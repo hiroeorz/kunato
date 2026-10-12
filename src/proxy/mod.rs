@@ -3,6 +3,7 @@ pub mod forward;
 pub mod http3;
 pub mod server;
 pub mod tls;
+pub mod websocket;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;

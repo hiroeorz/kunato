@@ -18,6 +18,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **HTTP/2, HTTP/3, and HTTP/1.1** — Accepts HTTP/2 over TLS (ALPN) and
   cleartext h2c (prior knowledge), plus optional HTTP/3 over QUIC, falling back
   to HTTP/1.1 automatically. Upstream requests are sent over HTTP/1.1.
+- **WebSocket proxying** — Forwards HTTP/1.1 upgrade handshakes to the upstream
+  and tunnels the connection both ways. The handshake passes through the rule
+  engine and protection budgets; idle tunnels are closed automatically.
 - **Categorized rule sets** — Rules are grouped into named categories (for example
   `sql-injection` or `xss`). Each category defines a default action, and individual
   rules can override it.
@@ -291,6 +294,7 @@ Defaults:
 | `upstream_connect`  | `5s`    | `max_headers`      | 100     |
 | `upstream_response` | `30s`   | `max_body_bytes`   | 1 MiB   |
 | `shutdown_grace`    | `10s`   |                    |         |
+| `websocket_idle`    | `10m`   |                    |         |
 
 ```yaml
 timeouts: { header_read: 10s, body_read: 30s }
@@ -352,6 +356,20 @@ HTTP/3 requests pass through the same protection, limits, and rule evaluation
 as TCP requests. Settings are applied at startup (like TLS); changing or
 disabling them requires a restart. If the UDP socket cannot be bound, Kunato
 logs a warning and keeps serving over TCP.
+
+### WebSocket
+
+Kunato forwards HTTP/1.1 WebSocket handshakes (`Upgrade: websocket`) to the
+upstream. The handshake request is evaluated by the same protection budgets and
+rules as any other request, and is blocked like one; when the upstream answers
+`101 Switching Protocols`, Kunato opens a bidirectional tunnel between client
+and upstream.
+
+The tunnel itself is opaque: payload bytes are not inspected and
+`max_body_bytes` does not apply. Tunnels with no traffic in either direction
+are closed after `timeouts.websocket_idle` (default `10m`), and all tunnels are
+closed on shutdown. WebSocket over HTTP/2 or HTTP/3 (extended CONNECT) is not
+supported yet.
 
 ### Hot reload
 

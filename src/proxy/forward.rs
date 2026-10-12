@@ -91,29 +91,13 @@ pub async fn forward_request(
     *request.uri_mut() = uri;
     *request.version_mut() = Version::HTTP_11;
     copy_forward_headers(&parts.headers, request.headers_mut());
-
-    if let Ok(forwarded_for) = HeaderValue::from_str(&peer.ip().to_string()) {
-        request
-            .headers_mut()
-            .insert("x-forwarded-for", forwarded_for);
-    }
-    let forwarded_proto = if scheme == "https" {
-        HeaderValue::from_static("https")
-    } else {
-        HeaderValue::from_static("http")
-    };
-    request
-        .headers_mut()
-        .insert("x-forwarded-proto", forwarded_proto);
-    let forwarded_host = parts.headers.get(HOST).cloned().or_else(|| {
-        parts
-            .uri
-            .authority()
-            .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok())
-    });
-    if let Some(host) = forwarded_host {
-        request.headers_mut().insert("x-forwarded-host", host);
-    }
+    set_forwarded_headers(
+        request.headers_mut(),
+        &parts.headers,
+        &parts.uri,
+        peer,
+        scheme,
+    );
 
     let result =
         tokio::time::timeout(config.timeouts.upstream_response, client.request(request)).await;
@@ -138,7 +122,34 @@ pub async fn forward_request(
     Ok(convert_response(response))
 }
 
-fn convert_response(response: Response<Incoming>) -> Response<ProxyBody> {
+pub(crate) fn set_forwarded_headers(
+    target: &mut HeaderMap,
+    source: &HeaderMap,
+    source_uri: &http::Uri,
+    peer: SocketAddr,
+    scheme: &'static str,
+) {
+    if let Ok(forwarded_for) = HeaderValue::from_str(&peer.ip().to_string()) {
+        target.insert("x-forwarded-for", forwarded_for);
+    }
+    let forwarded_proto = if scheme == "https" {
+        HeaderValue::from_static("https")
+    } else {
+        HeaderValue::from_static("http")
+    };
+    target.insert("x-forwarded-proto", forwarded_proto);
+
+    let forwarded_host = source.get(HOST).cloned().or_else(|| {
+        source_uri
+            .authority()
+            .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok())
+    });
+    if let Some(host) = forwarded_host {
+        target.insert("x-forwarded-host", host);
+    }
+}
+
+pub(crate) fn convert_response(response: Response<Incoming>) -> Response<ProxyBody> {
     let (parts, incoming) = response.into_parts();
     let body = incoming.map_err(|err| Box::new(err) as BoxError).boxed();
 
@@ -182,7 +193,7 @@ fn connection_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
     tokens
 }
 
-fn is_hop_by_hop(name: &HeaderName) -> bool {
+pub(crate) fn is_hop_by_hop(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
         "connection"

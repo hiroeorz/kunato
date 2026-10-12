@@ -42,7 +42,7 @@ src/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
   rules/           # Category/rule model, matcher, and evaluation engine
-  proxy/           # Listener, upstream client, forwarding, TLS termination, HTTP/3
+  proxy/           # Listener, upstream client, forwarding, TLS termination, HTTP/3, WebSocket
   protection/      # DoS / DDoS detection, rate limiting, bans
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)

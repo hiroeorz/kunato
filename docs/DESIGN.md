@@ -1,9 +1,10 @@
 # Kunato Design
 
-Status: **Draft** — milestones M0 through M9 are implemented and covered by unit
+Status: **Draft** — milestones M0 through M10 are implemented and covered by unit
 and integration tests. TLS termination is provided through `rustls`; HTTP/2 is
-served over TLS (ALPN) and cleartext (h2c prior knowledge), and HTTP/3 is served
-over QUIC when enabled. Certificate rotation remains future work.
+served over TLS (ALPN) and cleartext (h2c prior knowledge), HTTP/3 is served
+over QUIC when enabled, and HTTP/1.1 WebSocket upgrades are tunneled. Certificate
+rotation remains future work.
 
 Audience: contributors and AI coding agents. The YAML field reference lives in
 `README.md`; this document covers the system as a whole.
@@ -68,6 +69,10 @@ Components:
   is one task driving an `h3` server connection, and each request stream is a
   task. QUIC connections count against the same per-IP and global connection
   budgets as TCP connections.
+- A successful HTTP/1.1 upgrade moves both sockets into a detached tunnel task;
+  the upstream TCP connection is opened per tunnel and the connection guard is
+  transferred from the HTTP connection task to the tunnel so budgets stay
+  accurate. Tunnels are closed by an idle watchdog or by the shutdown signal.
 - Active configuration: `ArcSwap<CompiledConfig>`. The request path performs one
   lock-free `load()`; reloads swap the whole immutable snapshot atomically.
 - Protection state: sharded maps (`shards = num_cpus * 4`, rounded to a power of
@@ -96,6 +101,10 @@ Components:
    connect/response timeouts. `502` on connect failure, `504` on timeout.
 7. **Stream response** — pass status, headers, and body through unchanged (minus
    hop-by-hop headers) and emit an access log entry.
+8. **Tunnel upgrades** — a WebSocket handshake is evaluated like any other
+   request, then forwarded over a dedicated upstream connection. On `101`, both
+   sides are upgraded and a bidirectional tunnel is held until EOF, the idle
+   timeout, or shutdown.
 
 ### Body policy
 
@@ -120,6 +129,9 @@ bytes, stream the rest uninspected, log `body_truncated`).
 - Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. If the peer
   is in `trusted_proxies`, append to an existing `X-Forwarded-For`; otherwise
   overwrite it with the direct peer address.
+- WebSocket handshakes keep `Connection` and `Upgrade` (normalized to
+  `Connection: Upgrade` and `Upgrade: websocket`) while all other hop-by-hop
+  headers are stripped both ways.
 
 ## 5. Configuration and Hot Reload
 
@@ -404,7 +416,8 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
   `ALLOW` short-circuit, `LOG` continuation, reload success, reload failure
   retention, `413` / `429` / `503` / `502` / `504`, graceful shutdown, h2c
   prior knowledge, rule evaluation over HTTP/2, ALPN `h2` over TLS, HTTP/3
-  pass-through and rule evaluation over QUIC, and `Alt-Svc` advertisement.
+  pass-through and rule evaluation over QUIC, `Alt-Svc` advertisement, and
+  WebSocket tunneling, blocking, upstream rejection, and idle teardown.
 - Tests are deterministic: paused time for limiter tests, no external network
   access, ephemeral ports, temporary config files.
 - Later: fuzz targets for the config parser and matcher to assert no panics.
@@ -429,7 +442,10 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
   apply to HTTP/3 exactly as they do to TCP.
 - **Resource exhaustion** — every buffer, map, and counter is bounded; body size
   is limited before buffering. HTTP/3 field sections are capped by
-  `limits.max_header_bytes`.
+  `limits.max_header_bytes`, and WebSocket tunnels are closed after
+  `timeouts.websocket_idle` without traffic in either direction.
+- **Opaque tunnels** — only the WebSocket handshake is inspected; tunnel payload
+  is not evaluated by rules, not logged, and not bounded by `max_body_bytes`.
 - **Obfuscation** — path/query are matched raw and percent-decoded; encoded
   traversal and XSS payloads are covered by rules.
 - **Logging** — no secrets or full request bodies are logged.
@@ -449,14 +465,17 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 | M7        | Optional TLS termination behind config.                      | TLS integration test passes.                                    |
 | M8        | HTTP/2: ALPN over TLS, h2c prior knowledge, protocol detect. | HTTP/2 integration tests pass; HTTP/1.1 behavior unchanged.     |
 | M9        | HTTP/3: opt-in QUIC listener, Alt-Svc advertisement.         | HTTP/3 requests are proxied and rule-checked; Alt-Svc is sent.  |
+| M10       | WebSocket: HTTP/1.1 upgrade forwarding and tunneling.        | Handshake rules, tunnel I/O, and idle timeout tests pass.       |
 
-M0 through M9 are implemented: metrics and the admin listener, the example
+M0 through M10 are implemented: metrics and the admin listener, the example
 configuration, the systemd unit, musl static builds, CI, a tag-triggered release
-workflow, optional TLS termination, HTTP/2, and HTTP/3.
+workflow, optional TLS termination, HTTP/2, HTTP/3, and WebSocket upgrades.
 
 ## 16. Open Questions and Future Work
 
 - TLS: certificate hot reload.
+- WebSocket over HTTP/2 and HTTP/3 (RFC 8441 / RFC 9220 extended CONNECT).
+- Pluggable tunnel payload inspection (currently upgrades are opaque).
 - Streaming body inspection for large uploads (prefix inspection).
 - Response header inspection (rules currently match requests only).
 - Multiple upstreams and load balancing.

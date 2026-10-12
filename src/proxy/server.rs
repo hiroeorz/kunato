@@ -6,13 +6,12 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use http::header::HeaderValue;
+use http::header::{CONNECTION, HeaderMap, HeaderValue, UPGRADE};
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -26,6 +25,7 @@ use crate::protection::{ConnectionGuard, Decision, ProtectionState};
 use crate::proxy::ProxyBody;
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
+use crate::proxy::websocket::{self, Upgrade};
 use crate::proxy::{http3, tls};
 use crate::request_view::RequestView;
 use crate::rules::eval;
@@ -301,60 +301,90 @@ async fn serve_io<I>(
     context: Context,
     header_read_timeout: Duration,
     mut shutdown: watch::Receiver<bool>,
-    _guard: ConnectionGuard,
+    guard: ConnectionGuard,
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     let max_header_list_size =
         u32::try_from(context.config().limits.max_header_bytes).unwrap_or(u32::MAX);
+    let guard_slot = Arc::new(std::sync::Mutex::new(Some(guard)));
+    let service_shutdown = shutdown.clone();
     let service = service_fn(move |request: Request<Incoming>| {
         let context = context.clone();
-        async move { handle_request(request, peer, context).await }
+        let shutdown = service_shutdown.clone();
+        let guard_slot = Arc::clone(&guard_slot);
+        async move { handle_request(request, peer, context, shutdown, guard_slot).await }
     });
 
-    let mut builder = auto::Builder::new(TokioExecutor::new());
-    builder
-        .http1()
-        .keep_alive(true)
-        .timer(TokioTimer::new())
-        .header_read_timeout(header_read_timeout);
-    builder
-        .http2()
-        .timer(TokioTimer::new())
-        .max_header_list_size(max_header_list_size);
-
-    let builder = match protocol {
-        Protocol::Http1 => builder.http1_only(),
-        Protocol::Http2 => builder.http2_only(),
-    };
-
-    let connection = builder.serve_connection(io, service);
-    let mut connection = std::pin::pin!(connection);
-
-    tokio::select! {
-        result = connection.as_mut() => {
-            if let Err(err) = result {
-                debug!(client = %peer, error = %err, "connection closed with error");
+    match protocol {
+        Protocol::Http1 => {
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder
+                .keep_alive(true)
+                .timer(TokioTimer::new())
+                .header_read_timeout(header_read_timeout);
+            let connection = builder.serve_connection(io, service).with_upgrades();
+            let mut connection = std::pin::pin!(connection);
+            tokio::select! {
+                result = connection.as_mut() => {
+                    if let Err(err) = result {
+                        debug!(client = %peer, error = %err, "connection closed with error");
+                    }
+                }
+                _ = shutdown.changed() => {
+                    connection.as_mut().graceful_shutdown();
+                    if let Err(err) = connection.as_mut().await {
+                        debug!(client = %peer, error = %err, "connection closed during shutdown");
+                    }
+                }
             }
         }
-        _ = shutdown.changed() => {
-            connection.as_mut().graceful_shutdown();
-            if let Err(err) = connection.as_mut().await {
-                debug!(client = %peer, error = %err, "connection closed during shutdown");
+        Protocol::Http2 => {
+            let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+            builder
+                .timer(TokioTimer::new())
+                .max_header_list_size(max_header_list_size);
+            let connection = builder.serve_connection(io, service);
+            let mut connection = std::pin::pin!(connection);
+            tokio::select! {
+                result = connection.as_mut() => {
+                    if let Err(err) = result {
+                        debug!(client = %peer, error = %err, "connection closed with error");
+                    }
+                }
+                _ = shutdown.changed() => {
+                    connection.as_mut().graceful_shutdown();
+                    if let Err(err) = connection.as_mut().await {
+                        debug!(client = %peer, error = %err, "connection closed during shutdown");
+                    }
+                }
             }
         }
     }
 }
 
 async fn handle_request(
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
     peer: SocketAddr,
     context: Context,
+    shutdown: watch::Receiver<bool>,
+    guard_slot: Arc<std::sync::Mutex<Option<ConnectionGuard>>>,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    let upgrade = if is_websocket_upgrade(&request) {
+        let guard = guard_slot.lock().ok().and_then(|mut slot| slot.take());
+        Some(Upgrade {
+            on_upgrade: hyper::upgrade::on(&mut request),
+            shutdown,
+            guard,
+        })
+    } else {
+        None
+    };
+
     let config = context.config();
     let (parts, body) = request.into_parts();
     let result = match read_body(body, &config).await {
-        Ok(body) => process(parts, body, peer, &config, &context).await,
+        Ok(body) => process(parts, body, peer, &config, &context, upgrade).await,
         Err(err) => Err(err),
     };
     let mut response = match result {
@@ -407,9 +437,50 @@ pub(crate) async fn process_request(
     config: &CompiledConfig,
     context: &Context,
 ) -> Response<ProxyBody> {
-    match process(parts, body, peer, config, context).await {
+    match process(parts, body, peer, config, context, None).await {
         Ok(response) => response,
         Err(err) => rejected(peer, &err),
+    }
+}
+
+fn is_websocket_upgrade(request: &Request<Incoming>) -> bool {
+    request.version() == http::Version::HTTP_11
+        && request.method() == http::Method::GET
+        && header_has_token(request.headers(), CONNECTION, "upgrade")
+        && request
+            .headers()
+            .get(UPGRADE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket"))
+}
+
+fn header_has_token(headers: &HeaderMap, name: http::header::HeaderName, token: &str) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case(token))
+        })
+    })
+}
+
+fn record_upstream_error(context: &Context, result: &Result<Response<ProxyBody>, HttpError>) {
+    if let Err(err) = result {
+        match err.status {
+            StatusCode::GATEWAY_TIMEOUT => {
+                context
+                    .metrics
+                    .upstream_timeouts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StatusCode::BAD_GATEWAY => {
+                context
+                    .metrics
+                    .upstream_connect_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -419,6 +490,7 @@ async fn process(
     peer: SocketAddr,
     config: &CompiledConfig,
     context: &Context,
+    upgrade: Option<Upgrade>,
 ) -> Result<Response<ProxyBody>, HttpError> {
     context.metrics.requests.fetch_add(1, Ordering::Relaxed);
 
@@ -506,24 +578,15 @@ async fn process(
 
     drop(view);
 
+    if let Some(upgrade) = upgrade {
+        let result =
+            websocket::forward_handshake(config, parts, body, context.scheme, peer, upgrade).await;
+        record_upstream_error(context, &result);
+        return result;
+    }
+
     let result =
         forward::forward_request(&context.client, config, parts, body, peer, context.scheme).await;
-    if let Err(err) = &result {
-        match err.status {
-            StatusCode::GATEWAY_TIMEOUT => {
-                context
-                    .metrics
-                    .upstream_timeouts
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            StatusCode::BAD_GATEWAY => {
-                context
-                    .metrics
-                    .upstream_connect_errors
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-    }
+    record_upstream_error(context, &result);
     result
 }

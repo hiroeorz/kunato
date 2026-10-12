@@ -1,9 +1,11 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::{Buf, Bytes};
+use http::header::HeaderValue;
 use http::{Method, Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -77,6 +79,107 @@ async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
     });
 
     addr
+}
+
+async fn spawn_upgrade_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |mut request: Request<Incoming>| async move {
+                    if request.uri().path() != "/ws" {
+                        return Ok::<_, Infallible>(upstream_error(StatusCode::NOT_FOUND));
+                    }
+                    let forwarded_for = request.headers().contains_key("x-forwarded-for");
+                    let forwarded_host = request
+                        .headers()
+                        .get("x-forwarded-host")
+                        .is_some_and(|value| value.as_bytes() == b"kunato.test");
+                    if !forwarded_for || !forwarded_host {
+                        return Ok(upstream_error(StatusCode::BAD_REQUEST));
+                    }
+
+                    let mut response = Response::new(Full::new(Bytes::new()));
+                    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                    response
+                        .headers_mut()
+                        .insert("connection", HeaderValue::from_static("upgrade"));
+                    response
+                        .headers_mut()
+                        .insert("upgrade", HeaderValue::from_static("websocket"));
+                    let accept = request
+                        .headers()
+                        .get("sec-websocket-key")
+                        .cloned()
+                        .unwrap_or_else(|| HeaderValue::from_static("kunato"));
+                    response
+                        .headers_mut()
+                        .insert("sec-websocket-accept", accept);
+
+                    let on_upgrade = hyper::upgrade::on(&mut request);
+                    tokio::spawn(async move {
+                        let Ok(upgraded) = on_upgrade.await else {
+                            return;
+                        };
+                        let mut upgraded = TokioIo::new(upgraded);
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match upgraded.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(read) => {
+                                    if upgraded.write_all(&buf[..read]).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    Ok(response)
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+
+    addr
+}
+
+fn upstream_error(status: StatusCode) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::new()));
+    *response.status_mut() = status;
+    response
+}
+
+async fn websocket_handshake(addr: SocketAddr, path: &str) -> (String, TcpStream) {
+    let mut stream = TcpStream::connect(addr).await.expect("connect kunato");
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nhost: kunato.test\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write handshake");
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        let read = stream.read(&mut byte).await.expect("read handshake");
+        if read == 0 || response.len() > 8192 {
+            break;
+        }
+        response.push(byte[0]);
+    }
+    (String::from_utf8_lossy(&response).into_owned(), stream)
 }
 
 struct Running {
@@ -718,6 +821,97 @@ async fn http3_sets_forwarded_host_and_advertises_alt_svc() {
 
     drop(sender);
     let _ = connection_task.await;
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_upgrade_is_tunneled() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+
+    stream.write_all(b"ping").await.expect("write frame");
+    let mut echo = [0u8; 4];
+    stream.read_exact(&mut echo).await.expect("read echo");
+    assert_eq!(&echo, b"ping");
+
+    drop(stream);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_handshake_is_rule_evaluated() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: websockets
+    action: BLOCK
+    rules:
+      - name: deny-admin-socket
+        match: {{ path: ^/ws }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, _stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 403"),
+        "unexpected handshake: {handshake}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_rejected_upstream_passes_through() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (handshake, _stream) = websocket_handshake(running.addr, "/nope").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 404"),
+        "unexpected handshake: {handshake}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_idle_timeout_closes_tunnel() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ntimeouts: {{ websocket_idle: 200ms }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+
+    let mut byte = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+        .await
+        .expect("tunnel did not close");
+    assert!(
+        matches!(closed, Ok(0) | Err(_)),
+        "unexpected read: {closed:?}"
+    );
+
     running.stop().await;
 }
 

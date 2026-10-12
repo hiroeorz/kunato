@@ -13,7 +13,7 @@ h3-quinn = "0.0.10"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "server-auto", "tokio"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 ipnet = "2"
 notify = "8"
 quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }

@@ -169,6 +169,8 @@ pub struct TimeoutsSpec {
     pub upstream_response: Duration,
     #[serde(default = "secs10", deserialize_with = "de_duration")]
     pub shutdown_grace: Duration,
+    #[serde(default = "minutes10", deserialize_with = "de_duration")]
+    pub websocket_idle: Duration,
 }
 
 impl Default for TimeoutsSpec {
@@ -179,6 +181,7 @@ impl Default for TimeoutsSpec {
             upstream_connect: secs5(),
             upstream_response: secs30(),
             shutdown_grace: secs10(),
+            websocket_idle: minutes10(),
         }
     }
 }
@@ -356,6 +359,10 @@ fn secs30() -> Duration {
     Duration::from_secs(30)
 }
 
+fn minutes10() -> Duration {
+    Duration::from_secs(600)
+}
+
 fn default_max_path_bytes() -> usize {
     8 * 1024
 }
@@ -379,6 +386,7 @@ pub struct Timeouts {
     pub upstream_connect: Duration,
     pub upstream_response: Duration,
     pub shutdown_grace: Duration,
+    pub websocket_idle: Duration,
 }
 
 impl From<&TimeoutsSpec> for Timeouts {
@@ -389,6 +397,7 @@ impl From<&TimeoutsSpec> for Timeouts {
             upstream_connect: spec.upstream_connect,
             upstream_response: spec.upstream_response,
             shutdown_grace: spec.shutdown_grace,
+            websocket_idle: spec.websocket_idle,
         }
     }
 }
@@ -680,6 +689,7 @@ fn validate_timeouts(timeouts: &TimeoutsSpec, issues: &mut Vec<String>) {
         ("body_read", timeouts.body_read),
         ("upstream_connect", timeouts.upstream_connect),
         ("upstream_response", timeouts.upstream_response),
+        ("websocket_idle", timeouts.websocket_idle),
     ] {
         if value.is_zero() {
             issues.push(format!("timeouts.{name} must be greater than zero"));
