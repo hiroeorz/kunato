@@ -248,6 +248,9 @@ protection:
 
 Adaptive tightening (lowering per-IP burst under global pressure) is future work.
 
+For testing, `--disable-protection` forces `enabled` to false at startup and is
+reapplied after every hot reload.
+
 ## 8. Fault Tolerance and Error Handling
 
 - No `unwrap()` / `expect()` in request-handling paths; all fallible operations
@@ -304,7 +307,8 @@ Default limits:
 
 - Usage: `kunato --config <path>` (default `rules.yaml`).
 - Flags: `--config`, `--validate` (parse/validate and exit, for CI and manual
-  checks), `--log-level`, `--log-format`, `--version`.
+  checks), `--disable-protection` (turn off DoS/DDoS protection for load and
+  black-box testing), `--log-level`, `--log-format`, `--version`.
 - Exit codes: `0` success, `1` configuration error, `2` usage error.
 - Signals: `SIGINT` / `SIGTERM` trigger graceful shutdown; `SIGHUP` triggers a
   reload.
@@ -338,6 +342,10 @@ src/
     forward.rs     # Header and body forwarding
     tls.rs         # Certificate loading and rustls server configuration
   request_view.rs  # Borrowed request representation for the rule engine
+blackbox/          # External black-box test driver (separate crate)
+  requests/        # Request lists (blocked.txt / allowed.txt)
+examples/
+  upstream.rs      # Manual test upstream with access logs
 tests/
   proxy.rs         # Pass-through, rules, limits, protection, metrics
 docs/
@@ -383,6 +391,11 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 - Tests are deterministic: paused time for limiter tests, no external network
   access, ephemeral ports, temporary config files.
 - Later: fuzz targets for the config parser and matcher to assert no panics.
+- `examples/upstream.rs` is a standalone upstream with access logs for manual
+  browser and `curl` testing.
+- `blackbox/` is an external driver that replays blocked/allowed request lists in
+  parallel against a running instance; correctness is judged from the upstream
+  and Kunato logs.
 
 ## 14. Security Considerations
 

@@ -44,6 +44,10 @@ src/
   rules/           # Category/rule model, matcher, and evaluation engine
   proxy/           # Listener, upstream client, forwarding, TLS termination
   protection/      # DoS / DDoS detection, rate limiting, bans
+blackbox/          # External black-box test driver (separate crate)
+  requests/        # Request lists (blocked.txt / allowed.txt)
+examples/
+  upstream.rs      # Manual test upstream with access logs
 tests/             # Integration tests (mock upstream, reload scenarios)
 docs/
   DESIGN.md        # Overall design
@@ -78,10 +82,13 @@ cargo test                       # Run all tests
 cargo fmt                        # Format code
 cargo clippy --all-targets -- -D warnings  # Lint; warnings are errors
 cargo deny check                 # Dependency, license, advisory, and source audit
+cargo fmt --manifest-path blackbox/Cargo.toml
+cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
-`cargo deny check`, and `cargo test`, in that order. If a command is unavailable or
+`cargo deny check`, and `cargo test`, in that order. When touching `blackbox/`, run
+its `cargo fmt` and `cargo clippy` variants as well. If a command is unavailable or
 fails for environmental reasons, report it instead of ignoring it. The dependency
 policy lives in `deny.toml`; do not loosen it without an explicit reason.
 

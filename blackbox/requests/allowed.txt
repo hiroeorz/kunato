@@ -1,0 +1,17 @@
+# Requests that must be forwarded to the upstream.
+#
+# Same format as blocked.txt. The upstream does not need to answer with 2xx;
+# what matters is that Kunato forwards the request (the status then comes from
+# the upstream).
+#
+# `admin-interfaces` in rules.example.yaml logs these paths instead of blocking.
+
+GET /
+GET /index.html
+GET /health
+GET /api/items?page=2
+GET /?q=normal%20search
+POST /submit body=name=kunato
+GET /static/app.js?version=3
+GET /wp-admin/
+GET / ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
