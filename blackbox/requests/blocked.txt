@@ -7,6 +7,10 @@
 #   - `bodyhex` sets the request body from even-length hex bytes
 #   - `body_file` reads the request body from a file relative to this list
 #   - `header` sets an arbitrary header using `Name: value`
+#   - `proto=h2c` sends the request over HTTP/2 cleartext with prior knowledge
+#   - `hpack_bomb=N` adds an HPACK compression bomb expanding to N extra fields
+#     (requires `proto=h2c`)
+#   - `pad_header=N` adds an `x-pad` header with N bytes of padding
 #   - any other key becomes a request header
 #   - values with spaces or quotes are quoted with "..."; use \" for a literal
 #     quote and \\ for a backslash inside a quoted value
@@ -390,8 +394,8 @@ GET /old-config.old
 # 2025 CVEs: attacks against HTTP servers and web frameworks.
 #
 # Grouped by advisory family. Requests that cannot be expressed as a single
-# HTTP/1.1 request line (binary Java serialization bodies, compressed ViewState
-# payloads, HTTP/2) are summarized at the end.
+# request line (binary Java serialization bodies, compressed ViewState payloads)
+# are summarized at the end.
 # ---------------------------------------------------------------------------
 
 # --- CVE-2025-29927 (Next.js): middleware authorization bypass ---
@@ -507,9 +511,9 @@ POST /loginok.html header="Content-Type: application/x-www-form-urlencoded" body
 # ---------------------------------------------------------------------------
 # 2026 CVEs: attacks against HTTP servers and web frameworks.
 #
-# Grouped by advisory family. Requests that cannot be expressed as a single
-# HTTP/1.1 request line (HTTP/2, TLS, huge header blocks, raw chunk framing,
-# multipart CR/LF) are summarized at the end.
+# Grouped by advisory family. HTTP/2 attacks use `proto=h2c`; requests that
+# cannot be expressed even that way (TLS-internal, raw chunk framing, multipart
+# CR/LF) are summarized at the end.
 # ---------------------------------------------------------------------------
 
 # --- CVE-2026-79768 (httpd mod_userdir): '/./' path equivalence ---
@@ -658,13 +662,23 @@ GET /admin header="Authorization: Digest username=\"admin\", realm=\"protected\"
 GET /script.js header="Range: bytes=0-,0-,0-,0-,0-,0-,0-,0-,0-,0-"
 GET /script.js header="Range: bytes=0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-"
 
-# --- 2026 protocol-level attacks that a single HTTP/1.1 request line cannot express ---
-# CVE-2026-42945 / CVE-2026-42533 / CVE-2026-42926 / CVE-2026-40460 (nginx):
-#   rewrite/stream/HTTP2/HTTP3 memory corruption; needs connection-level framing
-#   or a configuration-specific rewrite surface.
+# --- 2026 protocol-level attacks ---
 # CVE-2026-49975 / CVE-2026-49160 (HTTP/2 compression bomb) and CVE-2026-47291
-#   (Windows HTTP.sys, >65535-byte request): need HTTP/2 frames or header blocks
-#   far beyond the request-size limits enforced by the listener.
+#   (Windows HTTP.sys, >65535-byte request): an HPACK bomb of indexed dynamic
+#   table references and a raw oversized header block, sent over h2c. Both must
+#   be stopped by the HTTP/2 header-list limit (431 or GOAWAY), never forwarded.
+GET / proto=h2c hpack_bomb=40
+GET / proto=h2c hpack_bomb=400
+GET / proto=h2c pad_header=65536
+# HTTP/2 requests run through the same rule engine as HTTP/1.1.
+GET /?q=union%20select proto=h2c
+
+# Classes that still need connection-level framing, a malicious upstream, or
+# configuration-specific state; no request line can express them.
+# CVE-2026-42945 / CVE-2026-42533 / CVE-2026-42926 / CVE-2026-40460 (nginx):
+#   rewrite/stream/HTTP2/HTTP3 memory corruption.
+# CVE-2026-56154 / CVE-2026-57941 / CVE-2026-48913 (httpd): config-dependent
+#   lookahead or HTTP/2-triggered memory corruption.
 # CVE-2026-63292 (httpd mod_vhost_alias): Host header longer than 8192 bytes.
 # CVE-2026-52747 / CVE-2026-52761 (ModSecurity): multipart field values carrying
 #   raw CR/LF. bodyhex/body_file can carry the bytes, but a reliable rule needs
@@ -674,5 +688,3 @@ GET /script.js header="Range: bytes=0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-
 #   names, not in the HTTP request itself.
 # CVE-2026-34355 / CVE-2026-34356 / CVE-2026-56449 / CVE-2026-63686 (httpd
 #   mod_proxy_*): triggered by a malicious upstream response, not by a request.
-# CVE-2026-56154 / CVE-2026-57941 / CVE-2026-48913 (httpd): config-dependent
-#   lookahead or HTTP/2-triggered memory corruption.

@@ -1,3 +1,6 @@
+mod h2c;
+mod hpack;
+
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -14,7 +17,15 @@ const DEFAULT_PARALLELISM: usize = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_HPACK_BOMB: usize = 100_000;
+const MAX_PAD_HEADER: usize = 8 * 1024 * 1024;
 const USER_AGENT: &str = "kunato-blackbox/0.1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    Http1,
+    H2c,
+}
 
 #[derive(Debug, Clone)]
 struct RequestSpec {
@@ -22,6 +33,9 @@ struct RequestSpec {
     target: String,
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
+    protocol: Protocol,
+    hpack_bomb: Option<usize>,
+    pad_header: Option<usize>,
 }
 
 struct Args {
@@ -164,6 +178,28 @@ fn send(addr: SocketAddr, request: &RequestSpec) -> Result<String, String> {
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|err| format!("set write timeout: {err}"))?;
 
+    match request.protocol {
+        Protocol::Http1 => send_http1(&mut stream, addr, request),
+        Protocol::H2c => h2c::send(
+            &mut stream,
+            &h2c::H2Request {
+                method: &request.method,
+                target: &request.target,
+                authority: &addr.to_string(),
+                headers: &request.headers,
+                body: request.body.as_deref().unwrap_or(&[]),
+                hpack_bomb: request.hpack_bomb,
+                pad_header: request.pad_header,
+            },
+        ),
+    }
+}
+
+fn send_http1(
+    stream: &mut TcpStream,
+    addr: SocketAddr,
+    request: &RequestSpec,
+) -> Result<String, String> {
     let mut message = String::new();
     message.push_str(&format!(
         "{} {} HTTP/1.1\r\n",
@@ -181,6 +217,9 @@ fn send(addr: SocketAddr, request: &RequestSpec) -> Result<String, String> {
     }
     if !has_user_agent {
         message.push_str(&format!("User-Agent: {USER_AGENT}\r\n"));
+    }
+    if let Some(length) = request.pad_header {
+        message.push_str(&format!("x-pad: {}\r\n", "a".repeat(length)));
     }
 
     let body = request.body.as_deref().unwrap_or(&[]);
@@ -296,6 +335,10 @@ REQUEST LIST FORMAT:
     bodyhex=<hex>       request body, as even-length hex bytes
     body_file=<path>    request body read from a file, relative to the list
     header=\"Name: value\"  arbitrary request header
+    proto=http1|h2c     wire protocol; h2c is HTTP/2 cleartext with prior knowledge
+    hpack_bomb=<n>      add an HPACK compression bomb expanding to n extra fields
+                        (requires proto=h2c)
+    pad_header=<n>      add an `x-pad` header with n bytes of padding
     <name>=<value>      any other name becomes a request header
 
   Quote values that contain spaces or quotes with \"...\"; inside a quoted
@@ -342,6 +385,9 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
 
     let mut headers = Vec::new();
     let mut body = None;
+    let mut protocol = Protocol::Http1;
+    let mut hpack_bomb = None;
+    let mut pad_header = None;
 
     for token in tokens {
         let (key, value) = token
@@ -355,6 +401,19 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
             "body" => body = Some(value.as_bytes().to_vec()),
             "bodyhex" => body = Some(decode_hex(value)?),
             "body_file" => body = Some(read_body_file(base, value)?),
+            "proto" => {
+                protocol = match value {
+                    "http1" => Protocol::Http1,
+                    "h2c" => Protocol::H2c,
+                    other => {
+                        return Err(format!(
+                            "unknown proto `{other}` (expected `http1` or `h2c`)"
+                        ));
+                    }
+                }
+            }
+            "hpack_bomb" => hpack_bomb = Some(parse_count(value, "hpack_bomb", MAX_HPACK_BOMB)?),
+            "pad_header" => pad_header = Some(parse_count(value, "pad_header", MAX_PAD_HEADER)?),
             "header" => {
                 let (name, header_value) = value
                     .split_once(':')
@@ -369,12 +428,29 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
         }
     }
 
+    if hpack_bomb.is_some() && protocol != Protocol::H2c {
+        return Err("`hpack_bomb` requires `proto=h2c`".to_owned());
+    }
+
     Ok(RequestSpec {
         method,
         target,
         headers,
         body,
+        protocol,
+        hpack_bomb,
+        pad_header,
     })
+}
+
+fn parse_count(value: &str, name: &str, max: usize) -> Result<usize, String> {
+    let count: usize = value
+        .parse()
+        .map_err(|_| format!("invalid `{name}` value `{value}`"))?;
+    if count == 0 || count > max {
+        return Err(format!("`{name}` must be between 1 and {max}"));
+    }
+    Ok(count)
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
@@ -521,5 +597,47 @@ mod tests {
             request.headers,
             vec![("X-Test".to_owned(), "a b".to_owned())]
         );
+    }
+
+    #[test]
+    fn parses_h2c_attributes() {
+        let request = parse_request(
+            "GET /check proto=h2c hpack_bomb=40 pad_header=70000",
+            Path::new("."),
+        )
+        .expect("parses");
+        assert_eq!(request.protocol, Protocol::H2c);
+        assert_eq!(request.hpack_bomb, Some(40));
+        assert_eq!(request.pad_header, Some(70000));
+    }
+
+    #[test]
+    fn defaults_to_http1() {
+        let request = parse_request("GET /", Path::new(".")).expect("parses");
+        assert_eq!(request.protocol, Protocol::Http1);
+        assert_eq!(request.hpack_bomb, None);
+        assert_eq!(request.pad_header, None);
+    }
+
+    #[test]
+    fn rejects_unknown_protocol() {
+        let error = parse_request("GET / proto=h3", Path::new(".")).expect_err("errs");
+        assert!(error.contains("unknown proto"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_hpack_bomb_without_h2c() {
+        let error = parse_request("GET / hpack_bomb=10", Path::new(".")).expect_err("errs");
+        assert!(
+            error.contains("requires `proto=h2c`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_counts() {
+        let error =
+            parse_request("GET / proto=h2c hpack_bomb=0", Path::new(".")).expect_err("errs");
+        assert!(error.contains("between 1"), "unexpected error: {error}");
     }
 }

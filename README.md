@@ -104,6 +104,10 @@ cargo run --release --manifest-path blackbox/Cargo.toml -- \
   --parallelism 5
 ```
 
+The request-list format supports HTTP/2 cleartext probes with `proto=h2c`,
+including HPACK compression bombs (`hpack_bomb=N`) and oversized header blocks
+(`pad_header=N`); see `--help` and the header of `blocked.txt`.
+
 `--parallelism` defaults to 5. The two lists are split by expectation; correctness
 is judged from the logs: the upstream access log should contain only the allowed
 requests, and the Kunato log should show the blocked requests as blocked. Run it
