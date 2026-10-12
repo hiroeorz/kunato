@@ -72,6 +72,21 @@ The binary is produced at `target/release/kunato`.
 ./target/release/kunato --config rules.yaml
 ```
 
+## Deployment
+
+Kunato ships as a single static binary:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+Install the binary to `/usr/local/bin/kunato` and the configuration to
+`/etc/kunato/rules.yaml`, then use the provided systemd unit
+(`packaging/kunato.service`). `rules.example.yaml` is a complete starting point.
+Tagging a release (`v*`) builds and uploads the static binary through GitHub
+Actions.
+
 ## Configuration
 
 Kunato is configured through a single YAML file. The file defines where Kunato
@@ -235,6 +250,22 @@ timeouts: { header_read: 10s, body_read: 30s }
 limits: { max_body_bytes: 1048576 }
 ```
 
+### Admin and metrics
+
+An optional admin listener exposes Prometheus metrics on a loopback address:
+
+```yaml
+admin:
+  enabled: true
+  listen: 127.0.0.1:9090
+```
+
+`GET /metrics` returns the text exposition format. Counters cover total requests,
+BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding,
+upstream failures, and configuration reloads; gauges cover active connections and
+uptime. Non-loopback addresses are rejected at validation time, and if the port is
+already in use Kunato logs a warning and continues without the admin endpoint.
+
 ### Hot reload
 
 Kunato watches the rule file for changes. When the file is updated:
@@ -288,14 +319,16 @@ to `max_duration`. Addresses in `allowlist` bypass all protection limits.
 - [x] Rule engine (`BLOCK` / `ALLOW` / `LOG`)
 - [x] YAML loader and hot reload
 - [x] DoS / DDoS detection and mitigation
-- [ ] Metrics endpoint
-- [ ] Packaging and release binaries
+- [x] Metrics endpoint and admin listener
+- [x] Example configuration, systemd unit, and static musl builds
 - [ ] Optional TLS termination
 
 ## Contributing
 
 This is a personal project, but issues and pull requests are welcome. Please keep
-all code, comments, and documentation in English.
+all code, comments, and documentation in English. Before opening a pull request,
+run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo deny check`,
+and `cargo test`.
 
 ## License
 

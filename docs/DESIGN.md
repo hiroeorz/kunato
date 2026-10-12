@@ -1,7 +1,7 @@
 # Kunato Design
 
-Status: **Draft** — milestones M0 through M5 are implemented and covered by unit
-and integration tests. M6 and M7 (hardening, packaging, TLS) are planned.
+Status: **Draft** — milestones M0 through M6 are implemented and covered by unit
+and integration tests. M7 (optional TLS termination) is planned.
 
 Audience: contributors and AI coding agents. The YAML field reference lives in
 `README.md`; this document covers the system as a whole.
@@ -292,8 +292,12 @@ Default limits:
   duration_ms, verdict, matched `category.rule` + action list, protection actions,
   upstream address, error.
 - Request bodies are never logged; paths are truncated to a bounded length.
-- Metrics (Prometheus text endpoint on a localhost-only admin listener) are
-  planned for a later milestone.
+- Metrics are exposed in Prometheus text format by the loopback-only admin
+  listener (`admin.listen`, default `127.0.0.1:9090`) at `GET /metrics`. Counters
+  cover requests, rule verdicts, protection decisions, upstream failures, and
+  reloads; gauges cover active connections and uptime. The listener refuses
+  non-loopback addresses at validation time, and a bind failure is logged and
+  non-fatal.
 
 ## 10. CLI and Deployment
 
@@ -314,6 +318,8 @@ src/
   cli.rs           # Argument parsing
   error.rs         # Error types
   telemetry.rs     # Logging setup
+  admin.rs         # Loopback admin listener exposing /metrics
+  metrics.rs       # Prometheus counters and gauges
   config/
     mod.rs         # Schema types, load, validate, compile
     watcher.rs     # File watching and reload
@@ -330,12 +336,12 @@ src/
     forward.rs     # Header and body forwarding
   request_view.rs  # Borrowed request representation for the rule engine
 tests/
-  proxy.rs         # Pass-through, status mapping, streaming
-  rules.rs         # Actions, precedence, matching
-  reload.rs        # Hot reload success and failure retention
-  protection.rs    # Rate limits, bans, connection budgets
+  proxy.rs         # Pass-through, rules, limits, protection, metrics
 docs/
   DESIGN.md
+packaging/
+  kunato.service   # systemd unit
+rules.example.yaml # Example configuration
 ```
 
 ## 12. Dependencies (proposed)
@@ -402,8 +408,9 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 | M6        | Hardening and packaging: limits, shutdown, musl release.     | All invariants tested; example config shipped.                  |
 | M7        | Optional TLS termination behind config.                      | TLS integration test passes.                                    |
 
-M0 through M5 are implemented. M6 remains open for metrics, release packaging, and
-additional hardening tests.
+M0 through M6 are implemented: metrics and the admin listener, the example
+configuration, the systemd unit, musl static builds, CI, and a tag-triggered
+release workflow. M7 (TLS) remains.
 
 ## 16. Open Questions and Future Work
 
@@ -414,4 +421,4 @@ additional hardening tests.
 - Admin API and Prometheus metrics.
 - IPv6 rate-limit aggregation (e.g., per /64) to resist address-rotation floods.
 - Config includes/anchors for large rule sets.
-- Deployment recipes (systemd unit, container image) once the binary is stable.
+- Container image recipe (the systemd unit and musl builds are shipped).

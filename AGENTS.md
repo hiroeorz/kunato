@@ -35,6 +35,9 @@ src/
   cli.rs           # Command-line argument parsing
   error.rs         # Error types
   telemetry.rs     # Logging setup
+  admin.rs         # Loopback admin listener exposing /metrics
+  metrics.rs       # Prometheus counters and gauges
+  request_view.rs  # Borrowed request representation for the rule engine
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
@@ -44,6 +47,10 @@ src/
 tests/             # Integration tests (mock upstream, reload scenarios)
 docs/
   DESIGN.md        # Overall design
+packaging/
+  kunato.service   # systemd unit
+rules.example.yaml # Example configuration
+deny.toml          # Dependency, license, and advisory policy
 ```
 
 See `docs/DESIGN.md` for the full architecture. Update this section as the layout
@@ -70,11 +77,13 @@ cargo run -- --config rules.yaml # Run locally
 cargo test                       # Run all tests
 cargo fmt                        # Format code
 cargo clippy --all-targets -- -D warnings  # Lint; warnings are errors
+cargo deny check                 # Dependency, license, advisory, and source audit
 ```
 
-Before finishing any task, run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
-and `cargo test`. If a command is unavailable or fails for environmental reasons,
-report it instead of ignoring it.
+Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
+`cargo deny check`, and `cargo test`, in that order. If a command is unavailable or
+fails for environmental reasons, report it instead of ignoring it. The dependency
+policy lives in `deny.toml`; do not loosen it without an explicit reason.
 
 ## Design Invariants
 

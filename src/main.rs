@@ -4,13 +4,15 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use clap::Parser;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
+use kunato::admin::AdminServer;
 use kunato::cli::Cli;
 use kunato::config;
 use kunato::config::CompiledConfig;
 use kunato::config::watcher;
 use kunato::error::Error;
+use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
 use kunato::telemetry;
 
@@ -42,9 +44,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
     }
 
     let listen = initial.listen;
+    let admin_config = initial.admin.clone();
     let config = Arc::new(ArcSwap::from_pointee(initial));
+    let metrics = Arc::new(Metrics::new());
 
-    let server = Server::bind(listen, config.clone()).await?;
+    let server = Server::bind(listen, config.clone(), metrics.clone()).await?;
+    let protection = server.protection();
     info!(addr = %server.local_addr()?, config = %cli.config.display(), "kunato started");
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -52,11 +57,27 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let watcher_task = tokio::spawn(watcher::watch(
         cli.config.clone(),
         config.clone(),
+        metrics.clone(),
         shutdown_rx.clone(),
     ));
 
+    let admin_task = if admin_config.enabled {
+        match AdminServer::bind(&admin_config, metrics.clone(), protection).await {
+            Ok(admin) => {
+                info!(addr = %admin.local_addr()?, "admin listening");
+                Some(tokio::spawn(admin.run(shutdown_rx.clone())))
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to start admin listener; metrics unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     #[cfg(unix)]
-    spawn_sighup_reload(cli.config.clone(), config.clone());
+    spawn_sighup_reload(cli.config.clone(), config.clone(), metrics.clone());
 
     wait_for_shutdown_signal().await?;
     info!("shutdown signal received");
@@ -68,12 +89,19 @@ async fn run(cli: Cli) -> Result<(), Error> {
         Err(err) => error!(error = %err, "server task failed"),
     }
     let _ = watcher_task.await;
+    if let Some(admin_task) = admin_task {
+        let _ = admin_task.await;
+    }
 
     Ok(())
 }
 
 #[cfg(unix)]
-fn spawn_sighup_reload(path: std::path::PathBuf, config: Arc<ArcSwap<CompiledConfig>>) {
+fn spawn_sighup_reload(
+    path: std::path::PathBuf,
+    config: Arc<ArcSwap<CompiledConfig>>,
+    metrics: Arc<Metrics>,
+) {
     tokio::spawn(async move {
         let Ok(mut sighup) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         else {
@@ -81,7 +109,7 @@ fn spawn_sighup_reload(path: std::path::PathBuf, config: Arc<ArcSwap<CompiledCon
         };
         while sighup.recv().await.is_some() {
             info!("SIGHUP received, reloading configuration");
-            watcher::reload(&path, &config);
+            watcher::reload(&path, &config, &metrics);
         }
     });
 }

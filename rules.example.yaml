@@ -1,0 +1,70 @@
+# Kunato example configuration.
+#
+# Start with:
+#   kunato --config rules.example.yaml
+#
+# See README.md for the full field reference.
+
+listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+
+categories:
+  # Trusted clients skip all remaining inspection.
+  - name: trusted-sources
+    action: ALLOW
+    rules:
+      - name: internal-networks
+        match: { source_ip: [10.0.0.0/8, 192.168.0.0/16] }
+
+  # SQL injection signatures are blocked.
+  - name: sql-injection
+    action: BLOCK
+    response: { status: 403, body: Forbidden }
+    rules:
+      - name: union-select
+        match: { regex: '(?i)\bunion\b.{0,40}\bselect\b', in: [query, body] }
+      - name: comment-obfuscation
+        match: { regex: '(?i)(/\*!|--\s|#\s)', in: [query, body] }
+
+  # Cross-site scripting signatures are blocked.
+  - name: xss
+    action: BLOCK
+    rules:
+      - name: script-tags
+        match: { regex: '(?i)<\s*script\b', in: [query, body, headers] }
+      - name: event-handlers
+        match: { regex: '(?i)\bon(error|load|click|mouseover)\s*=', in: [query, body] }
+
+  # Path traversal attempts are blocked.
+  - name: path-traversal
+    action: BLOCK
+    rules:
+      - name: dot-dot-slash
+        match: { regex: '\.\./', in: [path, query, body] }
+
+  # Scanners are logged; sensitive paths are blocked.
+  - name: scanners
+    action: LOG
+    rules:
+      - name: scanner-user-agents
+        match:
+          headers:
+            User-Agent: '(?i)(sqlmap|nikto|nmap|masscan)'
+      - name: sensitive-files
+        action: BLOCK
+        match: { path: '(?i)(^|/)(\.env|\.git/|wp-admin|phpmyadmin)' }
+
+protection:
+  enabled: true
+  allowlist: [127.0.0.1/32]
+  requests_per_second: 20
+  burst: 60
+  ban:
+    violations: 5
+    window: 10s
+    duration: 60s
+    max_duration: 1h
+
+admin:
+  enabled: true
+  listen: 127.0.0.1:9090

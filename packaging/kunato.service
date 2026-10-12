@@ -1,0 +1,21 @@
+[Unit]
+Description=Kunato WAF reverse proxy
+Documentation=https://github.com/hiroeorz/kunato
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kunato --config /etc/kunato/rules.yaml
+Restart=on-failure
+RestartSec=2
+User=kunato
+Group=kunato
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

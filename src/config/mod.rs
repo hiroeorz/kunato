@@ -148,6 +148,8 @@ pub struct ConfigSpec {
     pub limits: LimitsSpec,
     #[serde(default)]
     pub protection: ProtectionSpec,
+    #[serde(default)]
+    pub admin: AdminSpec,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -199,6 +201,28 @@ impl Default for LimitsSpec {
             max_body_bytes: default_max_body_bytes(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_admin_listen")]
+    pub listen: SocketAddr,
+}
+
+impl Default for AdminSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: default_admin_listen(),
+        }
+    }
+}
+
+fn default_admin_listen() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 9090))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -369,6 +393,21 @@ impl From<&LimitsSpec> for Limits {
 }
 
 #[derive(Debug, Clone)]
+pub struct Admin {
+    pub enabled: bool,
+    pub listen: SocketAddr,
+}
+
+impl From<&AdminSpec> for Admin {
+    fn from(spec: &AdminSpec) -> Self {
+        Self {
+            enabled: spec.enabled,
+            listen: spec.listen,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Protection {
     pub enabled: bool,
     pub allowlist: Vec<IpNet>,
@@ -440,6 +479,7 @@ pub struct CompiledConfig {
     pub timeouts: Timeouts,
     pub limits: Limits,
     pub protection: Protection,
+    pub admin: Admin,
 }
 
 #[derive(Debug)]
@@ -477,6 +517,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
     validate_limits(&spec.limits, &mut issues);
     validate_timeouts(&spec.timeouts, &mut issues);
     validate_protection(&spec.protection, &mut issues);
+    validate_admin(&spec.admin, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
 
     let mut categories = Vec::new();
@@ -560,6 +601,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
         timeouts: Timeouts::from(&spec.timeouts),
         limits: Limits::from(&spec.limits),
         protection: Protection::from(&spec.protection),
+        admin: Admin::from(&spec.admin),
     })
 }
 
@@ -586,6 +628,15 @@ fn validate_timeouts(timeouts: &TimeoutsSpec, issues: &mut Vec<String>) {
         if value.is_zero() {
             issues.push(format!("timeouts.{name} must be greater than zero"));
         }
+    }
+}
+
+fn validate_admin(spec: &AdminSpec, issues: &mut Vec<String>) {
+    if spec.enabled && !spec.listen.ip().is_loopback() {
+        issues.push(format!(
+            "admin.listen must be a loopback address, got `{}`",
+            spec.listen
+        ));
     }
 }
 
@@ -1192,6 +1243,92 @@ mod tests {
             config.protection.ban.max_duration,
             Duration::from_secs(1800)
         );
+    }
+
+    #[test]
+    fn parses_admin_block() {
+        let config = parse_with(BASE, "admin: { listen: 127.0.0.1:8000 }\n").expect("valid config");
+        assert!(config.admin.enabled);
+        assert_eq!(config.admin.listen.port(), 8000);
+    }
+
+    #[test]
+    fn rejects_non_loopback_admin_listener() {
+        let error = parse_with(BASE, "admin: { listen: 0.0.0.0:9090 }\n").expect_err("must fail");
+        assert!(error.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn example_configuration_is_valid() {
+        let config = parse(include_str!("../../rules.example.yaml"))
+            .expect("example configuration must stay valid");
+        assert!(!config.categories.is_empty());
+        assert!(config.admin.enabled);
+    }
+
+    #[test]
+    fn arbitrary_bytes_never_panic() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..2_000 {
+            let length = (next_random(&mut state) % 512) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| (next_random(&mut state) & 0xff) as u8)
+                .collect();
+            let text = String::from_utf8_lossy(&bytes);
+            let _ = parse(&text);
+        }
+    }
+
+    #[test]
+    fn arbitrary_token_streams_never_panic() {
+        const TOKENS: [&str; 24] = [
+            "listen:",
+            "127.0.0.1:8080",
+            "upstream:",
+            "http://127.0.0.1:3000",
+            "categories:",
+            "-",
+            "name:",
+            "action:",
+            "BLOCK",
+            "ALLOW",
+            "LOG",
+            "match:",
+            "{",
+            "}",
+            "regex:",
+            "path:",
+            "in:",
+            "[",
+            "]",
+            ",",
+            "enabled:",
+            "false",
+            "response:",
+            "timeouts:",
+        ];
+
+        let mut state = 0xDEAD_BEEF_CAFE_BABEu64;
+        for _ in 0..500 {
+            let count = (next_random(&mut state) % 40) as usize;
+            let mut text = String::new();
+            for _ in 0..count {
+                text.push_str(TOKENS[(next_random(&mut state) % TOKENS.len() as u64) as usize]);
+                text.push(if next_random(&mut state).is_multiple_of(5) {
+                    '\n'
+                } else {
+                    ' '
+                });
+            }
+            let _ = parse(&text);
+        }
+    }
+
+    fn next_random(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state ^ (*state >> 33)
     }
 
     #[test]

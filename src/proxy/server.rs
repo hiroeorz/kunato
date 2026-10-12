@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -18,6 +19,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::CompiledConfig;
 use crate::error::Error;
+use crate::metrics::Metrics;
 use crate::protection::{ConnectionGuard, Decision, ProtectionState};
 use crate::proxy::ProxyBody;
 use crate::proxy::client::UpstreamClient;
@@ -33,6 +35,7 @@ pub struct Context {
     config: Arc<ArcSwap<CompiledConfig>>,
     client: UpstreamClient,
     protection: Arc<ProtectionState>,
+    metrics: Arc<Metrics>,
 }
 
 impl Context {
@@ -50,6 +53,7 @@ impl Server {
     pub async fn bind(
         addr: SocketAddr,
         config: Arc<ArcSwap<CompiledConfig>>,
+        metrics: Arc<Metrics>,
     ) -> Result<Self, Error> {
         let listener = TcpListener::bind(addr)
             .await
@@ -64,12 +68,17 @@ impl Server {
                 config,
                 client,
                 protection: Arc::new(ProtectionState::new()),
+                metrics,
             },
         })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    pub fn protection(&self) -> Arc<ProtectionState> {
+        Arc::clone(&self.context.protection)
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -187,7 +196,7 @@ async fn handle_request(
     context: Context,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let config = context.config();
-    match process(request, peer, &config, &context.client, &context.protection).await {
+    match process(request, peer, &config, &context).await {
         Ok(response) => Ok(response),
         Err(err) => {
             warn!(
@@ -205,12 +214,17 @@ async fn process(
     request: Request<Incoming>,
     peer: SocketAddr,
     config: &CompiledConfig,
-    client: &UpstreamClient,
-    protection: &ProtectionState,
+    context: &Context,
 ) -> Result<Response<ProxyBody>, HttpError> {
-    match protection.check_request(peer.ip(), &config.protection) {
+    context.metrics.requests.fetch_add(1, Ordering::Relaxed);
+
+    match context
+        .protection
+        .check_request(peer.ip(), &config.protection)
+    {
         Decision::Allow => {}
         Decision::RateLimited { retry_after } => {
+            context.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
             return Err(HttpError::with_retry_after(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate limit exceeded",
@@ -218,6 +232,7 @@ async fn process(
             ));
         }
         Decision::Banned { retry_after } => {
+            context.metrics.banned.fetch_add(1, Ordering::Relaxed);
             return Err(HttpError::with_retry_after(
                 StatusCode::TOO_MANY_REQUESTS,
                 "client temporarily banned",
@@ -225,6 +240,7 @@ async fn process(
             ));
         }
         Decision::Overloaded { retry_after } => {
+            context.metrics.overloaded.fetch_add(1, Ordering::Relaxed);
             return Err(HttpError::with_retry_after(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server overloaded",
@@ -277,6 +293,10 @@ async fn process(
     let view = RequestView::new(&parts.method, &parts.uri, &parts.headers, &body, peer.ip());
     let outcome = eval::evaluate(config, &view);
 
+    if !outcome.logs.is_empty() {
+        context.metrics.logged.fetch_add(1, Ordering::Relaxed);
+    }
+
     for record in &outcome.logs {
         info!(
             category = %record.category,
@@ -290,6 +310,7 @@ async fn process(
     }
 
     if let Some(blocked) = &outcome.blocked {
+        context.metrics.blocked.fetch_add(1, Ordering::Relaxed);
         info!(
             category = %blocked.category,
             rule = %blocked.rule,
@@ -304,5 +325,23 @@ async fn process(
 
     drop(view);
 
-    forward::forward_request(client, config, parts, body, peer).await
+    let result = forward::forward_request(&context.client, config, parts, body, peer).await;
+    if let Err(err) = &result {
+        match err.status {
+            StatusCode::GATEWAY_TIMEOUT => {
+                context
+                    .metrics
+                    .upstream_timeouts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StatusCode::BAD_GATEWAY => {
+                context
+                    .metrics
+                    .upstream_connect_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+    result
 }

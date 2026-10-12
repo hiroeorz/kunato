@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -8,12 +9,14 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, trace, warn};
 
 use crate::config::{self, CompiledConfig};
+use crate::metrics::Metrics;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
 pub async fn watch(
     path: PathBuf,
     config: Arc<ArcSwap<CompiledConfig>>,
+    metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
@@ -65,7 +68,7 @@ pub async fn watch(
                     Some(event) => {
                         trace!(kind = ?event.kind, paths = ?event.paths, "configuration file changed");
                         debounce(&mut event_rx).await;
-                        reload(&absolute, &config);
+                        reload(&absolute, &config, &metrics);
                     }
                 }
             }
@@ -73,9 +76,10 @@ pub async fn watch(
     }
 }
 
-pub fn reload(path: &Path, config: &ArcSwap<CompiledConfig>) {
+pub fn reload(path: &Path, config: &ArcSwap<CompiledConfig>, metrics: &Metrics) {
     match config::load(path) {
         Ok(mut new_config) => {
+            metrics.reload_success.fetch_add(1, Ordering::Relaxed);
             let active_listen = config.load().listen;
             if new_config.listen != active_listen {
                 warn!(
@@ -96,6 +100,7 @@ pub fn reload(path: &Path, config: &ArcSwap<CompiledConfig>) {
             info!(categories, rules, "configuration reloaded");
         }
         Err(err) => {
+            metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
             error!(error = %err, "configuration reload failed; keeping previous configuration");
         }
     }
@@ -137,7 +142,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:9090\nupstream: http://127.0.0.1:4000\nlimits: { max_body_bytes: 42 }\n",
         );
-        reload(&path, &config);
+        reload(&path, &config, &Metrics::new());
 
         let current = config.load();
         assert_eq!(current.limits.max_body_bytes, 42);
@@ -155,7 +160,7 @@ mod tests {
         let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
 
         write(&path, "this is not: [valid\n");
-        reload(&path, &config);
+        reload(&path, &config, &Metrics::new());
 
         assert_eq!(config.load().limits.max_body_bytes, 42);
     }
@@ -174,7 +179,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:9999\nupstream: http://127.0.0.1:3000\n",
         );
-        reload(&path, &config);
+        reload(&path, &config, &Metrics::new());
 
         assert_eq!(config.load().listen.port(), 8080);
     }

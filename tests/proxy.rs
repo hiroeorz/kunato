@@ -12,11 +12,14 @@ use hyper::service::service_fn;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use kunato::admin::AdminServer;
 use kunato::config;
+use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
 
 async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
@@ -62,7 +65,8 @@ impl Running {
 async fn start_kunato(yaml: &str) -> Running {
     let compiled = config::parse(yaml).expect("valid config");
     let config = Arc::new(ArcSwap::from_pointee(compiled));
-    let server = Server::bind("127.0.0.1:0".parse().expect("address"), config)
+    let metrics = Arc::new(Metrics::new());
+    let server = Server::bind("127.0.0.1:0".parse().expect("address"), config, metrics)
         .await
         .expect("bind kunato");
     let addr = server.local_addr().expect("local address");
@@ -220,6 +224,111 @@ async fn rate_limit_returns_too_many_requests() {
     assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
 
     running.stop().await;
+}
+
+#[tokio::test]
+async fn body_at_limit_is_accepted() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::POST, "/exact", "12345678").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(running.addr, Method::POST, "/over", "123456789").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn oversized_headers_are_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_header_bytes: 128 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect kunato");
+    let request = format!(
+        "GET / HTTP/1.1\r\nhost: kunato.test\r\nx-pad: {}\r\nconnection: close\r\n\r\n",
+        "a".repeat(256)
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 431"),
+        "unexpected response: {response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn admin_metrics_endpoint_reports_counters() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+categories:
+  - name: catch-all
+    action: BLOCK
+    rules:
+      - name: everything
+        match: {{ path: ^/ }}
+"
+    );
+
+    let compiled = config::parse(&yaml).expect("valid config");
+    let admin_config = compiled.admin.clone();
+    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let metrics = Arc::new(Metrics::new());
+    let server = Server::bind(
+        "127.0.0.1:0".parse().expect("address"),
+        config,
+        metrics.clone(),
+    )
+    .await
+    .expect("bind kunato");
+    let protection = server.protection();
+    let addr = server.local_addr().expect("local address");
+
+    let admin = AdminServer::bind(&admin_config, metrics.clone(), protection)
+        .await
+        .expect("bind admin");
+    let admin_addr = admin.local_addr().expect("admin address");
+
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
+    let admin_task = tokio::spawn(admin.run(shutdown_rx.clone()));
+
+    let (status, _) = send(addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = send(admin_addr, Method::GET, "/metrics", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("kunato_requests_total 1"), "{body}");
+    assert!(body.contains("kunato_blocked_total 1"), "{body}");
+
+    let (status, _) = send(admin_addr, Method::GET, "/other", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let _ = shutdown.send(true);
+    let _ = server_task.await;
+    let _ = admin_task.await;
 }
 
 #[tokio::test]

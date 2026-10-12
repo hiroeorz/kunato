@@ -1,6 +1,8 @@
+pub mod admin;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod protection;
 pub mod proxy;
 pub mod request_view;

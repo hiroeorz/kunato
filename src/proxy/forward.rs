@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::config::{CompiledConfig, ResponseSpec};
 use crate::proxy::client::UpstreamClient;
-use crate::proxy::{BoxError, ProxyBody};
+use crate::proxy::{BoxError, ProxyBody, full_body};
 
 #[derive(Debug)]
 pub struct HttpError {
@@ -65,12 +65,6 @@ pub fn block_response(spec: &ResponseSpec) -> Response<ProxyBody> {
     let status = StatusCode::from_u16(spec.status).unwrap_or(StatusCode::FORBIDDEN);
     let body = spec.body.clone().unwrap_or_else(|| "Forbidden".to_owned());
     error_response(status, &body)
-}
-
-pub fn full_body(data: impl Into<Bytes>) -> ProxyBody {
-    Full::new(data.into())
-        .map_err(|never| match never {})
-        .boxed()
 }
 
 pub async fn forward_request(

@@ -115,4 +115,26 @@ mod tests {
     fn decodes_lossy_utf8() {
         assert_eq!(percent_decode("%FF"), "\u{FFFD}");
     }
+
+    #[test]
+    fn arbitrary_input_never_panics() {
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..5_000 {
+            let length = (next_random(&mut state) % 64) as usize;
+            let text: String = (0..length)
+                .map(|_| {
+                    let byte = (next_random(&mut state) & 0x7f) as u8;
+                    char::from(byte)
+                })
+                .collect();
+            let _ = percent_decode(&text);
+        }
+    }
+
+    fn next_random(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state ^ (*state >> 33)
+    }
 }

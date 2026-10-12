@@ -42,6 +42,10 @@ impl ProtectionState {
         }
     }
 
+    pub fn active_connections(&self) -> u64 {
+        u64::from(self.global_connections.load(Ordering::Relaxed))
+    }
+
     pub fn check_request(&self, ip: IpAddr, config: &Protection) -> Decision {
         if !config.enabled || is_allowlisted(ip, &config.allowlist) {
             return Decision::Allow;
