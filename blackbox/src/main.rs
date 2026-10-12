@@ -335,6 +335,16 @@ fn parse_request(line: &str) -> Result<RequestSpec, String> {
         match key {
             "ua" => headers.push(("User-Agent".to_owned(), value.to_owned())),
             "body" => body = Some(value.to_owned()),
+            "header" => {
+                let (name, header_value) = value
+                    .split_once(':')
+                    .ok_or_else(|| format!("`header` must be `Name: value`, got `{value}`"))?;
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(format!("empty header name in `{value}`"));
+                }
+                headers.push((name.to_owned(), header_value.trim().to_owned()));
+            }
             name => headers.push((name.to_owned(), value.to_owned())),
         }
     }

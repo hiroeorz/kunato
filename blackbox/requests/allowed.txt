@@ -4,14 +4,318 @@
 # what matters is that Kunato forwards the request (the status then comes from
 # the upstream).
 #
-# `admin-interfaces` in rules.example.yaml logs these paths instead of blocking.
+# `admin-interfaces` and the crawler rules in rules.example.yaml log these
+# requests instead of blocking them.
 
+# --- Static pages and assets ---
 GET /
 GET /index.html
+GET /about
+GET /about/team
+GET /pricing
+GET /features
+GET /docs
+GET /docs/getting-started
+GET /docs/api
+GET /blog
+GET /blog/2026/hello-kunato
+GET /blog/2026/rust-for-web
+GET /contact
+GET /terms
+GET /privacy
+GET /faq
+GET /support
+GET /status
+GET /favicon.ico
+GET /robots.txt
+GET /sitemap.xml
+GET /manifest.webmanifest
+GET /assets/app.css
+GET /assets/app.js
+GET /assets/vendor.js
+GET /assets/logo.svg
+GET /assets/font.woff2
+GET /images/hero.png
+GET /images/team.jpg
+GET /media/intro.mp4
+GET /static/app.js?v=1.2.3
+GET /static/app.css?v=1.2.3
+
+# --- API reads ---
+GET /api/version
+GET /api/items
+GET /api/items?page=1&per_page=20
+GET /api/items?page=2&per_page=20&sort=created_at
+GET /api/items?sort=created_at&order=desc
+GET /api/items?status=active&limit=50
+GET /api/items/42
+GET /api/items/42/comments
+GET /api/users
+GET /api/users?q=tanaka
+GET /api/users?role=admin&active=true
+GET /api/users/42
+GET /api/users/42/profile
+GET /api/users/me
+GET /api/search?q=selecting+a+plan
+GET /api/search?q=union+station
+GET /api/search?q=drop+table+reservations
+GET /api/search?q=how+to+use+sql
+GET /api/search?q=rust+programming
+GET /api/suggest?q=select
+GET /api/products
+GET /api/products?category=books
+GET /api/products?q=sql+server+guide
+GET /api/products?min_price=1000&max_price=5000
+GET /api/products/1234
+GET /api/orders
+GET /api/orders?status=shipped&limit=50
+GET /api/orders?from=2026-01-01&to=2026-01-31
+GET /api/orders/2026-0001
+GET /api/cart
+GET /api/cart/items
+GET /api/checkout/summary
+GET /api/notifications?unread=true
+GET /api/notifications?page=1
+GET /api/feed?since=1767225600
+GET /api/events?from=2026-01-01&to=2026-12-31
+GET /api/calendar?month=2026-02
+GET /api/weather?city=Osaka
+GET /api/stocks?symbol=AAPL
+GET /api/exchange?base=JPY&target=USD
+GET /api/metrics/summary
+GET /api/health
 GET /health
-GET /api/items?page=2
-GET /?q=normal%20search
-POST /submit body=name=kunato
-GET /static/app.js?version=3
+GET /healthz
+GET /readyz
+GET /livez
+GET /api/locale?lang=ja
+GET /api/timezones?country=JP&limit=10
+GET /api/countries?region=asia&limit=20
+GET /api/languages?limit=10
+
+# --- API writes ---
+POST /api/items body="{\"name\":\"New item\",\"price\":1200}"
+POST /api/items body="{\"name\":\"Wireless mouse\",\"price\":2980}"
+POST /api/items body="{\"name\":\"Mechanical keyboard\",\"tags\":[\"pc\",\"usb\"]}"
+PUT /api/items/42 body="{\"name\":\"Updated item\",\"price\":1500}"
+PATCH /api/items/42 body="{\"price\":1600}"
+DELETE /api/items/42
+POST /api/users body="{\"name\":\"Tanaka\",\"email\":\"tanaka@example.com\"}"
+POST /api/users body="{\"name\":\"Suzuki\",\"email\":\"suzuki@example.com\",\"role\":\"editor\"}"
+PUT /api/users/42 body="{\"name\":\"Tanaka Hiro\",\"email\":\"hiro@example.com\"}"
+PATCH /api/users/42 body="{\"role\":\"admin\"}"
+DELETE /api/users/42
+POST /api/login body="{\"username\":\"tanaka\",\"password\":\"correct-horse-battery-staple\"}"
+POST /api/logout
+POST /api/session/refresh
+POST /api/orders body="{\"item_id\":42,\"quantity\":2}"
+POST /api/orders/2026-0001/cancel
+POST /api/orders/2026-0001/refund
+POST /api/cart/items body="{\"item_id\":42,\"quantity\":1}"
+PATCH /api/cart/items/1 body="{\"quantity\":3}"
+DELETE /api/cart/items/1
+POST /api/checkout body="{\"payment_method\":\"card\"}"
+POST /api/payments body="{\"amount\":1200,\"currency\":\"JPY\"}"
+POST /api/comments body="{\"post_id\":42,\"body\":\"Nice article, thanks!\"}"
+PUT /api/comments/7 body="{\"body\":\"Updated comment\"}"
+DELETE /api/comments/7
+POST /api/feedback body="{\"rating\":5,\"comment\":\"Great service\"}"
+POST /api/subscribe body="{\"email\":\"tanaka@example.com\",\"topics\":[\"news\",\"releases\"]}"
+POST /api/unsubscribe body="{\"email\":\"tanaka@example.com\"}"
+POST /api/webhooks/stripe body="{\"type\":\"payment_intent.succeeded\",\"id\":\"evt_123\"}"
+POST /api/graphql body="{\"query\":\"{ user(id: 1) { name } }\"}"
+POST /api/translate body="{\"text\":\"Hello world\",\"target\":\"ja\"}"
+POST /api/report body="{\"from\":\"2026-01-01\",\"to\":\"2026-01-31\",\"format\":\"pdf\"}"
+PUT /api/profile body="{\"display_name\":\"Tanaka\",\"bio\":\"Web developer\"}"
+PATCH /api/profile body="{\"timezone\":\"Asia/Tokyo\"}"
+PUT /api/settings body="{\"theme\":\"dark\",\"notifications\":true}"
+POST /api/upload body="filename=\"report.pdf\""
+POST /api/upload body="filename=\"photo.jpg\""
+POST /api/upload body="filename=\"data.csv\""
+POST /api/upload body="filename=\"archive.zip\""
+PUT /api/files/report body="filename=\"report-2026.pdf\""
+POST /api/tags body="{\"name\":\"rust\"}"
+DELETE /api/tags/rust
+POST /api/invitations body="{\"email\":\"friend@example.com\"}"
+POST /api/password/reset body="{\"email\":\"tanaka@example.com\"}"
+POST /api/password/change body="{\"current\":\"old-password\",\"new\":\"new-password\"}"
+POST /api/2fa/verify body="{\"code\":\"123456\"}"
+POST /api/preferences body="{\"language\":\"ja\",\"newsletter\":false}"
+POST /api/notes body="{\"title\":\"Meeting notes\",\"body\":\"Discussed the roadmap\"}"
+PUT /api/notes/9 body="{\"title\":\"Meeting notes\",\"body\":\"Discussed the roadmap and budget\"}"
+DELETE /api/notes/9
+POST /api/attachments body="filename=\"minutes.docx\""
+POST /api/attachments body="filename=\"chart.png\""
+
+# --- Forms ---
+POST /login body=username=tanaka&password=correct-horse-battery-staple
+POST /login body="username=tanaka&password=correct horse battery staple"
+POST /login body="username=tanaka&remember=on"
+POST /logout
+POST /contact body="name=Tanaka&email=tanaka@example.com&message=Hello, I would like a demo."
+POST /contact body="name=Suzuki&message=Please call me at 03-1234-5678."
+POST /contact body="name=Alice&message=We use -- dashes and #hashtags in our copy."
+POST /search body=q=select
+POST /search body=q=union+station
+POST /search body=q=drop+table+reservations
+POST /search body=q=how+to+use+sql+select
+POST /search body="q=and or operators in sql"
+POST /feedback body="message=The and operator in SQL is useful. 1 + 1 = 2."
+POST /feedback body="message=Rated 5 out of 5."
+POST /subscribe body=email=tanaka@example.com
+POST /newsletter body="email=tanaka@example.com&format=html"
+POST /cart/add body=item=42&quantity=2
+POST /checkout body="shipping=Osaka&payment=card"
+POST /review body="rating=5&comment=Fast delivery, would buy again."
+POST /apply body="name=Tanaka&position=engineer&message=I have 5 years of experience."
+POST /inquiry body="subject=Question about pricing&message=Is there a discount for annual plans?"
+POST /report body="from=2026-01-01&to=2026-01-31"
+POST /webhook body="event=order.created&id=123"
+GET /search?q=select
+GET /search?q=union+station
+GET /search?q=drop+table+reservations
+GET /search?q=and+or+operators
+GET /search?q=how+to+use+sql
+GET /search?q=sleep+hygiene+tips
+GET /search?q=benchmark+results
+GET /search?q=evaluation+metrics
+GET /search?q=expression+engine
+GET /search?q=document+templates
+GET /search?q=window+seat+reservation
+GET /search?q=javascript+tutorials
+
+# --- File downloads and exports ---
+GET /files/report-2026-01.pdf
+GET /files/data-2026.csv
+GET /files/archive.zip
+GET /files/slides.pptx
+GET /files/manual.pdf
+GET /download?name=report.pdf
+GET /download?name=data.csv
+GET /download?file=report.pdf&inline=1
+GET /export?format=csv&from=2026-01-01&to=2026-01-31
+GET /export/orders.csv
+GET /media/logo.png
+GET /media/banner.jpg
+GET /media/podcast.mp3
+GET /media/tutorial.mp4
+GET /docs/manual.pdf
+GET /assets/images/icon-192.png
+GET /assets/images/icon-512.png
+GET /assets/files/spec.pdf
+GET /api/files/42
+GET /api/files/42/download
+
+# --- Admin interfaces (logged, not blocked) ---
 GET /wp-admin/
-GET / ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+GET /wp-admin/admin-ajax.php
+GET /wp-admin/post.php
+GET /wp-login.php
+GET /xmlrpc.php
+GET /phpmyadmin/
+GET /phpmyadmin/index.php
+GET /adminer.php
+GET /manager/html
+GET /solr/
+GET /admin/dashboard
+GET /administrator/
+GET /admin/settings
+POST /wp-login.php body=log=tanaka&pwd=secret
+GET /wp-json/wp/v2/posts
+
+# --- Search engine crawlers (logged, not blocked) ---
+GET / ua="Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+GET /robots.txt ua="Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
+GET / ua="DuckDuckBot/1.0; (+http://duckduckgo.com/duckduckbot.html)"
+GET / ua="Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)"
+GET / ua="Applebot/0.1; +http://www.apple.com/go/applebot"
+GET /blog ua="Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"
+GET /pricing ua="Mozilla/5.0 (compatible; SemrushBot/7~bl; +http://www.semrush.com/bot.html)"
+GET / ua="GPTBot/1.2; +https://openai.com/gptbot"
+GET /docs ua="Mozilla/5.0 (compatible; MJ12bot/v1.4.8; http://mj12bot.com/)"
+GET / ua="CCBot/2.0 (https://commoncrawl.org/faq/)"
+
+# --- Other methods ---
+HEAD /
+HEAD /index.html
+HEAD /assets/app.css
+OPTIONS /api/items
+OPTIONS /
+PUT /api/notes/3 body="{\"title\":\"Draft\",\"body\":\"Draft body\"}"
+PATCH /api/notes/3 body="{\"title\":\"Draft 2\"}"
+DELETE /api/notes/3
+PUT /api/settings/theme body=theme=dark
+PATCH /api/settings/language body=lang=ja
+DELETE /api/sessions/other
+POST /api/reindex
+POST /api/cache/clear
+GET /api/items?tags=rust&tags=web
+GET /api/items?fields=id,name,price
+GET /api/items?filter[status]=active
+GET /api/items?q=select+box
+GET /api/items?q=monitor+stand
+PUT /api/cart body="item=42&quantity=1"
+DELETE /api/cart/items/2
+
+# --- Header variety ---
+GET / header="Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MiJ9.signature"
+GET /api/profile header="Authorization: Bearer token-abc123"
+GET / header="Accept-Language: ja-JP,ja;q=0.9,en;q=0.8"
+GET / header="Accept-Encoding: gzip, deflate, br"
+GET / header="X-Request-Id: 550e8400-e29b-41d4-a716-446655440000"
+GET / header="Referer: https://example.com/blog/hello-kunato"
+GET / header="Origin: https://example.com"
+GET / header="If-None-Match: \"abc123\""
+GET / header="Cache-Control: no-cache"
+GET / header="Cookie: session=abc123; theme=dark; lang=ja"
+GET / header="Cookie: _ga=GA1.2.1234567890.1767225600"
+GET / header="X-CSRF-Token: abcdef123456"
+GET /api/profile header="Accept: application/json"
+POST /api/items header="Content-Type: application/json" body="{\"name\":\"Chair\",\"price\":9900}"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body=username=tanaka&password=secret
+GET / header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+GET / header="User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+GET / header="User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+GET /api/items header="User-Agent: PostmanRuntime/7.39.0"
+GET /api/items header="User-Agent: curl/8.5.0"
+GET /robots.txt header="User-Agent: UptimeRobot/2.0"
+GET / header="Forwarded: for=203.0.113.7;proto=https;host=example.com"
+GET / header="X-Forwarded-For: 203.0.113.7"
+GET / header="X-Real-IP: 203.0.113.7"
+GET / header="X-Forwarded-Proto: https"
+
+# --- Encoded and international text ---
+GET /search?q=%E5%AF%BF%E5%8F%B8
+GET /search?q=caf%C3%A9
+GET /search?q=%E6%9D%B1%E4%BA%AC
+GET /files/%E8%B3%87%E6%96%99.pdf
+GET /search?q=a%20b%20c
+GET /search?q=rust%2Bweb
+GET /search?q=100%25+coverage
+GET /search?q=C%2B%2B
+GET /search?q=AT%26T
+GET /search?q=a%3Db
+GET /search?q=hello%20world%21
+GET /search?q=%22quoted%20phrase%22
+GET /search?q=%3Cnot-a-tag%3E
+GET /search?q=%C3%A9l%C3%A9phant
+GET /search?q=50%25+off
+
+# --- Miscellaneous ---
+GET /.well-known/security.txt
+GET /.well-known/acme-challenge/abc123token
+GET /oauth/callback?code=abc123&state=xyz
+GET /auth/complete?code=abc123
+GET /api/oauth/authorize?client_id=web&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&response_type=code
+POST /graphql body="{\"query\":\"query { viewer { name } }\"}"
+GET /api/schema.json
+GET /api/items?cursor=eyJpZCI6NDJ9
+GET /api/items?ids=1,2,3,4,5
+GET /api/items?include=owner,tags
+GET /api/recommendations?user=42&limit=5
+GET /api/history?page=3&per_page=10
+GET /api/analytics/overview?period=30d
+GET /api/analytics/top-pages?limit=10
+GET /api/webhooks/deliveries?status=success
+GET /api/audit-log?from=2026-01-01&limit=100
+POST /api/support/tickets body="{\"subject\":\"Cannot log in\",\"priority\":\"normal\"}"
