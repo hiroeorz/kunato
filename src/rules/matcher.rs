@@ -1,0 +1,249 @@
+use http::Method;
+use http::header::HeaderName;
+use ipnet::IpNet;
+use regex::Regex;
+
+use crate::request_view::{RequestView, cookie_pairs};
+
+pub const TARGET_PATH: u8 = 1 << 0;
+pub const TARGET_QUERY: u8 = 1 << 1;
+pub const TARGET_BODY: u8 = 1 << 2;
+pub const TARGET_COOKIES: u8 = 1 << 3;
+pub const TARGET_HEADERS: u8 = 1 << 4;
+
+#[derive(Debug, Default)]
+pub struct Matcher {
+    pub paths: Vec<Regex>,
+    pub methods: Option<Vec<Method>>,
+    pub source_ips: Option<Vec<IpNet>>,
+    pub headers: Vec<(HeaderName, Vec<Regex>)>,
+    pub cookies: Vec<(String, Vec<Regex>)>,
+    pub payload: Option<PayloadMatcher>,
+}
+
+#[derive(Debug)]
+pub struct PayloadMatcher {
+    pub regexes: Vec<Regex>,
+    pub targets: u8,
+}
+
+impl Matcher {
+    pub fn matches(&self, view: &RequestView<'_>) -> bool {
+        if !self.paths.is_empty() {
+            let matched = self
+                .paths
+                .iter()
+                .any(|regex| regex.is_match(view.path) || regex.is_match(&view.decoded_path));
+            if !matched {
+                return false;
+            }
+        }
+
+        if let Some(methods) = &self.methods
+            && !methods.contains(view.method)
+        {
+            return false;
+        }
+
+        if let Some(networks) = &self.source_ips
+            && !networks
+                .iter()
+                .any(|network| network.contains(&view.source_ip))
+        {
+            return false;
+        }
+
+        for (name, regexes) in &self.headers {
+            let matched = view.headers.get_all(name).iter().any(|value| {
+                value
+                    .to_str()
+                    .is_ok_and(|value| regexes.iter().any(|re| re.is_match(value)))
+            });
+            if !matched {
+                return false;
+            }
+        }
+
+        for (name, regexes) in &self.cookies {
+            let matched = cookie_pairs(view.headers)
+                .iter()
+                .any(|(cookie_name, value)| {
+                    *cookie_name == name && regexes.iter().any(|re| re.is_match(value))
+                });
+            if !matched {
+                return false;
+            }
+        }
+
+        if let Some(payload) = &self.payload
+            && !payload.matches(view)
+        {
+            return false;
+        }
+
+        true
+    }
+}
+
+impl PayloadMatcher {
+    fn matches(&self, view: &RequestView<'_>) -> bool {
+        if self.targets & TARGET_PATH != 0
+            && (self.hits(view.path) || self.hits(&view.decoded_path))
+        {
+            return true;
+        }
+
+        if self.targets & TARGET_QUERY != 0
+            && (view.query.is_some_and(|query| self.hits(query))
+                || view
+                    .decoded_query
+                    .as_deref()
+                    .is_some_and(|query| self.hits(query)))
+        {
+            return true;
+        }
+
+        if self.targets & TARGET_BODY != 0
+            && !view.body.is_empty()
+            && self.hits(&String::from_utf8_lossy(view.body))
+        {
+            return true;
+        }
+
+        if self.targets & TARGET_COOKIES != 0
+            && cookie_pairs(view.headers)
+                .iter()
+                .any(|(_, value)| self.hits(value))
+        {
+            return true;
+        }
+
+        if self.targets & TARGET_HEADERS != 0
+            && view
+                .headers
+                .values()
+                .any(|value| value.to_str().is_ok_and(|value| self.hits(value)))
+        {
+            return true;
+        }
+
+        false
+    }
+
+    fn hits(&self, text: &str) -> bool {
+        self.regexes.iter().any(|regex| regex.is_match(text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::{HeaderMap, HeaderValue, Method, Uri};
+
+    use super::*;
+
+    fn view<'a>(
+        method: &'a Method,
+        uri: &'a Uri,
+        headers: &'a HeaderMap,
+        body: &'a [u8],
+    ) -> RequestView<'a> {
+        RequestView::new(
+            method,
+            uri,
+            headers,
+            body,
+            "127.0.0.1".parse().expect("valid IP"),
+        )
+    }
+
+    fn regex(pattern: &str) -> Regex {
+        Regex::new(pattern).expect("valid test regex")
+    }
+
+    #[test]
+    fn matches_decoded_query() {
+        let method = Method::GET;
+        let uri: Uri = "/?q=union%20select".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)union\s+select")],
+                targets: TARGET_QUERY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn matches_decoded_path() {
+        let method = Method::GET;
+        let uri: Uri = "/files/%2e%2e%2fetc/passwd".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            paths: vec![regex(r"\.\./")],
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn all_header_conditions_must_match() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("sqlmap/1.0"));
+        let matcher = Matcher {
+            headers: vec![
+                (HeaderName::from_static("user-agent"), vec![regex("sqlmap")]),
+                (HeaderName::from_static("x-api-key"), vec![regex(".+")]),
+            ],
+            ..Matcher::default()
+        };
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn method_filter_rejects_other_methods() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            methods: Some(vec![Method::POST]),
+            ..Matcher::default()
+        };
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn source_ip_cidr_is_respected() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            source_ips: Some(vec!["10.0.0.0/8".parse().expect("valid CIDR")]),
+            ..Matcher::default()
+        };
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn body_pattern_matches_raw_bytes() {
+        let method = Method::POST;
+        let uri: Uri = "/submit".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)<script")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(
+            &method,
+            &uri,
+            &headers,
+            b"x=<script>alert(1)</script>"
+        )));
+    }
+}

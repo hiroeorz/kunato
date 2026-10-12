@@ -1,0 +1,26 @@
+[package]
+name = "kunato"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arc-swap = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+ipnet = "2"
+notify = "8"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
