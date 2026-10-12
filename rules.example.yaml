@@ -71,13 +71,13 @@ categories:
     response: { status: 403, body: Forbidden }
     rules:
       - name: union-select
-        match: { regex: '(?i)\bunion\b[\s/*]{0,10}\bselect\b', in: [query, body, cookies] }
+        match: { regex: '(?i)\bunion\b[^;]{0,20}\bselect\b', in: [query, body, cookies] }
       - name: boolean-taunts
-        match: { regex: '(?i)\b(or|and)\b\s+["\)]?\d+["\)]?\s*=\s*["\)]?\d+', in: [query, body, cookies] }
+        match: { regex: '(?i)\b(or|and)\b[\s+]+[\x27"\(\)]?\d+[\x27"\(\)]?[\s+]*=[\s+]*[\x27"\(\)]?\d+[\x27"\(\)]?', in: [query, body, cookies] }
       - name: stacked-queries
         match: { regex: '(?i);\s*(select|insert|update|delete|drop|alter|create|truncate)\b', in: [query, body, cookies] }
       - name: time-based
-        match: { regex: '(?i)\b(sleep|benchmark|pg_sleep|waitfor\s+delay)\s*\(', in: [query, body, cookies] }
+        match: { regex: '(?i)(\b(sleep|benchmark|pg_sleep)\s*\(|\bwaitfor[\s+]+delay\b)', in: [query, body, cookies] }
       - name: database-metadata
         match: { regex: '(?i)(information_schema|sysobjects|syscolumns|xp_cmdshell|load_file|into\s+(out|dump)file|@@version)', in: [query, body, cookies] }
       - name: comment-obfuscation
@@ -97,7 +97,7 @@ categories:
       - name: script-tags
         match: { regex: '(?i)<\s*/?\s*(script|iframe|object|embed|applet)\b', in: [query, body, headers] }
       - name: event-handlers
-        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|change|submit|reset|keydown|keyup|keypress|input|animationstart|animationend|transitionend|toggle|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend)\s*=', in: [query, body, headers] }
+        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|animationstart|animationend|transitionend|toggle|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend)\s*=', in: [query, body, headers] }
       - name: javascript-uri
         match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers] }
       - name: data-html-uri
@@ -141,7 +141,7 @@ categories:
       - name: null-byte
         match: { regex: '(?i)%00', in: [path, query] }
       - name: crlf-injection
-        match: { regex: '(?i)(%0d%0a|%0a%0d|%0d|%0a)', in: [path, headers] }
+        match: { regex: '(?i)(%0d%0a|%0a%0d|%0d|%0a)', in: [path, query, headers] }
       - name: double-encoded-characters
         match: { regex: '(?i)%25(2e|3c|3e|27|22|2f|5c)', in: [path, query] }
 
