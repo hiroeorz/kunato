@@ -400,6 +400,15 @@ admin:
   enabled: true
   listen: 127.0.0.1:9090
 
+# Response header policy, applied to every response Kunato sends, including
+# upstream responses and its own block/error responses. Header names are
+# case-insensitive and a name in both lists is replaced. Hop-by-hop headers
+# and alt-svc are managed by the proxy and cannot be changed here.
+response_headers:
+  remove: [server, x-powered-by]
+  # set:
+  #   server: webserver
+
 # Optional TLS termination; remove the comments and point the paths at a
 # PEM-encoded certificate chain and private key to serve HTTPS.
 # tls:

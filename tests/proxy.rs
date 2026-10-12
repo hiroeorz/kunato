@@ -81,6 +81,37 @@ async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
     addr
 }
 
+async fn spawn_identifying_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_request: Request<Incoming>| async move {
+                    let mut response = Response::new(Full::new(Bytes::from_static(b"ok")));
+                    response
+                        .headers_mut()
+                        .insert("server", HeaderValue::from_static("upstream/1.0"));
+                    response
+                        .headers_mut()
+                        .insert("x-powered-by", HeaderValue::from_static("php"));
+                    Ok::<_, Infallible>(response)
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_upgrade_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -231,6 +262,25 @@ async fn send(addr: SocketAddr, method: Method, path: &str, body: &str) -> (Stat
         .expect("collect body")
         .to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn send_with_headers(
+    addr: SocketAddr,
+    method: Method,
+    path: &str,
+    body: &str,
+) -> (StatusCode, http::HeaderMap) {
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let request = Request::builder()
+        .method(method)
+        .uri(format!("http://{addr}{path}"))
+        .header("host", addr.to_string())
+        .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
+        .expect("build request");
+
+    let response = client.request(request).await.expect("request");
+    (response.status(), response.headers().clone())
 }
 
 async fn send_h2c(
@@ -397,6 +447,83 @@ categories:
     let (status, body) = send(running.addr, Method::GET, "/safe", "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_header_policy_rewrites_upstream_headers() {
+    let upstream = spawn_identifying_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+response_headers:
+  remove: [server, x-powered-by]
+  set: {{ x-served-by: kunato }}
+categories: []
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, headers) = send_with_headers(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key("server"));
+    assert!(!headers.contains_key("x-powered-by"));
+    assert_eq!(
+        headers
+            .get("x-served-by")
+            .and_then(|value| value.to_str().ok()),
+        Some("kunato")
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_header_policy_applies_to_block_responses() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+response_headers:
+  set: {{ server: hidden }}
+categories:
+  - name: catch-all
+    action: BLOCK
+    rules:
+      - name: everything
+        match: {{ path: ^/ }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, headers) = send_with_headers(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        headers.get("server").and_then(|value| value.to_str().ok()),
+        Some("hidden")
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_header_policy_applies_to_http3() {
+    let upstream = spawn_identifying_upstream().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "response_headers:\n  remove: [server, x-powered-by]\n",
+    )
+    .await;
+
+    let (status, _, headers) = send_h3(running.addr, certificate, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key("server"));
+    assert!(!headers.contains_key("x-powered-by"));
 
     running.stop().await;
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use http::Method;
 use http::Uri;
-use http::header::HeaderName;
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 use ipnet::IpNet;
 use regex::{Regex, RegexBuilder};
 use serde::de::Error as DeError;
@@ -23,6 +23,8 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const MAX_PATTERN_BYTES: usize = 4096;
 const MAX_PATTERNS_PER_RULE: usize = 64;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024;
+const MAX_RESPONSE_HEADER_ENTRIES: usize = 64;
+const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -154,6 +156,8 @@ pub struct ConfigSpec {
     pub tls: Option<TlsSpec>,
     #[serde(default)]
     pub http3: Http3Spec,
+    #[serde(default)]
+    pub response_headers: ResponseHeadersSpec,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -246,6 +250,15 @@ pub struct Http3Spec {
     pub enabled: bool,
     #[serde(default)]
     pub listen: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseHeadersSpec {
+    #[serde(default)]
+    pub remove: Vec<String>,
+    #[serde(default)]
+    pub set: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -451,6 +464,25 @@ impl From<&Http3Spec> for Http3 {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ResponseHeaders {
+    remove: Vec<HeaderName>,
+    set: Vec<(HeaderName, HeaderValue)>,
+}
+
+impl ResponseHeaders {
+    /// Remove and replace configured response headers. Removal runs first, so a
+    /// name that appears in both lists is replaced rather than deleted.
+    pub fn apply(&self, headers: &mut HeaderMap) {
+        for name in &self.remove {
+            headers.remove(name);
+        }
+        for (name, value) in &self.set {
+            headers.insert(name, value.clone());
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Admin {
     pub enabled: bool,
@@ -541,6 +573,7 @@ pub struct CompiledConfig {
     pub admin: Admin,
     pub tls: Option<Tls>,
     pub http3: Http3,
+    pub response_headers: ResponseHeaders,
 }
 
 #[derive(Debug)]
@@ -581,6 +614,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
     validate_admin(&spec.admin, &mut issues);
     validate_tls(&spec.tls, &mut issues);
     validate_http3(&spec.http3, &spec.tls, &mut issues);
+    let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
 
     let mut categories = Vec::new();
@@ -667,6 +701,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
         admin: Admin::from(&spec.admin),
         tls: spec.tls.as_ref().map(Tls::from),
         http3: Http3::from(&spec.http3),
+        response_headers,
     })
 }
 
@@ -713,6 +748,89 @@ fn validate_http3(spec: &Http3Spec, tls: &Option<TlsSpec>, issues: &mut Vec<Stri
     if spec.enabled && tls.is_none() {
         issues.push("http3 requires a tls block".to_owned());
     }
+}
+
+fn compile_response_headers(
+    spec: &ResponseHeadersSpec,
+    issues: &mut Vec<String>,
+) -> ResponseHeaders {
+    let mut remove = Vec::new();
+    if spec.remove.len() > MAX_RESPONSE_HEADER_ENTRIES {
+        issues.push(format!(
+            "response_headers.remove: too many entries (max {MAX_RESPONSE_HEADER_ENTRIES})"
+        ));
+    }
+    for raw in spec.remove.iter().take(MAX_RESPONSE_HEADER_ENTRIES) {
+        match HeaderName::from_bytes(raw.as_bytes()) {
+            Ok(name) if is_proxy_managed_header(&name) => issues.push(format!(
+                "response_headers.remove: `{raw}` is managed by the proxy and cannot be removed"
+            )),
+            Ok(name) => remove.push(name),
+            Err(_) => issues.push(format!(
+                "response_headers.remove: invalid header name `{raw}`"
+            )),
+        }
+    }
+
+    let mut set = Vec::new();
+    if spec.set.len() > MAX_RESPONSE_HEADER_ENTRIES {
+        issues.push(format!(
+            "response_headers.set: too many entries (max {MAX_RESPONSE_HEADER_ENTRIES})"
+        ));
+    }
+    for (raw_name, raw_value) in spec.set.iter().take(MAX_RESPONSE_HEADER_ENTRIES) {
+        let name = match HeaderName::from_bytes(raw_name.as_bytes()) {
+            Ok(name) if is_proxy_managed_header(&name) => {
+                issues.push(format!(
+                    "response_headers.set: `{raw_name}` is managed by the proxy and cannot be set"
+                ));
+                continue;
+            }
+            Ok(name) => name,
+            Err(_) => {
+                issues.push(format!(
+                    "response_headers.set: invalid header name `{raw_name}`"
+                ));
+                continue;
+            }
+        };
+        if raw_value.is_empty() {
+            issues.push(format!(
+                "response_headers.set: `{raw_name}` must not be empty; use `remove` instead"
+            ));
+            continue;
+        }
+        if raw_value.len() > MAX_RESPONSE_HEADER_VALUE_BYTES {
+            issues.push(format!(
+                "response_headers.set: `{raw_name}` value exceeds {MAX_RESPONSE_HEADER_VALUE_BYTES} bytes"
+            ));
+            continue;
+        }
+        match HeaderValue::from_str(raw_value) {
+            Ok(value) => set.push((name, value)),
+            Err(_) => issues.push(format!(
+                "response_headers.set: invalid value for `{raw_name}`"
+            )),
+        }
+    }
+
+    ResponseHeaders { remove, set }
+}
+
+fn is_proxy_managed_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
+            | "alt-svc"
+    )
 }
 
 fn validate_admin(spec: &AdminSpec, issues: &mut Vec<String>) {
@@ -1384,6 +1502,65 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
     fn rejects_http3_without_tls() {
         let error = parse_with(BASE, "http3: { enabled: true }\n").expect_err("must fail");
         assert!(error.to_string().contains("http3 requires a tls block"));
+    }
+
+    #[test]
+    fn parses_and_applies_response_header_policy() {
+        let config = parse_with(
+            BASE,
+            "response_headers:
+  remove: [Server, X-Powered-By]
+  set: { X-Served-By: kunato }
+",
+        )
+        .expect("valid config");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("server", HeaderValue::from_static("nginx/1.27"));
+        headers.insert("x-powered-by", HeaderValue::from_static("php"));
+        headers.insert("content-type", HeaderValue::from_static("text/plain"));
+        config.response_headers.apply(&mut headers);
+
+        assert!(!headers.contains_key("server"));
+        assert!(!headers.contains_key("x-powered-by"));
+        assert!(headers.contains_key("content-type"));
+        assert_eq!(
+            headers.get("x-served-by").map(|value| value.as_bytes()),
+            Some(b"kunato".as_slice())
+        );
+    }
+
+    #[test]
+    fn response_header_set_wins_over_remove() {
+        let config = parse_with(
+            BASE,
+            "response_headers: { remove: [server], set: { server: hidden } }\n",
+        )
+        .expect("valid config");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("server", HeaderValue::from_static("nginx"));
+        config.response_headers.apply(&mut headers);
+
+        assert_eq!(
+            headers.get("server").map(|value| value.as_bytes()),
+            Some(b"hidden".as_slice())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_response_header_policy() {
+        let error = parse_with(BASE, "response_headers: { remove: ['bad header'] }\n")
+            .expect_err("must fail");
+        assert!(error.to_string().contains("invalid header name"));
+
+        let error =
+            parse_with(BASE, "response_headers: { set: { server: '' } }\n").expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"));
+
+        let error = parse_with(BASE, "response_headers: { remove: [connection] }\n")
+            .expect_err("must fail");
+        assert!(error.to_string().contains("managed by the proxy"));
     }
 
     #[test]

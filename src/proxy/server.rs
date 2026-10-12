@@ -391,6 +391,7 @@ async fn handle_request(
         Ok(response) => response,
         Err(err) => rejected(peer, &err),
     };
+    config.response_headers.apply(response.headers_mut());
     if let Some(alt_svc) = &context.alt_svc {
         response.headers_mut().insert("alt-svc", alt_svc.clone());
     }

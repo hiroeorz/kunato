@@ -24,6 +24,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Categorized rule sets** — Rules are grouped into named categories (for example
   `sql-injection` or `xss`). Each category defines a default action, and individual
   rules can override it.
+- **Response header rewriting** — Removes or replaces identifying response headers
+  such as `Server` and `X-Powered-By` on upstream responses and Kunato's own
+  block/error responses alike.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.
@@ -321,6 +324,25 @@ Defaults:
 timeouts: { header_read: 10s, body_read: 30s }
 limits: { max_body_bytes: 1048576 }
 ```
+
+### Response headers
+
+`response_headers` rewrites the headers of every response Kunato sends — upstream
+responses and its own block/error responses alike — after hop-by-hop headers are
+filtered. Removing identifying headers is the recommended default; replacing them
+with a fixed, version-less value is the alternative:
+
+```yaml
+response_headers:
+  remove: [server, x-powered-by, via]
+  # set:
+  #   server: webserver
+```
+
+Header names are case-insensitive, `remove` runs before `set`, and a name listed in
+both is replaced rather than deleted. Hop-by-hop headers, `content-length`, and
+`alt-svc` are managed by the proxy and rejected in the policy. A value in `set`
+must be non-empty; use `remove` to drop a header.
 
 ### Admin and metrics
 

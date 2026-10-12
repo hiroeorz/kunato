@@ -190,18 +190,11 @@ async fn handle_request(
 
     let config = context.config();
     let (parts, _) = request.into_parts();
-    let body = match read_body(&mut stream, &config).await {
-        Ok(body) => body,
-        Err(err) => {
-            let response = server::rejected(peer, &err);
-            if let Err(err) = send_response(&mut stream, response).await {
-                debug!(client = %peer, error = %err, "failed to send HTTP/3 error response");
-            }
-            return;
-        }
+    let mut response = match read_body(&mut stream, &config).await {
+        Ok(body) => server::process_request(parts, body, peer, &config, &context).await,
+        Err(err) => server::rejected(peer, &err),
     };
-
-    let response = server::process_request(parts, body, peer, &config, &context).await;
+    config.response_headers.apply(response.headers_mut());
     if let Err(err) = send_response(&mut stream, response).await {
         debug!(client = %peer, error = %err, "failed to send HTTP/3 response");
     }
