@@ -274,6 +274,34 @@ async fn body_at_limit_is_accepted() {
 }
 
 #[tokio::test]
+async fn malformed_chunked_body_is_bad_request() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\n");
+    let running = start_kunato(&yaml).await;
+
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect kunato");
+    let request = "POST /upload HTTP/1.1\r\nhost: kunato.test\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\nnot-a-chunk\r\n";
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "unexpected response: {response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn oversized_headers_are_rejected() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(

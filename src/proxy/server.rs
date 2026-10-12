@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use http::{Request, Response, StatusCode};
-use http_body_util::{BodyExt, Limited};
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -343,11 +343,13 @@ async fn process(
                 "request body read timed out",
             ));
         }
-        Ok(Err(_)) => {
-            return Err(HttpError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request body too large",
-            ));
+        Ok(Err(err)) => {
+            let (status, message) = if err.downcast_ref::<LengthLimitError>().is_some() {
+                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+            } else {
+                (StatusCode::BAD_REQUEST, "malformed request body")
+            };
+            return Err(HttpError::new(status, message));
         }
         Ok(Ok(collected)) => collected.to_bytes(),
     };
