@@ -5,8 +5,8 @@ personal users who want an easy-to-deploy protection layer in front of their web
 applications.
 
 It runs as a reverse proxy between clients (browsers, apps) and your HTTP server,
-inspects incoming requests against a set of YAML-defined rules, and applies one of
-three actions: **BLOCK**, **ALLOW**, or **LOG**.
+inspects incoming requests against categorized, YAML-defined rules, and applies one
+of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 
 > **Status:** Early development. The configuration format and public interfaces are
 > not yet stable and may change without notice.
@@ -15,8 +15,9 @@ three actions: **BLOCK**, **ALLOW**, or **LOG**.
 
 - **Reverse proxy** — Sits between browsers/apps and your HTTP server, forwarding
   traffic while inspecting every request.
-- **Rule-based request handling** — Requests are evaluated against preconfigured
-  `BLOCK`, `ALLOW`, and `LOG` rules, and handled according to the verdict.
+- **Categorized rule sets** — Rules are grouped into named categories (for example
+  `sql-injection` or `xss`). Each category defines a default action, and individual
+  rules can override it.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.
@@ -40,12 +41,14 @@ Client ──────►  ┌───────────────�
 ```
 
 1. A request arrives at Kunato.
-2. Rules are evaluated in ascending order of `priority` (lower value first).
-3. The first matching rule decides how the request is handled:
-   - `ALLOW` — forward the request to the upstream and skip remaining rules.
-   - `BLOCK` — reject the request immediately (default: `403 Forbidden`).
-   - `LOG` — record the match and continue evaluating the remaining rules.
-4. If no rule matches, the request is forwarded to the upstream (default pass-through).
+2. Categories are evaluated in the order they appear in the configuration, and
+   rules within each category in their order.
+3. The first rule whose conditions all match is handled according to its effective
+   action:
+   - `ALLOW` — forwards the request and stops evaluation.
+   - `BLOCK` — rejects the request immediately (default: `403 Forbidden`).
+   - `LOG` — records the match and continues evaluation.
+4. If no rule matches, the request is forwarded to the upstream (pass-through).
 
 ## Getting Started
 
@@ -71,50 +74,166 @@ The binary is produced at `target/release/kunato`.
 
 ## Configuration
 
-Kunato is configured through a single YAML file. An example:
+Kunato is configured through a single YAML file. The file defines where Kunato
+listens, which upstream server it forwards to, and a list of rule **categories**:
+
+- `listen` — address and port to bind.
+- `upstream` — base URL of the upstream HTTP server.
+- `categories` — ordered list of rule categories.
+
+Each category groups related rules (for example SQL injection or XSS signatures)
+and defines a default action that its rules inherit. Individual rules can override
+the category defaults.
+
+Rules are written in a compact form: `name` on one line, followed by a flow-style
+`match` mapping on the next. Rules that override category defaults add one line per
+extra field (`action`, `enabled`, `description`, `response`), and larger match
+mappings can fall back to block style. Both forms are plain YAML and can be mixed.
+
+### Example
 
 ```yaml
 listen: 0.0.0.0:8080
 upstream: http://127.0.0.1:3000
 
-rules:
-  # Health checks are always allowed and skip further inspection.
-  - name: allow-health-checks
-    priority: 10
+categories:
+  # Trusted clients: matching rules forward the request immediately and skip
+  # all remaining categories.
+  - name: trusted-sources
     action: ALLOW
-    match:
-      path_prefix: /health
+    rules:
+      - name: internal-networks
+        match: { source_ip: [10.0.0.0/8, 192.168.0.0/16] }
+      - name: uptime-monitor
+        match: { source_ip: 203.0.113.10, path: ^/health$ }
 
-  # Suspicious scanners are logged, then evaluation continues.
-  - name: log-scanners
-    priority: 50
-    action: LOG
-    match:
-      header_regex:
-        User-Agent: '(?i)(sqlmap|nikto|nmap)'
-
-  # SQL injection attempts are blocked outright.
-  - name: block-sql-injection
-    priority: 100
+  # SQL injection: the category default blocks matching requests.
+  - name: sql-injection
     action: BLOCK
-    match:
-      path_regex: '(?i)^/api/.*'
-      method: [POST, PUT, PATCH]
-      body_regex: '(?i)(union\s+select|drop\s+table)'
-    response:
-      status: 403
-      body: Forbidden
+    response: { status: 403, body: Forbidden }
+    rules:
+      - name: union-select
+        match: { regex: '(?i)\bunion\b.{0,40}\bselect\b', in: [query, body] }
+      - name: comment-obfuscation
+        match: { regex: '(?i)(/\*!|--\s|#\s)', in: [query, body] }
+      - name: tuning-heuristics         # disabled while false positives are investigated
+        enabled: false
+        match: { regex: '(?i)\bor\s+1\s*=\s*1\b', in: [query, body] }
+      - name: detection-only            # logs instead of blocking while tuning
+        action: LOG
+        match: { regex: '(?i)(sleep\s*\(|benchmark\s*\()', in: [query, body] }
+
+  # Cross-site scripting: also blocks by default.
+  - name: xss
+    action: BLOCK
+    rules:
+      - name: script-tags
+        match: { regex: '(?i)<\s*script\b', in: [query, body, headers] }
+      - name: event-handlers
+        match: { regex: '(?i)\bon(error|load|click|mouseover)\s*=', in: [query, body] }
+      - name: javascript-uri
+        match: { regex: '(?i)javascript\s*:', in: [query, body] }
+
+  # Path traversal: blocks by default. Larger match mappings may use block style.
+  - name: path-traversal
+    action: BLOCK
+    rules:
+      - name: dot-dot-slash
+        match:
+          regex: ['\.\./', '(?i)%2e%2e%2f', '(?i)%2e%2e/']
+          in: [path, query, body]
+      - name: encoded-backslash
+        match: { regex: '(?i)(%5c|\.\.\\)', in: [path] }
+
+  # Scanners and sensitive endpoints: logged by default, but individual rules
+  # override the category action and block.
+  - name: scanners
+    action: LOG
+    rules:
+      - name: scanner-user-agents
+        match:
+          headers:
+            User-Agent: ['(?i)sqlmap', '(?i)nikto', '(?i)(nmap|masscan|zgrab)']
+      - name: sensitive-files            # overrides the category default
+        action: BLOCK
+        match: { path: '(?i)(^|/)(\.env|\.git/|wp-admin|phpmyadmin)' }
 ```
+
+### Evaluation
+
+1. Categories are evaluated in the order they appear in the file, and rules within
+   a category in their order. A category with `enabled: false` is skipped entirely.
+2. The first rule whose conditions all match wins. Its effective action and
+   response are resolved with rule-level values taking precedence over
+   category-level defaults.
+3. The effective action is applied:
+   - `ALLOW` — forwards the request and stops evaluation.
+   - `BLOCK` — rejects the request with the effective response (default:
+     `403 Forbidden`) and stops evaluation.
+   - `LOG` — records the match and continues evaluation.
+4. If no rule matches, the request is forwarded (pass-through).
+
+Every rule must resolve to an effective action: a rule without its own `action`
+requires the category to define one. The configuration is rejected at load time
+otherwise.
+
+### Category fields
+
+| Field         | Description                                                           |
+| ------------- | --------------------------------------------------------------------- |
+| `name`        | Unique category name.                                                 |
+| `description` | Optional free-text description.                                       |
+| `enabled`     | Set to `false` to skip the category. Defaults to `true`.              |
+| `action`      | Default action (`BLOCK`, `ALLOW`, or `LOG`) for the category's rules. |
+| `response`    | Default response for `BLOCK` rules. Defaults to `403 Forbidden`.      |
+| `rules`       | Ordered list of rules.                                                |
 
 ### Rule fields
 
-| Field      | Description                                                        |
-| ---------- | ------------------------------------------------------------------ |
-| `name`     | Unique, human-readable rule name.                                  |
-| `priority` | Evaluation order. Lower values are evaluated first.                |
-| `action`   | One of `BLOCK`, `ALLOW`, or `LOG`.                                 |
-| `match`    | Conditions the request must satisfy for the rule to apply.         |
-| `response` | Optional custom response for `BLOCK` rules.                        |
+| Field         | Description                                                     |
+| ------------- | --------------------------------------------------------------- |
+| `name`        | Rule name, unique within the category.                          |
+| `description` | Optional free-text description.                                 |
+| `enabled`     | Set to `false` to skip the rule. Defaults to `true`.            |
+| `action`      | Overrides the category default action.                          |
+| `match`       | Conditions that must all hold for the rule to apply (required). |
+| `response`    | Overrides the category response for `BLOCK` rules.              |
+
+### Match fields
+
+Match conditions are combined with logical AND; a list value means OR within that
+field. At least one condition must be specified. Regular expressions are compiled
+once at load time, and an invalid pattern rejects the configuration. Path and query
+values are matched both raw and percent-decoded, so `%3Cscript%3E` and `<script>`
+both match.
+
+| Field       | Description                                                                                                             |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `path`      | Regex(es) matched against the request path.                                                                             |
+| `method`    | One or more HTTP methods (for example `GET` or `[POST, PUT]`).                                                          |
+| `source_ip` | IP address(es) or CIDR range(s) the client must come from.                                                              |
+| `headers`   | Map of header name to regex(es); header names are case-insensitive.                                                     |
+| `cookies`   | Map of cookie name to regex(es).                                                                                        |
+| `in`        | Request parts searched by `regex`: `query`, `body`, `cookies`, `headers`, or `path`. Defaults to `[query, body, cookies]`. |
+| `regex`     | Signature regex(es) searched in the parts listed by `in`.                                                               |
+
+### Timeouts and limits
+
+Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
+Defaults:
+
+| Timeout             | Default | Limit              | Default |
+| ------------------- | ------- | ------------------ | ------- |
+| `header_read`       | `10s`   | `max_path_bytes`   | 8 KiB   |
+| `body_read`         | `30s`   | `max_header_bytes` | 32 KiB  |
+| `upstream_connect`  | `5s`    | `max_headers`      | 100     |
+| `upstream_response` | `30s`   | `max_body_bytes`   | 1 MiB   |
+| `shutdown_grace`    | `10s`   |                    |         |
+
+```yaml
+timeouts: { header_read: 10s, body_read: 30s }
+limits: { max_body_bytes: 1048576 }
+```
 
 ### Hot reload
 
@@ -127,10 +246,33 @@ Kunato watches the rule file for changes. When the file is updated:
 
 ## DoS / DDoS Protection
 
-Kunato monitors request rates and connection patterns to detect abusive traffic.
-When a source exceeds the configured thresholds, it is automatically throttled or
-temporarily banned. Detection and mitigation run without manual intervention and
-are independent of the YAML rule set.
+Kunato monitors connection and request rates to detect abusive traffic. When a
+source exceeds the configured thresholds, it is automatically throttled and, after
+repeated violations, temporarily banned. Detection and mitigation run without
+manual intervention and are independent of the YAML rule set.
+
+```yaml
+protection:
+  enabled: true
+  allowlist: [10.0.0.0/8, 192.168.0.0/16]
+  max_connections_per_ip: 32
+  max_connections: 1024
+  requests_per_second: 20
+  burst: 60
+  global_requests_per_second: 2000
+  max_tracked_ips: 100000
+  ban:
+    violations: 5
+    window: 10s
+    duration: 60s
+    max_duration: 1h
+```
+
+The per-IP limiter uses a token bucket (`requests_per_second` refill rate, `burst`
+capacity). Exceeding it returns `429 Too Many Requests` with a `Retry-After`
+header; exceeding the global rate or connection budget returns `503 Service
+Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
+to `max_duration`. Addresses in `allowlist` bypass all protection limits.
 
 ## Fault Tolerance
 
@@ -142,12 +284,13 @@ are independent of the YAML rule set.
 ## Roadmap
 
 - [x] Project scaffolding
-- [ ] Reverse proxy core
-- [ ] Rule engine (`BLOCK` / `ALLOW` / `LOG`)
-- [ ] YAML loader and hot reload
-- [ ] DoS / DDoS detection and mitigation
-- [ ] Metrics and structured logging
+- [x] Reverse proxy core
+- [x] Rule engine (`BLOCK` / `ALLOW` / `LOG`)
+- [x] YAML loader and hot reload
+- [x] DoS / DDoS detection and mitigation
+- [ ] Metrics endpoint
 - [ ] Packaging and release binaries
+- [ ] Optional TLS termination
 
 ## Contributing
 
