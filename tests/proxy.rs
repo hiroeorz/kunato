@@ -22,6 +22,36 @@ use kunato::config;
 use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
 
+async fn spawn_header_echo_upstream(header: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |request: Request<Incoming>| async move {
+                    let value = request
+                        .headers()
+                        .get(header)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(value))))
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -270,6 +300,62 @@ async fn oversized_headers_are_rejected() {
     let response = String::from_utf8_lossy(&response);
     assert!(
         response.starts_with("HTTP/1.1 431"),
+        "unexpected response: {response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn tls_termination_forwards_https_proto() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-proto").await;
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("generate cert");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&cert_path, certified.cert.pem()).expect("write cert");
+    std::fs::write(&key_path, certified.signing_key.serialize_pem()).expect("write key");
+
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+tls:
+  cert_file: {}
+  key_file: {}
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(certified.cert.der().clone())
+        .expect("trust test certificate");
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+
+    let stream = TcpStream::connect(running.addr).await.expect("connect");
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut tls = connector
+        .connect(server_name, stream)
+        .await
+        .expect("TLS handshake");
+    tls.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    tls.read_to_end(&mut response).await.expect("read response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "unexpected response: {response}"
+    );
+    assert!(
+        response.trim_end().ends_with("https"),
         "unexpected response: {response}"
     );
 

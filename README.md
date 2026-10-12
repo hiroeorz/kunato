@@ -77,13 +77,16 @@ The binary is produced at `target/release/kunato`.
 Kunato ships as a single static binary:
 
 ```sh
+sudo apt-get install musl-tools   # Debian/Ubuntu; provides musl-gcc
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
 Install the binary to `/usr/local/bin/kunato` and the configuration to
 `/etc/kunato/rules.yaml`, then use the provided systemd unit
-(`packaging/kunato.service`). `rules.example.yaml` is a complete starting point.
+(`packaging/kunato.service`). `rules.example.yaml` is a practical starting point
+with rules for SQL/NoSQL injection, XSS, path traversal, command injection, SSRF,
+XXE, malicious uploads, scanners, sensitive files, and more.
 Tagging a release (`v*`) builds and uploads the static binary through GitHub
 Actions.
 
@@ -266,6 +269,22 @@ upstream failures, and configuration reloads; gauges cover active connections an
 uptime. Non-loopback addresses are rejected at validation time, and if the port is
 already in use Kunato logs a warning and continues without the admin endpoint.
 
+### TLS
+
+Set a certificate and private key (PEM) to terminate HTTPS directly:
+
+```yaml
+tls:
+  cert_file: /etc/kunato/cert.pem
+  key_file: /etc/kunato/key.pem
+```
+
+Without this block Kunato serves plain HTTP. When TLS is enabled, forwarded
+requests carry `X-Forwarded-Proto: https`. TLS settings are applied at startup;
+changing them requires a restart (the running instance keeps the active
+certificate and key). Invalid or unreadable files fail startup. HTTP/2 and
+automatic certificate rotation are not supported yet.
+
 ### Hot reload
 
 Kunato watches the rule file for changes. When the file is updated:
@@ -321,7 +340,7 @@ to `max_duration`. Addresses in `allowlist` bypass all protection limits.
 - [x] DoS / DDoS detection and mitigation
 - [x] Metrics endpoint and admin listener
 - [x] Example configuration, systemd unit, and static musl builds
-- [ ] Optional TLS termination
+- [x] Optional TLS termination
 
 ## Contributing
 

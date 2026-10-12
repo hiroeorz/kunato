@@ -80,7 +80,10 @@ pub fn reload(path: &Path, config: &ArcSwap<CompiledConfig>, metrics: &Metrics) 
     match config::load(path) {
         Ok(mut new_config) => {
             metrics.reload_success.fetch_add(1, Ordering::Relaxed);
-            let active_listen = config.load().listen;
+            let (active_listen, active_tls) = {
+                let current = config.load();
+                (current.listen, current.tls.clone())
+            };
             if new_config.listen != active_listen {
                 warn!(
                     configured = %new_config.listen,
@@ -88,6 +91,12 @@ pub fn reload(path: &Path, config: &ArcSwap<CompiledConfig>, metrics: &Metrics) 
                     "listen address changes require a restart; keeping the active listener"
                 );
                 new_config.listen = active_listen;
+            }
+            if new_config.tls != active_tls {
+                warn!(
+                    "TLS settings changes require a restart; keeping the active TLS configuration"
+                );
+                new_config.tls = active_tls;
             }
 
             let categories = new_config.categories.len();
@@ -163,6 +172,32 @@ mod tests {
         reload(&path, &config, &Metrics::new());
 
         assert_eq!(config.load().limits.max_body_bytes, 42);
+    }
+
+    #[test]
+    fn reload_keeps_active_tls_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+tls: { cert_file: old-cert.pem, key_file: old-key.pem }
+",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+tls: { cert_file: new-cert.pem, key_file: new-key.pem }
+",
+        );
+        reload(&path, &config, &Metrics::new());
+
+        let tls = config.load().tls.clone().expect("tls block");
+        assert_eq!(tls.cert_file, PathBuf::from("old-cert.pem"));
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub enum Error {
     #[error("failed to bind `{addr}`: {source}")]
     Bind { addr: String, source: io::Error },
 
+    #[error("TLS configuration error: {0}")]
+    Tls(String),
+
     #[error("logging setup failed: {0}")]
     Telemetry(String),
 

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -150,6 +150,8 @@ pub struct ConfigSpec {
     pub protection: ProtectionSpec,
     #[serde(default)]
     pub admin: AdminSpec,
+    #[serde(default)]
+    pub tls: Option<TlsSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +225,13 @@ impl Default for AdminSpec {
 
 fn default_admin_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9090))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsSpec {
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -392,6 +401,21 @@ impl From<&LimitsSpec> for Limits {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tls {
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+}
+
+impl From<&TlsSpec> for Tls {
+    fn from(spec: &TlsSpec) -> Self {
+        Self {
+            cert_file: spec.cert_file.clone(),
+            key_file: spec.key_file.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Admin {
     pub enabled: bool,
@@ -480,6 +504,7 @@ pub struct CompiledConfig {
     pub limits: Limits,
     pub protection: Protection,
     pub admin: Admin,
+    pub tls: Option<Tls>,
 }
 
 #[derive(Debug)]
@@ -518,6 +543,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
     validate_timeouts(&spec.timeouts, &mut issues);
     validate_protection(&spec.protection, &mut issues);
     validate_admin(&spec.admin, &mut issues);
+    validate_tls(&spec.tls, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
 
     let mut categories = Vec::new();
@@ -602,6 +628,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
         limits: Limits::from(&spec.limits),
         protection: Protection::from(&spec.protection),
         admin: Admin::from(&spec.admin),
+        tls: spec.tls.as_ref().map(Tls::from),
     })
 }
 
@@ -628,6 +655,18 @@ fn validate_timeouts(timeouts: &TimeoutsSpec, issues: &mut Vec<String>) {
         if value.is_zero() {
             issues.push(format!("timeouts.{name} must be greater than zero"));
         }
+    }
+}
+
+fn validate_tls(spec: &Option<TlsSpec>, issues: &mut Vec<String>) {
+    let Some(tls) = spec else {
+        return;
+    };
+    if tls.cert_file.as_os_str().is_empty() {
+        issues.push("tls.cert_file must not be empty".to_owned());
+    }
+    if tls.key_file.as_os_str().is_empty() {
+        issues.push("tls.key_file must not be empty".to_owned());
     }
 }
 
@@ -1256,6 +1295,24 @@ mod tests {
     fn rejects_non_loopback_admin_listener() {
         let error = parse_with(BASE, "admin: { listen: 0.0.0.0:9090 }\n").expect_err("must fail");
         assert!(error.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn parses_tls_block() {
+        let config = parse_with(
+            BASE,
+            "tls: { cert_file: /etc/kunato/cert.pem, key_file: /etc/kunato/key.pem }\n",
+        )
+        .expect("valid config");
+        let tls = config.tls.expect("tls block");
+        assert_eq!(tls.cert_file, PathBuf::from("/etc/kunato/cert.pem"));
+    }
+
+    #[test]
+    fn rejects_empty_tls_paths() {
+        let error =
+            parse_with(BASE, "tls: { cert_file: '', key_file: key.pem }\n").expect_err("must fail");
+        assert!(error.to_string().contains("cert_file"));
     }
 
     #[test]

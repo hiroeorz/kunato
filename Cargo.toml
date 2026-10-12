@@ -15,14 +15,17 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 ipnet = "2"
 notify = "8"
 regex = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_ng = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
+rcgen = "0.14"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 

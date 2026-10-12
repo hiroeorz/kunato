@@ -42,7 +42,7 @@ src/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
   rules/           # Category/rule model, matcher, and evaluation engine
-  proxy/           # Listener, upstream client, header/body forwarding
+  proxy/           # Listener, upstream client, forwarding, TLS termination
   protection/      # DoS / DDoS detection, rate limiting, bans
 tests/             # Integration tests (mock upstream, reload scenarios)
 docs/

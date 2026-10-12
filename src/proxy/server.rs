@@ -24,6 +24,7 @@ use crate::protection::{ConnectionGuard, Decision, ProtectionState};
 use crate::proxy::ProxyBody;
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
+use crate::proxy::tls;
 use crate::request_view::RequestView;
 use crate::rules::eval;
 
@@ -36,6 +37,8 @@ pub struct Context {
     client: UpstreamClient,
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    scheme: &'static str,
 }
 
 impl Context {
@@ -62,6 +65,16 @@ impl Server {
                 source,
             })?;
         let client = UpstreamClient::new(config.load().timeouts.upstream_connect);
+        let (tls_acceptor, scheme) = match config.load().tls.as_ref() {
+            Some(tls) => {
+                let server_config = tls::load_server_config(&tls.cert_file, &tls.key_file)?;
+                (
+                    Some(tokio_rustls::TlsAcceptor::from(server_config)),
+                    "https",
+                )
+            }
+            None => (None, "http"),
+        };
         Ok(Self {
             listener,
             context: Context {
@@ -69,6 +82,8 @@ impl Server {
                 client,
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
+                tls_acceptor,
+                scheme,
             },
         })
     }
@@ -157,10 +172,57 @@ async fn serve_connection(
     peer: SocketAddr,
     context: Context,
     header_read_timeout: Duration,
+    shutdown: watch::Receiver<bool>,
+    guard: ConnectionGuard,
+) {
+    match context.tls_acceptor.clone() {
+        Some(acceptor) => {
+            let tls = match tokio::time::timeout(header_read_timeout, acceptor.accept(stream)).await
+            {
+                Ok(Ok(tls)) => tls,
+                Ok(Err(err)) => {
+                    debug!(client = %peer, error = %err, "TLS handshake failed");
+                    return;
+                }
+                Err(_) => {
+                    debug!(client = %peer, "TLS handshake timed out");
+                    return;
+                }
+            };
+            serve_io(
+                TokioIo::new(tls),
+                peer,
+                context,
+                header_read_timeout,
+                shutdown,
+                guard,
+            )
+            .await;
+        }
+        None => {
+            serve_io(
+                TokioIo::new(stream),
+                peer,
+                context,
+                header_read_timeout,
+                shutdown,
+                guard,
+            )
+            .await;
+        }
+    }
+}
+
+async fn serve_io<I>(
+    io: I,
+    peer: SocketAddr,
+    context: Context,
+    header_read_timeout: Duration,
     mut shutdown: watch::Receiver<bool>,
     _guard: ConnectionGuard,
-) {
-    let io = TokioIo::new(stream);
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
     let service = service_fn(move |request: Request<Incoming>| {
         let context = context.clone();
         async move { handle_request(request, peer, context).await }
@@ -325,7 +387,8 @@ async fn process(
 
     drop(view);
 
-    let result = forward::forward_request(&context.client, config, parts, body, peer).await;
+    let result =
+        forward::forward_request(&context.client, config, parts, body, peer, context.scheme).await;
     if let Err(err) = &result {
         match err.status {
             StatusCode::GATEWAY_TIMEOUT => {

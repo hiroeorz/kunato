@@ -1,7 +1,8 @@
 # Kunato Design
 
-Status: **Draft** — milestones M0 through M6 are implemented and covered by unit
-and integration tests. M7 (optional TLS termination) is planned.
+Status: **Draft** — milestones M0 through M7 are implemented and covered by unit
+and integration tests. TLS termination is provided through `rustls`; HTTP/2 and
+certificate rotation remain future work.
 
 Audience: contributors and AI coding agents. The YAML field reference lives in
 `README.md`; this document covers the system as a whole.
@@ -309,6 +310,7 @@ Default limits:
   reload.
 - Distribution: single static binary (musl target), no runtime dependencies.
 - An example configuration is shipped as `rules.example.yaml`.
+- Optional TLS termination via `rustls` when a `tls` block is configured.
 
 ## 11. Module Layout
 
@@ -334,6 +336,7 @@ src/
     server.rs      # Listener and connection tasks
     client.rs      # Upstream client
     forward.rs     # Header and body forwarding
+    tls.rs         # Certificate loading and rustls server configuration
   request_view.rs  # Borrowed request representation for the rule engine
 tests/
   proxy.rs         # Pass-through, rules, limits, protection, metrics
@@ -361,8 +364,10 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `clap` (derive)           | CLI parsing                    | Conventional, low-boilerplate argument handling.           |
 | `tracing`, `tracing-subscriber` | Structured logging       | Levels, spans, JSON output without custom code.            |
 | `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |
+| `rustls`, `tokio-rustls`  | TLS termination                | Pure-Rust TLS 1.2/1.3 with the ring provider.              |
 | `thiserror`               | Error types                    | Explicit, low-boilerplate error enums.                     |
 | `tempfile` (dev)          | Test fixtures                  | Writing config files for reload tests.                     |
+| `rcgen` (dev)             | Test certificates              | Self-signed certificates for the TLS integration test.     |
 
 Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 
@@ -408,17 +413,17 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 | M6        | Hardening and packaging: limits, shutdown, musl release.     | All invariants tested; example config shipped.                  |
 | M7        | Optional TLS termination behind config.                      | TLS integration test passes.                                    |
 
-M0 through M6 are implemented: metrics and the admin listener, the example
-configuration, the systemd unit, musl static builds, CI, and a tag-triggered
-release workflow. M7 (TLS) remains.
+M0 through M7 are implemented: metrics and the admin listener, the example
+configuration, the systemd unit, musl static builds, CI, a tag-triggered release
+workflow, and optional TLS termination.
 
 ## 16. Open Questions and Future Work
 
-- TLS termination defaults (cert path config shape, HTTP/2 support).
+- TLS: HTTP/2 (ALPN) and certificate hot reload.
 - Streaming body inspection for large uploads (prefix inspection).
 - Response header inspection (rules currently match requests only).
 - Multiple upstreams and load balancing.
-- Admin API and Prometheus metrics.
+- Admin API beyond the `/metrics` endpoint.
 - IPv6 rate-limit aggregation (e.g., per /64) to resist address-rotation floods.
 - Config includes/anchors for large rule sets.
 - Container image recipe (the systemd unit and musl builds are shipped).

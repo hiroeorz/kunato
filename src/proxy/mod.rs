@@ -1,6 +1,7 @@
 pub mod client;
 pub mod forward;
 pub mod server;
+pub mod tls;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;

@@ -73,6 +73,7 @@ pub async fn forward_request(
     parts: http::request::Parts,
     body: Bytes,
     peer: SocketAddr,
+    scheme: &'static str,
 ) -> Result<Response<ProxyBody>, HttpError> {
     let path_and_query = parts
         .uri
@@ -96,9 +97,14 @@ pub async fn forward_request(
             .headers_mut()
             .insert("x-forwarded-for", forwarded_for);
     }
+    let forwarded_proto = if scheme == "https" {
+        HeaderValue::from_static("https")
+    } else {
+        HeaderValue::from_static("http")
+    };
     request
         .headers_mut()
-        .insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        .insert("x-forwarded-proto", forwarded_proto);
     if let Some(host) = parts.headers.get(HOST) {
         request
             .headers_mut()
