@@ -48,6 +48,7 @@ blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
 examples/
   upstream.rs      # Manual test upstream with access logs
+scripts/           # One-command black-box test runner and colored report
 tests/             # Integration tests (mock upstream, reload scenarios)
 docs/
   DESIGN.md        # Overall design
@@ -84,6 +85,7 @@ cargo clippy --all-targets -- -D warnings  # Lint; warnings are errors
 cargo deny check                 # Dependency, license, advisory, and source audit
 cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
+./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,

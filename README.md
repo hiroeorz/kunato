@@ -96,8 +96,23 @@ rules locally.
 
 ## Black-Box Testing
 
-`blackbox/` is a dependency-free driver that replays request lists in parallel
-and prints the response status of each request:
+Run the whole test with one command: it builds the binaries, starts the example
+upstream and Kunato with a test configuration that does not trust the client,
+replays both request lists, and prints a colored report with allow/block
+pass and fail counts plus per-phase latency (min/avg/max):
+
+```sh
+./scripts/blackbox-test.sh
+```
+
+The report exits non-zero when an allowed request is not forwarded, a blocked
+request reaches the upstream, or the upstream access count does not match.
+`--skip-build`, `--parallelism N`, `--color auto|always|never`, and
+`--workdir DIR` adjust the run; the log and test-config paths are printed at
+the end.
+
+`blackbox/` itself is a dependency-free driver that replays request lists in
+parallel and prints the response status of each request:
 
 ```sh
 cargo run --release --manifest-path blackbox/Cargo.toml -- \
