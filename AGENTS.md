@@ -124,6 +124,9 @@ policy lives in `deny.toml`; do not loosen it without an explicit reason.
 - Required scenarios include: rule precedence, each action type, invalid
   configuration reload retaining previous rules, and rate-limit behavior.
 - Keep tests deterministic; avoid network access to external hosts.
+- CVE coverage in `blackbox/requests/`: only add requests for vulnerabilities
+  with a CVSS base score of 7.0 or higher, and only when the attack is
+  reproducible with an HTTP request.
 
 ## Commit Conventions
 

@@ -53,6 +53,29 @@ categories:
         match: { regex: '(?i)\$\{jndi:\s*(ldap|ldaps|rmi|dns|http|iiop)', in: [query, body, headers] }
       - name: shellshock
         match: { regex: '\(\s*\)\s*\{', in: [headers, body] }
+      # CVE-2016-3081 (Struts S2-032): the method: prefix enables dynamic
+      # method invocation and OGNL execution.
+      - name: struts-method-prefix
+        match: { regex: '(?i)(^|[?&])method\s*:', in: [query] }
+      # CVE-2026-93582 (OTRS): the application trusts a client-supplied
+      # Remote-User header as an authenticated user.
+      - name: client-remote-user-header
+        match: { headers: { Remote-User: '.+' } }
+      # CVE-2026-108598 (Floci): Velocity mapping templates reach $util
+      # reflection and ProcessBuilder.
+      - name: floci-vtl-processbuilder
+        match: { regex: '(?i)(\$util\.getClass\(\)\.forName|java\.lang\.ProcessBuilder|ProcessBuilder\(\))', in: [body] }
+      # CVE-2026-108905 (pH7Builder): the hard-coded API key bypasses access
+      # checks for any Host.
+      - name: ph7builder-hardcoded-api-key
+        match: { regex: '(?i)private_api_key\s*=\s*dev772277', in: [query, body] }
+      # CVE-2026-108863 (Katanemo Plano): the Envoy admin interface leaks
+      # provider API keys from /config_dump and friends.
+      - name: envoy-admin-endpoints
+        match: { regex: '(?i)^/(config_dump|clusters|listeners|server_info|certs)$', in: [path] }
+      # CVE-2026-108553 (OpenRefine): get-rows Jython facets execute code.
+      - name: openrefine-jython-facet
+        match: { path: '(?i)^/command/core/get-rows$', regex: '(?i)\bjython\s*:', in: [query] }
 
   # Request signatures for publicly exploited 2025 vulnerabilities
   # (CVE-2025-24813, CVE-2025-25257, CVE-2025-29927, CVE-2025-31324,
@@ -215,7 +238,7 @@ categories:
     action: BLOCK
     rules:
       - name: dot-dot-slash
-        match: { regex: '(\.\.[/\\]|%2e%2e|%252e%252e)', in: [path, query, body] }
+        match: { regex: '(?i)(\.\.[/\\]|\.\.(%2f|%5c)|%2e%2e|%252e%252e)', in: [path, query, body] }
       - name: sensitive-system-files
         match: { regex: '(?i)(/etc/(passwd|shadow|group|hosts)|/proc/self|win\.ini|boot\.ini|/windows/system32)', in: [path, query, body] }
       - name: php-wrappers
@@ -224,6 +247,18 @@ categories:
         match: { regex: '/~[^/]+/\./', in: [path] }
       - name: windows-short-names
         match: { regex: '(?i)~[0-9](\.|/|\\|$)', in: [path] }
+      # CVE-2026-87902 (WordPress) and CVE-2025-49132 (Pterodactyl) reached
+      # pearcmd.php; no legitimate application path contains it.
+      - name: pearcmd-in-path
+        match: { regex: '(?i)(^|/)pearcmd(\.php)?($|[/?])', in: [path, query] }
+      # '/..' sequences without a leading dot (CVE-2021-3199, CVE-2026-108902)
+      # are not covered by dot-dot-slash.
+      - name: slash-dot-dot-traversal
+        match: { regex: '[/\\]\.\.(?:[/\\%]|$)', in: [path, query, body] }
+      # CVE-2021-3199 (ONLYOFFICE): the upload PoC body starts with
+      # ENCRYPTED;/.. to escape the document working directory.
+      - name: onlyoffice-encrypted-upload-traversal
+        match: { regex: '^ENCRYPTED;/\.\.', in: [body] }
 
   # Encoded separators and matrix parameters used to desynchronize path-based
   # authorization (CVE-2026-50559, CVE-2026-73551).
@@ -267,8 +302,21 @@ categories:
         match: { headers: { Host: '[/?#]' } }
       - name: malformed-forwarded-host-header
         match: { headers: { X-Forwarded-Host: '[/?#]' } }
+      # CVE-2026-63292 needs a Host over 8192 bytes; a 1024-byte cap is well
+      # above the 255-byte DNS limit and below the regex size limit.
+      - name: oversized-host-header
+        match: { headers: { Host: '^.{1024,}$' } }
       - name: multi-range-flood
         match: { headers: { Range: '(?i)bytes=(?:[^,]*,){4,}' } }
+
+  # nginx rewrite capture overflows (CVE-2026-42945, CVE-2026-9256) are driven
+  # by request targets dense with URI-escapable bytes that expand during
+  # rewrite escaping; legitimate paths rarely repeat them.
+  - name: nginx-capture-overflow
+    action: BLOCK
+    rules:
+      - name: escapable-plus-run-in-path
+        match: { regex: '\+{16,}', in: [path] }
 
   # WebDAV and HTTP Digest endpoints accumulate memory-safety and authentication
   # flaws (CVE-2026-42528, CVE-2026-48005, CVE-2026-58415, CVE-2026-59685,
@@ -281,6 +329,11 @@ categories:
         match: { regex: '(?i)(^|/)\.dav(/|$)', in: [path] }
       - name: webdav-lock-abuse
         match: { method: LOCK, headers: { Timeout: '(?i)(infinite|second-\d{10,})' } }
+      # CVE-2026-27654 (nginx): COPY or MOVE to the same resource or a
+      # parent/child collection overflows a buffer. Narrow this rule if the
+      # protected application needs WebDAV copies.
+      - name: webdav-copy-move-destination
+        match: { method: [COPY, MOVE], headers: { Destination: '.+' } }
       - name: webdav-namespace-flood
         match: { method: PROPPATCH, regex: '(?i)xmlns:[a-z0-9]+=.*xmlns:[a-z0-9]+=.*xmlns:[a-z0-9]+=', in: [body] }
       - name: digest-authentication-abuse

@@ -119,6 +119,12 @@ against a configuration that does not trust the test client, otherwise
 limits, start Kunato with `--disable-protection` so rate limits and bans do not
 interfere with the driver.
 
+`blocked.txt` doubles as a CVE regression corpus. CVE coverage targets
+vulnerabilities with a CVSS base score of 7.0 or higher, and only attacks that
+can be expressed as an HTTP request are listed. Classes that need TLS-internal
+state, raw connection framing, or a malicious upstream are recorded as comments
+at the end of the list instead.
+
 ## Deployment
 
 Kunato ships as a single static binary:
