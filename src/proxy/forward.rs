@@ -105,10 +105,14 @@ pub async fn forward_request(
     request
         .headers_mut()
         .insert("x-forwarded-proto", forwarded_proto);
-    if let Some(host) = parts.headers.get(HOST) {
-        request
-            .headers_mut()
-            .insert("x-forwarded-host", host.clone());
+    let forwarded_host = parts.headers.get(HOST).cloned().or_else(|| {
+        parts
+            .uri
+            .authority()
+            .and_then(|authority| HeaderValue::from_str(authority.as_str()).ok())
+    });
+    if let Some(host) = forwarded_host {
+        request.headers_mut().insert("x-forwarded-host", host);
     }
 
     let result =

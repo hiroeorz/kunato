@@ -89,9 +89,9 @@ pub fn reload(
             if disable_protection {
                 new_config.protection.enabled = false;
             }
-            let (active_listen, active_tls) = {
+            let (active_listen, active_tls, active_http3) = {
                 let current = config.load();
-                (current.listen, current.tls.clone())
+                (current.listen, current.tls.clone(), current.http3)
             };
             if new_config.listen != active_listen {
                 warn!(
@@ -106,6 +106,12 @@ pub fn reload(
                     "TLS settings changes require a restart; keeping the active TLS configuration"
                 );
                 new_config.tls = active_tls;
+            }
+            if new_config.http3 != active_http3 {
+                warn!(
+                    "HTTP/3 settings changes require a restart; keeping the active HTTP/3 configuration"
+                );
+                new_config.http3 = active_http3;
             }
 
             let categories = new_config.categories.len();
@@ -223,6 +229,35 @@ tls: { cert_file: new-cert.pem, key_file: new-key.pem }
 
         let tls = config.load().tls.clone().expect("tls block");
         assert_eq!(tls.cert_file, PathBuf::from("old-cert.pem"));
+    }
+
+    #[test]
+    fn reload_keeps_active_http3_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+tls: { cert_file: cert.pem, key_file: key.pem }
+http3: { enabled: true, listen: 127.0.0.1:443 }
+",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+tls: { cert_file: cert.pem, key_file: key.pem }
+http3: { enabled: false }
+",
+        );
+        reload(&path, &config, &Metrics::new(), false);
+
+        let http3 = config.load().http3;
+        assert!(http3.enabled);
+        assert_eq!(http3.listen.map(|addr| addr.port()), Some(443));
     }
 
     #[test]

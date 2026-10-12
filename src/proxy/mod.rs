@@ -1,5 +1,6 @@
 pub mod client;
 pub mod forward;
+pub mod http3;
 pub mod server;
 pub mod tls;
 

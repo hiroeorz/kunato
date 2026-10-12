@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use http::{Method, Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -155,6 +155,106 @@ async fn send_h2c(
         .expect("collect body")
         .to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn write_test_certificate(
+    dir: &tempfile::TempDir,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    rustls::pki_types::CertificateDer<'static>,
+) {
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("generate cert");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&cert_path, certified.cert.pem()).expect("write cert");
+    std::fs::write(&key_path, certified.signing_key.serialize_pem()).expect("write key");
+    (cert_path, key_path, certified.cert.der().clone())
+}
+
+async fn start_http3_kunato(
+    upstream: SocketAddr,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    categories: &str,
+) -> Running {
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+tls:
+  cert_file: {}
+  key_file: {}
+http3: {{ enabled: true }}
+{categories}
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    start_kunato(&yaml).await
+}
+
+async fn send_h3(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    method: Method,
+    path: &str,
+    body: &str,
+) -> (StatusCode, String, http::HeaderMap) {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h3".to_vec()];
+    let client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
+            .expect("QUIC client config"),
+    ));
+
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().expect("client address"))
+        .expect("create client endpoint");
+    endpoint.set_default_client_config(client_config);
+    let connection = endpoint
+        .connect(addr, "localhost")
+        .expect("start connection")
+        .await
+        .expect("QUIC handshake");
+    let (mut h3_connection, mut send_request) =
+        h3::client::new(h3_quinn::Connection::new(connection))
+            .await
+            .expect("HTTP/3 handshake");
+    let _connection_task = tokio::spawn(async move { h3_connection.wait_idle().await });
+
+    let request = Request::builder()
+        .method(method)
+        .uri(format!("https://localhost{path}"))
+        .body(())
+        .expect("build request");
+    let mut stream = send_request
+        .send_request(request)
+        .await
+        .expect("send request");
+    if !body.is_empty() {
+        stream
+            .send_data(Bytes::copy_from_slice(body.as_bytes()))
+            .await
+            .expect("send body");
+    }
+    stream.finish().await.expect("finish request");
+
+    let response = stream.recv_response().await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut received = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.expect("response body") {
+        received.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    (
+        status,
+        String::from_utf8_lossy(&received).into_owned(),
+        headers,
+    )
 }
 
 #[tokio::test]
@@ -527,6 +627,98 @@ tls:
 
     running.stop().await;
     let _ = connection_task.await;
+}
+
+#[tokio::test]
+async fn http3_requests_are_proxied_and_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "categories:
+  - name: sql-injection
+    action: BLOCK
+    rules:
+      - name: union-select
+        match: { regex: '(?i)union\\s+select', in: [body] }
+",
+    )
+    .await;
+
+    let (status, body, _) = send_h3(
+        running.addr,
+        certificate.clone(),
+        Method::POST,
+        "/",
+        "hello",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    let (status, _, _) = send_h3(
+        running.addr,
+        certificate,
+        Method::POST,
+        "/",
+        "union select 1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_sets_forwarded_host_and_advertises_alt_svc() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-host").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(upstream, &cert_path, &key_path, "categories: []").await;
+
+    let (status, body, _) = send_h3(running.addr, certificate.clone(), Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "localhost");
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).expect("trust test certificate");
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect(running.addr).await.expect("connect");
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let tls = connector
+        .connect(server_name, stream)
+        .await
+        .expect("TLS handshake");
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+        .await
+        .expect("HTTP/1.1 handshake");
+    let connection_task = tokio::spawn(connection);
+
+    let request = Request::builder()
+        .uri(format!("https://localhost:{}/", running.addr.port()))
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+    let response = sender.send_request(request).await.expect("request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let alt_svc = response
+        .headers()
+        .get("alt-svc")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        alt_svc.contains(&format!("h3=\":{}\"", running.addr.port())),
+        "unexpected alt-svc: {alt_svc}"
+    );
+
+    drop(sender);
+    let _ = connection_task.await;
+    running.stop().await;
 }
 
 #[tokio::test]

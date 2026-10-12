@@ -15,9 +15,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 
 - **Reverse proxy** — Sits between browsers/apps and your HTTP server, forwarding
   traffic while inspecting every request.
-- **HTTP/2 and HTTP/1.1** — Accepts HTTP/2 over TLS (ALPN) and cleartext h2c
-  (prior knowledge), falling back to HTTP/1.1 automatically. Upstream requests
-  are sent over HTTP/1.1.
+- **HTTP/2, HTTP/3, and HTTP/1.1** — Accepts HTTP/2 over TLS (ALPN) and
+  cleartext h2c (prior knowledge), plus optional HTTP/3 over QUIC, falling back
+  to HTTP/1.1 automatically. Upstream requests are sent over HTTP/1.1.
 - **Categorized rule sets** — Rules are grouped into named categories (for example
   `sql-injection` or `xss`). Each category defines a default action, and individual
   rules can override it.
@@ -329,6 +329,26 @@ cleartext clients may use h2c prior knowledge. HTTP/1.1 clients are always
 accepted, and requests are forwarded to the upstream over HTTP/1.1. Automatic
 certificate rotation is not supported yet.
 
+### HTTP/3
+
+HTTP/3 over QUIC is opt-in and requires a `tls` block:
+
+```yaml
+http3:
+  enabled: true
+  listen: 127.0.0.1:8443   # optional; defaults to `listen`
+```
+
+When enabled, Kunato binds a UDP socket and terminates HTTP/3 with the same
+certificate and key. The UDP address defaults to the TCP `listen` address, so
+under normal deployments both share one port. TCP responses then carry an
+`Alt-Svc: h3=":<port>"; ma=86400` header so clients can discover HTTP/3.
+
+HTTP/3 requests pass through the same protection, limits, and rule evaluation
+as TCP requests. Settings are applied at startup (like TLS); changing or
+disabling them requires a restart. If the UDP socket cannot be bound, Kunato
+logs a warning and keeps serving over TCP.
+
 ### Hot reload
 
 Kunato watches the rule file for changes. When the file is updated:
@@ -391,6 +411,7 @@ bans interfering.
 - [x] Example configuration, systemd unit, and static musl builds
 - [x] Optional TLS termination
 - [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
+- [x] HTTP/3 over QUIC (opt-in, Alt-Svc advertisement)
 
 ## Contributing
 

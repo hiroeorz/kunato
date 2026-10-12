@@ -152,6 +152,8 @@ pub struct ConfigSpec {
     pub admin: AdminSpec,
     #[serde(default)]
     pub tls: Option<TlsSpec>,
+    #[serde(default)]
+    pub http3: Http3Spec,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,6 +234,15 @@ fn default_admin_listen() -> SocketAddr {
 pub struct TlsSpec {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Http3Spec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -416,6 +427,21 @@ impl From<&TlsSpec> for Tls {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Http3 {
+    pub enabled: bool,
+    pub listen: Option<SocketAddr>,
+}
+
+impl From<&Http3Spec> for Http3 {
+    fn from(spec: &Http3Spec) -> Self {
+        Self {
+            enabled: spec.enabled,
+            listen: spec.listen,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Admin {
     pub enabled: bool,
@@ -505,6 +531,7 @@ pub struct CompiledConfig {
     pub protection: Protection,
     pub admin: Admin,
     pub tls: Option<Tls>,
+    pub http3: Http3,
 }
 
 #[derive(Debug)]
@@ -544,6 +571,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
     validate_protection(&spec.protection, &mut issues);
     validate_admin(&spec.admin, &mut issues);
     validate_tls(&spec.tls, &mut issues);
+    validate_http3(&spec.http3, &spec.tls, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
 
     let mut categories = Vec::new();
@@ -629,6 +657,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
         protection: Protection::from(&spec.protection),
         admin: Admin::from(&spec.admin),
         tls: spec.tls.as_ref().map(Tls::from),
+        http3: Http3::from(&spec.http3),
     })
 }
 
@@ -667,6 +696,12 @@ fn validate_tls(spec: &Option<TlsSpec>, issues: &mut Vec<String>) {
     }
     if tls.key_file.as_os_str().is_empty() {
         issues.push("tls.key_file must not be empty".to_owned());
+    }
+}
+
+fn validate_http3(spec: &Http3Spec, tls: &Option<TlsSpec>, issues: &mut Vec<String>) {
+    if spec.enabled && tls.is_none() {
+        issues.push("http3 requires a tls block".to_owned());
     }
 }
 
@@ -1313,6 +1348,32 @@ mod tests {
         let error =
             parse_with(BASE, "tls: { cert_file: '', key_file: key.pem }\n").expect_err("must fail");
         assert!(error.to_string().contains("cert_file"));
+    }
+
+    #[test]
+    fn parses_http3_block() {
+        let config = parse_with(
+            BASE,
+            "tls: { cert_file: cert.pem, key_file: key.pem }
+http3: { enabled: true, listen: 127.0.0.1:8443 }
+",
+        )
+        .expect("valid config");
+        assert!(config.http3.enabled);
+        assert_eq!(config.http3.listen.map(|addr| addr.port()), Some(8443));
+    }
+
+    #[test]
+    fn http3_is_disabled_by_default() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert!(!config.http3.enabled);
+        assert!(config.http3.listen.is_none());
+    }
+
+    #[test]
+    fn rejects_http3_without_tls() {
+        let error = parse_with(BASE, "http3: { enabled: true }\n").expect_err("must fail");
+        assert!(error.to_string().contains("http3 requires a tls block"));
     }
 
     #[test]

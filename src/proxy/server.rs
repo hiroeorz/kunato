@@ -1,10 +1,12 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
+use http::header::HeaderValue;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
@@ -24,7 +26,7 @@ use crate::protection::{ConnectionGuard, Decision, ProtectionState};
 use crate::proxy::ProxyBody;
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
-use crate::proxy::tls;
+use crate::proxy::{http3, tls};
 use crate::request_view::RequestView;
 use crate::rules::eval;
 
@@ -47,17 +49,25 @@ pub struct Context {
     metrics: Arc<Metrics>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     scheme: &'static str,
+    alt_svc: Option<HeaderValue>,
 }
 
 impl Context {
     pub fn config(&self) -> Arc<CompiledConfig> {
         self.config.load_full()
     }
+
+    pub(crate) fn try_acquire_connection(&self, ip: IpAddr) -> Option<ConnectionGuard> {
+        let config = self.config();
+        self.protection
+            .try_acquire_connection(ip, &config.protection)
+    }
 }
 
 pub struct Server {
     listener: TcpListener,
     context: Context,
+    http3: Option<quinn::Endpoint>,
 }
 
 impl Server {
@@ -72,6 +82,7 @@ impl Server {
                 addr: addr.to_string(),
                 source,
             })?;
+        let local_addr = listener.local_addr()?;
         let client = UpstreamClient::new(config.load().timeouts.upstream_connect);
         let (tls_acceptor, scheme) = match config.load().tls.as_ref() {
             Some(tls) => {
@@ -83,6 +94,17 @@ impl Server {
             }
             None => (None, "http"),
         };
+        let (http3, alt_svc) = match http3::bind(&config.load(), local_addr) {
+            Ok(Some(listener)) => {
+                info!(addr = %listener.local_addr, "HTTP/3 listening");
+                (Some(listener.endpoint), listener.alt_svc)
+            }
+            Ok(None) => (None, None),
+            Err(err) => {
+                warn!(error = %err, "failed to start HTTP/3 listener; continuing without it");
+                (None, None)
+            }
+        };
         Ok(Self {
             listener,
             context: Context {
@@ -92,7 +114,9 @@ impl Server {
                 metrics,
                 tls_acceptor,
                 scheme,
+                alt_svc,
             },
+            http3,
         })
     }
 
@@ -105,6 +129,16 @@ impl Server {
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        let Server {
+            listener,
+            context,
+            http3,
+        } = self;
+        let http3_task = http3.map(|endpoint| {
+            let context = context.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(http3::serve(endpoint, context, shutdown))
+        });
         let mut connections = JoinSet::new();
 
         loop {
@@ -114,13 +148,13 @@ impl Server {
                         break;
                     }
                 }
-                accepted = self.listener.accept() => {
+                accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, peer)) => {
-                            let context = self.context.clone();
+                            let context = context.clone();
                             let connection_shutdown = shutdown.clone();
                             let config = context.config();
-                            match context.protection.try_acquire_connection(peer.ip(), &config.protection) {
+                            match context.try_acquire_connection(peer.ip()) {
                                 Some(guard) => {
                                     let header_read_timeout = config.timeouts.header_read;
                                     connections.spawn(serve_connection(
@@ -144,14 +178,17 @@ impl Server {
             }
         }
 
-        drop(self.listener);
-        let grace = self.context.config().timeouts.shutdown_grace;
+        drop(listener);
+        let grace = context.config().timeouts.shutdown_grace;
         info!(?grace, "listener stopped, draining connections");
         drain_connections(&mut connections, grace).await;
+        if let Some(task) = http3_task {
+            let _ = task.await;
+        }
     }
 }
 
-async fn drain_connections(connections: &mut JoinSet<()>, grace: Duration) {
+pub(crate) async fn drain_connections(connections: &mut JoinSet<()>, grace: Duration) {
     let deadline = tokio::time::Instant::now() + grace;
     loop {
         match tokio::time::timeout_at(deadline, connections.join_next()).await {
@@ -315,22 +352,70 @@ async fn handle_request(
     context: Context,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let config = context.config();
-    match process(request, peer, &config, &context).await {
-        Ok(response) => Ok(response),
-        Err(err) => {
-            warn!(
-                client = %peer.ip(),
-                status = err.status.as_u16(),
-                reason = err.message,
-                "request rejected"
-            );
-            Ok(forward::error_response_for(&err))
+    let (parts, body) = request.into_parts();
+    let result = match read_body(body, &config).await {
+        Ok(body) => process(parts, body, peer, &config, &context).await,
+        Err(err) => Err(err),
+    };
+    let mut response = match result {
+        Ok(response) => response,
+        Err(err) => rejected(peer, &err),
+    };
+    if let Some(alt_svc) = &context.alt_svc {
+        response.headers_mut().insert("alt-svc", alt_svc.clone());
+    }
+    Ok(response)
+}
+
+async fn read_body(body: Incoming, config: &CompiledConfig) -> Result<Bytes, HttpError> {
+    match tokio::time::timeout(
+        config.timeouts.body_read,
+        Limited::new(body, config.limits.max_body_bytes).collect(),
+    )
+    .await
+    {
+        Err(_) => Err(HttpError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "request body read timed out",
+        )),
+        Ok(Err(err)) => {
+            let (status, message) = if err.downcast_ref::<LengthLimitError>().is_some() {
+                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+            } else {
+                (StatusCode::BAD_REQUEST, "malformed request body")
+            };
+            Err(HttpError::new(status, message))
         }
+        Ok(Ok(collected)) => Ok(collected.to_bytes()),
+    }
+}
+
+pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody> {
+    warn!(
+        client = %peer.ip(),
+        status = err.status.as_u16(),
+        reason = err.message,
+        "request rejected"
+    );
+    forward::error_response_for(err)
+}
+
+pub(crate) async fn process_request(
+    parts: http::request::Parts,
+    body: Bytes,
+    peer: SocketAddr,
+    config: &CompiledConfig,
+    context: &Context,
+) -> Response<ProxyBody> {
+    match process(parts, body, peer, config, context).await {
+        Ok(response) => response,
+        Err(err) => rejected(peer, &err),
     }
 }
 
 async fn process(
-    request: Request<Incoming>,
+    parts: http::request::Parts,
+    body: Bytes,
     peer: SocketAddr,
     config: &CompiledConfig,
     context: &Context,
@@ -368,8 +453,6 @@ async fn process(
         }
     }
 
-    let (parts, body) = request.into_parts();
-
     if parts.uri.path().len() > config.limits.max_path_bytes {
         return Err(HttpError::new(StatusCode::URI_TOO_LONG, "URI too long"));
     }
@@ -387,29 +470,6 @@ async fn process(
             "request headers too large",
         ));
     }
-
-    let body = match tokio::time::timeout(
-        config.timeouts.body_read,
-        Limited::new(body, config.limits.max_body_bytes).collect(),
-    )
-    .await
-    {
-        Err(_) => {
-            return Err(HttpError::new(
-                StatusCode::REQUEST_TIMEOUT,
-                "request body read timed out",
-            ));
-        }
-        Ok(Err(err)) => {
-            let (status, message) = if err.downcast_ref::<LengthLimitError>().is_some() {
-                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
-            } else {
-                (StatusCode::BAD_REQUEST, "malformed request body")
-            };
-            return Err(HttpError::new(status, message));
-        }
-        Ok(Ok(collected)) => collected.to_bytes(),
-    };
 
     let view = RequestView::new(&parts.method, &parts.uri, &parts.headers, &body, peer.ip());
     let outcome = eval::evaluate(config, &view);
