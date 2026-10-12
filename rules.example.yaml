@@ -54,6 +54,111 @@ categories:
       - name: shellshock
         match: { regex: '\(\s*\)\s*\{', in: [headers, body] }
 
+  # Request signatures for publicly exploited 2025 vulnerabilities
+  # (CVE-2025-24813, CVE-2025-25257, CVE-2025-29927, CVE-2025-31324,
+  # CVE-2025-31650, CVE-2025-3248, CVE-2025-32432, CVE-2025-4427/4428,
+  # CVE-2025-47812, CVE-2025-48988, CVE-2025-49132, CVE-2025-53770,
+  # CVE-2025-5777, CVE-2025-58360).
+  - name: cve-2025-signatures
+    action: BLOCK
+    rules:
+      - name: nextjs-middleware-subrequest
+        match: { headers: { X-Middleware-Subrequest: '(?i)^\S+$' } }
+      - name: tomcat-partial-put
+        match: { method: [PUT, PATCH], headers: { Content-Range: '(?i)^bytes\s' } }
+      - name: tomcat-dotted-jsessionid
+        match: { cookies: { JSESSIONID: '^\.' } }
+      - name: invalid-priority-header
+        match: { headers: { Priority: '(?i)(u\s*=\s*(?:[89]|[1-9][0-9]+|[^0-7\s,])|i\s*=\s*[^?\s,01])' } }
+      - name: multipart-part-flood
+        match: { regex: '(?i)(?:content-disposition[\s\S]*?){32,}', in: [body] }
+      - name: sharepoint-toolpane
+        match: { path: '(?i)^/_layouts/\d+/toolpane\.aspx' }
+      - name: sharepoint-spinstall
+        match: { path: '(?i)^/_layouts/\d+/spinstall\d*\.aspx' }
+      - name: sharepoint-toolpane-parameters
+        match: { regex: '(?i)msotlpn_(dwp|uri)\s*=', in: [body, query] }
+      - name: citrix-bleed2-auth-probe
+        match:
+          method: POST
+          path: '(?i)^/(p/u/doAuthentication\.do|nitro/v1/config/login)$'
+          regex: '(?i)(^|&)login(=|&|$)'
+          in: [body]
+      - name: sap-metadata-uploader
+        match: { path: '(?i)^/developmentserver/metadatauploader' }
+      - name: sap-visual-composer-webshell
+        match: { path: '(?i)^/(irj|visual_composer)/[^/]+\.jsp$' }
+      - name: langflow-code-validation
+        match:
+          path: '(?i)^/api/v1/validate/code$'
+          regex: '(?i)(__import__|\bexec\s*\(|os\.system|subprocess|check_output)'
+          in: [body]
+      - name: xwiki-solrsearch-groovy
+        match:
+          path: '(?i)/bin/get/main/solrsearch$'
+          regex: '(?i)(\{\{\s*groovy\s*\}\}|\.execute\(\)|async\s+async\s*=)'
+          in: [query]
+      - name: fortiweb-fabric-auth-sqli
+        match:
+          path: '(?i)^/api/fabric/device/status$'
+          regex: "(?i)(/\\*\\*/or/\\*\\*/|or'1'='1|union|sleep\\s*\\()"
+          in: [headers]
+      - name: craftcms-yii-behavior-injection
+        match: { regex: '(?i)("as\s+[a-z0-9_ -]+"\s*:\s*\{|__class|guzzlehttp\\psr7|yii\\rbac)', in: [body] }
+      - name: pterodactyl-locale-traversal
+        match:
+          path: '(?i)^/locales/locale\.json$'
+          regex: '(?i)(\.\.[/\\]|pearcmd|config-create|php://)'
+          in: [query]
+      - name: ivanti-epmm-expression-language
+        match:
+          path: '(?i)^/mifs/rs/api/v2/featureusage$'
+          regex: '(?i)(getclass\(\)|\$\{|getruntime|java\.lang\.)'
+          in: [query]
+      - name: wingftp-lua-injection
+        match:
+          path: '(?i)^/loginok\.html$'
+          regex: '(?i)(%00|io\.popen|]])'
+          in: [body]
+
+  # Framework routing bypasses: internal route parameters, prefetch variants,
+  # RPC deserialization, and request-controlled trust flags (CVE-2026-44574,
+  # CVE-2026-44575, CVE-2026-27971, CVE-2026-67282).
+  - name: framework-routing-bypass
+    action: BLOCK
+    rules:
+      - name: nextjs-internal-route-parameters
+        match: { regex: '(?i)(^|[?&])(nxtp|nxti)[a-z0-9_]*=', in: [query] }
+      - name: nextjs-rsc-route-variants
+        match: { regex: '(?i)\.rsc($|/)', in: [path] }
+      - name: nextjs-rsc-transport-header
+        match: { method: GET, headers: { RSC: '^1$' } }
+      - name: qwik-rpc-deserialization
+        match: { headers: { Content-Type: '(?i)application/qwik-json' } }
+      - name: joomla-fabrik-eval-flag
+        match: { regex: '(?i)\[eval\]\s*=', in: [query, body] }
+
+  # Exposed CI/CD endpoints are consistent RCE and data-theft targets
+  # (CVE-2026-63077, CVE-2026-85706, CVE-2026-70428, CVE-2026-84671).
+  - name: ci-cd-servers
+    action: BLOCK
+    rules:
+      - name: teamcity-agent-protocol
+        match: { regex: '(?i)^/app/agents/v1/', in: [path] }
+      - name: teamcity-xstream-payload
+        match: { regex: '(?i)(linked-hash-map|schemapmismatchexception|connectioninitsqls)', in: [body] }
+      - name: jspws-webshell
+        match: { regex: '(?i)\.jspws($|/)', in: [path] }
+      - name: gitlab-workhorse-route-bypass
+        match: { regex: '(?i)/api/v4/projects/[^/]+/repository/%[0-9a-f]{2}', in: [path] }
+      - name: gitlab-repository-file-read
+        match:
+          path: '(?i)/api/v4/projects/[^/]+/repository/'
+          regex: '(?i)file\.path='
+          in: [query, body]
+      - name: jenkins-file-parameter-path
+        match: { regex: '(?i)(init\.groovy\.d|\.jpi\b|\.groovy\b)', in: [body] }
+
   # OS command injection signatures.
   - name: command-injection
     action: BLOCK
@@ -115,6 +220,20 @@ categories:
         match: { regex: '(?i)(/etc/(passwd|shadow|group|hosts)|/proc/self|win\.ini|boot\.ini|/windows/system32)', in: [path, query, body] }
       - name: php-wrappers
         match: { regex: '(?i)(php://(filter|input|data)|(expect|zip|phar)://)', in: [path, query, body] }
+      - name: userdir-dot-segment
+        match: { regex: '/~[^/]+/\./', in: [path] }
+      - name: windows-short-names
+        match: { regex: '(?i)~[0-9](\.|/|\\|$)', in: [path] }
+
+  # Encoded separators and matrix parameters used to desynchronize path-based
+  # authorization (CVE-2026-50559, CVE-2026-73551).
+  - name: path-normalization
+    action: BLOCK
+    rules:
+      - name: matrix-parameter
+        match: { regex: '(?i)(;|%3b)', in: [path] }
+      - name: encoded-path-separator
+        match: { regex: '(?i)(%2f|%5c)', in: [path] }
 
   # Server-side request forgery: cloud metadata endpoints and loopback targets.
   - name: ssrf
@@ -144,6 +263,28 @@ categories:
         match: { regex: '(?i)(%0d%0a|%0a%0d|%0d|%0a)', in: [path, query, headers] }
       - name: double-encoded-characters
         match: { regex: '(?i)%25(2e|3c|3e|27|22|2f|5c)', in: [path, query] }
+      - name: malformed-host-header
+        match: { headers: { Host: '[/?#]' } }
+      - name: malformed-forwarded-host-header
+        match: { headers: { X-Forwarded-Host: '[/?#]' } }
+      - name: multi-range-flood
+        match: { headers: { Range: '(?i)bytes=(?:[^,]*,){4,}' } }
+
+  # WebDAV and HTTP Digest endpoints accumulate memory-safety and authentication
+  # flaws (CVE-2026-42528, CVE-2026-48005, CVE-2026-58415, CVE-2026-59685,
+  # CVE-2026-73636, CVE-2026-73637, CVE-2026-93546). Remove the Digest rule if
+  # the protected application requires Digest authentication.
+  - name: webdav-and-digest
+    action: BLOCK
+    rules:
+      - name: webdav-state-directory
+        match: { regex: '(?i)(^|/)\.dav(/|$)', in: [path] }
+      - name: webdav-lock-abuse
+        match: { method: LOCK, headers: { Timeout: '(?i)(infinite|second-\d{10,})' } }
+      - name: webdav-namespace-flood
+        match: { method: PROPPATCH, regex: '(?i)xmlns:[a-z0-9]+=.*xmlns:[a-z0-9]+=.*xmlns:[a-z0-9]+=', in: [body] }
+      - name: digest-authentication-abuse
+        match: { headers: { Authorization: '(?i)^digest\s' } }
 
   # Executable files disguised as uploads.
   - name: malicious-upload
@@ -151,6 +292,8 @@ categories:
     rules:
       - name: executable-filenames
         match: { method: [POST, PUT], regex: '(?i)filename\s*=\s*"[^"]*\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b', in: [body] }
+      - name: traversal-in-filename
+        match: { regex: '(?i)filename\s*=\s*"[^"]*(\.\.[/\\]|\.\.%2f|\.\.%5c)', in: [body] }
 
   # Credentials, repository metadata, and backup files are hidden with a 404.
   - name: sensitive-files

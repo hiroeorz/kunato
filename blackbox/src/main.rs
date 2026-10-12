@@ -21,7 +21,7 @@ struct RequestSpec {
     method: String,
     target: String,
     headers: Vec<(String, String)>,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
 }
 
 struct Args {
@@ -183,16 +183,20 @@ fn send(addr: SocketAddr, request: &RequestSpec) -> Result<String, String> {
         message.push_str(&format!("User-Agent: {USER_AGENT}\r\n"));
     }
 
-    let body = request.body.as_deref().unwrap_or("");
+    let body = request.body.as_deref().unwrap_or(&[]);
     if !body.is_empty() {
         message.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     message.push_str("\r\n");
-    message.push_str(body);
 
     stream
         .write_all(message.as_bytes())
         .map_err(|err| format!("write: {err}"))?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .map_err(|err| format!("write body: {err}"))?;
+    }
     stream.flush().map_err(|err| format!("flush: {err}"))?;
 
     let mut response = Vec::new();
@@ -283,7 +287,20 @@ OPTIONS:
   --allowed <FILE>     request list that must reach the upstream
   --addr <HOST:PORT>   Kunato address (default {DEFAULT_ADDR})
   --parallelism <N>    concurrent workers (default {DEFAULT_PARALLELISM})
-  -h, --help           print this help"
+  -h, --help           print this help
+
+REQUEST LIST FORMAT:
+  METHOD TARGET [attribute ...]
+    ua=<value>          User-Agent header
+    body=<value>        request body, as text
+    bodyhex=<hex>       request body, as even-length hex bytes
+    body_file=<path>    request body read from a file, relative to the list
+    header=\"Name: value\"  arbitrary request header
+    <name>=<value>      any other name becomes a request header
+
+  Quote values that contain spaces or quotes with \"...\"; inside a quoted
+  value use \\\" for a literal quote and \\\\ for a backslash. Blank lines and
+  lines starting with `#` are ignored."
     );
 }
 
@@ -297,6 +314,7 @@ fn resolve_addr(raw: &str) -> Result<SocketAddr, String> {
 fn load_requests(path: &Path) -> Result<Vec<RequestSpec>, String> {
     let text = fs::read_to_string(path)
         .map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
 
     let mut requests = Vec::new();
     for (index, raw) in text.lines().enumerate() {
@@ -304,7 +322,7 @@ fn load_requests(path: &Path) -> Result<Vec<RequestSpec>, String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let request = parse_request(line)
+        let request = parse_request(line, base)
             .map_err(|message| format!("{}:{}: {message}", path.display(), index + 1))?;
         requests.push(request);
     }
@@ -312,7 +330,7 @@ fn load_requests(path: &Path) -> Result<Vec<RequestSpec>, String> {
     Ok(requests)
 }
 
-fn parse_request(line: &str) -> Result<RequestSpec, String> {
+fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
     let tokens = split_tokens(line)?;
     let mut tokens = tokens.into_iter();
 
@@ -334,7 +352,9 @@ fn parse_request(line: &str) -> Result<RequestSpec, String> {
         }
         match key {
             "ua" => headers.push(("User-Agent".to_owned(), value.to_owned())),
-            "body" => body = Some(value.to_owned()),
+            "body" => body = Some(value.as_bytes().to_vec()),
+            "bodyhex" => body = Some(decode_hex(value)?),
+            "body_file" => body = Some(read_body_file(base, value)?),
             "header" => {
                 let (name, header_value) = value
                     .split_once(':')
@@ -355,6 +375,44 @@ fn parse_request(line: &str) -> Result<RequestSpec, String> {
         headers,
         body,
     })
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    let digits = value.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        return Err(format!(
+            "`bodyhex` must contain an even number of hex digits: `{value}`"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks(2) {
+        let high = hex_value(pair[0])
+            .ok_or_else(|| format!("invalid hex digit in `bodyhex`: `{value}`"))?;
+        let low = hex_value(pair[1])
+            .ok_or_else(|| format!("invalid hex digit in `bodyhex`: `{value}`"))?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn read_body_file(base: &Path, value: &str) -> Result<Vec<u8>, String> {
+    let path = Path::new(value);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    fs::read(&resolved)
+        .map_err(|err| format!("failed to read `body_file` `{}`: {err}", resolved.display()))
 }
 
 fn split_tokens(line: &str) -> Result<Vec<String>, String> {
@@ -397,4 +455,71 @@ fn split_tokens(line: &str) -> Result<Vec<String>, String> {
     }
 
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_text_body() {
+        let request = parse_request("POST /submit body=hello", Path::new(".")).expect("parses");
+        assert_eq!(request.body.as_deref(), Some(b"hello".as_slice()));
+    }
+
+    #[test]
+    fn parses_hex_body() {
+        let request =
+            parse_request("POST /submit bodyhex=410d0a00ff", Path::new(".")).expect("parses");
+        assert_eq!(
+            request.body.as_deref(),
+            Some([0x41, 0x0d, 0x0a, 0x00, 0xff].as_slice())
+        );
+    }
+
+    #[test]
+    fn rejects_odd_length_hex() {
+        let error = parse_request("POST /submit bodyhex=abc", Path::new(".")).expect_err("errs");
+        assert!(error.contains("even number"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_non_hex_digits() {
+        let error = parse_request("POST /submit bodyhex=zz", Path::new(".")).expect_err("errs");
+        assert!(error.contains("invalid hex"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn reads_body_file_relative_to_list() {
+        let dir = env::temp_dir().join(format!("kunato-blackbox-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        fs::write(dir.join("blob.bin"), [0x00, 0x1b, 0xff]).expect("write blob");
+
+        let request =
+            parse_request("POST /submit body_file=blob.bin", &dir).expect("parses body file");
+        assert_eq!(request.body.as_deref(), Some([0x00, 0x1b, 0xff].as_slice()));
+
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn reports_missing_body_file() {
+        let error =
+            parse_request("POST /submit body_file=missing.bin", Path::new(".")).expect_err("errs");
+        assert!(error.contains("body_file"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn quoted_values_keep_escapes() {
+        let request = parse_request(
+            r#"POST /submit body="a\"b\\c" header="X-Test: a b""#,
+            Path::new("."),
+        )
+        .expect("parses");
+        assert_eq!(request.body.as_deref(), Some(b"a\"b\\c".as_slice()));
+        assert_eq!(
+            request.headers,
+            vec![("X-Test".to_owned(), "a b".to_owned())]
+        );
+    }
 }
