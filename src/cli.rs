@@ -13,6 +13,10 @@ pub struct Cli {
     #[arg(long)]
     pub validate: bool,
 
+    /// Disable DoS/DDoS protection (rate limits, bans, connection budgets).
+    #[arg(long)]
+    pub disable_protection: bool,
+
     /// Log level filter (overrides RUST_LOG).
     #[arg(long, value_name = "LEVEL")]
     pub log_level: Option<String>,

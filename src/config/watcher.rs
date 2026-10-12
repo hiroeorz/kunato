@@ -17,6 +17,7 @@ pub async fn watch(
     path: PathBuf,
     config: Arc<ArcSwap<CompiledConfig>>,
     metrics: Arc<Metrics>,
+    disable_protection: bool,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
@@ -68,7 +69,7 @@ pub async fn watch(
                     Some(event) => {
                         trace!(kind = ?event.kind, paths = ?event.paths, "configuration file changed");
                         debounce(&mut event_rx).await;
-                        reload(&absolute, &config, &metrics);
+                        reload(&absolute, &config, &metrics, disable_protection);
                     }
                 }
             }
@@ -76,10 +77,18 @@ pub async fn watch(
     }
 }
 
-pub fn reload(path: &Path, config: &ArcSwap<CompiledConfig>, metrics: &Metrics) {
+pub fn reload(
+    path: &Path,
+    config: &ArcSwap<CompiledConfig>,
+    metrics: &Metrics,
+    disable_protection: bool,
+) {
     match config::load(path) {
         Ok(mut new_config) => {
             metrics.reload_success.fetch_add(1, Ordering::Relaxed);
+            if disable_protection {
+                new_config.protection.enabled = false;
+            }
             let (active_listen, active_tls) = {
                 let current = config.load();
                 (current.listen, current.tls.clone())
@@ -151,7 +160,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:9090\nupstream: http://127.0.0.1:4000\nlimits: { max_body_bytes: 42 }\n",
         );
-        reload(&path, &config, &Metrics::new());
+        reload(&path, &config, &Metrics::new(), false);
 
         let current = config.load();
         assert_eq!(current.limits.max_body_bytes, 42);
@@ -169,9 +178,25 @@ mod tests {
         let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
 
         write(&path, "this is not: [valid\n");
-        reload(&path, &config, &Metrics::new());
+        reload(&path, &config, &Metrics::new(), false);
 
         assert_eq!(config.load().limits.max_body_bytes, 42);
+    }
+
+    #[test]
+    fn reload_applies_disable_protection_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        assert!(config.load().protection.enabled);
+
+        reload(&path, &config, &Metrics::new(), true);
+
+        assert!(!config.load().protection.enabled);
     }
 
     #[test]
@@ -194,7 +219,7 @@ upstream: http://127.0.0.1:3000
 tls: { cert_file: new-cert.pem, key_file: new-key.pem }
 ",
         );
-        reload(&path, &config, &Metrics::new());
+        reload(&path, &config, &Metrics::new(), false);
 
         let tls = config.load().tls.clone().expect("tls block");
         assert_eq!(tls.cert_file, PathBuf::from("old-cert.pem"));
@@ -214,7 +239,7 @@ tls: { cert_file: new-cert.pem, key_file: new-key.pem }
             &path,
             "listen: 127.0.0.1:9999\nupstream: http://127.0.0.1:3000\n",
         );
-        reload(&path, &config, &Metrics::new());
+        reload(&path, &config, &Metrics::new(), false);
 
         assert_eq!(config.load().listen.port(), 8080);
     }

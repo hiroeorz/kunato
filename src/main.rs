@@ -36,11 +36,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Error> {
-    let initial = config::load(&cli.config)?;
+    let mut initial = config::load(&cli.config)?;
 
     if cli.validate {
         println!("configuration OK: {}", cli.config.display());
         return Ok(());
+    }
+
+    if cli.disable_protection {
+        warn!("DoS/DDoS protection disabled by --disable-protection");
+        initial.protection.enabled = false;
     }
 
     let listen = initial.listen;
@@ -58,6 +63,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
         cli.config.clone(),
         config.clone(),
         metrics.clone(),
+        cli.disable_protection,
         shutdown_rx.clone(),
     ));
 
@@ -77,7 +83,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
     };
 
     #[cfg(unix)]
-    spawn_sighup_reload(cli.config.clone(), config.clone(), metrics.clone());
+    spawn_sighup_reload(
+        cli.config.clone(),
+        config.clone(),
+        metrics.clone(),
+        cli.disable_protection,
+    );
 
     wait_for_shutdown_signal().await?;
     info!("shutdown signal received");
@@ -101,6 +112,7 @@ fn spawn_sighup_reload(
     path: std::path::PathBuf,
     config: Arc<ArcSwap<CompiledConfig>>,
     metrics: Arc<Metrics>,
+    disable_protection: bool,
 ) {
     tokio::spawn(async move {
         let Ok(mut sighup) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -109,7 +121,7 @@ fn spawn_sighup_reload(
         };
         while sighup.recv().await.is_some() {
             info!("SIGHUP received, reloading configuration");
-            watcher::reload(&path, &config, &metrics);
+            watcher::reload(&path, &config, &metrics, disable_protection);
         }
     });
 }
