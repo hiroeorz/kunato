@@ -1,7 +1,12 @@
 # Kunato example configuration.
 #
-# Start with:
-#   kunato --config rules.example.yaml
+# This is a production-oriented starting point: trusted clients are allowlisted,
+# common attack payloads are blocked, and suspicious traffic is logged. Review the
+# patterns and thresholds against your application before deploying, and remove
+# rules that do not fit its traffic.
+#
+# Check it with:
+#   kunato --validate --config rules.example.yaml
 #
 # See README.md for the full field reference.
 
@@ -9,56 +14,186 @@ listen: 127.0.0.1:8080
 upstream: http://127.0.0.1:3000
 
 categories:
-  # Trusted clients skip all remaining inspection.
+  # Trusted clients bypass all remaining inspection. Add your own ranges (VPN,
+  # office network, monitoring) here.
   - name: trusted-sources
     action: ALLOW
     rules:
       - name: internal-networks
-        match: { source_ip: [10.0.0.0/8, 192.168.0.0/16] }
+        match: { source_ip: [127.0.0.1/32, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16] }
+      - name: uptime-monitor
+        match: { source_ip: 203.0.113.10/32, path: ^/health$ }
 
-  # SQL injection signatures are blocked.
+  # Well-known attack tools are blocked; generic crawlers are only logged.
+  - name: scanners-and-bots
+    action: LOG
+    rules:
+      - name: attack-tools
+        action: BLOCK
+        match:
+          headers:
+            User-Agent: '(?i)(sqlmap|nikto|nmap|masscan|zmap|zgrab|hydra|wpscan|acunetix|nessus|openvas|dirbuster|gobuster|wfuzz|ffuf|feroxbuster|nuclei|whatweb|w3af|skipfish|joomscan|commix|xsstrike)'
+      - name: seo-and-ai-crawlers
+        match:
+          headers:
+            User-Agent: '(?i)(semrush|ahrefs|mj12bot|dotbot|petalbot|bytespider|gptbot|ccbot|claudebot|perplexitybot)'
+
+  # Methods that no normal browser or application should send.
+  - name: bad-methods
+    action: BLOCK
+    rules:
+      - name: dangerous-methods
+        match: { method: [TRACE, TRACK, CONNECT, DEBUG] }
+
+  # Exploits that travel in headers or payloads.
+  - name: known-exploits
+    action: BLOCK
+    rules:
+      - name: log4shell
+        match: { regex: '(?i)\$\{jndi:\s*(ldap|ldaps|rmi|dns|http|iiop)', in: [query, body, headers] }
+      - name: shellshock
+        match: { regex: '\(\s*\)\s*\{', in: [headers, body] }
+
+  # OS command injection signatures.
+  - name: command-injection
+    action: BLOCK
+    rules:
+      - name: shell-metacharacters
+        match: { regex: '(?i)(;|\||&&|\|\|)\s*(cat|ls|id|whoami|uname|hostname|curl|wget|nc|netcat|bash|sh|zsh|python|perl|ruby|php|rm|mv|cp|chmod|chown|kill|ps|netstat|ifconfig|iptables)\b', in: [query, body] }
+      - name: command-substitution
+        match: { regex: '(?i)(\$\(|`)\s*(cat|ls|id|whoami|uname|curl|wget|bash|sh|nc)\b', in: [query, body] }
+      - name: shell-and-binaries
+        match: { regex: '(?i)(/bin/(sh|bash|zsh|dash)|/usr/bin/(perl|python|php)|cmd\.exe|powershell(\.exe)?)', in: [query, body, path] }
+
+  # SQL injection signatures in query, body, and cookies.
   - name: sql-injection
     action: BLOCK
     response: { status: 403, body: Forbidden }
     rules:
       - name: union-select
-        match: { regex: '(?i)\bunion\b.{0,40}\bselect\b', in: [query, body] }
+        match: { regex: '(?i)\bunion\b[\s/*]{0,10}\bselect\b', in: [query, body, cookies] }
+      - name: boolean-taunts
+        match: { regex: '(?i)\b(or|and)\b\s+["\)]?\d+["\)]?\s*=\s*["\)]?\d+', in: [query, body, cookies] }
+      - name: stacked-queries
+        match: { regex: '(?i);\s*(select|insert|update|delete|drop|alter|create|truncate)\b', in: [query, body, cookies] }
+      - name: time-based
+        match: { regex: '(?i)\b(sleep|benchmark|pg_sleep|waitfor\s+delay)\s*\(', in: [query, body, cookies] }
+      - name: database-metadata
+        match: { regex: '(?i)(information_schema|sysobjects|syscolumns|xp_cmdshell|load_file|into\s+(out|dump)file|@@version)', in: [query, body, cookies] }
       - name: comment-obfuscation
-        match: { regex: '(?i)(/\*!|--\s|#\s)', in: [query, body] }
+        match: { regex: '(?i)(--|#)[^\n]{0,12}\b(select|union|insert|update|delete|drop|from|where)\b', in: [query, body, cookies] }
 
-  # Cross-site scripting signatures are blocked.
+  # NoSQL injection operators.
+  - name: nosql-injection
+    action: BLOCK
+    rules:
+      - name: mongo-operators
+        match: { regex: '(?i)\$(where|ne|gt|gte|lt|lte|regex|exists|nin|or|and)\b', in: [query, body] }
+
+  # Cross-site scripting signatures.
   - name: xss
     action: BLOCK
     rules:
       - name: script-tags
-        match: { regex: '(?i)<\s*script\b', in: [query, body, headers] }
+        match: { regex: '(?i)<\s*/?\s*(script|iframe|object|embed|applet)\b', in: [query, body, headers] }
       - name: event-handlers
-        match: { regex: '(?i)\bon(error|load|click|mouseover)\s*=', in: [query, body] }
+        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|change|submit|reset|keydown|keyup|keypress|input|animationstart|animationend|transitionend|toggle|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend)\s*=', in: [query, body, headers] }
+      - name: javascript-uri
+        match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers] }
+      - name: data-html-uri
+        match: { regex: '(?i)data\s*:\s*(text/html|text/javascript|application/javascript|application/xhtml)', in: [query, body, headers] }
+      - name: dom-sinks
+        match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body] }
 
-  # Path traversal attempts are blocked.
+  # Directory traversal and local file inclusion.
   - name: path-traversal
     action: BLOCK
     rules:
       - name: dot-dot-slash
-        match: { regex: '\.\./', in: [path, query, body] }
+        match: { regex: '(\.\.[/\\]|%2e%2e|%252e%252e)', in: [path, query, body] }
+      - name: sensitive-system-files
+        match: { regex: '(?i)(/etc/(passwd|shadow|group|hosts)|/proc/self|win\.ini|boot\.ini|/windows/system32)', in: [path, query, body] }
+      - name: php-wrappers
+        match: { regex: '(?i)(php://(filter|input|data)|(expect|zip|phar)://)', in: [path, query, body] }
 
-  # Scanners are logged; sensitive paths are blocked.
-  - name: scanners
+  # Server-side request forgery: cloud metadata endpoints and loopback targets.
+  - name: ssrf
+    action: BLOCK
+    rules:
+      - name: metadata-endpoints
+        match: { regex: '(?i)(169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)', in: [query, body] }
+      - name: internal-addresses
+        match: { regex: '(?i)(https?|gopher|dict|ftp)://(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])', in: [query, body] }
+      - name: file-scheme
+        match: { regex: '(?i)file://', in: [query, body] }
+
+  # XML external entity payloads.
+  - name: xxe
+    action: BLOCK
+    rules:
+      - name: doctype-and-entity
+        match: { regex: '(?i)<!DOCTYPE[^>]{0,200}\[|<!ENTITY\b', in: [body] }
+
+  # Encoding tricks used to smuggle paths and headers.
+  - name: protocol-anomalies
+    action: BLOCK
+    rules:
+      - name: null-byte
+        match: { regex: '(?i)%00', in: [path, query] }
+      - name: crlf-injection
+        match: { regex: '(?i)(%0d%0a|%0a%0d|%0d|%0a)', in: [path, headers] }
+      - name: double-encoded-characters
+        match: { regex: '(?i)%25(2e|3c|3e|27|22|2f|5c)', in: [path, query] }
+
+  # Executable files disguised as uploads.
+  - name: malicious-upload
+    action: BLOCK
+    rules:
+      - name: executable-filenames
+        match: { method: [POST, PUT], regex: '(?i)filename\s*=\s*"[^"]*\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b', in: [body] }
+
+  # Credentials, repository metadata, and backup files are hidden with a 404.
+  - name: sensitive-files
+    action: BLOCK
+    response: { status: 404, body: Not Found }
+    rules:
+      - name: credentials-and-config
+        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials(\.|$)|secrets?\.(ya?ml|json|toml)|wp-config\.php)', in: [path] }
+      - name: backup-and-dump-files
+        match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
+
+  # Common admin interfaces are logged by default. Once you have allowlisted your
+  # own admin addresses in trusted-sources, raise this category to BLOCK.
+  - name: admin-interfaces
     action: LOG
     rules:
-      - name: scanner-user-agents
-        match:
-          headers:
-            User-Agent: '(?i)(sqlmap|nikto|nmap|masscan)'
-      - name: sensitive-files
-        action: BLOCK
-        match: { path: '(?i)(^|/)(\.env|\.git/|wp-admin|phpmyadmin)' }
+      - name: common-admin-paths
+        match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$))', in: [path] }
+
+timeouts:
+  header_read: 10s
+  body_read: 30s
+  upstream_connect: 5s
+  upstream_response: 30s
+  shutdown_grace: 10s
+
+# The body limit also bounds upload size. Raise max_body_bytes if your
+# application receives larger uploads.
+limits:
+  max_path_bytes: 8192
+  max_header_bytes: 32768
+  max_headers: 100
+  max_body_bytes: 1048576
 
 protection:
   enabled: true
   allowlist: [127.0.0.1/32]
+  max_connections_per_ip: 32
+  max_connections: 1024
   requests_per_second: 20
   burst: 60
+  global_requests_per_second: 2000
+  max_tracked_ips: 100000
   ban:
     violations: 5
     window: 10s
@@ -68,3 +203,9 @@ protection:
 admin:
   enabled: true
   listen: 127.0.0.1:9090
+
+# Optional TLS termination; remove the comments and point the paths at a
+# PEM-encoded certificate chain and private key to serve HTTPS.
+# tls:
+#   cert_file: /etc/kunato/cert.pem
+#   key_file: /etc/kunato/key.pem
