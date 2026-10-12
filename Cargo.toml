@@ -10,8 +10,8 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 http = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "server", "client"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "server-auto", "tokio"] }
 ipnet = "2"
 notify = "8"
 regex = "1"

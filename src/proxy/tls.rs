@@ -17,12 +17,13 @@ pub fn load_server_config(cert_file: &Path, key_file: &Path) -> Result<Arc<Serve
     })?;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = ServerConfig::builder_with_provider(provider)
+    let mut config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|err| Error::Tls(format!("failed to initialize TLS: {err}")))?
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)
         .map_err(|err| Error::Tls(format!("invalid certificate or private key: {err}")))?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(config))
 }

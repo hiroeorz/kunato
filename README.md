@@ -15,6 +15,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 
 - **Reverse proxy** — Sits between browsers/apps and your HTTP server, forwarding
   traffic while inspecting every request.
+- **HTTP/2 and HTTP/1.1** — Accepts HTTP/2 over TLS (ALPN) and cleartext h2c
+  (prior knowledge), falling back to HTTP/1.1 automatically. Upstream requests
+  are sent over HTTP/1.1.
 - **Categorized rule sets** — Rules are grouped into named categories (for example
   `sql-injection` or `xss`). Each category defines a default action, and individual
   rules can override it.
@@ -319,8 +322,12 @@ tls:
 Without this block Kunato serves plain HTTP. When TLS is enabled, forwarded
 requests carry `X-Forwarded-Proto: https`. TLS settings are applied at startup;
 changing them requires a restart (the running instance keeps the active
-certificate and key). Invalid or unreadable files fail startup. HTTP/2 and
-automatic certificate rotation are not supported yet.
+certificate and key). Invalid or unreadable files fail startup.
+
+With TLS, Kunato negotiates the protocol through ALPN and prefers `h2`;
+cleartext clients may use h2c prior knowledge. HTTP/1.1 clients are always
+accepted, and requests are forwarded to the upstream over HTTP/1.1. Automatic
+certificate rotation is not supported yet.
 
 ### Hot reload
 
@@ -383,6 +390,7 @@ bans interfering.
 - [x] Metrics endpoint and admin listener
 - [x] Example configuration, systemd unit, and static musl builds
 - [x] Optional TLS termination
+- [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
 
 ## Contributing
 

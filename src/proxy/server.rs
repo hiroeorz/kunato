@@ -8,9 +8,9 @@ use arc_swap::ArcSwap;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
-use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -30,6 +30,14 @@ use crate::rules::eval;
 
 const RAW_503: &[u8] =
     b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Protocol {
+    Http1,
+    Http2,
+}
 
 #[derive(Clone)]
 pub struct Context {
@@ -189,8 +197,14 @@ async fn serve_connection(
                     return;
                 }
             };
+            let protocol = if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+                Protocol::Http2
+            } else {
+                Protocol::Http1
+            };
             serve_io(
                 TokioIo::new(tls),
+                protocol,
                 peer,
                 context,
                 header_read_timeout,
@@ -200,8 +214,13 @@ async fn serve_connection(
             .await;
         }
         None => {
+            let Some(protocol) = detect_protocol(&stream, header_read_timeout).await else {
+                debug!(client = %peer, "connection ended before HTTP version detection");
+                return;
+            };
             serve_io(
                 TokioIo::new(stream),
+                protocol,
                 peer,
                 context,
                 header_read_timeout,
@@ -213,8 +232,34 @@ async fn serve_connection(
     }
 }
 
+async fn detect_protocol(stream: &tokio::net::TcpStream, timeout: Duration) -> Option<Protocol> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut buf = [0u8; H2_PREFACE.len()];
+
+    loop {
+        let filled = match tokio::time::timeout_at(deadline, stream.peek(&mut buf)).await {
+            Ok(Ok(filled)) if filled > 0 => filled,
+            _ => return None,
+        };
+
+        let available = &buf[..filled.min(H2_PREFACE.len())];
+        if !H2_PREFACE.starts_with(available) {
+            return Some(Protocol::Http1);
+        }
+        if filled >= H2_PREFACE.len() {
+            return Some(Protocol::Http2);
+        }
+
+        match tokio::time::timeout_at(deadline, stream.readable()).await {
+            Ok(Ok(())) => {}
+            _ => return None,
+        }
+    }
+}
+
 async fn serve_io<I>(
     io: I,
+    protocol: Protocol,
     peer: SocketAddr,
     context: Context,
     header_read_timeout: Duration,
@@ -223,16 +268,28 @@ async fn serve_io<I>(
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
+    let max_header_list_size =
+        u32::try_from(context.config().limits.max_header_bytes).unwrap_or(u32::MAX);
     let service = service_fn(move |request: Request<Incoming>| {
         let context = context.clone();
         async move { handle_request(request, peer, context).await }
     });
 
-    let mut builder = http1::Builder::new();
+    let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
+        .http1()
         .keep_alive(true)
         .timer(TokioTimer::new())
         .header_read_timeout(header_read_timeout);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .max_header_list_size(max_header_list_size);
+
+    let builder = match protocol {
+        Protocol::Http1 => builder.http1_only(),
+        Protocol::Http2 => builder.http2_only(),
+    };
 
     let connection = builder.serve_connection(io, service);
     let mut connection = std::pin::pin!(connection);

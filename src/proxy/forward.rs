@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue};
-use http::{Request, Response, StatusCode};
+use http::{Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use tracing::debug;
@@ -89,7 +89,7 @@ pub async fn forward_request(
     let mut request = Request::new(Full::new(body));
     *request.method_mut() = parts.method;
     *request.uri_mut() = uri;
-    *request.version_mut() = parts.version;
+    *request.version_mut() = Version::HTTP_11;
     copy_forward_headers(&parts.headers, request.headers_mut());
 
     if let Ok(forwarded_for) = HeaderValue::from_str(&peer.ip().to_string()) {

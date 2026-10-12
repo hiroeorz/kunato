@@ -1,8 +1,9 @@
 # Kunato Design
 
-Status: **Draft** — milestones M0 through M7 are implemented and covered by unit
-and integration tests. TLS termination is provided through `rustls`; HTTP/2 and
-certificate rotation remain future work.
+Status: **Draft** — milestones M0 through M8 are implemented and covered by unit
+and integration tests. TLS termination is provided through `rustls`; HTTP/2 is
+served over TLS (ALPN) and cleartext (h2c prior knowledge). Certificate
+rotation remains future work.
 
 Audience: contributors and AI coding agents. The YAML field reference lives in
 `README.md`; this document covers the system as a whole.
@@ -58,7 +59,9 @@ Components:
 ## 3. Runtime and Concurrency Model
 
 - Async runtime: `tokio` multi-threaded, worker threads = CPU cores.
-- One task per connection; hyper handles HTTP/1.1 keep-alive on both sides.
+- One task per connection; hyper handles keep-alive on both sides. Downstream
+  connections serve HTTP/1.1 or HTTP/2 (ALPN over TLS, h2c prior knowledge over
+  cleartext); upstream connections always use HTTP/1.1.
 - Active configuration: `ArcSwap<CompiledConfig>`. The request path performs one
   lock-free `load()`; reloads swap the whole immutable snapshot atomically.
 - Protection state: sharded maps (`shards = num_cpus * 4`, rounded to a power of
@@ -71,7 +74,9 @@ Components:
 
 1. **Accept** — check per-IP connection count and global connection budget. Over
    budget: respond `503` (when an HTTP response is still possible) or close.
-2. **Parse head** — hyper parses the request line and headers with a header read
+2. **Detect protocol and parse head** — cleartext connections are sniffed for the
+   HTTP/2 preface within the header read timeout; TLS connections use the ALPN
+   result. hyper then parses the request line and headers with a header read
    timeout, header size/count limits, and URL length limit. Malformed input: `400`.
 3. **Protection** — ban check, per-IP token bucket, global RPS guard. Rate/ban
    violations produce `429` or `503` with `Retry-After`.
@@ -102,6 +107,7 @@ bytes, stream the rest uninspected, log `body_truncated`).
 ### Forwarding rules
 
 - Preserve method, path, query, and body; preserve the `Host` header.
+- Forward upstream requests as HTTP/1.1 regardless of the downstream protocol.
 - Strip hop-by-hop headers (`Connection`, `Keep-Alive`, `TE`, `Trailer`,
   `Transfer-Encoding`, `Upgrade`, `Proxy-*`) plus headers named by `Connection`.
 - Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. If the peer
@@ -362,7 +368,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | Crate                     | Purpose                        | Justification                                              |
 | ------------------------- | ------------------------------ | ---------------------------------------------------------- |
 | `tokio`                   | Async runtime                  | Required by hyper; mature, standard choice.                |
-| `hyper`, `hyper-util`     | HTTP server and client         | Streaming-friendly HTTP/1.1; no framework overhead.        |
+| `hyper`, `hyper-util`     | HTTP server and client         | Streaming-friendly HTTP/1.1 and HTTP/2; no framework overhead. |
 | `http`                    | Shared HTTP types              | Core request/response types used across the proxy.         |
 | `http-body-util`, `bytes` | Body utilities and buffers     | Companion crates for hyper; bounded-body helpers.          |
 | `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
@@ -387,7 +393,8 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 - Integration tests in `tests/` start Kunato on `127.0.0.1:0` with an in-process
   mock upstream and cover: pass-through, each action, category override,
   `ALLOW` short-circuit, `LOG` continuation, reload success, reload failure
-  retention, `413` / `429` / `503` / `502` / `504`, and graceful shutdown.
+  retention, `413` / `429` / `503` / `502` / `504`, graceful shutdown, h2c
+  prior knowledge, rule evaluation over HTTP/2, and ALPN `h2` over TLS.
 - Tests are deterministic: paused time for limiter tests, no external network
   access, ephemeral ports, temporary config files.
 - Later: fuzz targets for the config parser and matcher to assert no panics.
@@ -400,9 +407,9 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 ## 14. Security Considerations
 
 - **ReDoS** — avoided structurally by the `regex` crate plus size/length caps.
-- **Request smuggling** — HTTP/1.1 only; hyper's strict parser is relied upon;
-  hop-by-hop headers are stripped; ambiguous framing is rejected rather than
-  forwarded.
+- **Request smuggling** — hyper's strict HTTP/1.1 parser and HTTP/2 framing are
+  relied upon; hop-by-hop headers are stripped; ambiguous framing is rejected
+  rather than forwarded.
 - **Header injection** — forwarding headers are constructed from validated values,
   never by string concatenation of untrusted input.
 - **Slowloris** — header/body/idle timeouts and connection budgets.
@@ -425,14 +432,15 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 | M5        | Protection: token bucket, bans, connection budgets.          | Rate/ban/limit tests pass deterministically.                    |
 | M6        | Hardening and packaging: limits, shutdown, musl release.     | All invariants tested; example config shipped.                  |
 | M7        | Optional TLS termination behind config.                      | TLS integration test passes.                                    |
+| M8        | HTTP/2: ALPN over TLS, h2c prior knowledge, protocol detect. | HTTP/2 integration tests pass; HTTP/1.1 behavior unchanged.     |
 
-M0 through M7 are implemented: metrics and the admin listener, the example
+M0 through M8 are implemented: metrics and the admin listener, the example
 configuration, the systemd unit, musl static builds, CI, a tag-triggered release
-workflow, and optional TLS termination.
+workflow, optional TLS termination, and HTTP/2.
 
 ## 16. Open Questions and Future Work
 
-- TLS: HTTP/2 (ALPN) and certificate hot reload.
+- TLS: certificate hot reload.
 - Streaming body inspection for large uploads (prefix inspection).
 - Response header inspection (rules currently match requests only).
 - Multiple upstreams and load balancing.

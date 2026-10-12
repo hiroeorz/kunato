@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use http::{Method, Request, Response, StatusCode};
+use http::{Method, Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -116,6 +116,33 @@ async fn send(addr: SocketAddr, method: Method, path: &str, body: &str) -> (Stat
         .method(method)
         .uri(format!("http://{addr}{path}"))
         .header("host", addr.to_string())
+        .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
+        .expect("build request");
+
+    let response = client.request(request).await.expect("request");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn send_h2c(
+    addr: SocketAddr,
+    method: Method,
+    path: &str,
+    body: &str,
+) -> (StatusCode, String) {
+    let client: Client<HttpConnector, Full<Bytes>> = Client::builder(TokioExecutor::new())
+        .http2_only(true)
+        .build_http();
+    let request = Request::builder()
+        .version(Version::HTTP_2)
+        .method(method)
+        .uri(format!("http://{addr}{path}"))
         .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
         .expect("build request");
 
@@ -388,6 +415,118 @@ tls:
     );
 
     running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_cleartext_prior_knowledge_is_proxied() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-proto").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (status, body) = send_h2c(running.addr, Method::POST, "/echo", "payload").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "http");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_requests_are_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: sql-injection
+    action: BLOCK
+    rules:
+      - name: union-select
+        match: {{ regex: '(?i)union\\s+select', in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send_h2c(running.addr, Method::POST, "/", "hello").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    let (status, _) = send_h2c(running.addr, Method::POST, "/", "union select 1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn tls_alpn_negotiates_http2() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-proto").await;
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("generate cert");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&cert_path, certified.cert.pem()).expect("write cert");
+    std::fs::write(&key_path, certified.signing_key.serialize_pem()).expect("write key");
+
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+tls:
+  cert_file: {}
+  key_file: {}
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(certified.cert.der().clone())
+        .expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+
+    let stream = TcpStream::connect(running.addr).await.expect("connect");
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let tls = connector
+        .connect(server_name, stream)
+        .await
+        .expect("TLS handshake");
+    assert_eq!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(b"h2".as_slice()),
+        "server must negotiate h2 over ALPN"
+    );
+
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+            .await
+            .expect("HTTP/2 handshake");
+    let connection_task = tokio::spawn(connection);
+
+    let request = Request::builder()
+        .version(Version::HTTP_2)
+        .method(Method::GET)
+        .uri("https://localhost/")
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+    let response = sender.send_request(request).await.expect("request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    assert_eq!(String::from_utf8_lossy(&bytes), "https");
+
+    running.stop().await;
+    let _ = connection_task.await;
 }
 
 #[tokio::test]
