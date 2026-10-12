@@ -7,7 +7,7 @@ pub enum Error {
     ConfigRead { path: PathBuf, source: io::Error },
 
     #[error("failed to parse configuration: {0}")]
-    ConfigParse(#[from] serde_yaml_ng::Error),
+    ConfigParse(#[from] serde_saphyr::Error),
 
     #[error("invalid configuration:\n{}", format_issues(.0))]
     ConfigInvalid(Vec<String>),

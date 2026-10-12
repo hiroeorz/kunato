@@ -54,7 +54,7 @@ Client ──────►  ┌───────────────�
 
 ### Prerequisites
 
-- Rust 1.85 or later (edition 2024)
+- Rust 1.89 or later (edition 2024)
 
 ### Build
 

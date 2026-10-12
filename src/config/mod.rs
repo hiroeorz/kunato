@@ -532,7 +532,7 @@ pub fn load(path: &Path) -> Result<CompiledConfig, Error> {
 }
 
 pub fn parse(text: &str) -> Result<CompiledConfig, Error> {
-    let spec: ConfigSpec = serde_yaml_ng::from_str(text)?;
+    let spec: ConfigSpec = serde_saphyr::from_str(text)?;
     compile(spec).map_err(Error::ConfigInvalid)
 }
 

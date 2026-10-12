@@ -20,7 +20,7 @@ configuration file, with no external services required.
 
 ## Tech Stack
 
-- Rust, edition 2024 (requires Rust 1.85+)
+- Rust, edition 2024 (requires Rust 1.89+)
 - Cargo for build, test, and dependency management
 - YAML for configuration
 

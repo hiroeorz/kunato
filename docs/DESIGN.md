@@ -365,7 +365,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `hyper`, `hyper-util`     | HTTP server and client         | Streaming-friendly HTTP/1.1; no framework overhead.        |
 | `http`                    | Shared HTTP types              | Core request/response types used across the proxy.         |
 | `http-body-util`, `bytes` | Body utilities and buffers     | Companion crates for hyper; bounded-body helpers.          |
-| `serde`, `serde_yaml_ng`  | YAML deserialization           | Typed config with `deny_unknown_fields`; maintained fork.  |
+| `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
 | `notify`                  | Config file watching           | Cross-platform filesystem events; polling fallback.        |
