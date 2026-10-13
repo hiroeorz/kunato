@@ -378,6 +378,7 @@ GET /secret.json
 GET /secrets.toml
 GET /wp-config.php
 GET /wp-config.php.bak
+GET /config.php.bak
 GET /backup.sql
 GET /dump.sql
 GET /database.sql
