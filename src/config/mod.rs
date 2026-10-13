@@ -321,6 +321,8 @@ pub struct ProtectionSpec {
     pub global_requests_per_second: f64,
     #[serde(default = "default_max_tracked_ips")]
     pub max_tracked_ips: usize,
+    #[serde(default = "default_aggregate_ipv6_prefix")]
+    pub aggregate_ipv6_prefix: u8,
     #[serde(default)]
     pub ban: BanSpec,
 }
@@ -336,6 +338,7 @@ impl Default for ProtectionSpec {
             burst: default_burst(),
             global_requests_per_second: default_global_requests_per_second(),
             max_tracked_ips: default_max_tracked_ips(),
+            aggregate_ipv6_prefix: default_aggregate_ipv6_prefix(),
             ban: BanSpec::default(),
         }
     }
@@ -387,6 +390,10 @@ fn default_global_requests_per_second() -> f64 {
 
 fn default_max_tracked_ips() -> usize {
     100_000
+}
+
+fn default_aggregate_ipv6_prefix() -> u8 {
+    64
 }
 
 fn default_ban_violations() -> u32 {
@@ -551,6 +558,7 @@ pub struct Protection {
     pub burst: f64,
     pub global_requests_per_second: f64,
     pub max_tracked_ips: usize,
+    pub aggregate_ipv6_prefix: u8,
     pub ban: BanConfig,
 }
 
@@ -571,6 +579,7 @@ impl From<&ProtectionSpec> for Protection {
             burst: spec.burst,
             global_requests_per_second: spec.global_requests_per_second,
             max_tracked_ips: spec.max_tracked_ips,
+            aggregate_ipv6_prefix: spec.aggregate_ipv6_prefix,
             ban: BanConfig {
                 violations: spec.ban.violations,
                 window: spec.ban.window,
@@ -625,6 +634,32 @@ impl CompiledConfig {
             .iter()
             .any(|category| category.phase == Phase::Response && !category.rules.is_empty())
     }
+
+    pub fn has_body_target_rules(&self) -> bool {
+        self.categories.iter().any(|category| {
+            category
+                .rules
+                .iter()
+                .any(|rule| targets(&rule.matcher, TARGET_BODY))
+        })
+    }
+
+    pub fn has_response_body_rules(&self) -> bool {
+        self.categories.iter().any(|category| {
+            category.phase == Phase::Response
+                && category
+                    .rules
+                    .iter()
+                    .any(|rule| targets(&rule.matcher, TARGET_RESPONSE_BODY))
+        })
+    }
+}
+
+fn targets(matcher: &Matcher, target: u8) -> bool {
+    matcher
+        .payload
+        .as_ref()
+        .is_some_and(|payload| payload.targets & target != 0)
 }
 
 #[derive(Debug)]
@@ -915,6 +950,9 @@ fn validate_protection(spec: &ProtectionSpec, issues: &mut Vec<String>) {
     }
     if spec.max_tracked_ips == 0 {
         issues.push("protection.max_tracked_ips must be greater than zero".to_owned());
+    }
+    if !(1..=128).contains(&spec.aggregate_ipv6_prefix) {
+        issues.push("protection.aggregate_ipv6_prefix must be between 1 and 128".to_owned());
     }
     if spec.ban.violations == 0 {
         issues.push("protection.ban.violations must be greater than zero".to_owned());
@@ -1622,6 +1660,7 @@ mod tests {
         assert_eq!(config.protection.allowlist.len(), 2);
         assert_eq!(config.protection.requests_per_second, 5.0);
         assert_eq!(config.protection.burst, 10.0);
+        assert_eq!(config.protection.aggregate_ipv6_prefix, 64);
         assert_eq!(config.protection.ban.violations, 3);
         assert_eq!(config.protection.ban.window, Duration::from_secs(20));
         assert_eq!(config.protection.ban.duration, Duration::from_secs(120));
@@ -1959,6 +1998,53 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
 
         let error = parse_with(BASE, "protection: { allowlist: [nope] }\n").expect_err("must fail");
         assert!(error.to_string().contains("allowlist"));
+
+        let error =
+            parse_with(BASE, "protection: { aggregate_ipv6_prefix: 0 }\n").expect_err("must fail");
+        assert!(error.to_string().contains("aggregate_ipv6_prefix"));
+
+        let error = parse_with(BASE, "protection: { aggregate_ipv6_prefix: 129 }\n")
+            .expect_err("must fail");
+        assert!(error.to_string().contains("aggregate_ipv6_prefix"));
+    }
+
+    #[test]
+    fn parses_aggregate_ipv6_prefix() {
+        let config =
+            parse_with(BASE, "protection: { aggregate_ipv6_prefix: 48 }\n").expect("valid config");
+        assert_eq!(config.protection.aggregate_ipv6_prefix, 48);
+    }
+
+    #[test]
+    fn body_rule_detection_reports_targets() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: sqli
+    action: BLOCK
+    rules:
+      - name: union
+        match: { regex: 'union select', in: [body] }
+",
+        )
+        .expect("valid config");
+        assert!(config.has_body_target_rules());
+        assert!(!config.has_response_body_rules());
+
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: leaks
+    phase: response
+    action: BLOCK
+    rules:
+      - name: stack
+        match: { regex: 'stack trace', in: [response_body] }
+",
+        )
+        .expect("valid config");
+        assert!(!config.has_body_target_rules());
+        assert!(config.has_response_body_rules());
     }
 
     #[test]

@@ -544,7 +544,24 @@ async fn process(
         ));
     }
 
-    let view = RequestView::new(&parts.method, &parts.uri, &parts.headers, &body, peer.ip());
+    let inspected_body = if config.has_body_target_rules() {
+        crate::decoding::decode_content_encoding(
+            &body,
+            &parts.headers,
+            config.limits.max_body_bytes,
+        )
+    } else {
+        None
+    };
+    let inspected_body = inspected_body.as_deref().unwrap_or(&body);
+    let view = RequestView::with_body_decoding(
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+        inspected_body,
+        peer.ip(),
+        config.has_body_target_rules(),
+    );
     let outcome = eval::evaluate(config, &view);
 
     if !outcome.logs.is_empty() {
@@ -602,5 +619,13 @@ async fn process(
         return Ok(response);
     }
 
-    crate::proxy::response::inspect(config, &context.metrics, &parts, &body, peer, response).await
+    crate::proxy::response::inspect(
+        config,
+        &context.metrics,
+        &parts,
+        inspected_body,
+        peer,
+        response,
+    )
+    .await
 }

@@ -120,7 +120,7 @@ pub async fn inspect(
     config: &CompiledConfig,
     metrics: &Metrics,
     request: &http::request::Parts,
-    request_body: &Bytes,
+    request_body: &[u8],
     peer: SocketAddr,
     response: Response<ProxyBody>,
 ) -> Result<Response<ProxyBody>, HttpError> {
@@ -131,17 +131,29 @@ pub async fn inspect(
             HttpError::new(StatusCode::BAD_GATEWAY, "upstream response failed")
         })?;
 
-    let view = RequestView::new(
+    let inspected_prefix = if config.has_response_body_rules() {
+        crate::decoding::decode_content_encoding(
+            &buffered.prefix,
+            &buffered.parts.headers,
+            config.limits.max_response_body_bytes,
+        )
+    } else {
+        None
+    };
+    let inspected_prefix = inspected_prefix.as_deref().unwrap_or(&buffered.prefix);
+
+    let view = RequestView::with_body_decoding(
         &request.method,
         &request.uri,
         &request.headers,
         request_body,
         peer.ip(),
+        config.has_body_target_rules(),
     );
     let response_view = ResponseView::new(
         buffered.parts.status,
         &buffered.parts.headers,
-        &buffered.prefix,
+        inspected_prefix,
         buffered.truncated,
     );
     let outcome = eval::evaluate_response(config, &view, &response_view);

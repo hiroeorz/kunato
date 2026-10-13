@@ -1136,6 +1136,7 @@ protection:
   burst: 60
   global_requests_per_second: 2000
   max_tracked_ips: 100000
+  aggregate_ipv6_prefix: 64
   ban:
     violations: 5
     window: 10s

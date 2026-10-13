@@ -152,8 +152,11 @@ impl PayloadMatcher {
         }
 
         if self.targets & TARGET_BODY != 0
-            && !view.body.is_empty()
-            && self.hits(&String::from_utf8_lossy(view.body))
+            && (!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body))
+                || view
+                    .decoded_body
+                    .as_deref()
+                    .is_some_and(|body| self.hits(&String::from_utf8_lossy(body))))
         {
             return true;
         }
@@ -301,6 +304,25 @@ mod tests {
             &headers,
             b"x=<script>alert(1)</script>"
         )));
+    }
+
+    #[test]
+    fn body_pattern_matches_decoded_form_body() {
+        let method = Method::POST;
+        let uri: Uri = "/submit".parse().expect("valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)union/select")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"q=%27+union%2Fselect")));
     }
 
     #[test]

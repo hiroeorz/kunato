@@ -8,8 +8,10 @@ publish = false
 
 [dependencies]
 arc-swap = "1"
+brotli-decompressor = { version = "6", default-features = false, features = ["std"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 http = "1"
@@ -30,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
+brotli = "9"
 rcgen = "0.14"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }

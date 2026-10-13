@@ -100,6 +100,8 @@ Components:
    violations produce `429` or `503` with `Retry-After`.
 4. **Buffer body** — read up to `limits.max_body_bytes`. Larger bodies: `413`.
    Buffer only because rules may inspect `body`; responses are always streamed.
+   Encoded bodies are decompressed and content-type decoded for inspection when
+   body-targeting rules exist; forwarded bytes stay unchanged.
 5. **Rule evaluation** — build a borrowed `RequestView` and evaluate the compiled
    categories/rules. Produces `Allow` (default), `Block(response)`, or `Log` +
    continuation.
@@ -129,7 +131,13 @@ bytes, stream the rest uninspected, log `body_truncated`).
 
 - Header names are case-insensitive (hyper). Header values are matched verbatim.
 - `path` and `query` are matched **both raw and percent-decoded** in a single pass,
-  so `%3Cscript%3E` and `<script>` both match. Body and cookies are matched raw.
+  so `%3Cscript%3E` and `<script>` both match. Cookies are matched raw.
+- Request bodies are matched raw and content-type decoded
+  (`application/x-www-form-urlencoded` and JSON string escapes such as `\u0075`).
+- Bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
+  inspection only; forwarded bytes are never modified. Decoding is bounded by
+  `limits.max_body_bytes` / `limits.max_response_body_bytes`; stacked or unknown
+  encodings are inspected as received.
 - No other normalization is performed (no Unicode folding, no double decoding).
 
 ### Forwarding rules
@@ -277,7 +285,10 @@ Protection is automatic and independent of the rule set. It consists of:
 
 State is bounded: `max_tracked_ips` (default 100 000). When full, stale entries are
 evicted first; if still full, new addresses fall back to the global limiter.
-`protection.allowlist` CIDRs are exempt from rate limits and bans.
+`protection.allowlist` CIDRs are exempt from rate limits and bans. IPv6 addresses
+are aggregated by `aggregate_ipv6_prefix` (default 64) for rate limits, bans, and
+per-IP connection budgets, so rotating within a prefix cannot bypass them;
+IPv4-mapped addresses are treated as IPv4.
 
 Proposed config block:
 
@@ -291,6 +302,7 @@ protection:
   burst: 60
   global_requests_per_second: 2000
   max_tracked_ips: 100000
+  aggregate_ipv6_prefix: 64
   ban:
     violations: 5
     window: 10s
@@ -426,11 +438,14 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `clap` (derive)           | CLI parsing                    | Conventional, low-boilerplate argument handling.           |
 | `tracing`, `tracing-subscriber` | Structured logging       | Levels, spans, JSON output without custom code.            |
 | `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |
+| `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
+| `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |
 | `rustls`, `tokio-rustls`  | TLS termination                | Pure-Rust TLS 1.2/1.3 with the ring provider.              |
 | `quinn`, `h3`, `h3-quinn` | HTTP/3 over QUIC               | Mature Rust QUIC stack and the hyperium HTTP/3 implementation. |
 | `thiserror`               | Error types                    | Explicit, low-boilerplate error enums.                     |
 | `tempfile` (dev)          | Test fixtures                  | Writing config files for reload tests.                     |
 | `rcgen` (dev)             | Test certificates              | Self-signed certificates for the TLS integration test.     |
+| `brotli` (dev)            | Compressed test fixtures       | Encoder used to build brotli payloads in tests.            |
 
 Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 
@@ -482,8 +497,10 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
   not re-inspected, so block responses cannot recurse.
 - **Opaque tunnels** — only the WebSocket handshake is inspected; tunnel payload
   is not evaluated by rules, not logged, and not bounded by `max_body_bytes`.
-- **Obfuscation** — path/query are matched raw and percent-decoded; encoded
-  traversal and XSS payloads are covered by rules.
+- **Obfuscation** — path/query are matched raw and percent-decoded, bodies are
+  matched raw plus content-type decoded, and gzip/deflate/br bodies are
+  decompressed for matching; encoded traversal, XSS, and compressed payloads are
+  covered by rules.
 - **Logging** — no secrets or full request bodies are logged.
 - **Supply chain** — minimal dependency set; `cargo audit` in CI is planned.
 
@@ -518,6 +535,5 @@ response-phase rules.
   response side already inspects only a bounded prefix).
 - Multiple upstreams and load balancing.
 - Admin API beyond the `/metrics` endpoint.
-- IPv6 rate-limit aggregation (e.g., per /64) to resist address-rotation floods.
 - Config includes/anchors for large rule sets.
 - Container image recipe (the systemd unit and musl builds are shipped).

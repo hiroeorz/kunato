@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod cli;
 pub mod config;
+pub mod decoding;
 pub mod error;
 pub mod metrics;
 pub mod protection;

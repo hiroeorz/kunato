@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::{Buf, Bytes};
-use http::header::HeaderValue;
+use http::header::{HeaderName, HeaderValue};
 use http::{Method, Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -72,6 +72,75 @@ async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
                         Response::new(Full::new(Bytes::from_static(body.as_bytes())));
                     *response.status_mut() = status;
                     Ok::<_, Infallible>(response)
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
+async fn spawn_body_echo_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |request: Request<Incoming>| async move {
+                    let body = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .map(|collected| collected.to_bytes())
+                        .unwrap_or_default();
+                    Ok::<_, Infallible>(Response::new(Full::new(body)))
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
+async fn spawn_encoded_response_upstream(
+    status: StatusCode,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    body: Vec<u8>,
+) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let headers = headers.clone();
+            let body = body.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    let headers = headers.clone();
+                    let body = body.clone();
+                    async move {
+                        let mut response = Response::new(Full::new(Bytes::from(body)));
+                        *response.status_mut() = status;
+                        for (name, value) in headers {
+                            response.headers_mut().insert(name, value);
+                        }
+                        Ok::<_, Infallible>(response)
+                    }
                 });
                 let _ = http1::Builder::new().serve_connection(io, service).await;
             });
@@ -228,9 +297,10 @@ impl Running {
 
 async fn start_kunato(yaml: &str) -> Running {
     let compiled = config::parse(yaml).expect("valid config");
+    let listen = compiled.listen;
     let config = Arc::new(ArcSwap::from_pointee(compiled));
     let metrics = Arc::new(Metrics::new());
-    let server = Server::bind("127.0.0.1:0".parse().expect("address"), config, metrics)
+    let server = Server::bind(listen, config, metrics)
         .await
         .expect("bind kunato");
     let addr = server.local_addr().expect("local address");
@@ -262,6 +332,45 @@ async fn send(addr: SocketAddr, method: Method, path: &str, body: &str) -> (Stat
         .expect("collect body")
         .to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn send_bytes(
+    addr: SocketAddr,
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Vec<u8>) {
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("http://{addr}{path}"))
+        .header("host", addr.to_string());
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Full::new(Bytes::from(body)))
+        .expect("build request");
+
+    let response = client.request(request).await.expect("request");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    (status, bytes.to_vec())
+}
+
+fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).expect("gzip write");
+    encoder.finish().expect("gzip finish")
 }
 
 async fn send_with_headers(
@@ -609,6 +718,132 @@ async fn rate_limit_returns_too_many_requests() {
 
     let (second, _) = send(running.addr, Method::GET, "/", "").await;
     assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn ipv6_listener_enforces_rate_limit() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: \"[::1]:0\"\nupstream: http://{upstream}\nprotection: {{ requests_per_second: 1, burst: 1 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+    assert!(running.addr.is_ipv6());
+
+    let (first, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(first, StatusCode::OK);
+
+    let (second, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn gzip_request_body_is_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        gzip(b"q=1 union select password"),
+        &[("content-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn compressed_request_body_is_forwarded_unchanged() {
+    let upstream = spawn_body_echo_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: never-matches\n        match: {{ regex: 'never-matches-xyz', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = gzip(b"payload for the upstream");
+    let (status, echoed) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/echo",
+        body.clone(),
+        &[("content-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, body);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn urlencoded_request_body_is_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-slash\n        match: {{ regex: '(?i)union/select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        b"q=%27+union%2Fselect+1".to_vec(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn json_request_body_is_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        br#"{"q":"\u0075nion select"}"#.to_vec(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn gzip_response_body_is_rule_evaluated() {
+    let upstream = spawn_encoded_response_upstream(
+        StatusCode::OK,
+        vec![(
+            HeaderName::from_static("content-encoding"),
+            HeaderValue::from_static("gzip"),
+        )],
+        gzip(b"warning: stack trace leak"),
+    )
+    .await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: leaks\n    phase: response\n    action: BLOCK\n    rules:\n      - name: stack-trace\n        match: {{ regex: '(?i)stack trace', in: [response_body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     running.stop().await;
 }

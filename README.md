@@ -32,6 +32,10 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Response inspection** — Response-phase categories match upstream responses on
   status, headers, and body (up to a size limit) and can block, log, or pass them
   through. The remainder of oversized responses is streamed uninspected.
+- **Encoded body inspection** — Bodies compressed with gzip, deflate, or brotli are
+  decompressed for matching, and request bodies are additionally decoded by content
+  type (`application/x-www-form-urlencoded` and JSON escapes). Forwarded traffic is
+  never modified.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.
@@ -323,7 +327,9 @@ Match conditions are combined with logical AND; a list value means OR within tha
 field. At least one condition must be specified. Regular expressions are compiled
 once at load time, and an invalid pattern rejects the configuration. Path and query
 values are matched both raw and percent-decoded, so `%3Cscript%3E` and `<script>`
-both match.
+both match. Bodies are matched raw and decoded by `Content-Type`
+(`application/x-www-form-urlencoded` and JSON string escapes such as `\u0075`), and
+are decompressed first when `Content-Encoding` is `gzip`, `deflate`, or `br`.
 
 | Field              | Description                                                                                                             |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
@@ -340,9 +346,12 @@ both match.
 Response-phase rules may combine request conditions (`path`, `method`, `source_ip`,
 `headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule
 can require a path and a response body signature. `status`, `response_headers`, and
-the `response_body` target are rejected in request-phase categories. Responses are
-matched as received: compressed bodies are not decompressed, and only the first
-`limits.max_response_body_bytes` of a body are inspected.
+the `response_body` target are rejected in request-phase categories. Response
+bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
+matching, and only the first `limits.max_response_body_bytes` are inspected (the
+decoded output is bounded by the same limit). Stacked or unknown encodings are
+inspected as received. Decoding is inspection-only: the bytes forwarded to the
+upstream and to the client are never modified.
 
 ### Timeouts and limits
 
@@ -362,6 +371,10 @@ Defaults:
 timeouts: { header_read: 10s, body_read: 30s }
 limits: { max_body_bytes: 1048576 }
 ```
+
+Bodies decoded for inspection (see Match fields) are bounded by `max_body_bytes`
+for requests and `max_response_body_bytes` for responses, so decompression bombs
+cannot exceed the configured buffer sizes.
 
 ### Response headers
 
@@ -478,6 +491,7 @@ protection:
   burst: 60
   global_requests_per_second: 2000
   max_tracked_ips: 100000
+  aggregate_ipv6_prefix: 64
   ban:
     violations: 5
     window: 10s
@@ -490,6 +504,11 @@ capacity). Exceeding it returns `429 Too Many Requests` with a `Retry-After`
 header; exceeding the global rate or connection budget returns `503 Service
 Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
 to `max_duration`. Addresses in `allowlist` bypass all protection limits.
+
+IPv6 clients are tracked by the `aggregate_ipv6_prefix` prefix (default 64) rather
+than by full address, so rotating within a prefix cannot bypass rate limits, bans,
+or per-IP connection budgets. Set it to 128 to track each address separately;
+IPv4-mapped addresses (`::ffff:a.b.c.d`) are always treated as IPv4.
 
 Protection can be turned off entirely with `protection.enabled: false`, or at
 runtime with `--disable-protection`. The flag also survives configuration reloads,

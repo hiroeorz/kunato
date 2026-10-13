@@ -4,6 +4,8 @@ use std::net::IpAddr;
 use http::header::{COOKIE, HeaderMap};
 use http::{Method, StatusCode, Uri};
 
+use crate::decoding::decode_body_format;
+
 pub struct RequestView<'a> {
     pub method: &'a Method,
     pub path: &'a str,
@@ -12,6 +14,7 @@ pub struct RequestView<'a> {
     pub decoded_query: Option<Cow<'a, str>>,
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
+    pub decoded_body: Option<Vec<u8>>,
     pub source_ip: IpAddr,
 }
 
@@ -23,6 +26,17 @@ impl<'a> RequestView<'a> {
         body: &'a [u8],
         source_ip: IpAddr,
     ) -> Self {
+        Self::with_body_decoding(method, uri, headers, body, source_ip, true)
+    }
+
+    pub fn with_body_decoding(
+        method: &'a Method,
+        uri: &'a Uri,
+        headers: &'a HeaderMap,
+        body: &'a [u8],
+        source_ip: IpAddr,
+        decode_body: bool,
+    ) -> Self {
         let path = uri.path();
         let query = uri.query();
         Self {
@@ -33,6 +47,11 @@ impl<'a> RequestView<'a> {
             decoded_query: query.map(percent_decode),
             headers,
             body,
+            decoded_body: if decode_body {
+                decode_body_format(body, headers)
+            } else {
+                None
+            },
             source_ip,
         }
     }

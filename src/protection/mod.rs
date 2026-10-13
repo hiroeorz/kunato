@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -47,11 +47,11 @@ impl ProtectionState {
     }
 
     pub fn check_request(&self, ip: IpAddr, config: &Protection) -> Decision {
-        if !config.enabled || is_allowlisted(ip, &config.allowlist) {
+        if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
             return Decision::Allow;
         }
 
-        if let Some(decision) = self.check_client(ip, config) {
+        if let Some(decision) = self.check_client(tracking_key(ip, config), config) {
             return decision;
         }
 
@@ -63,10 +63,12 @@ impl ProtectionState {
         ip: IpAddr,
         config: &Protection,
     ) -> Option<ConnectionGuard> {
+        let key = tracking_key(ip, config);
+
         if !config.enabled {
             return Some(ConnectionGuard {
                 state: Arc::clone(self),
-                ip,
+                key,
                 per_ip: false,
                 counted: false,
             });
@@ -77,19 +79,19 @@ impl ProtectionState {
             return None;
         }
 
-        if is_allowlisted(ip, &config.allowlist) {
+        if is_allowlisted(normalize_ip(ip), &config.allowlist) {
             return Some(ConnectionGuard {
                 state: Arc::clone(self),
-                ip,
+                key,
                 per_ip: false,
                 counted: true,
             });
         }
 
         let now = Instant::now();
-        let mut shard = lock(&self.shards[shard_index(ip)]);
+        let mut shard = lock(&self.shards[shard_index(key)]);
 
-        if !shard.entries.contains_key(&ip) {
+        if !shard.entries.contains_key(&key) {
             if shard.entries.len() >= config.max_tracked_ips {
                 evict_stale(&mut shard.entries, now);
             }
@@ -97,15 +99,15 @@ impl ProtectionState {
                 drop(shard);
                 return Some(ConnectionGuard {
                     state: Arc::clone(self),
-                    ip,
+                    key,
                     per_ip: false,
                     counted: true,
                 });
             }
-            shard.entries.insert(ip, Entry::new(now, config.burst));
+            shard.entries.insert(key, Entry::new(now, config.burst));
         }
 
-        let Some(entry) = shard.entries.get_mut(&ip) else {
+        let Some(entry) = shard.entries.get_mut(&key) else {
             self.global_connections.fetch_sub(1, Ordering::AcqRel);
             return None;
         };
@@ -121,27 +123,27 @@ impl ProtectionState {
 
         Some(ConnectionGuard {
             state: Arc::clone(self),
-            ip,
+            key,
             per_ip: true,
             counted: true,
         })
     }
 
-    fn check_client(&self, ip: IpAddr, config: &Protection) -> Option<Decision> {
+    fn check_client(&self, key: IpAddr, config: &Protection) -> Option<Decision> {
         let now = Instant::now();
-        let mut shard = lock(&self.shards[shard_index(ip)]);
+        let mut shard = lock(&self.shards[shard_index(key)]);
 
-        if !shard.entries.contains_key(&ip) {
+        if !shard.entries.contains_key(&key) {
             if shard.entries.len() >= config.max_tracked_ips {
                 evict_stale(&mut shard.entries, now);
             }
             if shard.entries.len() >= config.max_tracked_ips {
                 return None;
             }
-            shard.entries.insert(ip, Entry::new(now, config.burst));
+            shard.entries.insert(key, Entry::new(now, config.burst));
         }
 
-        let entry = shard.entries.get_mut(&ip)?;
+        let entry = shard.entries.get_mut(&key)?;
         entry.last_seen = now;
 
         if let Some(until) = entry.banned_until {
@@ -222,7 +224,7 @@ impl Default for ProtectionState {
 
 pub struct ConnectionGuard {
     state: Arc<ProtectionState>,
-    ip: IpAddr,
+    key: IpAddr,
     per_ip: bool,
     counted: bool,
 }
@@ -233,8 +235,8 @@ impl Drop for ConnectionGuard {
             self.state.global_connections.fetch_sub(1, Ordering::AcqRel);
         }
         if self.per_ip {
-            let mut shard = lock(&self.state.shards[shard_index(self.ip)]);
-            if let Some(entry) = shard.entries.get_mut(&self.ip) {
+            let mut shard = lock(&self.state.shards[shard_index(self.key)]);
+            if let Some(entry) = shard.entries.get_mut(&self.key) {
                 entry.connections = entry.connections.saturating_sub(1);
             }
         }
@@ -285,6 +287,35 @@ fn is_allowlisted(ip: IpAddr, allowlist: &[IpNet]) -> bool {
     allowlist.iter().any(|network| network.contains(&ip))
 }
 
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(address) => match address.to_ipv4_mapped() {
+            Some(mapped) => IpAddr::V4(mapped),
+            None => IpAddr::V6(address),
+        },
+        address => address,
+    }
+}
+
+fn tracking_key(ip: IpAddr, config: &Protection) -> IpAddr {
+    match normalize_ip(ip) {
+        IpAddr::V6(address) => IpAddr::V6(mask_ipv6(address, config.aggregate_ipv6_prefix)),
+        address => address,
+    }
+}
+
+fn mask_ipv6(address: Ipv6Addr, prefix: u8) -> Ipv6Addr {
+    if prefix >= 128 {
+        return address;
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - u32::from(prefix))
+    };
+    Ipv6Addr::from(u128::from(address) & mask)
+}
+
 fn shard_index(ip: IpAddr) -> usize {
     match ip {
         IpAddr::V4(address) => (u32::from(address) as usize) % SHARD_COUNT,
@@ -331,6 +362,7 @@ mod tests {
             burst: 2.0,
             global_requests_per_second: 1000.0,
             max_tracked_ips: 100,
+            aggregate_ipv6_prefix: 64,
             ban: BanConfig {
                 violations: 2,
                 window: Duration::from_secs(10),
@@ -517,6 +549,151 @@ mod tests {
             state.check_request(ip("10.0.0.4"), &config),
             Decision::Allow
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_addresses_in_one_prefix_share_budget() {
+        let state = ProtectionState::new();
+        let config = config();
+
+        assert_eq!(
+            state.check_request(ip("2001:db8:1:2::1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("2001:db8:1:2::2"), &config),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.check_request(ip("2001:db8:1:2::3"), &config),
+            Decision::RateLimited { .. }
+        ));
+        assert!(matches!(
+            state.check_request(ip("2001:db8:1:2::4"), &config),
+            Decision::Banned { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_prefixes_are_tracked_separately() {
+        let state = ProtectionState::new();
+        let config = config();
+
+        assert_eq!(
+            state.check_request(ip("2001:db8:1:2::1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("2001:db8:1:3::1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("2001:db8:1:3::2"), &config),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.check_request(ip("2001:db8:1:3::3"), &config),
+            Decision::RateLimited { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_prefix_128_tracks_each_address() {
+        let state = ProtectionState::new();
+        let mut config = config();
+        config.aggregate_ipv6_prefix = 128;
+
+        assert_eq!(
+            state.check_request(ip("2001:db8::1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("2001:db8::2"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("2001:db8::1"), &config),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.check_request(ip("2001:db8::1"), &config),
+            Decision::RateLimited { .. }
+        ));
+        assert_eq!(
+            state.check_request(ip("2001:db8::2"), &config),
+            Decision::Allow
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn v4_mapped_addresses_share_ipv4_state() {
+        let state = ProtectionState::new();
+        let config = config();
+
+        assert_eq!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("::ffff:10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::RateLimited { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn v4_mapped_addresses_match_ipv4_allowlist() {
+        let state = ProtectionState::new();
+        let mut config = config();
+        config.allowlist = vec!["10.0.0.0/8".parse().expect("valid CIDR")];
+        for _ in 0..10 {
+            assert_eq!(
+                state.check_request(ip("::ffff:10.0.0.1"), &config),
+                Decision::Allow
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn per_ip_connection_budget_aggregates_ipv6_prefix() {
+        let state = Arc::new(ProtectionState::new());
+        let mut config = config();
+        config.max_connections_per_ip = 1;
+
+        let guard = state.try_acquire_connection(ip("2001:db8::1"), &config);
+        assert!(guard.is_some());
+        assert!(
+            state
+                .try_acquire_connection(ip("2001:db8::2"), &config)
+                .is_none()
+        );
+        assert!(
+            state
+                .try_acquire_connection(ip("2001:db8:0:1::1"), &config)
+                .is_some()
+        );
+
+        drop(guard);
+        assert!(
+            state
+                .try_acquire_connection(ip("2001:db8::2"), &config)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn tracking_key_masks_ipv6_to_prefix() {
+        let mut config = config();
+        config.aggregate_ipv6_prefix = 56;
+        assert_eq!(
+            tracking_key(ip("2001:db8:aa:bb::1"), &config),
+            ip("2001:db8:aa::")
+        );
+        assert_eq!(tracking_key(ip("10.0.0.1"), &config), ip("10.0.0.1"));
+        assert_eq!(tracking_key(ip("::ffff:10.0.0.1"), &config), ip("10.0.0.1"));
     }
 
     #[test]

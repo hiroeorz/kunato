@@ -319,3 +319,7 @@ GET /api/analytics/top-pages?limit=10
 GET /api/webhooks/deliveries?status=success
 GET /api/audit-log?from=2026-01-01&limit=100
 POST /api/support/tickets body="{\"subject\":\"Cannot log in\",\"priority\":\"normal\"}"
+
+# --- Compressed and encoded benign bodies ---
+POST /graphql header="Content-Type: application/json" header="Content-Encoding: gzip" bodyhex=1f8b0800000000000203ab562a2c4d2daa54b282d00ad50a6599a9e5a94540465e626eaa42ad42ad522d0022b99b4f25000000
+POST /api/support/tickets header="Content-Type: application/json" header="Content-Encoding: deflate" bodyhex=789cab562a2e4dca4a4d2e51b252724ecccbcb2f51c8c94f57c8cc53d2512a28cacc2fca2ca9044ae5e517e526e628d50200873e1060
