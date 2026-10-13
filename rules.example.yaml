@@ -144,6 +144,316 @@ categories:
           regex: '(?i)(%00|io\.popen|]])'
           in: [body]
 
+  # Request signatures for exploited 2020 vulnerabilities: appliance management
+  # endpoints, framework injection points, and device CGIs. See the 2020
+  # section of blocked.txt for the advisory details.
+  - name: cve-2020-signatures
+    action: BLOCK
+    rules:
+      - name: cisco-asa-cscot-path
+        match: { regex: '(?i)^/\+CSCOT\+/', in: [path] }
+      - name: sap-netweaver-ctcwebservice
+        match: { regex: '(?i)^/CTCWebService/', in: [path] }
+      - name: nexus-javael-injection
+        match: { regex: '\$\s*\\{0,2}[A-Z]\{[0-9]', in: [body] }
+      - name: nexus-auth-endpoints
+        match: { regex: '(?i)^/service/(rapture/session|extdirect)$', in: [path] }
+      - name: vbulletin-widget-render
+        match: { regex: '(?i)^/ajax/render/widget_', in: [path] }
+      - name: solarwinds-i18n-handler
+        match: { regex: '(?i)\.i18n\.ashx$', in: [path] }
+      - name: opentsdb-gnuplot-injection
+        match: { path: '^/q$', regex: 'system\(', in: [query] }
+      - name: nette-micro-callback
+        match: { regex: '(?i)^/nette\.micro(/|$)', in: [path] }
+      - name: draytek-mainfunction-cgi
+        match: { regex: '(?i)^/cgi-bin/mainfunction\.cgi', in: [path] }
+      - name: dlink-command-php
+        match: { regex: '(?i)^/command\.php$', in: [path] }
+      - name: dlink-config-getuser
+        match: { regex: '(?i)^/config/getuser(/|$)', in: [path] }
+      - name: zyxel-hardcoded-account
+        match: { regex: 'zyfwp', in: [query, body] }
+      - name: netgear-debug-login
+        match: { path: '(?i)^/login\.htm$', regex: '(?i)debugcmd=', in: [body] }
+      - name: cisco-7937g-localmenus
+        match: { regex: '(?i)^/localmenus\.cgi$', in: [path] }
+      - name: wp-file-manager-connector
+        match: { regex: '(?i)^/wp-content/plugins/wp-file-manager/', in: [path] }
+      - name: liferay-jsonws-deserialization
+        match: { regex: '(?i)hexasciiserializedmap', in: [body] }
+      - name: shardingsphere-snakeyaml
+        match: { path: '(?i)^/api/schema$', regex: '(?i)(jdbcrowsetimpl|datasourceconfiguration)', in: [body] }
+      - name: kylin-cube-command-injection
+        match: { regex: '(?i)^/kylin/api/cubes/', in: [path] }
+      - name: unomi-expression-injection
+        match: { path: '(?i)^/context\.json$', regex: '(?i)(getruntime|@java\.lang\.|script::)', in: [body] }
+      - name: saltstack-ssh-priv
+        match: { regex: '"ssh_priv"', in: [body] }
+      - name: airflow-experimental-api
+        match: { regex: '(?i)^/api/experimental/', in: [path] }
+      - name: sap-eem-admin-service
+        match: { regex: '(?i)^/EemAdminService/', in: [path] }
+      - name: obiee-preview-image
+        match: { regex: '(?i)(getpreviewimage|bieehome)', in: [query] }
+      - name: playsms-login-template
+        match: { path: '(?i)^/index\.php$', regex: '(?i)inc=core_auth', in: [query] }
+      - name: unraid-site-text-injection
+        match: { regex: '(?i)site\[[^\]]+\]\[text\]=', in: [query] }
+      - name: zimbra-webex-ssrf
+        match: { regex: '(?i)^/zimlet/com_zimbra_webex/', in: [path] }
+      - name: manageengine-cewolf
+        match: { regex: '(?i)^/cewolf/', in: [path] }
+      - name: tomcat-jsessionid-traversal
+        match: { cookies: { JSESSIONID: '(?i)\.\.[/\\]|^\.' } }
+      - name: exchange-viewstate-ecp
+        match: { path: '(?i)^/ecp/', regex: '(?i)__viewstate=', in: [query, body] }
+      - name: ibm-drm-albatross
+        match: { regex: '(?i)^/albatross/', in: [path] }
+
+  # Request signatures for exploited 2021 vulnerabilities: Exchange proxy
+  # flaws, httpd traversal, enterprise console RCEs, and framework injection.
+  - name: cve-2021-signatures
+    action: BLOCK
+    rules:
+      - name: exchange-beresource-cookie
+        match: { cookies: { X-BEResource: '.+' } }
+      - name: exchange-anonresource-cookie
+        match: { cookies: { X-AnonResource-Backend: '.+' } }
+      - name: exchange-autodiscover-json
+        match: { path: '(?i)^/autodiscover/autodiscover\.json', regex: '@', in: [query] }
+      - name: exchange-ecp-securitytoken
+        match: { path: '(?i)^/ecp/', cookies: { SecurityToken: '.+' } }
+      - name: httpd-mod-proxy-unix-ssrf
+        match: { regex: '(?i)(^|&)unix:', in: [query] }
+      - name: confluence-ognl-page-variables
+        match: { regex: '(?i)/(doenterpagevariables|createpage-entervariables)\.action$', in: [path] }
+      - name: f5-icontrol-bash-command
+        match: { path: '(?i)^/mgmt/tm/util/bash$', regex: '(?i)utilcmdargs', in: [body] }
+      - name: vcenter-vrops-uploadova
+        match: { regex: '(?i)^/ui/vropspluginui/', in: [path] }
+      - name: vcenter-h5-vsan-proxy
+        match: { regex: '(?i)^/ui/h5-vsan/', in: [path] }
+      - name: vcenter-analytics-telemetry
+        match: { regex: '(?i)^/analytics/telemetry/', in: [path] }
+      - name: dahua-rpc2-login-bypass
+        match: { path: '(?i)^/RPC2_Login$', regex: '(?i)global\.login', in: [body] }
+      - name: hikvision-weblanguage-injection
+        match: { regex: '(?i)^/SDK/webLanguage$', in: [path] }
+      - name: gitlab-exiftool-djvu
+        match: { path: '(?i)^/uploads/user$', regex: '(?i)(AT&TFORM|qx\{)', in: [body] }
+      - name: laravel-ignition-endpoint
+        match: { regex: '(?i)^/_ignition/execute-solution$', in: [path] }
+      - name: nacos-server-user-agent
+        match: { headers: { User-Agent: '(?i)^Nacos-Server' } }
+      - name: nacos-derby-console
+        match: { regex: '(?i)^/nacos/v1/cs/ops/derby', in: [path] }
+      - name: shenyu-dashboard-user
+        match: { regex: '(?i)^/dashboardUser$', in: [path] }
+      - name: h2c-upgrade-with-body
+        match: { headers: { Upgrade: '(?i)^h2c$' }, regex: '(?s).', in: [body] }
+      - name: log4shell-nested-lookups
+        match: { regex: '(?i)\$\{\$\{[^}]{0,40}\}', in: [query, body, headers] }
+      - name: oracle-oam-sessionservice
+        match: { regex: '(?i)^/oam/server/opensso/sessionservice', in: [path] }
+      - name: struts-ognl-form-field
+        match: { regex: '\{\(#[^)]{0,200}', in: [body] }
+      - name: embedded-http-request-in-body
+        match: { regex: '(?i)(GET|POST) /[^\s]{0,200} HTTP/1\.[01]', in: [body] }
+      - name: jndi-initial-context
+        match: { regex: '(?i)javax\.naming\.initialcontext', in: [body] }
+      - name: manageengine-restapi-upload
+        match: { regex: '(?i)^/(\./)?RestAPI/(ImportTechnicians|s247action)', in: [path] }
+      - name: desktopcentral-state-cookie
+        match: { path: '(?i)^/STATE_ID/', cookies: { STATE_COOKIE: '.+' } }
+      - name: apisix-dashboard-migrate
+        match: { regex: '(?i)^/apisix/admin/migrate/', in: [path] }
+      - name: tapestry-appmodule-class
+        match: { regex: 'AppModule\.class', in: [path] }
+      - name: ofbiz-soap-cus-obj
+        match: { regex: '(?i)cus-obj', in: [body] }
+      - name: sitecore-report-ashx
+        match: { regex: '(?i)^/sitecore/shell/ClientBin/Reporting/Report\.ashx', in: [path] }
+      - name: octobercms-auth-restore
+        match: { regex: '(?i)^/backend/backend/auth/', in: [path] }
+      - name: aviatrix-rce-php
+        match: { regex: '(?i)^/v1/[^/]*\.php$', in: [path] }
+
+  # Request signatures for exploited 2022 vulnerabilities: Spring injection,
+  # enterprise access-control bypasses, and framework deserialization.
+  - name: cve-2022-signatures
+    action: BLOCK
+    rules:
+      - name: spring-cloud-gateway-actuator
+        match: { regex: '(?i)^/actuator/gateway/', in: [path] }
+      - name: spring-cloud-function-routing-expression
+        match: { headers: { 'spring.cloud.function.routing-expression': '.+' } }
+      - name: spring4shell-classloader-binding
+        match: { regex: '(?i)class\.module\.classloader', in: [query, body] }
+      - name: freemarker-template-execute
+        match: { regex: '(?i)freemarker\.template\.utility', in: [query, body] }
+      - name: workspaceone-saas-endpoints
+        match: { regex: '(?i)^/SAAS/(API/1\.0/REST/oauth2|auth/)', in: [path] }
+      - name: workspaceone-vcac
+        match: { regex: '(?i)^/vcac/', in: [path] }
+      - name: zabbix-forged-session
+        match: { cookies: { zbx_session: '.+' } }
+      - name: magento-template-filter-callback
+        match: { regex: '(?i)addafterfiltercallback', in: [body] }
+      - name: apisix-batch-requests-admin
+        match: { path: '(?i)^/apisix/batch-requests$', regex: '(?i)/apisix/admin/', in: [body] }
+      - name: geoserver-jiffle-injection
+        match: { path: '(?i)^/geoserver/wms$', regex: '(?i)(jiffle|getruntime)', in: [body] }
+      - name: bonita-extension-rce
+        match: { regex: '(?i)^/bonita/API/extension/rce', in: [path] }
+      - name: confluence-uri-ognl
+        match: { regex: '(?i)(%24%7B(%23|%40)|\$\{[#@])', in: [path] }
+      - name: common-webshell-artifacts
+        match: { regex: '(?i)(^|/)(pwn|shell|test|webshell|taint)\.(jsp|jspx|aspx|php[0-9]?)$', in: [path] }
+      - name: zimbra-admin-jsp
+        match: { regex: '(?i)^/zimbraAdmin/[^/]*\.jsp$', in: [path] }
+      - name: pfblockerng-host-injection
+        match: { path: '(?i)^/pfblockerng/', headers: { Host: ';' } }
+      - name: spark-doas-command
+        match: { path: '^/$', regex: '(?i)(^|&)doas=', in: [query] }
+      - name: manageengine-xmlrpc
+        match: { regex: '(?i)^/xmlrpc$', in: [path] }
+      - name: glpi-htmlawed
+        match: { regex: '(?i)^/vendor/htmlawed/', in: [path] }
+      - name: fortinac-keyupload
+        match: { regex: '(?i)^/configWizard/keyUpload\.jsp$', in: [path] }
+      - name: fortios-forwarded-bypass
+        match: { path: '(?i)^/api/v2/cmdb/system/admin', headers: { Forwarded: '.+' } }
+      - name: activemq-jolokia-jfr
+        match: { path: '(?i)^/api/jolokia/', regex: '(?i)(flightrecorder|jfr)', in: [body] }
+      - name: pgadmin-validate-binary-path
+        match: { path: '(?i)^/misc/validate_binary_path$', regex: '(?i)utility_path', in: [body] }
+      - name: manageengine-samlresponse
+        match: { regex: '(?i)^/SamlResponseServlet$', in: [path] }
+
+  # Request signatures for exploited 2023 vulnerabilities: file-transfer and
+  # CI/CD flaws, appliance auth bypasses, and framework template injection.
+  - name: cve-2023-signatures
+    action: BLOCK
+    rules:
+      - name: moveit-session-setvars
+        match: { headers: { X-siLock-Transaction: '(?i)session_setvars' } }
+      - name: moveit-rest-token
+        match: { path: '(?i)^/api/v1/auth/token$', regex: '(?i)grant_type=session', in: [body] }
+      - name: moveit-guestaccess
+        match: { regex: '(?i)^/guestaccess\.aspx$', in: [path] }
+      - name: ivanti-epmm-admins-api
+        match: { regex: '(?i)^/mifs/aad/api/v2/admins/', in: [path] }
+      - name: netscaler-saml-login
+        match: { path: '(?i)^/saml/login$', regex: '(?i)SAMLRequest=', in: [body] }
+      - name: netscaler-citrixbleed-host
+        match: { path: '(?i)^/oauth/idp/\.well-known/openid-configuration$', headers: { Host: '^.{128,}$' } }
+      - name: netscaler-getusername-cookie
+        match: { path: '(?i)^/logon/LogonPoint/', cookies: { NSC_AAAC: '^0{16,}$' } }
+      - name: teamcity-rest-tokens
+        match: { regex: '(?i)^/app/rest/users/[^/]+/tokens/', in: [path] }
+      - name: teamcity-datadir-debug
+        match: { path: '(?i)^/admin/dataDir\.html$', regex: '(?i)rest\.debug\.processes', in: [query] }
+      - name: teamcity-debug-processes
+        match: { regex: '(?i)^/app/rest/debug/processes$', in: [path] }
+      - name: cisco-iosxe-wsma-endpoint
+        match: { regex: '(?i)(^/webui_wsma_http$|^/%25?77eb|^/%77eb)', in: [path] }
+      - name: cisco-iosxe-logon-hash
+        match: { path: '(?i)^/webui/logoutconfirm\.html$', regex: '(?i)logon_hash=', in: [query] }
+      - name: f5-double-chunked-te
+        match: { method: POST, regex: '(?i)^chunked\s*,\s*chunked$', in: [headers] }
+      - name: f5-authn-login-reference
+        match: { path: '(?i)^/mgmt/shared/authn/login$', regex: '(?i)(loginreference|"username")', in: [body] }
+      - name: confluence-setup-complete-flag
+        match: { regex: '(?i)setupcomplete=', in: [query] }
+      - name: confluence-setup-administrator
+        match: { regex: '(?i)^/setup/setupadministrator', in: [path] }
+      - name: confluence-setup-restore
+        match: { regex: '(?i)^/json/setup-restore\.action$', in: [path] }
+      - name: confluence-text-inline-vm
+        match: { regex: '(?i)^/template/aui/text-inline\.vm$', in: [path] }
+      - name: owncloud-graphapi-tests
+        match: { regex: '(?i)/graphapi/vendor/.+/tests/', in: [path] }
+      - name: papercut-setup-completed
+        match: { path: '(?i)^/app$', regex: '(?i)service=page/setupcompleted', in: [query] }
+      - name: papercut-direct-service-injection
+        match: { path: '(?i)^/app$', regex: '(?i)service=direct(%2f|/)1(%2f|/)', in: [body] }
+      - name: sharefile-cifs-aspx
+        match: { regex: '(?i)^/cifs/[^/]*\.aspx$', in: [path] }
+      - name: goanywhere-license-accept
+        match: { regex: '(?i)^/goanywhere/lic/accept$', in: [path] }
+      - name: coldfusion-wddx-packet
+        match: { regex: '(?i)wddxpacket', in: [body] }
+      - name: juniper-jweb-webauth
+        match: { regex: '(?i)^/webauth_operation\.php$', in: [path] }
+      - name: sharepoint-proof-token
+        match: { headers: { X-PROOF_TOKEN: '.+' } }
+      - name: zoneminder-snapshot-create
+        match: { path: '(?i)^/zm/index\.php$', regex: '(?i)(monitor_ids|snapshot)', in: [body] }
+      - name: openfire-unicode-traversal
+        match: { regex: '(?i)%u002e', in: [path] }
+      - name: forticlient-ems-fctuid
+        match: { regex: '(?i)FCTUID=', in: [body] }
+      - name: fortigate-hostcheck-validate
+        match: { regex: '(?i)^/remote/hostcheck_validate$', in: [path] }
+      - name: wp-backup-migration-content-dir
+        match: { headers: { Content-Dir: '.+' } }
+      - name: chamilo-bigupload
+        match: { regex: '(?i)^/main/inc/lib/javascript/bigupload/', in: [path] }
+
+  # Request signatures for exploited 2024 vulnerabilities: edge-appliance
+  # command injection, CI/CD auth bypasses, and framework path confusion.
+  - name: cve-2024-signatures
+    action: BLOCK
+    rules:
+      - name: panos-globalprotect-sessid
+        match: { path: '(?i)^/ssl-vpn/', cookies: { SESSID: '\.\.' } }
+      - name: panos-portal-image-webshell
+        match: { regex: '(?i)^/global-protect/portal/images/[^/]+\.(txt|php[0-9]?|jsp|asp|aspx|sh|py)$', in: [path] }
+      - name: ivanti-ics-saml-ssrf
+        match: { path: '(?i)^/dana-ws/saml20\.ws$', regex: '(?i)retrievalmethod', in: [body] }
+      - name: screenconnect-setupwizard
+        match: { regex: '(?i)^/SetupWizard\.aspx', in: [path] }
+      - name: teamcity-jsp-parameter
+        match: { regex: '(?i)(^|&)jsp=/app/rest/', in: [query] }
+      - name: jenkins-cli-remoting
+        match: { path: '(?i)^/cli$', regex: '(?i)remoting=false', in: [query] }
+      - name: dlink-nas-sharing-system
+        match: { path: '(?i)^/cgi-bin/nas_sharing\.cgi$', regex: '(?i)(^|&)system=', in: [query] }
+      - name: cleo-vlsync-header
+        match: { path: '(?i)^/Synchronization$', headers: { VLSync: '.+' } }
+      - name: ofbiz-program-export
+        match: { regex: '(?i)^/webtools/control/.*ProgramExport', in: [path] }
+      - name: ofbiz-xmldsdump
+        match: { regex: '(?i)^/webtools/control/forgotPassword/xmldsdump$', in: [path] }
+      - name: ofbiz-stats-decorator
+        match: { regex: '(?i)statsdecoratorlocation', in: [body] }
+      - name: spring-cloud-dataflow-package-upload
+        match: { path: '(?i)^/api/package/upload$', regex: '(?i)packagefileasbytes', in: [body] }
+      - name: crushftp-function-endpoint
+        match: { regex: '(?i)^/WebInterface/function/?$', in: [path] }
+      - name: servicenow-jelly-page-title
+        match: { regex: '(?i)jvar_page_title', in: [query] }
+      - name: coldfusion-dotdot-cfide
+        match: { regex: '(?i)\.\.CFIDE/', in: [path] }
+      - name: ivanti-vtm-user-creation
+        match: { path: '(?i)^/apps/zxtm/wizard\.fcgi$', regex: '(?i)create_user', in: [body] }
+      - name: ivanti-csa-encoded-index
+        match: { regex: '(?i)^/client/index\.php(%3f|\?)\.php', in: [path] }
+      - name: tomcat-case-confusion-jsp-put
+        match: { method: PUT, regex: '(?i)\.jspx?$', in: [path] }
+      - name: tomcat-case-confusion-artifacts
+        match: { regex: '(?i)^/(aa|bb)\.jsp$', in: [path] }
+      - name: encoded-question-mark-in-path
+        match: { regex: '(?i)%3f', in: [path] }
+      - name: spring-uri-userinfo-fragment-bypass
+        match: { regex: '(?i)(%5c|%23)@', in: [query] }
+      - name: nextjs-image-optimizer-ssrf
+        match: { path: '(?i)^/_next/image$', regex: '(?i)url=https?://', in: [query] }
+      - name: gitlab-saml-callback
+        match: { path: '(?i)^/users/auth/saml/callback$', regex: '(?i)samlresponse=', in: [body] }
+      - name: magento-cosmicsting-xxe
+        match: { regex: '(?i)(totalscollector|dataisurl)', in: [body] }
   # Framework routing bypasses: internal route parameters, prefetch variants,
   # RPC deserialization, and request-controlled trust flags (CVE-2026-44574,
   # CVE-2026-44575, CVE-2026-27971, CVE-2026-67282).

