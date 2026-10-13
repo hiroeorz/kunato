@@ -144,6 +144,420 @@ categories:
           regex: '(?i)(%00|io\.popen|]])'
           in: [body]
 
+  # Request signatures for exploited 2010-2019 vulnerabilities. The rules cover
+  # the families documented in the 2010-2019 sections of blocked.txt. Shared
+  # signatures (Struts OGNL, JBoss invoker servlets, router command CGIs) sit in
+  # the earliest year they belong to.
+  - name: cve-2010-signatures
+    action: BLOCK
+    rules:
+      - name: axis2-admin-default-login
+        match: { path: '(?i)^/(?:axis2/)?axis2-admin/login$' }
+      - name: jboss-web-console-verb-tampering
+        match: { method: [HEAD, PUT, DELETE], path: '(?i)^/web-console/' }
+      - name: struts-ognl-member-access
+        match: { regex: '(?i)(_?memberaccess|denymethodexecution|allowstaticmethodaccess|processbuilder)', in: [query, body] }
+      - name: struts-ognl-file-writer
+        match: { regex: '(?i)java\.io\.(filewriter|bufferedwriter)', in: [query, body] }
+      - name: jboss-seam-actionoutcome
+        match: { regex: '(?i)actionoutcome=[^&]*getclass\(\)', in: [query] }
+      - name: sap-ctc-configservlet
+        match: { path: '(?i)^/ctc/servlet/com\.sap\.ctc\.util\.configservlet$' }
+
+  - name: cve-2011-signatures
+    action: BLOCK
+    rules:
+      - name: lotuscms-page-rce
+        match: { regex: '\$\{system\(', in: [body] }
+      - name: apache-killer-overlapping-range
+        match: { headers: { Range: '(?i)^bytes=0-,.*(?:5-){10,}' } }
+
+  - name: cve-2012-signatures
+    action: BLOCK
+    rules:
+      - name: oracle-reports-rwservlet-urlparameter
+        match: { path: '(?i)^/reports/rwservlet$', regex: '(?i)(urlparameter=|jobtype=rwurl)', in: [query] }
+      - name: oracle-reports-rwservlet-showenv
+        match: { path: '(?i)^/reports/rwservlet/showenv$' }
+
+  - name: cve-2013-signatures
+    action: BLOCK
+    rules:
+      - name: coldfusion-adminapi-login
+        match: { path: '(?i)^/cfide/adminapi/administrator\.cfc$', regex: '(?i)adminpassword=', in: [body] }
+      - name: jboss-invoker-deserialization
+        match: { path: '(?i)^/(invoker/(?:ejbinvokerservlet|jmxinvokerservlet|readonly)/?|jbossmq-httpil/httpserverilservlet|jmx-console/?)$' }
+
+  - name: cve-2014-signatures
+    action: BLOCK
+    rules:
+      - name: struts-classloader-manipulation
+        match: { regex: '(?i)class\.classloader', in: [query, body] }
+      - name: java-runtime-exec
+        match: { regex: '(?i)(runtime\.getruntime\(\)|runtime@getruntime\(\))', in: [query, body] }
+      - name: zte-web-shell-command
+        match: { path: '(?i)^/web_shell_cmd\.gch$' }
+      - name: sql-error-based-functions
+        match: { regex: '(?i)(updatexml\s*\(|extractvalue\s*\(|floor\s*\(\s*rand)', in: [query, body] }
+      - name: netsweeper-webadmin
+        match: { path: '(?i)^/webadmin/' }
+
+  - name: cve-2015-signatures
+    action: BLOCK
+    rules:
+      - name: adb-wlsecurity-disclosure
+        match: { path: '(?i)^/wlsecurity\.html$' }
+      - name: xdebug-forwarded-command
+        match: { headers: { X-Forwarded-For: '(?i)^\S+$' }, regex: '(?i)xdebug_session_start=', in: [query] }
+      - name: dlink-ping-ccp-injection
+        match: { path: '(?i)^/ping\.ccp$', regex: '(?i)ping_addr=', in: [body] }
+      - name: httpsys-oversized-range
+        match: { headers: { Range: '(?i)^bytes=\d+-18446744073709551615$' } }
+      - name: dlink-hnap-command
+        match: { path: '(?i)^/hnap1/' }
+      - name: jetty-null-referer
+        match: { headers: { Referer: '(?i)(\\x00|\x00|%00)' } }
+      - name: jenkins-fingerprint-disclosure
+        match: { path: '(?i)^/fingerprint/?$' }
+      - name: websphere-admin-soap-deserialization
+        match: { headers: { SOAPAction: '(?i)urn:adminservice' }, regex: '(?i)jmxconnector', in: [body] }
+      - name: joomla-object-injection
+        match: { regex: '(?i)(__test\||jdatabasedrivermysqli|jsimplepiefactory)', in: [headers] }
+      - name: umbraco-feedproxy-ssrf
+        match: { path: '(?i)^/umbraco/feedproxy\.aspx$' }
+
+  - name: cve-2016-signatures
+    action: BLOCK
+    rules:
+      - name: aem-system-console-access
+        match: { path: '(?i)^/system/console' }
+      - name: phpmailer-exim-expansion
+        match: { regex: '(?i)(\$\{run\{|spool_directory|substr\{)', in: [headers] }
+      - name: wordpress-author-enumeration
+        match: { path: '^/$', regex: '(?i)(^|&)author=\d+(&|$)', in: [query] }
+      - name: wd-mycloud-cookie-command
+        match: { regex: '(?i)username=[^;]*(%7c|\||\x60|%60)', in: [headers] }
+      - name: netgear-apply-noauth-overflow
+        match: { path: '(?i)^/apply_noauth\.cgi' }
+      - name: dlink-set-system-command
+        match: { path: '(?i)^/setsystemcommand$' }
+      - name: netgear-boarddataww-command
+        match: { path: '(?i)^/boarddataww\.php$', regex: '(?i)(wget|curl|%3b|%7c)', in: [body] }
+      - name: activemq-fileserver-write
+        match: { path: '(?i)^/fileserver/' }
+      - name: shiro-rememberme-deserialization
+        match: { cookies: { rememberMe: '(?i)(^rO0|^[A-Za-z0-9+/]{40,}={0,2}$)' } }
+      - name: spring-oauth-spel
+        match: { regex: '(?i)response_type=[^&]*\$\{', in: [query] }
+      - name: netgear-bsw-password-disclosure
+        match: { path: '(?i)^/bsw_cxttongr\.htm$' }
+      - name: nuuo-debugging-center-command
+        match: { path: '(?i)^/__debugging_center_utils___.php$' }
+      - name: vbulletin-forumrunner-sqli
+        match: { path: '(?i)/forumrunner/request\.php$', regex: '(?i)cmd=get_spam_data', in: [query] }
+      - name: trendmicro-session-path-traversal
+        match: { path: '(?i)^/cgi-bin/logoff\.cgi$', regex: '(?i)(\.\./|%2e%2e)', in: [cookies] }
+      - name: sony-prima-factory-hardcoded
+        match: { path: '(?i)^/command/prima-factory\.cgi$' }
+
+  - name: cve-2017-signatures
+    action: BLOCK
+    rules:
+      - name: jenkins-cli-deserialization
+        match: { path: '^/cli$', headers: { Side: '(?i)^(?:upload|download)$' } }
+      - name: primefaces-dynamiccontent-rce
+        match: { path: '(?i)^/javax\.faces\.resource/dynamiccontent\.properties\.xhtml$' }
+      - name: weblogic-wls-wsat
+        match: { path: '(?i)^/wls-wsat/' }
+      - name: datataker-getfile-disclosure
+        match: { path: '(?i)^/services/getfile\.cmd$' }
+      - name: telerik-rau-upload
+        match: { path: '(?i)^/telerik\.web\.ui\.webresource\.axd$', regex: '(?i)(^|&)type=rau(&|$)', in: [query] }
+      - name: telerik-dialoghandler-dp
+        match: { path: '(?i)^/telerik\.web\.ui\.dialoghandler\.aspx$', regex: '(?i)(^|&)dp=', in: [query] }
+      - name: supervisor-xmlrpc-rce
+        match: { path: '(?i)^/rpc2$', regex: '(?i)supervisor', in: [body] }
+      - name: ilo-accountservice-access
+        match: { path: '(?i)^/rest/v1/accountservice' }
+      - name: tomcat-trailing-slash-jsp-write
+        match: { method: PUT, path: '(?i)\.jsp/$' }
+      - name: solr-admin-cores
+        match: { path: '(?i)^/solr/admin/cores$' }
+      - name: solr-config-api
+        match: { path: '(?i)^/solr/[^/]+/config$' }
+      - name: solr-dataimport-api
+        match: { path: '(?i)^/solr/[^/]+/dataimport$' }
+      - name: couchdb-users-endpoint
+        match: { path: '(?i)^/_users/' }
+      - name: netgear-passwordrecovered
+        match: { path: '(?i)^/passwordrecovered\.cgi$' }
+      - name: panos-esp-command-request
+        match: { path: '(?i)^/esp/cms_changedevicecontext\.esp$' }
+      - name: dynamic-loader-environment-probe
+        match: { regex: '(?i)(ld_preload|ld_debug|ld_library_path)=', in: [query] }
+      - name: kentico-installer-access
+        match: { path: '(?i)^/cmsinstall/' }
+      - name: episerver-xmlrpc-handler
+        match: { path: '(?i)^/util/xmlrpc/handler\.ashx$' }
+      - name: fastjson-type-deserialization
+        match: { regex: '(?i)@type.{0,80}(jdbcrowsetimpl|templatesimpl)', in: [body] }
+      - name: kaseya-managedit-service
+        match: { path: '(?i)^/kaseyacwwebservice/' }
+      - name: router-config-download
+        match: { path: '(?i)^/cgi-bin/downloadcfg/routercfm\.cfg$' }
+      - name: zyxel-viewlog-injection
+        match: { path: '(?i)^/cgi-bin/viewlog\.asp$', regex: '(?i)remote_host=', in: [body] }
+      - name: graphite-send-email-ssrf
+        match: { path: '(?i)^/composer/send_email$' }
+      - name: coldfusion-flex2gateway
+        match: { path: '(?i)^/flex2gateway/' }
+      - name: struts-contenttype-ognl
+        match: { regex: '(?i)(@ognl\.|%\{\(#)', in: [headers] }
+      - name: intel-amt-hwsys-probe
+        match: { path: '(?i)^/hw-sys\.htm$' }
+      - name: netgear-ping-cgi-injection
+        match: { path: '(?i)^/ping\.cgi$', regex: '(?i)ping_ipaddr=.*(%3b|%7c)', in: [body] }
+      - name: phpcoll-upload-directory
+        match: { path: '(?i)^/logos_clients/' }
+      - name: cookie-command-substitution
+        match: { regex: '(`|\$\(|%60|%24\()', in: [cookies] }
+      - name: iis-webdav-if-header-overflow
+        match: { headers: { If: '(?i)^\s*<https?://[^>]{100,}' } }
+      - name: mantisbt-verify-confirm-hash
+        match: { regex: '(?i)(^|&)confirm_hash=', in: [query] }
+      - name: hikvision-deviceinfo-auth
+        match: { path: '(?i)^/system/deviceinfo$' }
+      - name: dahua-current-config-disclosure
+        match: { path: '(?i)^/current_config/' }
+      - name: spring-data-rest-spel-patch
+        match: { regex: '(?i)(?:^|[^\w])(?:T|B)\(java\.lang\.', in: [body] }
+      - name: goahead-system-ini-disclosure
+        match: { path: '(?i)^/system\.ini$' }
+      - name: struts-s2-053-integration-action
+        match: { path: '(?i)^/integration/savegangster\.action$' }
+      - name: dotnetnuke-cookie-deserialization
+        match: { regex: '(?i)(expandedwrapper|objectdataprovider)', in: [cookies, headers] }
+      - name: phpunit-eval-stdin
+        match: { path: '(?i)eval-stdin\.php$' }
+      - name: jboss-web-console-root
+        match: { path: '(?i)^/jmx-console/?$' }
+
+  - name: cve-2018-signatures
+    action: BLOCK
+    rules:
+      - name: cisco-dumpmdm-disclosure
+        match: { path: '(?i)^/dumpmdm\.cmd$' }
+      - name: jolokia-agent-access
+        match: { path: '(?i)^/jolokia/' }
+      - name: cobbler-api-xmlrpc
+        match: { path: '(?i)^/cobbler_api$' }
+      - name: gitlist-open-files-in-pager
+        match: { regex: '(?i)open-files-in-pager', in: [body] }
+      - name: uc-httpd-long-target
+        match: { regex: '^/[^/?]{900,}$', in: [path] }
+      - name: dasan-gpon-diag-form
+        match: { path: '(?i)^/gponform/diag_form$' }
+      - name: pandora-fms-console
+        match: { path: '(?i)^/pandora_console/' }
+      - name: flowpaper-installer-files
+        match: { path: '(?i)^/php/(?:change_config\.php|setup\.php|config/output\.txt)$' }
+      - name: tomcat-jkstatus
+        match: { path: '(?i)^/jkstatus$' }
+      - name: img-php-traversal
+        match: { path: '(?i)^/img\.php$', regex: '(?i)(etc/passwd|/\./|%2f\.)', in: [query] }
+      - name: avamar-avigwt
+        match: { path: '(?i)^/avi/avigui/avigwt$' }
+      - name: seagate-external-api
+        match: { path: '(?i)^/api/external/' }
+      - name: circarlife-log-disclosure
+        match: { path: '(?i)^/html/log$' }
+      - name: spring-data-commons-spel
+        match: { regex: '(?i)#this\.getclass\(\)', in: [body] }
+      - name: tika-ocr-tesseract-path
+        match: { headers: { X-Tika-OCRTesseractPath: '.+' } }
+      - name: tika-ocr-language
+        match: { headers: { X-Tika-OCRLanguage: '.+' } }
+      - name: fortinet-magic-value
+        match: { regex: '(?i)magic=4tinet', in: [body] }
+      - name: richfaces-userresource-el
+        match: { path: '(?i)^/a4j/s/.*userresource' }
+      - name: dlink-mailconnect-ssrf
+        match: { path: '(?i)^/index\.php/system/mailconnect/' }
+      - name: coldfusion-ckeditor-upload
+        match: { path: '(?i)^/cf_scripts/.*/uploadedfiles/' }
+      - name: logontracer-upload-injection
+        match: { path: '(?i)^/upload$', regex: '(?i)(logtype=xml|timezone=[^&]*(%3b|%7c))', in: [body] }
+      - name: manageengine-oputils-disclosure
+        match: { path: '(?i)^/oputilsservlet$' }
+      - name: kubernetes-dashboard-secrets
+        match: { path: '(?i)/api/v1/namespaces/kube-system/secrets/kubernetes-dashboard' }
+      - name: gogs-cookie-traversal
+        match: { regex: '(?i)i_like_gogits=[^;]*(?:\.\.|%2e%2e)', in: [headers, cookies] }
+      - name: phpcms-template-injection
+        match: { path: '(?i)^/data/cache_template/' }
+      - name: phpcms-type-template-param
+        match: { path: '(?i)^/type\.php$', regex: '(?i)(^|&)template=', in: [query] }
+      - name: wowza-login-file-traversal
+        match: { path: '(?i)^/public/login\.htm$', regex: '(?i)(^|&)file=(?:/|\.|%2f)', in: [query] }
+      - name: thinkphp-invokefunction
+        match: { regex: '(?i)invokefunction', in: [query] }
+      - name: php-uploads-webshell
+        match: { regex: '(?i)^/uploads/[^/]*\.(?:php7?|phtml)(?:/|$)', in: [path] }
+      - name: imcat-tools-access
+        match: { path: '(?i)^/imcat/' }
+      - name: oscommerce-installer
+        match: { path: '(?i)^/install/' }
+      - name: weblogic-ws-utc
+        match: { path: '(?i)^/ws_utc/' }
+      - name: sierra-aleos-upload
+        match: { path: '(?i)^/(?:cgi-bin/upload\.cgi|admin/fw_upload_init\.cgi)$' }
+      - name: dedecms-downmix-include
+        match: { path: '(?i)^/include/downmix\.inc\.php$' }
+      - name: anchor-error-log
+        match: { path: '(?i)^/anchor/errors\.log$' }
+      - name: drupal-post-render
+        match: { regex: '(?i)post_render', in: [query, body] }
+      - name: dedecms-field-runphp
+        match: { regex: '(?i)(dede:field|runphp=)', in: [query, body] }
+      - name: umotion-track-import
+        match: { path: '(?i)^/umotion/modules/reporting/track_import_export\.php$' }
+      - name: exchange-pushsubscription
+        match: { path: '(?i)^/ews/exchange\.asmx$', regex: '(?i)pushsubscription', in: [body] }
+      - name: prismaweb-login-script
+        match: { path: '(?i)^/user/scripts/login_par\.js$' }
+      - name: jquery-file-upload-webshell
+        match: { regex: '(?i)^(?:/jquery-file-upload/|/files/[^?]*\.php(?:/|$))', in: [path] }
+      - name: etherpad-admin-bypass
+        match: { path: '(?i)^/admin$' }
+      - name: tbk-dvr-device-rsp
+        match: { path: '(?i)^/device\.rsp$' }
+
+  - name: cve-2019-signatures
+    action: BLOCK
+    rules:
+      - name: struts-expression-injection
+        match: { regex: '(?i)(\$\{|%25%7B|%\{)', in: [query, body] }
+      - name: sap-commerce-virtualjdbc
+        match: { path: '(?i)^/virtualjdbc/' }
+      - name: sharepoint-picker-deserialization
+        match: { path: '(?i)^/_layouts/\d+/picker\.aspx$', regex: '(?i)hiddenspandata=__bp', in: [body] }
+      - name: jenkins-check-script
+        match: { path: '(?i)/descriptorbyname/[^?]*/checkscript(?:compile)?$' }
+      - name: kentico-syncserver
+        match: { path: '(?i)^/cmspages/staging/syncserver\.asmx' }
+      - name: zzzcms-ueditor-upload
+        match: { path: '(?i)^/plugins/ueditor/' }
+      - name: mongo-express-constructor-rce
+        match: { regex: '(?i)(constructor\.constructor|mainmodule\.require)', in: [body] }
+      - name: golang-pprof-endpoint
+        match: { path: '(?i)^/debug/pprof/' }
+      - name: kubernetes-authorization-api
+        match: { path: '(?i)^/apis/authorization\.k8s\.io/' }
+      - name: pulse-secure-diag-options
+        match: { path: '(?i)^/dana-admin/diag/diag\.cgi$', regex: '(?i)(^|&)options=', in: [query] }
+      - name: atlassian-crowd-plugin-upload
+        match: { path: '(?i)^/crowd/(?:admin/uploadplugin\.action|plugins/servlet/[^/]+)$' }
+      - name: zyxel-free-time
+        match: { path: '(?i)^/free_time\.cgi$' }
+      - name: citrix-sdwan-collector
+        match: { path: '(?i)^/collector/' }
+      - name: citrix-sdwan-talari-files
+        match: { path: '(?i)^/talari/' }
+      - name: grafana-timelion-run
+        match: { path: '(?i)^/api/timelion/run$' }
+      - name: dlink-wan-page
+        match: { path: '(?i)^/wan\.htm$' }
+      - name: dlink-cwm-index
+        match: { path: '(?i)^/index\.php/index/index' }
+      - name: lansweeper-sqli
+        match: { regex: '(?i)\(select\b', in: [query, body] }
+      - name: grafana-anonymous-snapshots
+        match: { path: '(?i)^/api/snapshots$' }
+      - name: webmin-rpc-command
+        match: { path: '(?i)^/rpc\.cgi$', regex: '(?i)object\s+socket', in: [body] }
+      - name: panos-sslmgr-format-string
+        match: { path: '(?i)^/sslmgr$' }
+      - name: socomec-password-disclosure
+        match: { path: '(?i)^/password\.jsn$' }
+      - name: dlink-login-mgr-injection
+        match: { path: '(?i)^/cgi-bin/login_mgr\.cgi$', regex: '(?i)(%7c|\|)', in: [query] }
+      - name: enigma-nms-protected-cgi
+        match: { path: '(?i)^/cgi-bin/protected/' }
+      - name: ifw8-usermanager
+        match: { path: '(?i)^/action/usermanager\.htm$' }
+      - name: cisco-config-exp
+        match: { path: '(?i)^/cgi-bin/config\.exp$' }
+      - name: dlink-apply-sec
+        match: { path: '(?i)^/apply_sec\.cgi$' }
+      - name: wordpress-visualizer-ssrf
+        match: { path: '(?i)^/wp-json/visualizer/v1/upload-data$' }
+      - name: zabbix-unauth-dashboard
+        match: { path: '(?i)/zabbix\.php$', regex: '(?i)action=dashboard\.view', in: [query] }
+      - name: dlink-getcfg-account
+        match: { path: '(?i)^/getcfg\.php$', regex: '(?i)services=device\.account', in: [body] }
+      - name: solr-velocity-template
+        match: { regex: '(?i)(v\.template|wt=velocity)', in: [query] }
+      - name: popup-maker-sysinfo
+        match: { regex: '(?i)(pum_action=|popmake_action=popup_sysinfo)', in: [query, body] }
+      - name: openfire-getfavicon-ssrf
+        match: { path: '(?i)^/getfavicon$', regex: '(?i)(^|&)host=', in: [query] }
+      - name: xfilesharing-temp-upload
+        match: { path: '(?i)^/cgi-bin/temp/' }
+      - name: netis-igd-command
+        match: { path: '(?i)^/cgi-bin-igd/' }
+      - name: totolink-config-dump
+        match: { path: '(?i)^/config\.dat$' }
+      - name: totolink-system-command
+        match: { path: '(?i)^/boafrm/formsyscmd$' }
+      - name: totolink-form-login
+        match: { path: '(?i)^/boafrm/formlogin$' }
+      - name: employee-records-upload
+        match: { path: '(?i)^/uploads/employees_ids/' }
+      - name: influxdb-query-endpoint
+        match: { path: '^/query$', regex: '(?i)(^|&)q=show\b', in: [query] }
+      - name: webcenter-satellite-admin
+        match: { path: '(?i)^/cs/satellite$', regex: '(?i)pagename=openmarket/xcelerate/admin', in: [query] }
+      - name: oracle-bi-xmlpserver
+        match: { path: '(?i)^/xmlpserver/' }
+      - name: weblogic-async-service
+        match: { path: '(?i)^/_async/' }
+      - name: confluence-pages-actions
+        match: { path: '(?i)^/pages/(?:createpage|downloadallattachments)\.action$' }
+      - name: confluence-pages-jsp
+        match: { path: '(?i)^/pages/[^/]*\.jsp$' }
+      - name: barco-file-transfer
+        match: { path: '(?i)^/cgi-bin/file_transfer\.cgi$' }
+      - name: youphptube-objects
+        match: { path: '(?i)^/objects/' }
+      - name: rails-action-view-accept-traversal
+        match: { headers: { Accept: '(?i)(?:\.\./|%2e%2e)' } }
+      - name: revive-third-party-servers
+        match: { path: '(?i)^/plugins/3rdpartyservers/' }
+      - name: drupal-guzzle-deserialization
+        match: { regex: '(?i)guzzlehttp\\\\psr7', in: [body] }
+      - name: gitlab-jira-oauth-ssrf
+        match: { path: '(?i)^/-/jira/login/oauth/access_token$' }
+      - name: qnap-photo-station
+        match: { path: '(?i)^/photo/' }
+      - name: qnap-cgi-auth-endpoints
+        match: { path: '(?i)^/cgi-bin/(?:authlogin|userconfig)\.cgi$' }
+      - name: optergy-console-result
+        match: { path: '(?i)^/tools/ajax/consoleresult\.html$' }
+      - name: kibana-timelion-prototype
+        match: { regex: '(?i)(label\.__proto__|__proto__\.env)', in: [body] }
+      - name: aem-forms-afdata
+        match: { regex: '(?i)(afdata|guidestate|fd/af/components)', in: [body] }
+      - name: jira-web-inf-read
+        match: { path: '(?i)^/s/[^/]+/_.*(?:web-inf|meta-inf)' }
+      - name: zzzcms-array-map-rce
+        match: { regex: '(?i)(array_map|base_convert)', in: [body] }
+      - name: thinkphp-construct-rce
+        match: { regex: '(?i)(__construct|filter\[\]=system|filter%5b%5d=system)', in: [body, query] }
+      - name: elfinder-connector
+        match: { path: '(?i)^/php/connector\.minimal\.php$' }
+      - name: sitecore-csrftoken-deserialization
+        match: { regex: '(?i)__csrftoken=/w', in: [body] }
+
   # Request signatures for exploited 2020 vulnerabilities: appliance management
   # endpoints, framework injection points, and device CGIs. See the 2020
   # section of blocked.txt for the advisory details.
