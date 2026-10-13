@@ -1,5 +1,7 @@
 # Kunato
 
+[![CI](https://github.com/hiroeorz/kunato/actions/workflows/ci.yml/badge.svg)](https://github.com/hiroeorz/kunato/actions/workflows/ci.yml)
+
 Kunato is a lightweight Web Application Firewall (WAF) written in Rust, built for
 personal users who want an easy-to-deploy protection layer in front of their web
 applications.
