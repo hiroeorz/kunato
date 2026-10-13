@@ -74,7 +74,7 @@ Client ──────►  ┌───────────────�
 ### Build
 
 ```sh
-git clone <repository-url>
+git clone git@github.com:hiroeorz/kunato.git
 cd kunato
 cargo build --release
 ```
