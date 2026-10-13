@@ -366,6 +366,26 @@ categories:
       - name: common-admin-paths
         match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$))', in: [path] }
 
+  # Response inspection runs after the upstream response arrives. Response
+  # bodies are inspected up to limits.max_response_body_bytes as received
+  # (compressed bodies are not decompressed); when the limit is reached the
+  # prefix is inspected and the remainder is streamed through. The default
+  # `in` target is `response_body`; request conditions such as `path` still
+  # apply. BLOCK replaces the upstream response with the configured response.
+  - name: response-leaks
+    phase: response
+    action: LOG
+    rules:
+      - name: private-key-material     # blocks: private keys never leave the server
+        action: BLOCK
+        match: { regex: '-----BEGIN [A-Z ]*PRIVATE KEY-----', in: [response_body] }
+      - name: stack-trace
+        match: { regex: '(?i)(traceback \(most recent call last\)|stack backtrace:|panic: runtime error:)' }
+      - name: sql-error-message
+        match: { regex: '(?i)(sql syntax.*(mysql|mariadb)|ORA-[0-9]{5}|postgresql.*(error|exception)|sqlite3\.OperationalError)' }
+      - name: server-version-leak
+        match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
+
 timeouts:
   header_read: 10s
   body_read: 30s
@@ -374,12 +394,14 @@ timeouts:
   shutdown_grace: 10s
 
 # The body limit also bounds upload size. Raise max_body_bytes if your
-# application receives larger uploads.
+# application receives larger uploads. max_response_body_bytes bounds how much
+# of each upstream response response rules inspect before streaming the rest.
 limits:
   max_path_bytes: 8192
   max_header_bytes: 32768
   max_headers: 100
   max_body_bytes: 1048576
+  max_response_body_bytes: 1048576
 
 protection:
   enabled: true

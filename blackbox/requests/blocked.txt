@@ -812,12 +812,16 @@ MOVE /dav/ header="Destination: /dav/sub/"
 #   names, not in the HTTP request itself.
 # CVE-2026-34355 / CVE-2026-34356 / CVE-2026-56449 / CVE-2026-63686 (httpd
 #   mod_proxy_*): triggered by a malicious upstream response, not by a request.
+#   Response-phase rules can mitigate this class when the response shape is
+#   known, but this harness only replays requests against a benign upstream.
 # CVE-2026-60005 (nginx ngx_http_slice_module): memory disclosure needs the
 #   slice directive with unnamed regex captures; the trigger is a plain Range
 #   request, so no stable request signature exists.
 # CVE-2026-27651 / CVE-2026-27784 / CVE-2026-32647 / CVE-2026-42946 /
 #   CVE-2026-56434 (nginx): mail CRAM-MD5, 32-bit mp4, scgi/uwsgi, and ssi
-#   overreads; configuration-specific, local, or backend-response driven.
+#   overreads; configuration-specific, local, or backend-response driven
+#   (response-phase rules can cover the response-driven case when a signature
+#   is known).
 # CVE-2026-93488 / CVE-2026-93491 / CVE-2026-93558 / CVE-2026-93564 /
 #   CVE-2026-93567 / CVE-2026-93568 / CVE-2026-93569 (Netty): SPDY frame
 #   floods, pipelining queues, PROXY v2 framing, and CONNECT conversion need

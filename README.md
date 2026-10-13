@@ -27,6 +27,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Response header rewriting** — Removes or replaces identifying response headers
   such as `Server` and `X-Powered-By` on upstream responses and Kunato's own
   block/error responses alike.
+- **Response inspection** — Response-phase categories match upstream responses on
+  status, headers, and body (up to a size limit) and can block, log, or pass them
+  through. The remainder of oversized responses is streamed uninspected.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.
@@ -58,6 +61,9 @@ Client ──────►  ┌───────────────�
    - `BLOCK` — rejects the request immediately (default: `403 Forbidden`).
    - `LOG` — records the match and continues evaluation.
 4. If no rule matches, the request is forwarded to the upstream (pass-through).
+5. Response-phase categories run on the upstream response the same way. `BLOCK`
+   replaces the upstream response with the configured response; `ALLOW` stops
+   response evaluation and passes the response through unchanged.
 
 ## Getting Started
 
@@ -246,12 +252,27 @@ categories:
       - name: sensitive-files            # overrides the category default
         action: BLOCK
         match: { path: '(?i)(^|/)(\.env|\.git/|wp-admin|phpmyadmin)' }
+
+  # Response inspection: runs on the upstream response after it arrives. The
+  # default `in` target in a response category is `response_body`.
+  - name: response-leaks
+    phase: response
+    action: LOG
+    rules:
+      - name: private-key-material
+        action: BLOCK
+        match: { regex: '-----BEGIN [A-Z ]*PRIVATE KEY-----' }
+      - name: versioned-server
+        match: { response_headers: { Server: '(?i)(apache|nginx)/[0-9]' } }
+      - name: upstream-error
+        match: { status: 5xx }
 ```
 
 ### Evaluation
 
-1. Categories are evaluated in the order they appear in the file, and rules within
-   a category in their order. A category with `enabled: false` is skipped entirely.
+1. Request-phase categories (`phase: request`, the default) are evaluated in the
+   order they appear in the file, and rules within a category in their order. A
+   category with `enabled: false` is skipped entirely.
 2. The first rule whose conditions all match wins. Its effective action and
    response are resolved with rule-level values taking precedence over
    category-level defaults.
@@ -261,6 +282,11 @@ categories:
      `403 Forbidden`) and stops evaluation.
    - `LOG` — records the match and continues evaluation.
 4. If no rule matches, the request is forwarded (pass-through).
+5. After the upstream responds, response-phase categories (`phase: response`) run
+   in document order. They match the upstream response plus the request context;
+   `BLOCK` replaces the response with the effective response, `ALLOW` stops
+   response evaluation and passes the response through unchanged, and `LOG`
+   records the match and continues.
 
 Every rule must resolve to an effective action: a rule without its own `action`
 requires the category to define one. The configuration is rejected at load time
@@ -268,14 +294,15 @@ otherwise.
 
 ### Category fields
 
-| Field         | Description                                                           |
-| ------------- | --------------------------------------------------------------------- |
-| `name`        | Unique category name.                                                 |
-| `description` | Optional free-text description.                                       |
-| `enabled`     | Set to `false` to skip the category. Defaults to `true`.              |
-| `action`      | Default action (`BLOCK`, `ALLOW`, or `LOG`) for the category's rules. |
-| `response`    | Default response for `BLOCK` rules. Defaults to `403 Forbidden`.      |
-| `rules`       | Ordered list of rules.                                                |
+| Field         | Description                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------------------- |
+| `name`        | Unique category name.                                                                                |
+| `description` | Optional free-text description.                                                                      |
+| `enabled`     | Set to `false` to skip the category. Defaults to `true`.                                             |
+| `phase`       | `request` (default) or `response`; selects when the category is evaluated.                            |
+| `action`      | Default action (`BLOCK`, `ALLOW`, or `LOG`) for the category's rules.                                |
+| `response`    | Default response for `BLOCK` rules. Defaults to `403 Forbidden`.                                      |
+| `rules`       | Ordered list of rules.                                                                               |
 
 ### Rule fields
 
@@ -296,29 +323,38 @@ once at load time, and an invalid pattern rejects the configuration. Path and qu
 values are matched both raw and percent-decoded, so `%3Cscript%3E` and `<script>`
 both match.
 
-| Field       | Description                                                                                                             |
-| ----------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `path`      | Regex(es) matched against the request path.                                                                             |
-| `method`    | One or more HTTP methods (for example `GET` or `[POST, PUT]`).                                                          |
-| `source_ip` | IP address(es) or CIDR range(s) the client must come from.                                                              |
-| `headers`   | Map of header name to regex(es); header names are case-insensitive.                                                     |
-| `cookies`   | Map of cookie name to regex(es).                                                                                        |
-| `in`        | Request parts searched by `regex`: `query`, `body`, `cookies`, `headers`, or `path`. Defaults to `[query, body, cookies]`. |
-| `regex`     | Signature regex(es) searched in the parts listed by `in`.                                                               |
+| Field              | Description                                                                                                             |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `path`             | Regex(es) matched against the request path.                                                                             |
+| `method`           | One or more HTTP methods (for example `GET` or `[POST, PUT]`).                                                          |
+| `source_ip`        | IP address(es) or CIDR range(s) the client must come from.                                                              |
+| `headers`          | Map of request header name to regex(es); header names are case-insensitive.                                             |
+| `cookies`          | Map of cookie name to regex(es).                                                                                        |
+| `in`               | Parts searched by `regex`: `query`, `body`, `cookies`, `headers`, `path`, or `response_body`. Defaults to `[query, body, cookies]`, or `[response_body]` in a response-phase category. |
+| `regex`            | Signature regex(es) searched in the parts listed by `in`.                                                               |
+| `status`           | Response-phase only: status code(s) or ranges, for example `404`, `500-599`, or `5xx`.                                  |
+| `response_headers` | Response-phase only: map of response header name to regex(es); header names are case-insensitive.                       |
+
+Response-phase rules may combine request conditions (`path`, `method`, `source_ip`,
+`headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule
+can require a path and a response body signature. `status`, `response_headers`, and
+the `response_body` target are rejected in request-phase categories. Responses are
+matched as received: compressed bodies are not decompressed, and only the first
+`limits.max_response_body_bytes` of a body are inspected.
 
 ### Timeouts and limits
 
 Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
 Defaults:
 
-| Timeout             | Default | Limit              | Default |
-| ------------------- | ------- | ------------------ | ------- |
-| `header_read`       | `10s`   | `max_path_bytes`   | 8 KiB   |
-| `body_read`         | `30s`   | `max_header_bytes` | 32 KiB  |
-| `upstream_connect`  | `5s`    | `max_headers`      | 100     |
-| `upstream_response` | `30s`   | `max_body_bytes`   | 1 MiB   |
-| `shutdown_grace`    | `10s`   |                    |         |
-| `websocket_idle`    | `10m`   |                    |         |
+| Timeout             | Default | Limit                     | Default |
+| ------------------- | ------- | ------------------------- | ------- |
+| `header_read`       | `10s`   | `max_path_bytes`          | 8 KiB   |
+| `body_read`         | `30s`   | `max_header_bytes`        | 32 KiB  |
+| `upstream_connect`  | `5s`    | `max_headers`             | 100     |
+| `upstream_response` | `30s`   | `max_body_bytes`          | 1 MiB   |
+| `shutdown_grace`    | `10s`   | `max_response_body_bytes` | 1 MiB   |
+| `websocket_idle`    | `10m`   |                           |         |
 
 ```yaml
 timeouts: { header_read: 10s, body_read: 30s }
@@ -477,6 +513,7 @@ bans interfering.
 - [x] Optional TLS termination
 - [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
 - [x] HTTP/3 over QUIC (opt-in, Alt-Svc advertisement)
+- [x] Response-phase rules (status, response headers, response body)
 
 ## Contributing
 

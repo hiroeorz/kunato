@@ -66,6 +66,10 @@ evaluation, proxying, and protection logic must not bleed into each other.
 
 - The YAML config uses a two-level model: `categories` → `rules`. A category's
   `action` and `response` are defaults that individual rules may override.
+- Categories carry a `phase` (`request` by default, or `response`). Response-phase
+  rules match upstream status, response headers, and the response body prefix
+  (`limits.max_response_body_bytes`); `status`, `response_headers`, and the
+  `response_body` target are rejected in request-phase categories.
 - Evaluation order is document order; `enabled: false` disables a category or rule.
 - Write rules in the compact style shown in `README.md`: `name` on one line and a
   flow-style `match` mapping on the next, falling back to block style only for
@@ -98,12 +102,15 @@ policy lives in `deny.toml`; do not loosen it without an explicit reason.
 
 1. **Rule evaluation order:** Rules are grouped into categories and evaluated in
    document order — categories in the order they appear, then rules within each
-   category. A rule's `action` and `response` override the category defaults, and
-   every rule must resolve to an effective action at load time. `ALLOW` forwards
-   the request and stops evaluation; `BLOCK` rejects the request immediately;
-   `LOG` records the match and continues evaluation. If no rule matches, the
-   request is forwarded (pass-through). Match conditions are combined with logical
-   AND, while list values are ORed within a field.
+   category. Categories have a `phase` (`request` by default, or `response`);
+   the two phases are evaluated independently and in document order within each
+   phase. A rule's `action` and `response` override the category defaults, and
+   every rule must resolve to an effective action at load time. `ALLOW` stops
+   evaluation within its phase (`request`: forward; `response`: pass the upstream
+   response through unchanged); `BLOCK` responds and stops; `LOG` records the
+   match and continues evaluation. If no rule matches, the request or response
+   is passed through. Match conditions are combined with logical AND, while list
+   values are ORed within a field.
 2. **Hot reload safety:** A new configuration must be parsed and validated before it
    replaces the active one. Apply it atomically. If it is invalid, keep the last
    known good configuration and log the error.

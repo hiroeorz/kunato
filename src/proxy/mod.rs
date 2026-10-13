@@ -1,6 +1,7 @@
 pub mod client;
 pub mod forward;
 pub mod http3;
+pub mod response;
 pub mod server;
 pub mod tls;
 pub mod websocket;

@@ -16,7 +16,8 @@ pub mod watcher;
 
 use crate::error::Error;
 use crate::rules::matcher::{
-    Matcher, PayloadMatcher, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH, TARGET_QUERY,
+    Matcher, PayloadMatcher, StatusRange, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH,
+    TARGET_QUERY, TARGET_RESPONSE_BODY,
 };
 
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
@@ -40,6 +41,23 @@ impl Action {
             Self::Block => "BLOCK",
             Self::Allow => "ALLOW",
             Self::Log => "LOG",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    #[default]
+    Request,
+    Response,
+}
+
+impl Phase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
         }
     }
 }
@@ -83,6 +101,24 @@ pub struct MatchSpec {
     pub targets: Option<Vec<String>>,
     #[serde(default, deserialize_with = "de_opt_string_or_seq")]
     pub regex: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "de_opt_statuses")]
+    pub status: Option<Vec<StatusItem>>,
+    #[serde(default)]
+    pub response_headers: Option<BTreeMap<String, StringOrSeq>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StatusItem {
+    Code(u16),
+    Text(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StatusItems {
+    One(StatusItem),
+    Many(Vec<StatusItem>),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +145,8 @@ pub struct CategorySpec {
     pub description: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub phase: Phase,
     #[serde(default)]
     pub action: Option<Action>,
     #[serde(default)]
@@ -201,6 +239,8 @@ pub struct LimitsSpec {
     pub max_headers: usize,
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    #[serde(default = "default_max_body_bytes")]
+    pub max_response_body_bytes: usize,
 }
 
 impl Default for LimitsSpec {
@@ -210,6 +250,7 @@ impl Default for LimitsSpec {
             max_header_bytes: default_max_header_bytes(),
             max_headers: default_max_headers(),
             max_body_bytes: default_max_body_bytes(),
+            max_response_body_bytes: default_max_body_bytes(),
         }
     }
 }
@@ -421,6 +462,7 @@ pub struct Limits {
     pub max_header_bytes: usize,
     pub max_headers: usize,
     pub max_body_bytes: usize,
+    pub max_response_body_bytes: usize,
 }
 
 impl From<&LimitsSpec> for Limits {
@@ -430,6 +472,7 @@ impl From<&LimitsSpec> for Limits {
             max_header_bytes: spec.max_header_bytes,
             max_headers: spec.max_headers,
             max_body_bytes: spec.max_body_bytes,
+            max_response_body_bytes: spec.max_response_body_bytes,
         }
     }
 }
@@ -576,9 +619,18 @@ pub struct CompiledConfig {
     pub response_headers: ResponseHeaders,
 }
 
+impl CompiledConfig {
+    pub fn has_response_rules(&self) -> bool {
+        self.categories
+            .iter()
+            .any(|category| category.phase == Phase::Response && !category.rules.is_empty())
+    }
+}
+
 #[derive(Debug)]
 pub struct CompiledCategory {
     pub name: String,
+    pub phase: Phase,
     pub action: Option<Action>,
     pub response: Option<ResponseSpec>,
     pub rules: Vec<CompiledRule>,
@@ -651,7 +703,8 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
                 validate_response(response, &rule_context, &mut issues);
             }
 
-            let matcher = compile_matcher(&rule.matcher, &rule_context, &mut issues);
+            let matcher =
+                compile_matcher(&rule.matcher, category.phase, &rule_context, &mut issues);
             let effective_action = rule.action.or(category.action);
             if category.enabled && rule.enabled && effective_action.is_none() {
                 issues.push(format!(
@@ -677,6 +730,7 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
 
         categories.push(CompiledCategory {
             name: category.name.clone(),
+            phase: category.phase,
             action: category.action,
             response: category.response.clone(),
             rules,
@@ -711,6 +765,7 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
         ("max_header_bytes", limits.max_header_bytes),
         ("max_headers", limits.max_headers),
         ("max_body_bytes", limits.max_body_bytes),
+        ("max_response_body_bytes", limits.max_response_body_bytes),
     ] {
         if value == 0 {
             issues.push(format!("limits.{name} must be greater than zero"));
@@ -933,7 +988,12 @@ fn compile_upstream(raw: &str, issues: &mut Vec<String>) -> Option<Upstream> {
     })
 }
 
-fn compile_matcher(spec: &MatchSpec, context: &str, issues: &mut Vec<String>) -> Matcher {
+fn compile_matcher(
+    spec: &MatchSpec,
+    phase: Phase,
+    context: &str,
+    issues: &mut Vec<String>,
+) -> Matcher {
     let mut matcher = Matcher::default();
     let mut has_condition = false;
 
@@ -983,13 +1043,38 @@ fn compile_matcher(spec: &MatchSpec, context: &str, issues: &mut Vec<String>) ->
         matcher.cookies = compile_cookie_matchers(map, context, issues);
     }
 
+    if let Some(items) = &spec.status {
+        has_condition = true;
+        if phase != Phase::Response {
+            issues.push(format!("{context}: `status` requires `phase: response`"));
+        } else {
+            matcher.statuses = compile_statuses(items, &format!("{context}: status"), issues);
+        }
+    }
+
+    if let Some(map) = &spec.response_headers {
+        has_condition = true;
+        if phase != Phase::Response {
+            issues.push(format!(
+                "{context}: `response_headers` requires `phase: response`"
+            ));
+        } else {
+            if map.is_empty() {
+                issues.push(format!("{context}: `response_headers` must not be empty"));
+            }
+            matcher.response_headers =
+                compile_header_matchers(map, &format!("{context}: response_headers"), issues);
+        }
+    }
+
     match &spec.regex {
         Some(patterns) => {
             has_condition = true;
             if patterns.is_empty() {
                 issues.push(format!("{context}: `regex` must not be empty"));
             }
-            matcher.payload = compile_payload(patterns, spec.targets.as_deref(), context, issues);
+            matcher.payload =
+                compile_payload(patterns, spec.targets.as_deref(), phase, context, issues);
         }
         None => {
             if spec.targets.is_some() {
@@ -1010,6 +1095,7 @@ fn compile_matcher(spec: &MatchSpec, context: &str, issues: &mut Vec<String>) ->
 fn compile_payload(
     patterns: &[String],
     targets: Option<&[String]>,
+    phase: Phase,
     context: &str,
     issues: &mut Vec<String>,
 ) -> Option<PayloadMatcher> {
@@ -1027,10 +1113,20 @@ fn compile_payload(
                     "body" => target_flags |= TARGET_BODY,
                     "cookies" => target_flags |= TARGET_COOKIES,
                     "headers" => target_flags |= TARGET_HEADERS,
+                    "response_body" => {
+                        if phase == Phase::Response {
+                            target_flags |= TARGET_RESPONSE_BODY;
+                        } else {
+                            issues.push(format!(
+                                "{context}: `in` target `response_body` requires `phase: response`"
+                            ));
+                        }
+                    }
                     other => issues.push(format!("{context}: unknown `in` target `{other}`")),
                 }
             }
         }
+        None if phase == Phase::Response => target_flags = TARGET_RESPONSE_BODY,
         None => target_flags = TARGET_QUERY | TARGET_BODY | TARGET_COOKIES,
     }
 
@@ -1094,6 +1190,83 @@ fn compile_networks(values: &[String], context: &str, issues: &mut Vec<String>) 
         }
     }
     networks
+}
+
+fn compile_statuses(
+    items: &[StatusItem],
+    context: &str,
+    issues: &mut Vec<String>,
+) -> Vec<StatusRange> {
+    if items.is_empty() {
+        issues.push(format!("{context}: `status` must not be empty"));
+    }
+    if items.len() > MAX_PATTERNS_PER_RULE {
+        issues.push(format!(
+            "{context}: too many status entries (max {MAX_PATTERNS_PER_RULE})"
+        ));
+    }
+
+    let mut ranges = Vec::new();
+    for item in items.iter().take(MAX_PATTERNS_PER_RULE) {
+        match item {
+            StatusItem::Code(code) => match status_code_range(*code) {
+                Some(range) => ranges.push(range),
+                None => issues.push(format!("{context}: invalid status code {code}")),
+            },
+            StatusItem::Text(text) => match parse_status_range(text) {
+                Ok(range) => ranges.push(range),
+                Err(message) => issues.push(format!("{context}: {message}")),
+            },
+        }
+    }
+    ranges
+}
+
+fn parse_status_range(text: &str) -> Result<StatusRange, String> {
+    let trimmed = text.trim();
+
+    if trimmed.len() == 3 {
+        let bytes = trimmed.as_bytes();
+        let is_class =
+            (bytes[1] == b'x' || bytes[1] == b'X') && (bytes[2] == b'x' || bytes[2] == b'X');
+        if is_class {
+            if !(b'1'..=b'5').contains(&bytes[0]) {
+                return Err(format!("invalid status class `{trimmed}`"));
+            }
+            let start = u16::from(bytes[0] - b'0') * 100;
+            return Ok(StatusRange {
+                start,
+                end: start + 99,
+            });
+        }
+    }
+
+    if let Some((start, end)) = trimmed.split_once('-') {
+        let start: u16 = start
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid status range `{trimmed}`"))?;
+        let end: u16 = end
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid status range `{trimmed}`"))?;
+        if !(100..=599).contains(&start) || !(100..=599).contains(&end) || start > end {
+            return Err(format!("invalid status range `{trimmed}`"));
+        }
+        return Ok(StatusRange { start, end });
+    }
+
+    let code: u16 = trimmed
+        .parse()
+        .map_err(|_| format!("invalid status `{trimmed}`"))?;
+    status_code_range(code).ok_or_else(|| format!("invalid status `{trimmed}`"))
+}
+
+fn status_code_range(code: u16) -> Option<StatusRange> {
+    (100..=599).contains(&code).then_some(StatusRange {
+        start: code,
+        end: code,
+    })
 }
 
 fn parse_ip_net(value: &str) -> Result<IpNet, String> {
@@ -1207,6 +1380,17 @@ where
 {
     let value = Option::<StringOrSeq>::deserialize(deserializer)?;
     Ok(value.map(StringOrSeq::into_vec))
+}
+
+fn de_opt_statuses<'de, D>(deserializer: D) -> Result<Option<Vec<StatusItem>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<StatusItems>::deserialize(deserializer)?;
+    Ok(value.map(|items| match items {
+        StatusItems::One(item) => vec![item],
+        StatusItems::Many(items) => items,
+    }))
 }
 
 #[cfg(test)]
@@ -1569,6 +1753,137 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
             .expect("example configuration must stay valid");
         assert!(!config.categories.is_empty());
         assert!(config.admin.enabled);
+    }
+
+    #[test]
+    fn parses_response_phase_rules() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: response-leaks
+    phase: response
+    action: BLOCK
+    rules:
+      - name: server-errors
+        match: { status: [500-599], response_headers: { Server: '(?i)apache' } }
+      - name: leaked-secret
+        match: { regex: 'BEGIN RSA PRIVATE KEY', in: [response_body] }
+      - name: default-target
+        match: { regex: 'stack trace' }
+",
+        )
+        .expect("valid config");
+        let category = &config.categories[0];
+        assert_eq!(category.phase, Phase::Response);
+        assert!(config.has_response_rules());
+        assert_eq!(category.rules[0].matcher.statuses.len(), 1);
+        assert!(category.rules[0].matcher.statuses[0].contains(503));
+        assert_eq!(category.rules[0].matcher.response_headers.len(), 1);
+        assert_eq!(
+            category.rules[1]
+                .matcher
+                .payload
+                .as_ref()
+                .map(|p| p.targets),
+            Some(TARGET_RESPONSE_BODY)
+        );
+        assert_eq!(
+            category.rules[2]
+                .matcher
+                .payload
+                .as_ref()
+                .map(|p| p.targets),
+            Some(TARGET_RESPONSE_BODY)
+        );
+    }
+
+    #[test]
+    fn request_only_config_has_no_response_rules() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert!(!config.has_response_rules());
+    }
+
+    #[test]
+    fn rejects_response_conditions_in_request_phase() {
+        for match_spec in [
+            "status: [500]",
+            "response_headers: { Server: nginx }",
+            "regex: leak, in: [response_body]",
+        ] {
+            let error = parse_with(
+                BASE,
+                &format!(
+                    "categories:
+  - name: broken
+    action: BLOCK
+    rules:
+      - name: rule
+        match: {{ {match_spec} }}
+"
+                ),
+            )
+            .expect_err("must fail");
+            assert!(
+                error.to_string().contains("phase: response"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_status_matchers() {
+        for status in ["[99]", "[600]", "[500-400]", "[nope]", "[5xy]"] {
+            let error = parse_with(
+                BASE,
+                &format!(
+                    "categories:
+  - name: broken
+    phase: response
+    action: BLOCK
+    rules:
+      - name: rule
+        match: {{ status: {status} }}
+"
+                ),
+            )
+            .expect_err("must fail");
+            assert!(
+                error.to_string().contains("status"),
+                "unexpected error for {status}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_status_classes_and_scalars() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: errors
+    phase: response
+    action: LOG
+    rules:
+      - name: class
+        match: { status: 5xx }
+      - name: scalar
+        match: { status: 404 }
+",
+        )
+        .expect("valid config");
+        let class = &config.categories[0].rules[0].matcher.statuses[0];
+        assert_eq!((class.start, class.end), (500, 599));
+        let scalar = &config.categories[0].rules[1].matcher.statuses[0];
+        assert_eq!((scalar.start, scalar.end), (404, 404));
+    }
+
+    #[test]
+    fn default_response_body_limit_matches_request_limit() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert_eq!(config.limits.max_response_body_bytes, 1024 * 1024);
+
+        let error =
+            parse_with(BASE, "limits: { max_response_body_bytes: 0 }\n").expect_err("must fail");
+        assert!(error.to_string().contains("max_response_body_bytes"));
     }
 
     #[test]

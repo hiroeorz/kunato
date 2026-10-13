@@ -586,8 +586,21 @@ async fn process(
         return result;
     }
 
-    let result =
-        forward::forward_request(&context.client, config, parts, body, peer, context.scheme).await;
+    let result = forward::forward_request(
+        &context.client,
+        config,
+        &parts,
+        body.clone(),
+        peer,
+        context.scheme,
+    )
+    .await;
     record_upstream_error(context, &result);
-    result
+    let response = result?;
+
+    if !config.has_response_rules() {
+        return Ok(response);
+    }
+
+    crate::proxy::response::inspect(config, &context.metrics, &parts, &body, peer, response).await
 }

@@ -70,7 +70,7 @@ pub fn block_response(spec: &ResponseSpec) -> Response<ProxyBody> {
 pub async fn forward_request(
     client: &UpstreamClient,
     config: &CompiledConfig,
-    parts: http::request::Parts,
+    parts: &http::request::Parts,
     body: Bytes,
     peer: SocketAddr,
     scheme: &'static str,
@@ -87,7 +87,7 @@ pub async fn forward_request(
     })?;
 
     let mut request = Request::new(Full::new(body));
-    *request.method_mut() = parts.method;
+    *request.method_mut() = parts.method.clone();
     *request.uri_mut() = uri;
     *request.version_mut() = Version::HTTP_11;
     copy_forward_headers(&parts.headers, request.headers_mut());

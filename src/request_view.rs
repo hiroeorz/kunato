@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 
 use http::header::{COOKIE, HeaderMap};
-use http::{Method, Uri};
+use http::{Method, StatusCode, Uri};
 
 pub struct RequestView<'a> {
     pub method: &'a Method,
@@ -34,6 +34,29 @@ impl<'a> RequestView<'a> {
             headers,
             body,
             source_ip,
+        }
+    }
+}
+
+pub struct ResponseView<'a> {
+    pub status: StatusCode,
+    pub headers: &'a HeaderMap,
+    pub body: &'a [u8],
+    pub body_truncated: bool,
+}
+
+impl<'a> ResponseView<'a> {
+    pub fn new(
+        status: StatusCode,
+        headers: &'a HeaderMap,
+        body: &'a [u8],
+        body_truncated: bool,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+            body_truncated,
         }
     }
 }

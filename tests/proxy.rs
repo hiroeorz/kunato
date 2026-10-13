@@ -1113,3 +1113,152 @@ async fn unreachable_upstream_returns_bad_gateway() {
 
     running.stop().await;
 }
+
+#[tokio::test]
+async fn response_rule_blocks_matching_upstream_body() {
+    let upstream = spawn_upstream(StatusCode::OK, "prefix <script>alert(1)</script>").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: response-xss
+    phase: response
+    action: BLOCK
+    rules:
+      - name: reflected-script
+        match: {{ path: ^/admin, regex: '(?i)<script', in: [response_body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body, "Forbidden");
+
+    let (status, body) = send(running.addr, Method::GET, "/public", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "prefix <script>alert(1)</script>");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_log_rule_passes_through() {
+    let upstream = spawn_upstream(StatusCode::OK, "the secret is out").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: response-leak
+    phase: response
+    action: LOG
+    rules:
+      - name: leaked-secret
+        match: {{ regex: secret }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "the secret is out");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_rule_matches_status_and_headers() {
+    let upstream = spawn_identifying_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: identifying-responses
+    phase: response
+    action: BLOCK
+    rules:
+      - name: versioned-server
+        match:
+          status: 2xx
+          response_headers: {{ server: '(?i)upstream/' }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn payload_after_prefix_limit_is_forwarded() {
+    let upstream = spawn_upstream(StatusCode::OK, "safe <script>alert(1)</script>").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_response_body_bytes: 4 }}
+categories:
+  - name: response-xss
+    phase: response
+    action: BLOCK
+    rules:
+      - name: reflected-script
+        match: {{ regex: '(?i)<script' }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "safe <script>alert(1)</script>");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn prefix_hit_blocks_response_larger_than_limit() {
+    let upstream = spawn_upstream(StatusCode::OK, "evil script follows here").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_response_body_bytes: 8 }}
+categories:
+  - name: response-xss
+    phase: response
+    action: BLOCK
+    rules:
+      - name: reflected-script
+        match: {{ regex: evil }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_rule_blocks_over_h2c() {
+    let upstream = spawn_upstream(StatusCode::OK, "the secret is out").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: response-leak
+    phase: response
+    action: BLOCK
+    rules:
+      - name: leaked-secret
+        match: {{ regex: secret }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_h2c(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}

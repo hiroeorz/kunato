@@ -8,6 +8,9 @@ pub struct Metrics {
     pub requests: AtomicU64,
     pub blocked: AtomicU64,
     pub logged: AtomicU64,
+    pub response_blocked: AtomicU64,
+    pub response_logged: AtomicU64,
+    pub response_truncated: AtomicU64,
     pub rate_limited: AtomicU64,
     pub banned: AtomicU64,
     pub overloaded: AtomicU64,
@@ -24,6 +27,9 @@ impl Metrics {
             requests: AtomicU64::new(0),
             blocked: AtomicU64::new(0),
             logged: AtomicU64::new(0),
+            response_blocked: AtomicU64::new(0),
+            response_logged: AtomicU64::new(0),
+            response_truncated: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             banned: AtomicU64::new(0),
             overloaded: AtomicU64::new(0),
@@ -54,6 +60,24 @@ impl Metrics {
             "kunato_logged_total",
             "Requests with at least one LOG rule match.",
             self.logged.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_response_blocked_total",
+            "Upstream responses replaced by BLOCK rules.",
+            self.response_blocked.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_response_logged_total",
+            "Responses with at least one LOG rule match.",
+            self.response_logged.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_response_truncated_total",
+            "Response bodies truncated for inspection.",
+            self.response_truncated.load(Ordering::Relaxed),
         );
         counter(
             &mut out,

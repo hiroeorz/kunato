@@ -3,13 +3,26 @@ use http::header::HeaderName;
 use ipnet::IpNet;
 use regex::Regex;
 
-use crate::request_view::{RequestView, cookie_pairs};
+use crate::request_view::{RequestView, ResponseView, cookie_pairs};
 
 pub const TARGET_PATH: u8 = 1 << 0;
 pub const TARGET_QUERY: u8 = 1 << 1;
 pub const TARGET_BODY: u8 = 1 << 2;
 pub const TARGET_COOKIES: u8 = 1 << 3;
 pub const TARGET_HEADERS: u8 = 1 << 4;
+pub const TARGET_RESPONSE_BODY: u8 = 1 << 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusRange {
+    pub start: u16,
+    pub end: u16,
+}
+
+impl StatusRange {
+    pub fn contains(self, status: u16) -> bool {
+        (self.start..=self.end).contains(&status)
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Matcher {
@@ -18,6 +31,8 @@ pub struct Matcher {
     pub source_ips: Option<Vec<IpNet>>,
     pub headers: Vec<(HeaderName, Vec<Regex>)>,
     pub cookies: Vec<(String, Vec<Regex>)>,
+    pub statuses: Vec<StatusRange>,
+    pub response_headers: Vec<(HeaderName, Vec<Regex>)>,
     pub payload: Option<PayloadMatcher>,
 }
 
@@ -29,6 +44,38 @@ pub struct PayloadMatcher {
 
 impl Matcher {
     pub fn matches(&self, view: &RequestView<'_>) -> bool {
+        self.matches_request(view) && self.matches_payload(view, None)
+    }
+
+    pub fn matches_response(&self, view: &RequestView<'_>, response: &ResponseView<'_>) -> bool {
+        if !self.matches_request(view) {
+            return false;
+        }
+
+        if !self.statuses.is_empty()
+            && !self
+                .statuses
+                .iter()
+                .any(|range| range.contains(response.status.as_u16()))
+        {
+            return false;
+        }
+
+        for (name, regexes) in &self.response_headers {
+            let matched = response.headers.get_all(name).iter().any(|value| {
+                value
+                    .to_str()
+                    .is_ok_and(|value| regexes.iter().any(|re| re.is_match(value)))
+            });
+            if !matched {
+                return false;
+            }
+        }
+
+        self.matches_payload(view, Some(response))
+    }
+
+    fn matches_request(&self, view: &RequestView<'_>) -> bool {
         if !self.paths.is_empty() {
             let matched = self
                 .paths
@@ -75,18 +122,19 @@ impl Matcher {
             }
         }
 
-        if let Some(payload) = &self.payload
-            && !payload.matches(view)
-        {
-            return false;
-        }
-
         true
+    }
+
+    fn matches_payload(&self, view: &RequestView<'_>, response: Option<&ResponseView<'_>>) -> bool {
+        let Some(payload) = &self.payload else {
+            return true;
+        };
+        payload.matches(view, response)
     }
 }
 
 impl PayloadMatcher {
-    fn matches(&self, view: &RequestView<'_>) -> bool {
+    fn matches(&self, view: &RequestView<'_>, response: Option<&ResponseView<'_>>) -> bool {
         if self.targets & TARGET_PATH != 0
             && (self.hits(view.path) || self.hits(&view.decoded_path))
         {
@@ -127,6 +175,14 @@ impl PayloadMatcher {
             return true;
         }
 
+        if self.targets & TARGET_RESPONSE_BODY != 0
+            && let Some(response) = response
+            && !response.body.is_empty()
+            && self.hits(&String::from_utf8_lossy(response.body))
+        {
+            return true;
+        }
+
         false
     }
 
@@ -137,7 +193,7 @@ impl PayloadMatcher {
 
 #[cfg(test)]
 mod tests {
-    use http::{HeaderMap, HeaderValue, Method, Uri};
+    use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 
     use super::*;
 
@@ -245,5 +301,94 @@ mod tests {
             &headers,
             b"x=<script>alert(1)</script>"
         )));
+    }
+
+    #[test]
+    fn response_status_range_is_matched() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let response_headers = HeaderMap::new();
+        let matcher = Matcher {
+            statuses: vec![StatusRange {
+                start: 500,
+                end: 599,
+            }],
+            ..Matcher::default()
+        };
+        let request = view(&method, &uri, &headers, b"");
+        let response = ResponseView::new(StatusCode::BAD_GATEWAY, &response_headers, b"", false);
+        assert!(matcher.matches_response(&request, &response));
+
+        let response = ResponseView::new(StatusCode::OK, &response_headers, b"", false);
+        assert!(!matcher.matches_response(&request, &response));
+    }
+
+    #[test]
+    fn response_header_condition_is_matched() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert("server", HeaderValue::from_static("Apache/2.4.1"));
+        let matcher = Matcher {
+            response_headers: vec![(
+                HeaderName::from_static("server"),
+                vec![regex(r"(?i)apache")],
+            )],
+            ..Matcher::default()
+        };
+        let request = view(&method, &uri, &headers, b"");
+        let response = ResponseView::new(StatusCode::OK, &response_headers, b"", false);
+        assert!(matcher.matches_response(&request, &response));
+    }
+
+    #[test]
+    fn response_body_target_scans_response_body() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let response_headers = HeaderMap::new();
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)segmentation fault")],
+                targets: TARGET_RESPONSE_BODY,
+            }),
+            ..Matcher::default()
+        };
+        let request = view(&method, &uri, &headers, b"segmentation fault");
+        let response = ResponseView::new(StatusCode::OK, &response_headers, b"all good", false);
+        assert!(!matcher.matches_response(&request, &response));
+
+        let response = ResponseView::new(
+            StatusCode::OK,
+            &response_headers,
+            b"warning: Segmentation fault",
+            false,
+        );
+        assert!(matcher.matches_response(&request, &response));
+    }
+
+    #[test]
+    fn response_matcher_still_applies_request_conditions() {
+        let method = Method::GET;
+        let uri: Uri = "/admin".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let response_headers = HeaderMap::new();
+        let matcher = Matcher {
+            paths: vec![regex("^/admin")],
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("leak")],
+                targets: TARGET_RESPONSE_BODY,
+            }),
+            ..Matcher::default()
+        };
+        let request = view(&method, &uri, &headers, b"");
+        let response = ResponseView::new(StatusCode::OK, &response_headers, b"leak", false);
+        assert!(matcher.matches_response(&request, &response));
+
+        let uri: Uri = "/public".parse().expect("valid URI");
+        let request = view(&method, &uri, &headers, b"");
+        assert!(!matcher.matches_response(&request, &response));
     }
 }
