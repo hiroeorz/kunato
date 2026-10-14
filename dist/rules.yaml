@@ -1079,6 +1079,26 @@ categories:
       - name: common-admin-paths
         match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$))', in: [path] }
 
+  # Request signatures for the 2026-10 KEV intake: pre-auth RCE, deserialization,
+  # and command-injection paths with published request shapes.
+  - name: cve-2026-10-signatures
+    action: BLOCK
+    rules:
+      # CVE-2025-55182 (React Server Components, "React2Shell"): the Flight
+      # protocol deserializes a multipart Server Function payload whose root
+      # object sets a "then" of $N:__proto__:then and reaches Function through
+      # :constructor:constructor.
+      - name: react-rsc-flight-deserialization
+        match: { regex: '(?i)(__proto__:then|\$\d+:constructor:constructor|"status"\s*:\s*"resolved_model")', in: [body] }
+      # CVE-2025-26399 (SolarWinds Web Help Desk): unauthenticated Java
+      # deserialization through the AjaxProxy WebObjects action.
+      - name: solarwinds-whd-ajaxproxy
+        match: { path: '(?i)^/helpdesk/WebObjects/Helpdesk\.woa/wa/AjaxProxy', regex: '(?i)(javaclass|java\.lang\.|@class)', in: [body, query] }
+      # CVE-2026-105134 (Ahsay AhsayCBS): OS command injection in the
+      # Replication Receiver random argument.
+      - name: ahsay-updatereceivers-command
+        match: { path: '(?i)^/rps/api/json/UpdateReceivers\.do$', regex: '(?i)random[^&]{0,40}(;|\||&&|\$\(|`)', in: [body, query] }
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes as received
   # (compressed bodies are not decompressed); when the limit is reached the

