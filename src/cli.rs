@@ -8,6 +8,7 @@ use crate::error::Error;
 pub const DEFAULT_RULES_URL: &str =
     "https://raw.githubusercontent.com/hiroeorz/kunato/main/dist/rules.yaml";
 pub const DEFAULT_RULES_FILE: &str = "/var/lib/kunato/rules.yaml";
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
 
 #[derive(Debug, Parser)]
 #[command(name = "kunato", version, about = "Personal-use WAF reverse proxy")]
@@ -16,7 +17,7 @@ pub struct Cli {
     #[arg(
         short,
         long,
-        default_value = "rules.yaml",
+        default_value = DEFAULT_CONFIG_PATH,
         value_name = "PATH",
         global = true
     )]
@@ -212,6 +213,15 @@ mod tests {
         let text = args.render().expect("render");
         let compiled = config::parse(&text).expect("generated config must be valid");
         assert!(compiled.tls.is_none());
+    }
+
+    #[test]
+    fn config_defaults_to_the_installed_path() {
+        let cli = Cli::try_parse_from(["kunato"]).expect("parse");
+        assert_eq!(cli.config, PathBuf::from(DEFAULT_CONFIG_PATH));
+
+        let cli = Cli::try_parse_from(["kunato", "--config", "local.yaml"]).expect("parse");
+        assert_eq!(cli.config, PathBuf::from("local.yaml"));
     }
 
     #[test]

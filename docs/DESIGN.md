@@ -383,7 +383,7 @@ Default limits:
 
 ## 10. CLI and Deployment
 
-- Usage: `kunato --config <path>` (default `rules.yaml`).
+- Usage: `kunato --config <path>` (default `/etc/kunato/kunato.yaml`).
 - Flags: `--config`, `--validate` (parse/validate and exit, for CI and manual
   checks), `--disable-protection` (turn off DoS/DDoS protection for load and
   black-box testing), `--log-level`, `--log-format`, `--version`.

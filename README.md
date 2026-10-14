@@ -107,7 +107,7 @@ The service starts automatically. Confirm it is running, then edit
 systemctl status kunato
 sudo journalctl -u kunato -e
 curl -s http://127.0.0.1:9090/metrics | head
-sudo kunato validate --config /etc/kunato/kunato.yaml
+sudo kunato validate
 ```
 
 Rerunning the installer upgrades the binary and unit while keeping the
@@ -131,9 +131,9 @@ default 10%) Kunato:
 
 Any failure (network, checksum mismatch, invalid rules, size limit) leaves the
 current rules active; failures are logged and counted in the
-`kunato_rules_update_*` metrics. `kunato update-rules --config
-/etc/kunato/kunato.yaml` performs a single check and exits, and is what the
-installer uses for the first download. The full field reference lives in
+`kunato_rules_update_*` metrics. `kunato update-rules` performs a single check
+and exits, and is what the installer uses for the first download. The full field
+reference lives in
 [Rule sources and updates](#rule-sources-and-updates).
 
 Local changes are never overwritten: exemptions and rule disables belong in
@@ -283,17 +283,19 @@ cargo build --release --target x86_64-unknown-linux-musl
 Install the binary to `/usr/local/bin/kunato`, generate a configuration with
 `kunato init --upstream <url> --tls-cert <pem> --tls-key <pem> --output
 /etc/kunato/kunato.yaml`, download the first rules file with `kunato
-update-rules --config /etc/kunato/kunato.yaml`, and enable
-`packaging/kunato.service`. `rules.example.yaml` is a practical starting point
-with rules for SQL/NoSQL injection, XSS, path traversal, command injection, SSRF,
-XXE, malicious uploads, scanners, sensitive files, and more. Tagging a release
+update-rules`, and enable `packaging/kunato.service`. `rules.example.yaml` is a
+practical starting point with rules for SQL/NoSQL injection, XSS, path traversal,
+command injection, SSRF, XXE, malicious uploads, scanners, sensitive files, and
+more. Tagging a release
 (`v*`) builds and uploads static musl tarballs, checksums, and the installer
 through GitHub Actions.
 
 ## Configuration
 
 Kunato is configured through a single YAML file. The file defines where Kunato
-listens, which upstream server it forwards to, and a list of rule **categories**:
+listens, which upstream server it forwards to, and a list of rule **categories**.
+All commands read `/etc/kunato/kunato.yaml` by default; pass `--config PATH` to
+use a different file (for example `rules.example.yaml` when running from source):
 
 - `listen` — address and port to bind.
 - `upstream` — base URL of the upstream HTTP server.
@@ -474,8 +476,8 @@ atomically, and lets the hot reload path apply it. Any failure — network,
 checksum mismatch, invalid rules, size limit — leaves the current rules
 untouched and is reported in the logs and metrics. The updater state (last
 success, HTTP validators) is stored next to the rules file.
-`kunato update-rules --config kunato.yaml` performs a single check and exits;
-the installer uses it for the first download.
+`kunato update-rules` performs a single check and exits; the installer uses it
+for the first download.
 
 The SHA256 digest guards against corrupted or truncated downloads; it is
 fetched over the same TLS connection as the rules file, so it does not add
