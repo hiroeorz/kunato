@@ -1,0 +1,184 @@
+# Daily CVE rule update.
+#
+# Fetches the NVD eight-day delta, runs an OpenCode agent over the daily watch
+# skills, then verifies every gate deterministically and commits to main only
+# when everything is green.
+#
+# Required repository secrets:
+#   OPENCODE_API_KEY  OpenCode Go API key used by `opencode run`.
+# Optional:
+#   NVD_API_KEY       Raises the NVD API rate limit for backfill runs.
+#
+# Test with a manual workflow_dispatch run first; enable "dry run" to stop
+# before the commit and push. The agent never receives the push token.
+
+name: Daily CVE update
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: OpenCode model as provider/model
+        required: false
+        default: ""
+      since:
+        description: Backfill start date for the NVD API (YYYY-MM-DD)
+        required: false
+        default: ""
+      dry_run:
+        description: Run every step but skip the commit and push
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-cve
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MODEL: ${{ inputs.model || 'opencode-go/deepseek-v4.1-flash' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the NVD delta
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SINCE:-}" ]; then
+            ./scripts/fetch-cve-delta.sh --out target/cve-delta \
+              --since "$SINCE" --min-cvss 7.0 --attack-vector N
+          else
+            ./scripts/fetch-cve-delta.sh --out target/cve-delta \
+              --min-cvss 7.0 --attack-vector N
+          fi
+
+      - name: Upload the candidate list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cve-candidates
+          path: |
+            target/cve-delta/candidates.md
+            target/cve-delta/candidates.jsonl
+          if-no-files-found: warn
+
+      - name: Install opencode
+        run: |
+          set -euo pipefail
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Run the daily CVE agent
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          set -euo pipefail
+          opencode run --auto --model "$MODEL" "$(cat .github/prompts/daily-cve.md)" 2>&1 \
+            | tee "$RUNNER_TEMP/opencode.log"
+
+      - name: Check the change allowlist
+        run: |
+          set -euo pipefail
+          {
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } | sort -u > "$RUNNER_TEMP/changed.txt"
+          cat "$RUNNER_TEMP/changed.txt"
+          status=0
+          while IFS= read -r path; do
+            case "$path" in
+              blackbox/requests/blocked.txt | blackbox/requests/allowed.txt | \
+                rules.example.yaml | dist/rules.yaml | dist/rules.yaml.sha256 | \
+                docs/cve-coverage.md) ;;
+              *)
+                echo "::error::unexpected change: $path"
+                status=1
+                ;;
+            esac
+          done < "$RUNNER_TEMP/changed.txt"
+          exit "$status"
+
+      - name: Regenerate the managed rule set
+        run: scripts/update-dist-rules.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Check blackbox formatting
+        run: cargo fmt --manifest-path blackbox/Cargo.toml --check
+
+      - name: Lint blackbox
+        run: cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
+
+      - name: Validate the example rules
+        run: |
+          set -euo pipefail
+          cargo build --release
+          ./target/release/kunato --config rules.example.yaml --validate
+
+      - name: Run the black-box test
+        run: scripts/blackbox-test.sh --color never --workdir "$RUNNER_TEMP/kunato-blackbox"
+
+      - name: Save the patch artifact
+        if: always()
+        run: |
+          git add -N .
+          git diff --binary > "$RUNNER_TEMP/daily-cve.patch" || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-cve-diagnostics
+          path: |
+            ${{ runner.temp }}/daily-cve.patch
+            ${{ runner.temp }}/opencode.log
+            ${{ runner.temp }}/changed.txt
+            ${{ runner.temp }}/kunato-blackbox/*.log
+          if-no-files-found: warn
+
+      - name: Commit and push
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update CVE rules and corpus" -m "Automated daily CVE intake."
+          git remote set-url origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
