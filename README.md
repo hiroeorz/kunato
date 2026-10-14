@@ -26,6 +26,10 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Categorized rule sets** — Rules are grouped into named categories (for example
   `sql-injection` or `xss`). Each category defines a default action, and individual
   rules can override it.
+- **Daily CVE-driven rule updates** — An optional updater automatically refreshes
+  the managed rule set once a day with signatures for the latest exploited CVEs,
+  using conditional requests, SHA256 verification, and full validation before an
+  atomic swap.
 - **Response header rewriting** — Removes or replaces identifying response headers
   such as `Server` and `X-Powered-By` on upstream responses and Kunato's own
   block/error responses alike.
@@ -44,9 +48,6 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Guided install** — One `curl | sudo sh` command installs the static binary,
   the systemd service, the configuration, and the initial rule set on a Linux
   server.
-- **Managed rule set with daily updates** — An optional updater refreshes the rule
-  file once a day using conditional requests, SHA256 verification, and full
-  validation before an atomic swap.
 - **DoS / DDoS detection and mitigation** — Detects abnormal request patterns and
   automatically throttles or blocks abusive sources.
 - **Simple deployment** — One binary and one YAML configuration file. No database,
@@ -735,6 +736,15 @@ run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo deny check`
 and `cargo test`.
 
 ## License
+
+Kunato is provided "as is", without warranty of any kind, express or implied,
+including but not limited to the warranties of merchantability, fitness for a
+particular purpose, and non-infringement. In no event shall the authors or
+copyright holders be liable for any claim, damages, or other liability, whether
+in an action of contract, tort, or otherwise, arising from, out of, or in
+connection with the software or the use or other dealings in the software. You
+use it at your own risk, and you remain responsible for keeping your applications
+updated and securely configured.
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
