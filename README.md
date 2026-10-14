@@ -87,9 +87,9 @@ set:
 curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh | sudo sh
 ```
 
-The installer asks for the upstream URL and, when listening on `:443`, for a
-certificate and key. Pass every answer as a flag together with `--yes` for
-unattended installs:
+The installer asks for the upstream URL (default `http://127.0.0.1:3000`;
+press Enter to accept) and, when listening on `:443`, for a certificate and key.
+Pass every answer as a flag together with `--yes` for unattended installs:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh \

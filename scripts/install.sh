@@ -19,6 +19,7 @@ UNIT_PATH="/etc/systemd/system/kunato.service"
 
 VERSION="${KUNATO_VERSION:-}"
 UPSTREAM="${KUNATO_UPSTREAM:-}"
+DEFAULT_UPSTREAM="http://127.0.0.1:3000"
 LISTEN="0.0.0.0:443"
 TLS_CERT=""
 TLS_KEY=""
@@ -154,7 +155,11 @@ ask() {
         printf '%s' "$default"
         return
     fi
-    printf '%s' "$question" >/dev/tty
+    if [ -n "$default" ]; then
+        printf '%s [%s]: ' "$question" "$default" >/dev/tty
+    else
+        printf '%s: ' "$question" >/dev/tty
+    fi
     if IFS= read -r answer < /dev/tty; then
         :
     else
@@ -249,13 +254,15 @@ initialize_configuration() {
         log "keeping the existing configuration at $CONFIG_PATH"
     else
         if [ -z "$UPSTREAM" ]; then
-            UPSTREAM=$(ask "Upstream URL (for example http://127.0.0.1:3000): " "")
+            if [ "$ASSUME_YES" -eq 1 ] || [ ! -r /dev/tty ]; then
+                die "--upstream is required for a fresh install"
+            fi
+            UPSTREAM=$(ask "Upstream URL (the web server Kunato protects)" "$DEFAULT_UPSTREAM")
         fi
-        [ -n "$UPSTREAM" ] || die "--upstream is required for a fresh install"
         if [ -z "$TLS_CERT" ] && [ "$LISTEN" != "${LISTEN#*:443}" ]; then
-            TLS_CERT=$(ask "TLS certificate path (empty to listen without TLS): " "")
+            TLS_CERT=$(ask "TLS certificate path (empty to listen without TLS)" "")
             if [ -n "$TLS_CERT" ]; then
-                TLS_KEY=$(ask "TLS private key path: " "")
+                TLS_KEY=$(ask "TLS private key path" "")
                 [ -n "$TLS_KEY" ] || die "a private key is required when a certificate is configured"
                 copy_tls_material
             fi
