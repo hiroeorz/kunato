@@ -24,5 +24,6 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
       - run: cargo fmt --manifest-path blackbox/Cargo.toml --check
       - run: cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
+      - run: shellcheck scripts/install.sh scripts/update-dist-rules.sh
       - run: cargo build --release
       - run: cargo test

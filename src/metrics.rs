@@ -18,6 +18,10 @@ pub struct Metrics {
     pub upstream_timeouts: AtomicU64,
     pub reload_success: AtomicU64,
     pub reload_failure: AtomicU64,
+    pub rules_update_success: AtomicU64,
+    pub rules_update_failure: AtomicU64,
+    pub rules_update_not_modified: AtomicU64,
+    pub rules_last_success: AtomicU64,
 }
 
 impl Metrics {
@@ -37,6 +41,10 @@ impl Metrics {
             upstream_timeouts: AtomicU64::new(0),
             reload_success: AtomicU64::new(0),
             reload_failure: AtomicU64::new(0),
+            rules_update_success: AtomicU64::new(0),
+            rules_update_failure: AtomicU64::new(0),
+            rules_update_not_modified: AtomicU64::new(0),
+            rules_last_success: AtomicU64::new(0),
         }
     }
 
@@ -120,6 +128,30 @@ impl Metrics {
             "kunato_reload_failure_total",
             "Failed configuration reloads.",
             self.reload_failure.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_rules_update_success_total",
+            "Rules files downloaded and applied.",
+            self.rules_update_success.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_rules_update_failure_total",
+            "Failed rules file updates.",
+            self.rules_update_failure.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_rules_update_not_modified_total",
+            "Rules update checks that found no new version.",
+            self.rules_update_not_modified.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
+            "kunato_rules_last_success_timestamp_seconds",
+            "Unix time of the last successful rules update check.",
+            self.rules_last_success.load(Ordering::Relaxed),
         );
         gauge(
             &mut out,
