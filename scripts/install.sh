@@ -228,11 +228,13 @@ install_release() {
 
     log "extracting and installing $tarball"
     tar -xzf "$workdir/$tarball" -C "$workdir"
-    [ -f "$workdir/kunato" ] || die "archive does not contain the kunato binary"
-    install -m 0755 "$workdir/kunato" "$BIN_PATH"
+    binary=$(find "$workdir" -maxdepth 3 -type f -name kunato -print -quit)
+    [ -n "$binary" ] || die "archive does not contain the kunato binary"
+    install -m 0755 "$binary" "$BIN_PATH"
 
-    if [ -f "$workdir/kunato.service" ]; then
-        install -m 0644 "$workdir/kunato.service" "$UNIT_PATH"
+    unit=$(find "$workdir" -maxdepth 3 -type f -name kunato.service -print -quit)
+    if [ -n "$unit" ]; then
+        install -m 0644 "$unit" "$UNIT_PATH"
     elif [ ! -f "$UNIT_PATH" ]; then
         die "archive does not contain kunato.service and no unit file is installed"
     fi
