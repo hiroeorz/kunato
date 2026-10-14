@@ -221,7 +221,7 @@ install_release() {
     log "verifying the checksum"
     (
         cd "$workdir"
-        grep "  $tarball\$" SHA256SUMS > checksum.txt ||
+        grep -E "  (\./)?$tarball\$" SHA256SUMS > checksum.txt ||
             die "SHA256SUMS does not list $tarball"
         sha256sum -c checksum.txt
     )
