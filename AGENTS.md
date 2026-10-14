@@ -51,7 +51,7 @@ dist/
   rules.yaml.sha256
 examples/
   upstream.rs      # Manual test upstream with access logs
-scripts/           # curl installer, dist-rules regeneration, black-box test runner
+scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box test runner
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md        # Overall design
