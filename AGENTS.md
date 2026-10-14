@@ -46,10 +46,13 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
+dist/
+  rules.yaml       # Managed rule set for daily updates (generated; keep in sync)
+  rules.yaml.sha256
 examples/
   upstream.rs      # Manual test upstream with access logs
-scripts/           # One-command black-box test runner and colored report
-tests/             # Integration tests (mock upstream, reload scenarios)
+scripts/           # curl installer, dist-rules regeneration, black-box test runner
+tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md        # Overall design
 packaging/
@@ -66,6 +69,10 @@ evaluation, proxying, and protection logic must not bleed into each other.
 
 - The YAML config uses a two-level model: `categories` → `rules`. A category's
   `action` and `response` are defaults that individual rules may override.
+- Rules can also come from `rules_file` (managed, refreshed by `rules_update`)
+  and `overrides_file` (local exceptions plus `disabled_rules`). Evaluation order
+  is overrides → inline categories → rules file; the external files are
+  categories-only. Relative paths resolve against the config file's directory.
 - Categories carry a `phase` (`request` by default, or `response`). Response-phase
   rules match upstream status, response headers, and the response body prefix
   (`limits.max_response_body_bytes`); `status`, `response_headers`, and the

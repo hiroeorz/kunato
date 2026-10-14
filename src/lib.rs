@@ -8,4 +8,5 @@ pub mod protection;
 pub mod proxy;
 pub mod request_view;
 pub mod rules;
+pub mod rules_update;
 pub mod telemetry;

@@ -41,6 +41,12 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
   process or dropping connections.
 - **High fault tolerance** — Keeps serving with the last known good configuration,
   isolates failures, and avoids disrupting traffic during reloads.
+- **Guided install** — One `curl | sudo sh` command installs the static binary,
+  the systemd service, the configuration, and the initial rule set on a Linux
+  server.
+- **Managed rule set with daily updates** — An optional updater refreshes the rule
+  file once a day using conditional requests, SHA256 verification, and full
+  validation before an atomic swap.
 - **DoS / DDoS detection and mitigation** — Detects abnormal request patterns and
   automatically throttles or blocks abusive sources.
 - **Simple deployment** — One binary and one YAML configuration file. No database,
@@ -73,30 +79,105 @@ Client ──────►  ┌───────────────�
 
 ## Getting Started
 
-### Prerequisites
-
-- Rust 1.89 or later (edition 2024)
-
-### Build
+Kunato ships as a single static binary for Linux. On a server with systemd, one
+command installs the binary, the service, the configuration, and the initial rule
+set:
 
 ```sh
-git clone git@github.com:hiroeorz/kunato.git
-cd kunato
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh | sudo sh
 ```
 
-The binary is produced at `target/release/kunato`.
-
-### Run
+The installer asks for the upstream URL and, when listening on `:443`, for a
+certificate and key. Pass every answer as a flag together with `--yes` for
+unattended installs:
 
 ```sh
-./target/release/kunato --config rules.yaml
+curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh \
+  | sudo sh -s -- \
+      --upstream http://127.0.0.1:3000 \
+      --tls-cert /etc/letsencrypt/live/example.com/fullchain.pem \
+      --tls-key /etc/letsencrypt/live/example.com/privkey.pem \
+      --yes
 ```
+
+The service starts automatically. Confirm it is running, then edit
+`/etc/kunato/kunato.yaml`; changes are applied without a restart:
+
+```sh
+systemctl status kunato
+sudo journalctl -u kunato -e
+curl -s http://127.0.0.1:9090/metrics | head
+sudo kunato validate --config /etc/kunato/kunato.yaml
+```
+
+Rerunning the installer upgrades the binary and unit while keeping the
+configuration, and `--uninstall` removes them. See
+[Managed Rules and Automatic Updates](#managed-rules-and-automatic-updates) for
+what is refreshed after installation, and [Deployment](#deployment) for installer
+details and building from source.
+
+## Managed Rules and Automatic Updates
+
+The installer enables `rules_update`, so the rule set stays current without
+manual work. Every `interval` (default `24h`, randomized by `jitter_percent`,
+default 10%) Kunato:
+
+1. sends a conditional request (`If-None-Match` / `If-Modified-Since`) and stops
+   immediately on `304 Not Modified`;
+2. downloads the rule file and verifies its SHA256 digest against `checksum_url`;
+3. parses and fully validates it — regex compilation, ReDoS guards, action
+   resolution, size limits — before replacing anything;
+4. swaps the file in atomically, and the configuration watcher hot-reloads it.
+
+Any failure (network, checksum mismatch, invalid rules, size limit) leaves the
+current rules active; failures are logged and counted in the
+`kunato_rules_update_*` metrics. `kunato update-rules --config
+/etc/kunato/kunato.yaml` performs a single check and exits, and is what the
+installer uses for the first download. The full field reference lives in
+[Rule sources and updates](#rule-sources-and-updates).
+
+Local changes are never overwritten: exemptions and rule disables belong in
+`overrides_file` (`/etc/kunato/overrides.yaml` when configured), which is
+evaluated before the managed set. The updater writes exactly one file — the
+managed rules file — and nothing else.
+
+### Installed files and directories
+
+```text
+/
+├── usr/
+│   └── local/
+│       └── bin/
+│           └── kunato                         # binary (0755 root:root)
+├── etc/
+│   ├── systemd/
+│   │   └── system/
+│   │       ├── kunato.service                 # unit (0644)
+│   │       └── multi-user.target.wants/
+│   │           └── kunato.service -> ../kunato.service
+│   └── kunato/                                # settings (0750 root:kunato)
+│       ├── kunato.yaml                        # main configuration (0640 root:kunato)
+│       ├── overrides.yaml                     # only when configured (0640 root:kunato)
+│       └── tls/                               # only with --tls-cert/--tls-key (0750 root:kunato)
+│           ├── cert.pem                       # (0640 root:kunato)
+│           └── key.pem                        # (0640 root:kunato)
+└── var/
+    └── lib/
+        └── kunato/                            # StateDirectory (0750 kunato:kunato)
+            ├── rules.yaml                     # managed rule set (auto-updated)
+            └── rules.yaml.update-state        # updater bookkeeping (auto-updated)
+```
+
+Auto-updated: `/var/lib/kunato/rules.yaml` and its `rules.yaml.update-state`
+sidecar (last success timestamp, HTTP validators). Never touched by the updater:
+everything under `/etc/kunato/`. The service runs as the `kunato` user (created
+by the installer, no home directory) and only needs write access to
+`/var/lib/kunato/`.
 
 ## Trying It Locally
 
-The repository includes a small example upstream that logs every request to
-stdout:
+Running from source requires Rust 1.89 or later (edition 2024). The repository
+includes a small example upstream that logs every request to stdout:
 
 ```sh
 cargo run --example upstream -- --listen 127.0.0.1:3000
@@ -157,7 +238,41 @@ at the end of the list instead.
 
 ## Deployment
 
-Kunato ships as a single static binary:
+The installer used in [Getting Started](#getting-started) downloads the release
+for your architecture, verifies its SHA256 checksum, installs the binary to
+`/usr/local/bin/kunato` and the systemd unit, writes `/etc/kunato/kunato.yaml`,
+fetches the managed rule set, validates the configuration, and enables the
+service. Key options:
+
+| Option                    | Description                                                              |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `--version TAG`           | Install a specific release (default: the latest).                        |
+| `--upstream URL`          | Upstream server the WAF forwards to; required on first install.          |
+| `--listen ADDR`           | Listen address (default `0.0.0.0:443`).                                   |
+| `--tls-cert`/`--tls-key`  | PEM certificate chain and key; copied to `/etc/kunato/tls/`.             |
+| `--rules-url URL`         | Managed rule set URL (see Managed Rules and Automatic Updates).          |
+| `--no-start`              | Install and validate without enabling or starting the service.            |
+| `--yes`                   | Never prompt; fail instead of asking.                                    |
+| `--uninstall`             | Stop and remove the service and binary.                                  |
+| `--purge`                 | With `--uninstall`, also remove `/etc/kunato` and `/var/lib/kunato`.      |
+
+TLS material passed with `--tls-cert`/`--tls-key` is copied to `/etc/kunato/tls/`
+so the service user can read it. Re-copy it and restart the service when the
+certificate is renewed; as a certbot deploy hook
+(`/etc/letsencrypt/renewal-hooks/deploy/kunato`):
+
+```sh
+#!/bin/sh
+install -m 0640 -o root -g kunato /etc/letsencrypt/live/example.com/fullchain.pem /etc/kunato/tls/cert.pem
+install -m 0640 -o root -g kunato /etc/letsencrypt/live/example.com/privkey.pem /etc/kunato/tls/key.pem
+systemctl restart kunato
+```
+
+Running the installer again upgrades the binary and unit while keeping the
+existing configuration.
+
+Without network access, or to build a custom binary, build from source (Rust
+1.89 or later, edition 2024):
 
 ```sh
 sudo apt-get install musl-tools   # Debian/Ubuntu; provides musl-gcc
@@ -165,13 +280,15 @@ rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-Install the binary to `/usr/local/bin/kunato` and the configuration to
-`/etc/kunato/rules.yaml`, then use the provided systemd unit
-(`packaging/kunato.service`). `rules.example.yaml` is a practical starting point
+Install the binary to `/usr/local/bin/kunato`, generate a configuration with
+`kunato init --upstream <url> --tls-cert <pem> --tls-key <pem> --output
+/etc/kunato/kunato.yaml`, download the first rules file with `kunato
+update-rules --config /etc/kunato/kunato.yaml`, and enable
+`packaging/kunato.service`. `rules.example.yaml` is a practical starting point
 with rules for SQL/NoSQL injection, XSS, path traversal, command injection, SSRF,
-XXE, malicious uploads, scanners, sensitive files, and more.
-Tagging a release (`v*`) builds and uploads the static binary through GitHub
-Actions.
+XXE, malicious uploads, scanners, sensitive files, and more. Tagging a release
+(`v*`) builds and uploads static musl tarballs, checksums, and the installer
+through GitHub Actions.
 
 ## Configuration
 
@@ -181,6 +298,10 @@ listens, which upstream server it forwards to, and a list of rule **categories**
 - `listen` — address and port to bind.
 - `upstream` — base URL of the upstream HTTP server.
 - `categories` — ordered list of rule categories.
+- `rules_file` — optional categories-only file refreshed by the daily rules updater.
+- `overrides_file` — optional categories-only file with local exceptions,
+  evaluated before every other rule source.
+- `rules_update` — daily refresh of `rules_file` (see Managed rules and updates).
 
 Each category groups related rules (for example SQL injection or XSS signatures)
 and defines a default action that its rules inherit. Individual rules can override
@@ -298,6 +419,68 @@ Every rule must resolve to an effective action: a rule without its own `action`
 requires the category to define one. The configuration is rejected at load time
 otherwise.
 
+### Rule sources and updates
+
+Rules can come from three places. Sources are concatenated in this order, and
+evaluation starts with the first source, so earlier sources win:
+
+1. `overrides_file` — a categories-only YAML document for local exceptions and
+   tuning.
+2. categories written directly in the configuration file.
+3. `rules_file` — the managed rule set refreshed by `rules_update`.
+
+```yaml
+rules_file: /var/lib/kunato/rules.yaml
+overrides_file: /etc/kunato/overrides.yaml
+```
+
+```yaml
+# /etc/kunato/overrides.yaml
+disabled_rules: [union-select]      # drop these rule names from every other source
+
+categories:
+  # Fix a false positive before the managed rules run: ALLOW wins over later BLOCKs.
+  - name: local-exceptions
+    action: ALLOW
+    rules:
+      - name: admin-search
+        match: { path: ^/admin/search$, source_ip: 192.168.0.0/16 }
+```
+
+The external files are categories-only: `categories`, plus `disabled_rules` in
+the overrides file (listing it in `rules_file` is rejected, so a downloaded file
+can never weaken local overrides). Relative paths are resolved against the
+directory of the configuration file. Missing files fail validation; a running
+instance keeps its last known good rules if a reload fails.
+
+`rules_update` keeps `rules_file` fresh without manual downloads:
+
+```yaml
+rules_update:
+  enabled: true
+  url: https://raw.githubusercontent.com/hiroeorz/kunato/main/dist/rules.yaml
+  checksum_url: https://raw.githubusercontent.com/hiroeorz/kunato/main/dist/rules.yaml.sha256
+  interval: 24h        # default
+  jitter_percent: 10   # randomize the next check by ±10% (default 10, max 50)
+  max_bytes: 1048576   # download size limit (default 1 MiB)
+```
+
+The URL must use https; plain http is accepted only for loopback hosts, which is
+handy for tests and local mirrors. Every `interval` the updater sends a
+conditional request (`If-None-Match`/`If-Modified-Since`), downloads any new
+file, verifies its SHA256 digest against `checksum_url`, validates it with the
+full rule compiler (regex and ReDoS guards included), replaces the file
+atomically, and lets the hot reload path apply it. Any failure — network,
+checksum mismatch, invalid rules, size limit — leaves the current rules
+untouched and is reported in the logs and metrics. The updater state (last
+success, HTTP validators) is stored next to the rules file.
+`kunato update-rules --config kunato.yaml` performs a single check and exits;
+the installer uses it for the first download.
+
+The SHA256 digest guards against corrupted or truncated downloads; it is
+fetched over the same TLS connection as the rules file, so it does not add
+authenticity. Detached signatures (minisign) are planned as a hardening step.
+
 ### Category fields
 
 | Field         | Description                                                                                          |
@@ -407,8 +590,9 @@ admin:
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
 BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding,
-upstream failures, and configuration reloads; gauges cover active connections and
-uptime. Non-loopback addresses are rejected at validation time, and if the port is
+upstream failures, configuration reloads, and rules update outcomes; gauges cover
+active connections, uptime, and the time of the last successful rules update.
+Non-loopback addresses are rejected at validation time, and if the port is
 already in use Kunato logs a warning and continues without the admin endpoint.
 
 ### TLS
@@ -467,7 +651,8 @@ supported yet.
 
 ### Hot reload
 
-Kunato watches the rule file for changes. When the file is updated:
+Kunato watches the configuration file plus the configured `rules_file` and
+`overrides_file` for changes. When any of them is updated:
 
 - The new configuration is parsed and validated **before** it is applied.
 - A valid configuration is swapped in atomically; in-flight requests are unaffected.
@@ -518,6 +703,8 @@ bans interfering.
 ## Fault Tolerance
 
 - Invalid rule reloads never take down a running instance.
+- A failed rules update (network, checksum, validation) always keeps the current
+  rule set active.
 - Upstream failures and timeouts are handled gracefully.
 - Request handling paths avoid panics and unbounded resource usage.
 - Graceful shutdown drains in-flight connections.
@@ -535,6 +722,8 @@ bans interfering.
 - [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
 - [x] HTTP/3 over QUIC (opt-in, Alt-Svc advertisement)
 - [x] Response-phase rules (status, response headers, response body)
+- [x] curl installer and managed rule set with daily updates
+- [ ] Detached signatures (minisign) for rules updates
 
 ## Contributing
 

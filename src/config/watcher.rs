@@ -1,6 +1,7 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -13,6 +14,23 @@ use crate::metrics::Metrics;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// All files that make up the active configuration: the main file, the managed
+/// rules file, and the optional overrides file.
+pub fn source_paths(main: &Path, config: &CompiledConfig) -> Vec<PathBuf> {
+    let mut paths = vec![absolute(main)];
+    if let Some(path) = &config.rules_file {
+        paths.push(absolute(path));
+    }
+    if let Some(path) = &config.overrides_file {
+        paths.push(absolute(path));
+    }
+    paths
+}
+
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub async fn watch(
     path: PathBuf,
     config: Arc<ArcSwap<CompiledConfig>>,
@@ -20,13 +38,16 @@ pub async fn watch(
     disable_protection: bool,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
+    let main = absolute(&path);
+    let initial = source_paths(&main, &config.load());
+    let watched: Arc<Mutex<BTreeSet<PathBuf>>> =
+        Arc::new(Mutex::new(initial.iter().cloned().collect()));
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
-    let filter_path = absolute.clone();
+    let filter = watched.clone();
 
     let mut watcher =
         match notify::recommended_watcher(move |result: notify::Result<Event>| match result {
-            Ok(event) if is_relevant(&event, &filter_path) => {
+            Ok(event) if is_relevant(&event, &filter) => {
                 let _ = event_tx.send(event);
             }
             Ok(_) => {}
@@ -39,26 +60,15 @@ pub async fn watch(
             }
         };
 
-    if let Err(err) = watcher.watch(&absolute, RecursiveMode::NonRecursive) {
-        error!(
-            path = %absolute.display(),
-            error = %err,
-            "failed to watch configuration file; hot reload disabled"
-        );
-        return;
+    let mut state = WatchState::default();
+    for source in &initial {
+        state.add(&mut watcher, source);
     }
 
-    if let Some(parent) = absolute.parent()
-        && let Err(err) = watcher.watch(parent, RecursiveMode::NonRecursive)
-    {
-        warn!(
-            path = %parent.display(),
-            error = %err,
-            "failed to watch configuration directory; rename-based updates may be missed"
-        );
-    }
-
-    info!(path = %absolute.display(), "watching configuration for changes");
+    info!(
+        paths = ?initial,
+        "watching configuration for changes"
+    );
 
     loop {
         tokio::select! {
@@ -67,9 +77,11 @@ pub async fn watch(
                 match event {
                     None => break,
                     Some(event) => {
-                        trace!(kind = ?event.kind, paths = ?event.paths, "configuration file changed");
+                        trace!(kind = ?event.kind, paths = ?event.paths, "configuration source changed");
                         debounce(&mut event_rx).await;
-                        reload(&absolute, &config, &metrics, disable_protection);
+                        if let Some(sources) = reload(&main, &config, &metrics, disable_protection) {
+                            state.sync(&mut watcher, &watched, &sources);
+                        }
                     }
                 }
             }
@@ -82,7 +94,7 @@ pub fn reload(
     config: &ArcSwap<CompiledConfig>,
     metrics: &Metrics,
     disable_protection: bool,
-) {
+) -> Option<Vec<PathBuf>> {
     match config::load(path) {
         Ok(mut new_config) => {
             metrics.reload_success.fetch_add(1, Ordering::Relaxed);
@@ -114,6 +126,7 @@ pub fn reload(
                 new_config.http3 = active_http3;
             }
 
+            let sources = source_paths(path, &new_config);
             let categories = new_config.categories.len();
             let rules: usize = new_config
                 .categories
@@ -122,20 +135,98 @@ pub fn reload(
                 .sum();
             config.store(Arc::new(new_config));
             info!(categories, rules, "configuration reloaded");
+            Some(sources)
         }
         Err(err) => {
             metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
             error!(error = %err, "configuration reload failed; keeping previous configuration");
+            None
         }
     }
 }
 
-fn is_relevant(event: &Event, path: &Path) -> bool {
+#[derive(Debug, Default)]
+struct WatchState {
+    files: BTreeSet<PathBuf>,
+    parents: BTreeMap<PathBuf, usize>,
+}
+
+impl WatchState {
+    fn add(&mut self, watcher: &mut impl Watcher, path: &Path) {
+        if !self.files.insert(path.to_path_buf()) {
+            return;
+        }
+        if let Err(err) = watcher.watch(path, RecursiveMode::NonRecursive) {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to watch configuration file"
+            );
+        }
+        if let Some(parent) = path.parent() {
+            let count = self.parents.entry(parent.to_path_buf()).or_insert(0);
+            if *count == 0
+                && let Err(err) = watcher.watch(parent, RecursiveMode::NonRecursive)
+            {
+                warn!(
+                    path = %parent.display(),
+                    error = %err,
+                    "failed to watch configuration directory; rename-based updates may be missed"
+                );
+            }
+            *count += 1;
+        }
+    }
+
+    fn remove(&mut self, watcher: &mut impl Watcher, path: &Path) {
+        if !self.files.remove(path) {
+            return;
+        }
+        let _ = watcher.unwatch(path);
+        if let Some(parent) = path.parent()
+            && let Some(count) = self.parents.get_mut(parent)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.parents.remove(parent);
+                let _ = watcher.unwatch(parent);
+            }
+        }
+    }
+
+    fn sync(
+        &mut self,
+        watcher: &mut impl Watcher,
+        watched: &Mutex<BTreeSet<PathBuf>>,
+        sources: &[PathBuf],
+    ) {
+        let desired: BTreeSet<PathBuf> = sources.iter().cloned().collect();
+        let stale: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|path| !desired.contains(*path))
+            .cloned()
+            .collect();
+        for path in stale {
+            self.remove(watcher, &path);
+        }
+        for path in &desired {
+            self.add(watcher, path);
+        }
+        *lock(watched) = desired;
+    }
+}
+
+fn lock(set: &Mutex<BTreeSet<PathBuf>>) -> std::sync::MutexGuard<'_, BTreeSet<PathBuf>> {
+    set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn is_relevant(event: &Event, watched: &Mutex<BTreeSet<PathBuf>>) -> bool {
     let relevant_kind = matches!(
         event.kind,
         EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
     );
-    relevant_kind && event.paths.iter().any(|event_path| event_path == path)
+    relevant_kind && event.paths.iter().any(|path| lock(watched).contains(path))
 }
 
 async fn debounce(rx: &mut mpsc::UnboundedReceiver<Event>) {
@@ -277,5 +368,67 @@ http3: { enabled: false }
         reload(&path, &config, &Metrics::new(), false);
 
         assert_eq!(config.load().listen.port(), 8080);
+    }
+
+    #[test]
+    fn reload_picks_up_rules_file_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rules = dir.path().join("rules.yaml");
+        write(
+            &rules,
+            "categories:
+  - name: auto
+    action: BLOCK
+    rules:
+      - name: catch-all
+        match: { path: ^/ }
+",
+        );
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: rules.yaml
+",
+        );
+        let config = ArcSwap::from_pointee(config::load(&main).expect("initial config"));
+        assert_eq!(config.load().categories.len(), 1);
+
+        write(&rules, "categories: []\n");
+        let sources = reload(&main, &config, &Metrics::new(), false).expect("reload");
+
+        assert!(config.load().categories.is_empty());
+        assert!(sources.iter().any(|path| path.ends_with("rules.yaml")));
+    }
+
+    #[test]
+    fn reload_keeps_previous_configuration_when_rules_file_disappears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rules = dir.path().join("rules.yaml");
+        write(
+            &rules,
+            "categories:
+  - name: auto
+    action: BLOCK
+    rules:
+      - name: catch-all
+        match: { path: ^/ }
+",
+        );
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: rules.yaml
+",
+        );
+        let config = ArcSwap::from_pointee(config::load(&main).expect("initial config"));
+
+        std::fs::remove_file(&rules).expect("remove rules file");
+        assert!(reload(&main, &config, &Metrics::new(), false).is_none());
+
+        assert_eq!(config.load().categories.len(), 1);
     }
 }

@@ -7,13 +7,14 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use kunato::admin::AdminServer;
-use kunato::cli::Cli;
+use kunato::cli::{Cli, Command, InitArgs};
 use kunato::config;
 use kunato::config::CompiledConfig;
 use kunato::config::watcher;
 use kunato::error::Error;
 use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
+use kunato::rules_update::{self, UpdateOutcome};
 use kunato::telemetry;
 
 #[tokio::main]
@@ -36,6 +37,18 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Error> {
+    if let Some(command) = cli.command {
+        return match command {
+            Command::Init(args) => run_init(&args),
+            Command::Validate => {
+                config::load(&cli.config)?;
+                println!("configuration OK: {}", cli.config.display());
+                Ok(())
+            }
+            Command::UpdateRules => run_update_rules(&cli.config).await,
+        };
+    }
+
     let mut initial = config::load(&cli.config)?;
 
     if cli.validate {
@@ -62,6 +75,13 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let watcher_task = tokio::spawn(watcher::watch(
         cli.config.clone(),
         config.clone(),
+        metrics.clone(),
+        cli.disable_protection,
+        shutdown_rx.clone(),
+    ));
+    let rules_update_task = tokio::spawn(rules_update::run(
+        config.clone(),
+        cli.config.clone(),
         metrics.clone(),
         cli.disable_protection,
         shutdown_rx.clone(),
@@ -100,10 +120,79 @@ async fn run(cli: Cli) -> Result<(), Error> {
         Err(err) => error!(error = %err, "server task failed"),
     }
     let _ = watcher_task.await;
+    let _ = rules_update_task.await;
     if let Some(admin_task) = admin_task {
         let _ = admin_task.await;
     }
 
+    Ok(())
+}
+
+fn run_init(args: &InitArgs) -> Result<(), Error> {
+    if args.output.exists() && !args.force {
+        return Err(Error::Message(format!(
+            "`{}` already exists; pass --force to overwrite",
+            args.output.display()
+        )));
+    }
+    let text = args.render()?;
+    config::parse(&text)
+        .map_err(|err| Error::Message(format!("generated configuration is invalid: {err}")))?;
+    if let Some(parent) = args.output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&args.output, text)?;
+    println!("wrote {}", args.output.display());
+
+    let rules_file = args.rules_file.as_path();
+    if !rules_file.exists() {
+        write_starter_rules(rules_file, "Managed rule set; replaced by rules_update.\n")?;
+        println!("wrote {}", rules_file.display());
+    }
+    if let Some(overrides_file) = &args.overrides_file
+        && !overrides_file.exists()
+    {
+        write_starter_rules(
+            overrides_file,
+            "Local overrides, evaluated before every other rule source.\n\
+             # disabled_rules: [rule-name]\n",
+        )?;
+        println!("wrote {}", overrides_file.display());
+    }
+    Ok(())
+}
+
+fn write_starter_rules(path: &std::path::Path, header: &str) -> Result<(), Error> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("# {header}\ncategories: []\n"))?;
+    Ok(())
+}
+
+async fn run_update_rules(config_path: &std::path::Path) -> Result<(), Error> {
+    let loaded = config::load_settings(config_path)?;
+    let Some(rules_file) = &loaded.rules_file else {
+        return Err(Error::Message(format!(
+            "`{}` does not configure `rules_file`",
+            config_path.display()
+        )));
+    };
+    if !loaded.rules_update.enabled {
+        return Err(Error::Message(format!(
+            "`{}` does not enable `rules_update`",
+            config_path.display()
+        )));
+    }
+    let state_file = rules_update::state_path(rules_file);
+    match rules_update::update_once(&loaded.rules_update, rules_file, &state_file).await? {
+        UpdateOutcome::Updated => println!("rules updated: {}", rules_file.display()),
+        UpdateOutcome::NotModified => println!("rules are up to date: {}", rules_file.display()),
+    }
     Ok(())
 }
 

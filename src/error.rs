@@ -9,8 +9,17 @@ pub enum Error {
     #[error("failed to parse configuration: {0}")]
     ConfigParse(#[from] serde_saphyr::Error),
 
+    #[error("failed to parse rules file `{path}`: {source}")]
+    RulesParse {
+        path: PathBuf,
+        source: Box<serde_saphyr::Error>,
+    },
+
     #[error("invalid configuration:\n{}", format_issues(.0))]
     ConfigInvalid(Vec<String>),
+
+    #[error("{0}")]
+    Message(String),
 
     #[error("failed to bind `{addr}`: {source}")]
     Bind { addr: String, source: io::Error },

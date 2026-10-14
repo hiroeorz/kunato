@@ -9,15 +9,59 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --target x86_64-unknown-linux-musl
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          name="kunato-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/kunato" "dist/${name}/"
+          cp packaging/kunato.service "dist/${name}/"
+          cp rules.example.yaml LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+          cp scripts/install.sh "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kunato-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Build SHA256SUMS
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          files: target/x86_64-unknown-linux-musl/release/kunato
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            scripts/install.sh

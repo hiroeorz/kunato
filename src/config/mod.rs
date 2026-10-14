@@ -26,6 +26,8 @@ const MAX_PATTERNS_PER_RULE: usize = 64;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_HEADER_ENTRIES: usize = 64;
 const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
+const MAX_RULES_UPDATE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RULES_UPDATE_JITTER_PERCENT: u8 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -183,6 +185,12 @@ pub struct ConfigSpec {
     #[serde(default)]
     pub categories: Vec<CategorySpec>,
     #[serde(default)]
+    pub rules_file: Option<PathBuf>,
+    #[serde(default)]
+    pub overrides_file: Option<PathBuf>,
+    #[serde(default)]
+    pub rules_update: RulesUpdateSpec,
+    #[serde(default)]
     pub timeouts: TimeoutsSpec,
     #[serde(default)]
     pub limits: LimitsSpec,
@@ -196,6 +204,58 @@ pub struct ConfigSpec {
     pub http3: Http3Spec,
     #[serde(default)]
     pub response_headers: ResponseHeadersSpec,
+}
+
+/// A categories-only YAML document, used for `rules_file` and `overrides_file`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesFileSpec {
+    #[serde(default)]
+    pub categories: Vec<CategorySpec>,
+    #[serde(default)]
+    pub disabled_rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesUpdateSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub checksum_url: Option<String>,
+    #[serde(default = "hours24", deserialize_with = "de_duration")]
+    pub interval: Duration,
+    #[serde(default = "default_jitter_percent")]
+    pub jitter_percent: u8,
+    #[serde(default = "default_max_rules_bytes")]
+    pub max_bytes: usize,
+}
+
+impl Default for RulesUpdateSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            checksum_url: None,
+            interval: hours24(),
+            jitter_percent: default_jitter_percent(),
+            max_bytes: default_max_rules_bytes(),
+        }
+    }
+}
+
+fn hours24() -> Duration {
+    Duration::from_secs(24 * 3600)
+}
+
+fn default_jitter_percent() -> u8 {
+    10
+}
+
+fn default_max_rules_bytes() -> usize {
+    1024 * 1024
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -514,6 +574,29 @@ impl From<&Http3Spec> for Http3 {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RulesUpdate {
+    pub enabled: bool,
+    pub url: Option<Uri>,
+    pub checksum_url: Option<Uri>,
+    pub interval: Duration,
+    pub jitter_percent: u8,
+    pub max_bytes: usize,
+}
+
+impl Default for RulesUpdate {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            checksum_url: None,
+            interval: hours24(),
+            jitter_percent: default_jitter_percent(),
+            max_bytes: default_max_rules_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResponseHeaders {
     remove: Vec<HeaderName>,
@@ -626,6 +709,9 @@ pub struct CompiledConfig {
     pub tls: Option<Tls>,
     pub http3: Http3,
     pub response_headers: ResponseHeaders,
+    pub rules_file: Option<PathBuf>,
+    pub overrides_file: Option<PathBuf>,
+    pub rules_update: RulesUpdate,
 }
 
 impl CompiledConfig {
@@ -680,19 +766,137 @@ pub struct CompiledRule {
 }
 
 pub fn load(path: &Path) -> Result<CompiledConfig, Error> {
+    let spec = read_spec(path)?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let rules_file = spec
+        .rules_file
+        .as_deref()
+        .map(|rules| resolve_path(base, rules));
+    let overrides_file = spec
+        .overrides_file
+        .as_deref()
+        .map(|overrides| resolve_path(base, overrides));
+    let rules = load_rules_spec(&rules_file)?;
+    let overrides = load_rules_spec(&overrides_file)?;
+    let sources = RulesSources {
+        overrides,
+        rules,
+        rules_file,
+        overrides_file,
+    };
+    compile(spec, sources).map_err(Error::ConfigInvalid)
+}
+
+/// Load the main configuration file without reading `rules_file` or
+/// `overrides_file`. Used by `kunato update-rules`, which must work before the
+/// managed rules file exists for the first time.
+pub fn load_settings(path: &Path) -> Result<CompiledConfig, Error> {
+    let spec = read_spec(path)?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let sources = RulesSources {
+        rules_file: spec
+            .rules_file
+            .as_deref()
+            .map(|rules| resolve_path(base, rules)),
+        overrides_file: spec
+            .overrides_file
+            .as_deref()
+            .map(|overrides| resolve_path(base, overrides)),
+        ..RulesSources::default()
+    };
+    compile(spec, sources).map_err(Error::ConfigInvalid)
+}
+
+fn read_spec(path: &Path) -> Result<ConfigSpec, Error> {
     let text = std::fs::read_to_string(path).map_err(|source| Error::ConfigRead {
         path: path.to_path_buf(),
         source,
     })?;
-    parse(&text)
+    Ok(serde_saphyr::from_str(&text)?)
+}
+
+fn resolve_path(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn load_rules_spec(path: &Option<PathBuf>) -> Result<RulesFileSpec, Error> {
+    let Some(path) = path else {
+        return Ok(RulesFileSpec::default());
+    };
+    let text = std::fs::read_to_string(path).map_err(|source| Error::ConfigRead {
+        path: path.clone(),
+        source,
+    })?;
+    if text.trim().is_empty() {
+        return Ok(RulesFileSpec::default());
+    }
+    serde_saphyr::from_str(&text).map_err(|source| Error::RulesParse {
+        path: path.clone(),
+        source: Box::new(source),
+    })
 }
 
 pub fn parse(text: &str) -> Result<CompiledConfig, Error> {
     let spec: ConfigSpec = serde_saphyr::from_str(text)?;
-    compile(spec).map_err(Error::ConfigInvalid)
+    let sources = RulesSources {
+        rules_file: spec.rules_file.clone(),
+        overrides_file: spec.overrides_file.clone(),
+        ..RulesSources::default()
+    };
+    compile(spec, sources).map_err(Error::ConfigInvalid)
 }
 
-fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
+/// A categories-only rule set compiled from a `rules_file` or `overrides_file`
+/// document, used to validate downloaded rules before they replace the active file.
+#[derive(Debug, Default)]
+pub struct ParsedRules {
+    pub categories: Vec<CompiledCategory>,
+    pub disabled_rules: Vec<String>,
+}
+
+pub fn parse_rules(text: &str) -> Result<ParsedRules, Error> {
+    if text.trim().is_empty() {
+        return Ok(ParsedRules::default());
+    }
+    let spec: RulesFileSpec = serde_saphyr::from_str(text)?;
+    let disabled = normalize_disabled_rules(&spec.disabled_rules);
+    let mut issues = Vec::new();
+    let categories = compile_categories(
+        &[("rules file", spec.categories.as_slice())],
+        &disabled,
+        &mut issues,
+    );
+    if !issues.is_empty() {
+        return Err(Error::ConfigInvalid(issues));
+    }
+    Ok(ParsedRules {
+        categories,
+        disabled_rules: spec.disabled_rules,
+    })
+}
+
+fn normalize_disabled_rules(names: &[String]) -> BTreeSet<String> {
+    names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct RulesSources {
+    overrides: RulesFileSpec,
+    rules: RulesFileSpec,
+    rules_file: Option<PathBuf>,
+    overrides_file: Option<PathBuf>,
+}
+
+fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Vec<String>> {
     let mut issues = Vec::new();
 
     validate_limits(&spec.limits, &mut issues);
@@ -703,74 +907,25 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
     validate_http3(&spec.http3, &spec.tls, &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
+    let rules_update = compile_rules_update(&spec.rules_update, &sources.rules_file, &mut issues);
 
-    let mut categories = Vec::new();
-    let mut seen_categories: BTreeSet<&str> = BTreeSet::new();
-
-    for category in &spec.categories {
-        if category.name.trim().is_empty() {
-            issues.push("category name must not be empty".to_owned());
-        } else if !seen_categories.insert(category.name.as_str()) {
-            issues.push(format!(
-                "category `{}`: duplicate category name",
-                category.name
-            ));
-        }
-
-        let context = format!("category `{}`", category.name);
-        if let Some(response) = &category.response {
-            validate_response(response, &context, &mut issues);
-        }
-
-        let mut seen_rules: BTreeSet<&str> = BTreeSet::new();
-        let mut rules = Vec::new();
-
-        for rule in &category.rules {
-            let rule_context = format!("{context}: rule `{}`", rule.name);
-
-            if rule.name.trim().is_empty() {
-                issues.push(format!("{context}: rule name must not be empty"));
-            } else if !seen_rules.insert(rule.name.as_str()) {
-                issues.push(format!("{rule_context}: duplicate rule name"));
-            }
-
-            if let Some(response) = &rule.response {
-                validate_response(response, &rule_context, &mut issues);
-            }
-
-            let matcher =
-                compile_matcher(&rule.matcher, category.phase, &rule_context, &mut issues);
-            let effective_action = rule.action.or(category.action);
-            if category.enabled && rule.enabled && effective_action.is_none() {
-                issues.push(format!(
-                    "{rule_context}: no effective action; set `action` on the rule or the category"
-                ));
-            }
-
-            if !category.enabled || !rule.enabled {
-                continue;
-            }
-
-            rules.push(CompiledRule {
-                name: rule.name.clone(),
-                action: rule.action,
-                response: rule.response.clone(),
-                matcher,
-            });
-        }
-
-        if !category.enabled {
-            continue;
-        }
-
-        categories.push(CompiledCategory {
-            name: category.name.clone(),
-            phase: category.phase,
-            action: category.action,
-            response: category.response.clone(),
-            rules,
-        });
+    let mut disabled = normalize_disabled_rules(&sources.overrides.disabled_rules);
+    if !sources.rules.disabled_rules.is_empty() {
+        issues.push(
+            "rules file: `disabled_rules` is only supported in the overrides file".to_owned(),
+        );
     }
+    disabled.extend(normalize_disabled_rules(&sources.rules.disabled_rules));
+
+    let categories = compile_categories(
+        &[
+            ("overrides file", sources.overrides.categories.as_slice()),
+            ("", spec.categories.as_slice()),
+            ("rules file", sources.rules.categories.as_slice()),
+        ],
+        &disabled,
+        &mut issues,
+    );
 
     if !issues.is_empty() {
         return Err(issues);
@@ -791,7 +946,93 @@ fn compile(spec: ConfigSpec) -> Result<CompiledConfig, Vec<String>> {
         tls: spec.tls.as_ref().map(Tls::from),
         http3: Http3::from(&spec.http3),
         response_headers,
+        rules_file: sources.rules_file,
+        overrides_file: sources.overrides_file,
+        rules_update,
     })
+}
+
+fn compile_categories(
+    sources: &[(&str, &[CategorySpec])],
+    disabled: &BTreeSet<String>,
+    issues: &mut Vec<String>,
+) -> Vec<CompiledCategory> {
+    let mut seen_categories: BTreeSet<String> = BTreeSet::new();
+    let mut categories = Vec::new();
+
+    for (source, specs) in sources {
+        for category in *specs {
+            let context = prefixed(source, &format!("category `{}`", category.name));
+
+            if category.name.trim().is_empty() {
+                issues.push(prefixed(source, "category name must not be empty"));
+            } else if !seen_categories.insert(category.name.clone()) {
+                issues.push(format!("{context}: duplicate category name"));
+            }
+
+            if let Some(response) = &category.response {
+                validate_response(response, &context, issues);
+            }
+
+            let mut seen_rules: BTreeSet<&str> = BTreeSet::new();
+            let mut rules = Vec::new();
+
+            for rule in &category.rules {
+                let rule_context = prefixed(source, &format!("{context}: rule `{}`", rule.name));
+
+                if rule.name.trim().is_empty() {
+                    issues.push(format!("{context}: rule name must not be empty"));
+                } else if !seen_rules.insert(rule.name.as_str()) {
+                    issues.push(format!("{rule_context}: duplicate rule name"));
+                }
+
+                if let Some(response) = &rule.response {
+                    validate_response(response, &rule_context, issues);
+                }
+
+                let matcher = compile_matcher(&rule.matcher, category.phase, &rule_context, issues);
+                let effective_action = rule.action.or(category.action);
+                if category.enabled && rule.enabled && effective_action.is_none() {
+                    issues.push(format!(
+                        "{rule_context}: no effective action; set `action` on the rule or the category"
+                    ));
+                }
+
+                if !category.enabled || !rule.enabled || disabled.contains(rule.name.as_str()) {
+                    continue;
+                }
+
+                rules.push(CompiledRule {
+                    name: rule.name.clone(),
+                    action: rule.action,
+                    response: rule.response.clone(),
+                    matcher,
+                });
+            }
+
+            if !category.enabled {
+                continue;
+            }
+
+            categories.push(CompiledCategory {
+                name: category.name.clone(),
+                phase: category.phase,
+                action: category.action,
+                response: category.response.clone(),
+                rules,
+            });
+        }
+    }
+
+    categories
+}
+
+fn prefixed(source: &str, message: &str) -> String {
+    if source.is_empty() {
+        message.to_owned()
+    } else {
+        format!("{source}: {message}")
+    }
 }
 
 fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
@@ -837,6 +1078,89 @@ fn validate_tls(spec: &Option<TlsSpec>, issues: &mut Vec<String>) {
 fn validate_http3(spec: &Http3Spec, tls: &Option<TlsSpec>, issues: &mut Vec<String>) {
     if spec.enabled && tls.is_none() {
         issues.push("http3 requires a tls block".to_owned());
+    }
+}
+
+fn compile_rules_update(
+    spec: &RulesUpdateSpec,
+    rules_file: &Option<PathBuf>,
+    issues: &mut Vec<String>,
+) -> RulesUpdate {
+    let url = spec
+        .url
+        .as_deref()
+        .and_then(|raw| compile_update_uri(raw, "rules_update.url", issues));
+    let checksum_url = spec
+        .checksum_url
+        .as_deref()
+        .and_then(|raw| compile_update_uri(raw, "rules_update.checksum_url", issues));
+
+    if spec.enabled {
+        if url.is_none() {
+            issues.push("rules_update.enabled requires `rules_update.url`".to_owned());
+        }
+        if checksum_url.is_none() {
+            issues.push("rules_update.enabled requires `rules_update.checksum_url`".to_owned());
+        }
+        if rules_file.is_none() {
+            issues.push("rules_update.enabled requires `rules_file`".to_owned());
+        }
+        if spec.interval.is_zero() {
+            issues.push("rules_update.interval must be greater than zero".to_owned());
+        }
+        if spec.jitter_percent > MAX_RULES_UPDATE_JITTER_PERCENT {
+            issues.push(format!(
+                "rules_update.jitter_percent must be at most {MAX_RULES_UPDATE_JITTER_PERCENT}"
+            ));
+        }
+        if spec.max_bytes == 0 || spec.max_bytes > MAX_RULES_UPDATE_BYTES {
+            issues.push(format!(
+                "rules_update.max_bytes must be between 1 and {MAX_RULES_UPDATE_BYTES}"
+            ));
+        }
+    }
+
+    RulesUpdate {
+        enabled: spec.enabled,
+        url,
+        checksum_url,
+        interval: spec.interval,
+        jitter_percent: spec.jitter_percent,
+        max_bytes: spec.max_bytes,
+    }
+}
+
+fn compile_update_uri(raw: &str, field: &str, issues: &mut Vec<String>) -> Option<Uri> {
+    let uri = match Uri::from_str(raw) {
+        Ok(uri) => uri,
+        Err(err) => {
+            issues.push(format!("{field}: invalid URL `{raw}`: {err}"));
+            return None;
+        }
+    };
+    if uri.authority().is_none() {
+        issues.push(format!("{field}: `{raw}` is missing a host"));
+        return None;
+    }
+    let scheme = uri.scheme_str().unwrap_or_default();
+    if scheme != "https" && !(scheme == "http" && uri_host_is_loopback(&uri)) {
+        issues.push(format!(
+            "{field}: `{raw}` must use https (http is only allowed for loopback hosts)"
+        ));
+        return None;
+    }
+    Some(uri)
+}
+
+fn uri_host_is_loopback(uri: &Uri) -> bool {
+    match uri.host() {
+        Some(host) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }
+        None => false,
     }
 }
 
@@ -2088,5 +2412,248 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
         )
         .expect_err("must fail");
         assert!(error.to_string().contains("response body exceeds"));
+    }
+
+    #[test]
+    fn rules_update_is_disabled_by_default() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert!(!config.rules_update.enabled);
+        assert_eq!(config.rules_update.interval, Duration::from_secs(24 * 3600));
+        assert_eq!(config.rules_update.jitter_percent, 10);
+        assert!(config.rules_file.is_none());
+        assert!(config.overrides_file.is_none());
+    }
+
+    fn update_block(url: &str, checksum_url: &str) -> String {
+        format!(
+            "rules_file: /var/lib/kunato/rules.yaml
+rules_update:
+  enabled: true
+  url: {url}
+  checksum_url: {checksum_url}
+  interval: 24h
+  jitter_percent: 10
+  max_bytes: 1048576
+"
+        )
+    }
+
+    #[test]
+    fn requires_rules_update_targets_when_enabled() {
+        let error = parse_with(BASE, "rules_update: { enabled: true }\n").expect_err("must fail");
+        let message = error.to_string();
+        assert!(message.contains("requires `rules_update.url`"));
+        assert!(message.contains("requires `rules_update.checksum_url`"));
+        assert!(message.contains("requires `rules_file`"));
+    }
+
+    #[test]
+    fn accepts_https_and_loopback_http_update_urls() {
+        let config = parse_with(
+            BASE,
+            &update_block(
+                "https://example.com/rules.yaml",
+                "https://example.com/rules.yaml.sha256",
+            ),
+        )
+        .expect("valid config");
+        assert!(config.rules_update.enabled);
+        assert_eq!(config.rules_update.max_bytes, 1048576);
+
+        parse_with(
+            BASE,
+            &update_block(
+                "http://127.0.0.1:8080/rules.yaml",
+                "http://127.0.0.1:8080/rules.yaml.sha256",
+            ),
+        )
+        .expect("loopback http is allowed for testing");
+    }
+
+    #[test]
+    fn rejects_plain_http_update_urls_for_remote_hosts() {
+        let error = parse_with(
+            BASE,
+            &update_block(
+                "http://example.com/rules.yaml",
+                "http://example.com/rules.yaml.sha256",
+            ),
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("must use https"));
+    }
+
+    #[test]
+    fn rejects_invalid_update_limits() {
+        let error = parse_with(
+            BASE,
+            "rules_file: rules.yaml
+rules_update:
+  enabled: true
+  url: https://example.com/rules.yaml
+  checksum_url: https://example.com/rules.yaml.sha256
+  interval: 0s
+  jitter_percent: 60
+  max_bytes: 0
+",
+        )
+        .expect_err("must fail");
+        let message = error.to_string();
+        assert!(message.contains("interval must be greater than zero"));
+        assert!(message.contains("jitter_percent must be at most 50"));
+        assert!(message.contains("max_bytes must be between"));
+    }
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn load_merges_overrides_main_and_rules_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            &dir.path().join("overrides.yaml"),
+            "categories:
+  - name: overrides
+    action: ALLOW
+    rules:
+      - name: trusted
+        match: { source_ip: 127.0.0.1/32 }
+disabled_rules: [auto-block]
+",
+        );
+        write(
+            &dir.path().join("rules.yaml"),
+            "categories:
+  - name: auto
+    action: BLOCK
+    rules:
+      - name: auto-block
+        match: { path: ^/ }
+      - name: other
+        match: { path: ^/other }
+",
+        );
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+categories:
+  - name: inline
+    action: LOG
+    rules:
+      - name: inline-rule
+        match: { path: ^/inline }
+rules_file: rules.yaml
+overrides_file: overrides.yaml
+",
+        );
+
+        let config = load(&main).expect("valid config");
+        let names: Vec<&str> = config
+            .categories
+            .iter()
+            .map(|category| category.name.as_str())
+            .collect();
+        assert_eq!(names, ["overrides", "inline", "auto"]);
+
+        let auto = config
+            .categories
+            .iter()
+            .find(|category| category.name == "auto")
+            .expect("auto category");
+        assert_eq!(auto.rules.len(), 1);
+        assert_eq!(auto.rules[0].name, "other");
+        assert!(config.rules_file.is_some());
+        assert!(config.overrides_file.is_some());
+    }
+
+    #[test]
+    fn rules_file_rejects_disabled_rules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            &dir.path().join("rules.yaml"),
+            "categories: []\ndisabled_rules: [something]\n",
+        );
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: rules.yaml
+",
+        );
+        let error = load(&main).expect_err("must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("only supported in the overrides file")
+        );
+    }
+
+    #[test]
+    fn missing_rules_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: missing.yaml
+",
+        );
+        let error = load(&main).expect_err("must fail");
+        assert!(matches!(error, Error::ConfigRead { .. }));
+    }
+
+    #[test]
+    fn parse_rules_validates_matchers() {
+        let error = parse_rules(
+            "categories:
+  - name: broken
+    action: BLOCK
+    rules:
+      - name: rule
+        match: { path: '(' }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("invalid regex"));
+
+        let rules = parse_rules(
+            "categories:
+  - name: auto
+    action: BLOCK
+    rules:
+      - name: catch-all
+        match: { path: ^/ }
+",
+        )
+        .expect("valid rules");
+        assert_eq!(rules.categories.len(), 1);
+        assert_eq!(rules.categories[0].rules.len(), 1);
+    }
+
+    #[test]
+    fn dist_rules_match_example_configuration() {
+        let example = parse(include_str!("../../rules.example.yaml")).expect("example is valid");
+        let dist = parse_rules(include_str!("../../dist/rules.yaml")).expect("dist is valid");
+        assert_eq!(
+            format!("{:?}", example.categories),
+            format!("{:?}", dist.categories),
+            "dist/rules.yaml has drifted from rules.example.yaml; run scripts/update-dist-rules.sh"
+        );
+    }
+
+    #[test]
+    fn dist_rules_checksum_matches() {
+        let rules = include_bytes!("../../dist/rules.yaml");
+        let expected = include_str!("../../dist/rules.yaml.sha256")
+            .split_whitespace()
+            .next()
+            .expect("checksum file is not empty")
+            .to_owned();
+        assert_eq!(expected, crate::rules_update::sha256_hex(rules));
     }
 }

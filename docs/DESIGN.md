@@ -186,6 +186,20 @@ logs a warning and keeps the current listener.
 Watcher implementation: `notify` crate, with an mtime polling fallback (2 s) if the
 platform watcher fails. Tests drive the reload function directly.
 
+### Rule sources and managed updates
+
+Categories can be split across three documents: `overrides_file`, inline
+`categories`, and `rules_file`. They are merged in that order before compilation,
+so override categories are evaluated first and names must be globally unique. The
+external files are categories-only; `overrides_file` additionally accepts
+`disabled_rules`, which drops matching rule names from every source.
+
+`rules_update` optionally refreshes `rules_file` on an interval: a conditional
+HTTPS request, a SHA256 check against `checksum_url`, full parse/compile
+validation, and an atomic rename. The file watcher then swaps in the new
+snapshot; any failure leaves the previous rules in place. `kunato update-rules`
+runs a single check for the installer and for manual use.
+
 ## 6. Rule Engine
 
 ### Compiled model (sketch)
