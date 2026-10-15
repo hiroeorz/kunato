@@ -7,7 +7,7 @@ use std::time::Duration;
 use ipnet::IpNet;
 use tokio::time::Instant;
 
-use crate::config::Protection;
+use crate::config::{Protection, RuleLimit};
 
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
@@ -23,6 +23,7 @@ pub enum Decision {
 
 pub struct ProtectionState {
     shards: Vec<Mutex<Shard>>,
+    rule_shards: Vec<Mutex<RuleShard>>,
     global_connections: AtomicU32,
     global_requests: Mutex<GlobalWindow>,
 }
@@ -32,8 +33,12 @@ impl ProtectionState {
         let shards = (0..SHARD_COUNT)
             .map(|_| Mutex::new(Shard::default()))
             .collect();
+        let rule_shards = (0..SHARD_COUNT)
+            .map(|_| Mutex::new(RuleShard::default()))
+            .collect();
         Self {
             shards,
+            rule_shards,
             global_connections: AtomicU32::new(0),
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
@@ -214,6 +219,73 @@ impl ProtectionState {
 
         Decision::Allow
     }
+
+    /// Returns `true` while `ip` stays within the rule's budget of
+    /// `limit.requests` per `limit.window` (burst up to `requests`).
+    pub fn check_rule_limit(
+        &self,
+        key: u32,
+        ip: IpAddr,
+        limit: &RuleLimit,
+        config: &Protection,
+    ) -> bool {
+        if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
+            return true;
+        }
+
+        let now = Instant::now();
+        let tracking = tracking_key(ip, config);
+        let map_key = (key, tracking);
+        let mut shard = lock(&self.rule_shards[shard_index(tracking)]);
+
+        if !shard.entries.contains_key(&map_key) {
+            if shard.entries.len() >= config.max_tracked_ips {
+                shard.entries.retain(|_, bucket| {
+                    now.saturating_duration_since(bucket.last_seen) < STALE_AFTER
+                });
+            }
+            if shard.entries.len() >= config.max_tracked_ips {
+                return true;
+            }
+            let burst = f64::from(limit.requests);
+            shard.entries.insert(map_key, RuleBucket::new(now, burst));
+        }
+
+        let Some(bucket) = shard.entries.get_mut(&map_key) else {
+            return true;
+        };
+        bucket.last_seen = now;
+
+        let burst = f64::from(limit.requests);
+        let rate = burst / limit.window.as_secs_f64().max(0.001);
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
+        if elapsed > 0.0 {
+            bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
+            bucket.last_refill = now;
+        }
+
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Rule-conditioned rate limiting as seen by the evaluation engine: a rule
+/// stays transparent while its source is within budget and fires beyond it.
+pub trait RuleLimitCheck {
+    /// Returns `true` while `ip` stays within the rule's budget.
+    fn permit(&self, key: u32, ip: IpAddr, limit: &RuleLimit, protection: &Protection) -> bool;
+}
+
+impl RuleLimitCheck for ProtectionState {
+    fn permit(&self, key: u32, ip: IpAddr, limit: &RuleLimit, protection: &Protection) -> bool {
+        self.check_rule_limit(key, ip, limit, protection)
+    }
 }
 
 impl Default for ProtectionState {
@@ -246,6 +318,27 @@ impl Drop for ConnectionGuard {
 #[derive(Default)]
 struct Shard {
     entries: HashMap<IpAddr, Entry>,
+}
+
+#[derive(Default)]
+struct RuleShard {
+    entries: HashMap<(u32, IpAddr), RuleBucket>,
+}
+
+struct RuleBucket {
+    tokens: f64,
+    last_refill: Instant,
+    last_seen: Instant,
+}
+
+impl RuleBucket {
+    fn new(now: Instant, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            last_refill: now,
+            last_seen: now,
+        }
+    }
 }
 
 struct Entry {
@@ -682,6 +775,77 @@ mod tests {
                 .try_acquire_connection(ip("2001:db8::2"), &config)
                 .is_some()
         );
+    }
+
+    fn rule_limit(requests: u32, window_secs: u64) -> RuleLimit {
+        RuleLimit {
+            requests,
+            window: Duration::from_secs(window_secs),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rule_limit_allows_burst_then_blocks() {
+        let state = ProtectionState::new();
+        let config = config();
+        let limit = rule_limit(2, 10);
+
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rule_limit_refills_over_time() {
+        let state = ProtectionState::new();
+        let config = config();
+        let limit = rule_limit(2, 10);
+
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rule_limits_are_isolated_per_rule_and_source() {
+        let state = ProtectionState::new();
+        let config = config();
+        let limit = rule_limit(1, 10);
+
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+
+        assert!(state.check_rule_limit(8, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(7, ip("10.0.0.2"), &limit, &config));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rule_limit_aggregates_ipv6_prefixes() {
+        let state = ProtectionState::new();
+        let config = config();
+        let limit = rule_limit(1, 10);
+
+        assert!(state.check_rule_limit(7, ip("2001:db8:1:2::1"), &limit, &config));
+        assert!(!state.check_rule_limit(7, ip("2001:db8:1:2::2"), &limit, &config));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rule_limit_skips_allowlisted_and_disabled_sources() {
+        let state = ProtectionState::new();
+        let limit = rule_limit(1, 10);
+
+        let mut allowlisted = config();
+        allowlisted.allowlist = vec!["10.0.0.0/8".parse().expect("valid CIDR")];
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &allowlisted));
+        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &allowlisted));
+
+        let mut disabled = config();
+        disabled.enabled = false;
+        assert!(state.check_rule_limit(7, ip("10.0.0.9"), &limit, &disabled));
+        assert!(state.check_rule_limit(7, ip("10.0.0.9"), &limit, &disabled));
     }
 
     #[test]

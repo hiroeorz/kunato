@@ -899,6 +899,27 @@ async fn multipart_filename_traversal_is_rule_evaluated() {
 }
 
 #[tokio::test]
+async fn rule_limit_blocks_after_burst_but_not_other_paths() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: brute-force\n    action: BLOCK\n    rules:\n      - name: login\n        limit: {{ requests: 2, window: 60s }}\n        match: {{ path: ^/login$ }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for _ in 0..2 {
+        let (status, _) = send(running.addr, Method::POST, "/login", "user=a").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = send(running.addr, Method::POST, "/login", "user=a").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send(running.addr, Method::POST, "/other", "user=a").await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn gzip_response_body_is_rule_evaluated() {
     let upstream = spawn_encoded_response_upstream(
         StatusCode::OK,

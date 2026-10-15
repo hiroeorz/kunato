@@ -169,8 +169,20 @@ pub struct RuleSpec {
     pub action: Option<Action>,
     #[serde(default)]
     pub response: Option<ResponseSpec>,
+    #[serde(default)]
+    pub limit: Option<LimitSpec>,
     #[serde(rename = "match")]
     pub matcher: MatchSpec,
+}
+
+/// Per-source rate limit attached to a rule: while the source stays within
+/// `requests` per `window` the rule is transparent; beyond it the rule fires.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitSpec {
+    pub requests: u32,
+    #[serde(default = "secs60", deserialize_with = "de_duration")]
+    pub window: Duration,
 }
 
 fn default_true() -> bool {
@@ -762,7 +774,15 @@ pub struct CompiledRule {
     pub name: String,
     pub action: Option<Action>,
     pub response: Option<ResponseSpec>,
+    pub limit: Option<RuleLimit>,
+    pub limit_key: u32,
     pub matcher: Matcher,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuleLimit {
+    pub requests: u32,
+    pub window: Duration,
 }
 
 pub fn load(path: &Path) -> Result<CompiledConfig, Error> {
@@ -998,6 +1018,14 @@ fn compile_categories(
                     ));
                 }
 
+                let limit = compile_limit(
+                    rule.limit.as_ref(),
+                    category.phase,
+                    effective_action,
+                    &rule_context,
+                    issues,
+                );
+
                 if !category.enabled || !rule.enabled || disabled.contains(rule.name.as_str()) {
                     continue;
                 }
@@ -1006,6 +1034,10 @@ fn compile_categories(
                     name: rule.name.clone(),
                     action: rule.action,
                     response: rule.response.clone(),
+                    limit_key: limit
+                        .map(|_| rule_limit_key(&category.name, &rule.name))
+                        .unwrap_or(0),
+                    limit,
                     matcher,
                 });
             }
@@ -1033,6 +1065,53 @@ fn prefixed(source: &str, message: &str) -> String {
     } else {
         format!("{source}: {message}")
     }
+}
+
+fn compile_limit(
+    spec: Option<&LimitSpec>,
+    phase: Phase,
+    action: Option<Action>,
+    context: &str,
+    issues: &mut Vec<String>,
+) -> Option<RuleLimit> {
+    let spec = spec?;
+    if phase != Phase::Request {
+        issues.push(format!(
+            "{context}: `limit` is only valid in request-phase categories"
+        ));
+    }
+    if spec.requests == 0 {
+        issues.push(format!(
+            "{context}: limit.requests must be greater than zero"
+        ));
+    }
+    if spec.window.is_zero() {
+        issues.push(format!("{context}: limit.window must be greater than zero"));
+    }
+    if action == Some(Action::Allow) {
+        issues.push(format!(
+            "{context}: a rule with `limit` cannot resolve to ALLOW"
+        ));
+    }
+    Some(RuleLimit {
+        requests: spec.requests,
+        window: spec.window,
+    })
+}
+
+/// Stable identifier for a rule's limit bucket: survives hot reloads because
+/// it hashes the category and rule names instead of compiled positions.
+fn rule_limit_key(category: &str, rule: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in category
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(rule.bytes())
+    {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
@@ -1878,6 +1957,105 @@ mod tests {
         )
         .expect_err("must fail");
         assert!(error.to_string().contains("at least one condition"));
+    }
+
+    #[test]
+    fn rule_limits_are_compiled() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: brute-force
+    action: BLOCK
+    rules:
+      - name: login
+        limit: { requests: 5, window: 30s }
+        match: { path: ^/login }
+",
+        )
+        .expect("valid config");
+        let rule = &config.categories[0].rules[0];
+        let limit = rule.limit.expect("compiled limit");
+        assert_eq!(limit.requests, 5);
+        assert_eq!(limit.window, Duration::from_secs(30));
+        assert_ne!(rule.limit_key, 0);
+    }
+
+    #[test]
+    fn rule_limit_keys_are_stable_across_reloads() {
+        let yaml = "categories:
+  - name: brute-force
+    action: BLOCK
+    rules:
+      - name: login
+        limit: { requests: 5 }
+        match: { path: ^/login }
+";
+        let first = parse_with(BASE, yaml).expect("valid config");
+        let second = parse_with(BASE, yaml).expect("valid config");
+        assert_eq!(
+            first.categories[0].rules[0].limit_key,
+            second.categories[0].rules[0].limit_key
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_rule_limits() {
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: brute-force
+    action: BLOCK
+    rules:
+      - name: login
+        limit: { requests: 0 }
+        match: { path: ^/login }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("limit.requests"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: brute-force
+    action: BLOCK
+    rules:
+      - name: login
+        limit: { requests: 5, window: 0s }
+        match: { path: ^/login }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("limit.window"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: responses
+    phase: response
+    action: BLOCK
+    rules:
+      - name: leak
+        limit: { requests: 5 }
+        match: { regex: secret }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("request-phase"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: brute-force
+    action: ALLOW
+    rules:
+      - name: login
+        limit: { requests: 5 }
+        match: { path: ^/login }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("ALLOW"), "{error}");
     }
 
     #[test]

@@ -254,7 +254,9 @@ struct Matcher {
 Categories are evaluated in document order, then rules within a category. Phase
 selects the pass: request-phase categories run before forwarding, response-phase
 categories run on the buffered upstream response. The first rule whose conditions
-all match wins. Effective action and response resolve rule-first, then category.
+all match wins. A rule with `limit` skips itself while its source is within
+budget (see Section 7). Effective action and response resolve rule-first, then
+category.
 `ALLOW` stops evaluating further categories of that phase (request: forward;
 response: pass through unchanged); `BLOCK` responds and stops; `LOG` records and
 continues. No match means pass-through. See AGENTS.md invariant 1 for the request
@@ -303,6 +305,13 @@ Protection is automatic and independent of the rule set. It consists of:
    `max_duration` (default 1 h). Bans are held in a TTL map with a bounded size.
 5. **Timeouts** — header/body/idle timeouts mitigate slowloris-style attacks (see
    Section 8).
+6. **Rule rate limits** — a rule may carry `limit: { requests, window }`. Matching
+   requests are counted per source with the same tracking key, allowlist, and
+   bounds as the per-IP limits; below the budget the rule is transparent and
+   evaluation continues, at or above it the rule fires (`BLOCK` or `LOG` only).
+   Limits are bucketed per rule identity (a stable hash of category and rule
+   name, so hot reloads keep the counters) and are evaluated during the request
+   phase only.
 
 State is bounded: `max_tracked_ips` (default 100 000). When full, stale entries are
 evicted first; if still full, new addresses fall back to the global limiter.

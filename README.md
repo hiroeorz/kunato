@@ -506,6 +506,15 @@ authenticity. Detached signatures (minisign) are planned as a hardening step.
 | `action`      | Overrides the category default action.                          |
 | `match`       | Conditions that must all hold for the rule to apply (required). |
 | `response`    | Overrides the category response for `BLOCK` rules.              |
+| `limit`       | Request-phase per-source rate limit, `{ requests: N, window: 60s }`. |
+
+A rule with `limit` is a burst guard: the first `requests` matching requests per
+`window` from one source pass through as if the rule had not matched, and later
+matches take the rule's effective action (which cannot be `ALLOW`). Sources are
+tracked like the automatic per-IP limits (IPv6 aggregated by
+`protection.aggregate_ipv6_prefix`), allowlisted sources and
+`--disable-protection` are exempt, and the state is bounded by
+`protection.max_tracked_ips`.
 
 ### Match fields
 

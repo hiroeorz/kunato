@@ -562,7 +562,7 @@ async fn process(
         peer.ip(),
         config.has_body_target_rules(),
     );
-    let outcome = eval::evaluate(config, &view);
+    let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
 
     if !outcome.logs.is_empty() {
         context.metrics.logged.fetch_add(1, Ordering::Relaxed);
@@ -582,10 +582,14 @@ async fn process(
 
     if let Some(blocked) = &outcome.blocked {
         context.metrics.blocked.fetch_add(1, Ordering::Relaxed);
+        if blocked.rate_limited {
+            context.metrics.rule_limited.fetch_add(1, Ordering::Relaxed);
+        }
         info!(
             category = %blocked.category,
             rule = %blocked.rule,
             action = "BLOCK",
+            rate_limited = blocked.rate_limited,
             client = %peer.ip(),
             method = %parts.method,
             path = %parts.uri.path(),

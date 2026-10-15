@@ -1,4 +1,5 @@
 use crate::config::{Action, CompiledConfig, Phase, ResponseSpec};
+use crate::protection::RuleLimitCheck;
 use crate::request_view::{RequestView, ResponseView};
 
 #[derive(Debug)]
@@ -15,6 +16,7 @@ pub struct Blocked {
     pub rule: String,
     pub response: ResponseSpec,
     pub phase: Phase,
+    pub rate_limited: bool,
 }
 
 #[derive(Debug, Default)]
@@ -23,8 +25,12 @@ pub struct EvalOutcome {
     pub logs: Vec<MatchRecord>,
 }
 
-pub fn evaluate(config: &CompiledConfig, view: &RequestView<'_>) -> EvalOutcome {
-    evaluate_phase(config, Phase::Request, view, None)
+pub fn evaluate(
+    config: &CompiledConfig,
+    view: &RequestView<'_>,
+    limits: Option<&dyn RuleLimitCheck>,
+) -> EvalOutcome {
+    evaluate_phase(config, Phase::Request, view, None, limits)
 }
 
 pub fn evaluate_response(
@@ -32,7 +38,7 @@ pub fn evaluate_response(
     view: &RequestView<'_>,
     response: &ResponseView<'_>,
 ) -> EvalOutcome {
-    evaluate_phase(config, Phase::Response, view, Some(response))
+    evaluate_phase(config, Phase::Response, view, Some(response), None)
 }
 
 fn evaluate_phase(
@@ -40,6 +46,7 @@ fn evaluate_phase(
     phase: Phase,
     view: &RequestView<'_>,
     response: Option<&ResponseView<'_>>,
+    limits: Option<&dyn RuleLimitCheck>,
 ) -> EvalOutcome {
     let mut outcome = EvalOutcome::default();
 
@@ -55,6 +62,15 @@ fn evaluate_phase(
             };
             if !matched {
                 continue;
+            }
+
+            if let Some(limit) = &rule.limit {
+                let within = limits.is_some_and(|check| {
+                    check.permit(rule.limit_key, view.source_ip, limit, &config.protection)
+                });
+                if within {
+                    continue;
+                }
             }
 
             let Some(action) = rule.action.or(category.action) else {
@@ -74,6 +90,7 @@ fn evaluate_phase(
                         rule: rule.name.clone(),
                         response,
                         phase,
+                        rate_limited: rule.limit.is_some(),
                     });
                     return outcome;
                 }
@@ -110,7 +127,7 @@ mod tests {
             b"",
             "127.0.0.1".parse().expect("valid IP"),
         );
-        evaluate(&config, &view)
+        evaluate(&config, &view, None)
     }
 
     const BASE: &str = "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n";
@@ -194,6 +211,41 @@ mod tests {
         let outcome = evaluate_request(&yaml, "/anything");
         assert_eq!(outcome.logs.len(), 1);
         assert!(outcome.blocked.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rule_limit_is_transparent_until_exceeded() {
+        use crate::protection::ProtectionState;
+
+        let yaml = format!(
+            "{BASE}categories:
+  - name: brute-force
+    action: BLOCK
+    rules:
+      - name: many-logins
+        limit: {{ requests: 1, window: 60s }}
+        match: {{ path: ^/login }}
+"
+        );
+        let config = config::parse(&yaml).expect("valid test config");
+        let state = ProtectionState::new();
+        let method = Method::POST;
+        let uri: Uri = "/login".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let view = RequestView::new(
+            &method,
+            &uri,
+            &headers,
+            b"",
+            "127.0.0.1".parse().expect("valid IP"),
+        );
+
+        let outcome = evaluate(&config, &view, Some(&state));
+        assert!(outcome.blocked.is_none());
+
+        let outcome = evaluate(&config, &view, Some(&state));
+        let blocked = outcome.blocked.expect("blocked");
+        assert!(blocked.rate_limited);
     }
 
     #[test]

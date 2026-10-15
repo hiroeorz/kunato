@@ -12,6 +12,7 @@ pub struct Metrics {
     pub response_logged: AtomicU64,
     pub response_truncated: AtomicU64,
     pub rate_limited: AtomicU64,
+    pub rule_limited: AtomicU64,
     pub banned: AtomicU64,
     pub overloaded: AtomicU64,
     pub upstream_connect_errors: AtomicU64,
@@ -35,6 +36,7 @@ impl Metrics {
             response_logged: AtomicU64::new(0),
             response_truncated: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
+            rule_limited: AtomicU64::new(0),
             banned: AtomicU64::new(0),
             overloaded: AtomicU64::new(0),
             upstream_connect_errors: AtomicU64::new(0),
@@ -92,6 +94,12 @@ impl Metrics {
             "kunato_rate_limited_total",
             "Requests rejected by the per-IP rate limiter.",
             self.rate_limited.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_rule_limited_total",
+            "Requests blocked by a rule's own rate limit.",
+            self.rule_limited.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
