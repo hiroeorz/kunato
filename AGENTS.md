@@ -112,7 +112,9 @@ policy lives in `deny.toml`; do not loosen it without an explicit reason.
    category. Categories have a `phase` (`request` by default, or `response`);
    the two phases are evaluated independently and in document order within each
    phase. A rule's `action` and `response` override the category defaults, and
-   every rule must resolve to an effective action at load time. `ALLOW` stops
+   every rule must resolve to an effective action at load time (a `threshold`
+   category instead scores matching rules and applies the category action once
+   the threshold is reached). `ALLOW` stops
    evaluation within its phase (`request`: forward; `response`: pass the upstream
    response through unchanged); `BLOCK` responds and stops; `LOG` records the
    match and continues evaluation. If no rule matches, the request or response

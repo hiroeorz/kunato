@@ -944,6 +944,23 @@ async fn rule_limit_blocks_after_burst_but_not_other_paths() {
 }
 
 #[tokio::test]
+async fn threshold_category_blocks_on_enough_signals() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: anomaly\n    action: BLOCK\n    threshold: 2\n    rules:\n      - name: login-path\n        match: {{ path: ^/login$ }}\n      - name: admin-param\n        match: {{ regex: '(?i)admin', in: [query] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/login", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(running.addr, Method::GET, "/login?u=admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn gzip_response_body_is_rule_evaluated() {
     let upstream = spawn_encoded_response_upstream(
         StatusCode::OK,

@@ -1,4 +1,4 @@
-use crate::config::{Action, CompiledConfig, Phase, ResponseSpec};
+use crate::config::{Action, CompiledConfig, CompiledRule, Phase, ResponseSpec};
 use crate::protection::RuleLimitCheck;
 use crate::request_view::{RequestView, ResponseView};
 
@@ -55,6 +55,46 @@ fn evaluate_phase(
         .iter()
         .filter(|category| category.phase == phase)
     {
+        if let Some(threshold) = category.threshold {
+            let mut score = 0u32;
+            let mut last: Option<&CompiledRule> = None;
+            for rule in &category.rules {
+                let matched = match response {
+                    Some(response) => rule.matcher.matches_response(view, response),
+                    None => rule.matcher.matches(view),
+                };
+                if matched {
+                    score += 1;
+                    last = Some(rule);
+                }
+            }
+
+            let Some(last) = last.filter(|_| score >= threshold) else {
+                continue;
+            };
+
+            match category.action {
+                Some(Action::Block) => {
+                    outcome.blocked = Some(Blocked {
+                        category: category.name.clone(),
+                        rule: last.name.clone(),
+                        response: category.response.clone().unwrap_or_default(),
+                        phase,
+                        rate_limited: false,
+                    });
+                    return outcome;
+                }
+                Some(Action::Log) => outcome.logs.push(MatchRecord {
+                    category: category.name.clone(),
+                    rule: last.name.clone(),
+                    action: Action::Log,
+                    phase,
+                }),
+                _ => {}
+            }
+            continue;
+        }
+
         for rule in &category.rules {
             let matched = match response {
                 Some(response) => rule.matcher.matches_response(view, response),
@@ -246,6 +286,53 @@ mod tests {
         let outcome = evaluate(&config, &view, Some(&state));
         let blocked = outcome.blocked.expect("blocked");
         assert!(blocked.rate_limited);
+    }
+
+    #[test]
+    fn threshold_category_blocks_only_after_enough_matches() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: anomaly
+    action: BLOCK
+    threshold: 2
+    rules:
+      - name: weak-one
+        match: {{ path: ^/x$ }}
+      - name: weak-two
+        match: {{ regex: beta }}
+"
+        );
+        let outcome = evaluate_request(&yaml, "/x");
+        assert!(outcome.blocked.is_none());
+
+        let outcome = evaluate_request(&yaml, "/x?q=beta");
+        let blocked = outcome.blocked.expect("blocked");
+        assert_eq!(blocked.category, "anomaly");
+        assert_eq!(blocked.rule, "weak-two");
+        assert!(!blocked.rate_limited);
+    }
+
+    #[test]
+    fn threshold_log_category_records_once_when_reached() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: noisy-anomaly
+    action: LOG
+    threshold: 2
+    rules:
+      - name: weak-one
+        match: {{ path: ^/x$ }}
+      - name: weak-two
+        match: {{ regex: beta }}
+"
+        );
+        let outcome = evaluate_request(&yaml, "/x");
+        assert!(outcome.logs.is_empty());
+
+        let outcome = evaluate_request(&yaml, "/x?q=beta");
+        assert_eq!(outcome.logs.len(), 1);
+        assert_eq!(outcome.logs[0].rule, "weak-two");
+        assert!(outcome.blocked.is_none());
     }
 
     #[test]

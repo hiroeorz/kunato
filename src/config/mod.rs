@@ -153,6 +153,10 @@ pub struct CategorySpec {
     pub action: Option<Action>,
     #[serde(default)]
     pub response: Option<ResponseSpec>,
+    /// Scoring mode: each matching rule adds one point and the category action
+    /// applies once the score reaches the threshold.
+    #[serde(default)]
+    pub threshold: Option<u32>,
     #[serde(default)]
     pub rules: Vec<RuleSpec>,
 }
@@ -766,6 +770,7 @@ pub struct CompiledCategory {
     pub phase: Phase,
     pub action: Option<Action>,
     pub response: Option<ResponseSpec>,
+    pub threshold: Option<u32>,
     pub rules: Vec<CompiledRule>,
 }
 
@@ -994,6 +999,24 @@ fn compile_categories(
                 validate_response(response, &context, issues);
             }
 
+            if let Some(threshold) = category.threshold {
+                if threshold == 0 {
+                    issues.push(format!("{context}: threshold must be greater than zero"));
+                }
+                if category.enabled {
+                    match category.action {
+                        None => issues.push(format!(
+                            "{context}: `threshold` requires `action` on the category"
+                        )),
+                        Some(Action::Allow) => issues.push(format!(
+                            "{context}: a threshold category cannot use action ALLOW"
+                        )),
+                        Some(_) => {}
+                    }
+                }
+            }
+            let scoring = category.threshold.is_some();
+
             let mut seen_rules: BTreeSet<&str> = BTreeSet::new();
             let mut rules = Vec::new();
 
@@ -1010,9 +1033,27 @@ fn compile_categories(
                     validate_response(response, &rule_context, issues);
                 }
 
+                if scoring && category.enabled && rule.enabled {
+                    if rule.action.is_some() {
+                        issues.push(format!(
+                            "{rule_context}: rules in a threshold category cannot set `action`"
+                        ));
+                    }
+                    if rule.response.is_some() {
+                        issues.push(format!(
+                            "{rule_context}: rules in a threshold category cannot set `response`"
+                        ));
+                    }
+                    if rule.limit.is_some() {
+                        issues.push(format!(
+                            "{rule_context}: rules in a threshold category cannot set `limit`"
+                        ));
+                    }
+                }
+
                 let matcher = compile_matcher(&rule.matcher, category.phase, &rule_context, issues);
                 let effective_action = rule.action.or(category.action);
-                if category.enabled && rule.enabled && effective_action.is_none() {
+                if !scoring && category.enabled && rule.enabled && effective_action.is_none() {
                     issues.push(format!(
                         "{rule_context}: no effective action; set `action` on the rule or the category"
                     ));
@@ -1051,6 +1092,7 @@ fn compile_categories(
                 phase: category.phase,
                 action: category.action,
                 response: category.response.clone(),
+                threshold: category.threshold,
                 rules,
             });
         }
@@ -2056,6 +2098,99 @@ mod tests {
         )
         .expect_err("must fail");
         assert!(error.to_string().contains("ALLOW"), "{error}");
+    }
+
+    #[test]
+    fn threshold_categories_are_compiled() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: anomaly
+    action: BLOCK
+    threshold: 2
+    rules:
+      - name: one
+        match: { path: /a }
+      - name: two
+        match: { path: /b }
+",
+        )
+        .expect("valid config");
+        assert_eq!(config.categories[0].threshold, Some(2));
+    }
+
+    #[test]
+    fn rejects_invalid_threshold_configurations() {
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: anomaly
+    action: BLOCK
+    threshold: 0
+    rules:
+      - name: one
+        match: { path: /a }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("threshold"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: anomaly
+    threshold: 2
+    rules:
+      - name: one
+        match: { path: /a }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("requires `action`"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: anomaly
+    action: ALLOW
+    threshold: 2
+    rules:
+      - name: one
+        match: { path: /a }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("ALLOW"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: anomaly
+    action: BLOCK
+    threshold: 2
+    rules:
+      - name: one
+        action: LOG
+        match: { path: /a }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("cannot set `action`"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: anomaly
+    action: BLOCK
+    threshold: 2
+    rules:
+      - name: one
+        limit: { requests: 5 }
+        match: { path: /a }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("cannot set `limit`"), "{error}");
     }
 
     #[test]

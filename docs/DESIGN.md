@@ -231,8 +231,9 @@ struct CompiledCategory {
     name: String,
     enabled: bool,
     phase: Phase,                       // request | response
-    action: Option<Action>,             // category default
+    action: Option<Action>,             // category default / threshold action
     response: Option<ResponseSpec>,     // category default (BLOCK)
+    threshold: Option<u32>,             // scoring mode when set
     rules: Vec<CompiledRule>,
 }
 
@@ -241,6 +242,8 @@ struct CompiledRule {
     enabled: bool,
     action: Option<Action>,             // overrides the category default
     response: Option<ResponseSpec>,     // overrides the category default
+    limit: Option<RuleLimit>,           // per-source rate limit (request phase)
+    limit_key: u32,                     // stable bucket key for limit
     matcher: Matcher,
 }
 
@@ -264,6 +267,12 @@ categories run on the buffered upstream response. The first rule whose condition
 all match wins. A rule with `limit` skips itself while its source is within
 budget (see Section 7). Effective action and response resolve rule-first, then
 category.
+
+A category with `threshold: N` runs in scoring mode instead: every matching rule
+adds one point, rules never carry `action`, `response`, or `limit`, and the
+category action (`BLOCK` or `LOG`, required) applies once the score reaches `N`.
+Below the threshold the category is transparent and evaluation continues. The
+blocked/log record names the last matching rule.
 `ALLOW` stops evaluating further categories of that phase (request: forward;
 response: pass through unchanged); `BLOCK` responds and stops; `LOG` records and
 continues. No match means pass-through. See AGENTS.md invariant 1 for the request

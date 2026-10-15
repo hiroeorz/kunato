@@ -494,7 +494,15 @@ authenticity. Detached signatures (minisign) are planned as a hardening step.
 | `phase`       | `request` (default) or `response`; selects when the category is evaluated.                            |
 | `action`      | Default action (`BLOCK`, `ALLOW`, or `LOG`) for the category's rules.                                |
 | `response`    | Default response for `BLOCK` rules. Defaults to `403 Forbidden`.                                      |
+| `threshold`   | Scoring mode: each matching rule adds 1 and the category action applies at the threshold.             |
 | `rules`       | Ordered list of rules.                                                                               |
+
+A category with `threshold` does not short-circuit on the first match: every
+matching rule adds one point and, once the score reaches the threshold, the
+category action runs (`BLOCK` or `LOG`, not `ALLOW`). Rules in a threshold
+category must not set `action`, `response`, or `limit`, and the category
+`action` is required. Categories without `threshold` keep first-match
+semantics.
 
 ### Rule fields
 
