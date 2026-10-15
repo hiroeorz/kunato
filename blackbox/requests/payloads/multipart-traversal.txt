@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name="file"; filename="../../etc/passwd"
+Content-Type: text/plain
+
+blob
+--X--

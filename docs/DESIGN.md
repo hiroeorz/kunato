@@ -130,15 +130,22 @@ bytes, stream the rest uninspected, log `body_truncated`).
 ### Request normalization
 
 - Header names are case-insensitive (hyper). Header values are matched verbatim.
-- `path` and `query` are matched **both raw and percent-decoded** in a single pass,
-  so `%3Cscript%3E` and `<script>` both match. Cookies are matched raw.
-- Request bodies are matched raw and content-type decoded
-  (`application/x-www-form-urlencoded` and JSON string escapes such as `\u0075`).
+- `path` and `query` are matched raw and through up to two percent-decode passes
+  (a compile-time constant), so `%253Cscript%253E`, `%3Cscript%3E`, and
+  `<script>` all match. Cookies are matched raw.
+- Request bodies are matched raw, then content-type decoded
+  (`application/x-www-form-urlencoded`, JSON string escapes such as `\u0075`,
+  and `multipart/form-data` flattened to field values and file names), then
+  through the same percent-decode passes. Multipart parsing is bounded (64
+  parts, 1 KiB names/file names); malformed or oversized multipart bodies fall
+  back to raw inspection.
 - Bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
   inspection only; forwarded bytes are never modified. Decoding is bounded by
   `limits.max_body_bytes` / `limits.max_response_body_bytes`; stacked or unknown
   encodings are inspected as received.
-- No other normalization is performed (no Unicode folding, no double decoding).
+- No other normalization is performed (no Unicode folding, no HTML entity
+  decoding). Entity and fullwidth folding are deferred until anomaly scoring
+  can absorb their false positives.
 
 ### Forwarding rules
 
@@ -511,10 +518,13 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
   not re-inspected, so block responses cannot recurse.
 - **Opaque tunnels** — only the WebSocket handshake is inspected; tunnel payload
   is not evaluated by rules, not logged, and not bounded by `max_body_bytes`.
-- **Obfuscation** — path/query are matched raw and percent-decoded, bodies are
-  matched raw plus content-type decoded, and gzip/deflate/br bodies are
-  decompressed for matching; encoded traversal, XSS, and compressed payloads are
-  covered by rules.
+- **Obfuscation** — path/query are matched raw and through up to two
+  percent-decode passes, bodies are matched raw plus content-type decoded
+  (forms, JSON escapes, multipart field values and file names) and then
+  percent-decoded again, and gzip/deflate/br bodies are decompressed for
+  matching; encoded traversal, XSS, and compressed payloads are covered by
+  rules. Multipart flattening and decode passes are bounded, and no decoding
+  ever changes the forwarded bytes.
 - **Logging** — no secrets or full request bodies are logged.
 - **Supply chain** — minimal dependency set; `cargo audit` in CI is planned.
 

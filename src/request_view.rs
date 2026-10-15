@@ -4,17 +4,15 @@ use std::net::IpAddr;
 use http::header::{COOKIE, HeaderMap};
 use http::{Method, StatusCode, Uri};
 
-use crate::decoding::decode_body_format;
+use crate::decoding::{decoded_body_forms, percent_decode_forms};
 
 pub struct RequestView<'a> {
     pub method: &'a Method,
-    pub path: &'a str,
-    pub decoded_path: Cow<'a, str>,
-    pub query: Option<&'a str>,
-    pub decoded_query: Option<Cow<'a, str>>,
+    pub path_forms: Vec<Cow<'a, str>>,
+    pub query_forms: Vec<Cow<'a, str>>,
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
-    pub decoded_body: Option<Vec<u8>>,
+    pub body_forms: Vec<Vec<u8>>,
     pub source_ip: IpAddr,
 }
 
@@ -37,20 +35,16 @@ impl<'a> RequestView<'a> {
         source_ip: IpAddr,
         decode_body: bool,
     ) -> Self {
-        let path = uri.path();
-        let query = uri.query();
         Self {
             method,
-            path,
-            decoded_path: percent_decode(path),
-            query,
-            decoded_query: query.map(percent_decode),
+            path_forms: percent_decode_forms(uri.path()),
+            query_forms: uri.query().map(percent_decode_forms).unwrap_or_default(),
             headers,
             body,
-            decoded_body: if decode_body {
-                decode_body_format(body, headers)
+            body_forms: if decode_body && !body.is_empty() {
+                decoded_body_forms(body, headers)
             } else {
-                None
+                Vec::new()
             },
             source_ip,
         }
@@ -80,40 +74,6 @@ impl<'a> ResponseView<'a> {
     }
 }
 
-pub fn percent_decode(input: &str) -> Cow<'_, str> {
-    if !input.contains('%') {
-        return Cow::Borrowed(input);
-    }
-
-    let bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-        {
-            decoded.push((high << 4) | low);
-            index += 3;
-            continue;
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-
-    Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 pub fn cookie_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
     let mut pairs = Vec::new();
     for value in headers.get_all(COOKIE) {
@@ -132,34 +92,94 @@ pub fn cookie_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use http::{HeaderMap, HeaderValue, Method, Uri};
+
     use super::*;
 
-    #[test]
-    fn leaves_plain_text_borrowed() {
-        assert!(matches!(percent_decode("/plain/path"), Cow::Borrowed(_)));
+    fn view<'a>(uri: &'a Uri, headers: &'a HeaderMap, body: &'a [u8]) -> RequestView<'a> {
+        RequestView::new(
+            &Method::GET,
+            uri,
+            headers,
+            body,
+            "127.0.0.1".parse().expect("valid IP"),
+        )
     }
 
     #[test]
-    fn decodes_percent_escapes() {
-        assert_eq!(percent_decode("%2e%2e%2f"), "../");
-        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
-        assert_eq!(percent_decode("%3Cscript%3E"), "<script>");
+    fn plain_path_keeps_a_single_borrowed_form() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/plain/path".parse().expect("valid URI");
+        let view = view(&uri, &headers, b"");
+        assert_eq!(view.path_forms.len(), 1);
+        assert!(matches!(view.path_forms[0], Cow::Borrowed("/plain/path")));
+        assert!(view.query_forms.is_empty());
     }
 
     #[test]
-    fn keeps_invalid_escapes() {
-        assert_eq!(percent_decode("100%"), "100%");
-        assert_eq!(percent_decode("%zz"), "%zz");
-        assert_eq!(percent_decode("%4"), "%4");
+    fn path_forms_decode_twice() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/files/%252e%252e%252fetc".parse().expect("valid URI");
+        let view = view(&uri, &headers, b"");
+        let forms: Vec<&str> = view.path_forms.iter().map(|form| form.as_ref()).collect();
+        assert_eq!(
+            forms,
+            vec![
+                "/files/%252e%252e%252fetc",
+                "/files/%2e%2e%2fetc",
+                "/files/../etc"
+            ]
+        );
     }
 
     #[test]
-    fn decodes_lossy_utf8() {
-        assert_eq!(percent_decode("%FF"), "\u{FFFD}");
+    fn query_forms_stop_when_decoding_settles() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/?q=%2525".parse().expect("valid URI");
+        let view = view(&uri, &headers, b"");
+        let forms: Vec<&str> = view.query_forms.iter().map(|form| form.as_ref()).collect();
+        assert_eq!(forms, vec!["q=%2525", "q=%25", "q=%"]);
     }
 
     #[test]
-    fn arbitrary_input_never_panics() {
+    fn body_forms_include_decoded_and_percent_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        let uri: Uri = "/".parse().expect("valid URI");
+        let view = view(&uri, &headers, b"q=%2527+union");
+        let forms: Vec<&str> = view
+            .body_forms
+            .iter()
+            .map(|form| std::str::from_utf8(form).expect("utf8"))
+            .collect();
+        assert_eq!(forms, vec!["q=%27 union", "q=' union"]);
+    }
+
+    #[test]
+    fn body_forms_are_skipped_when_decoding_is_disabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        let uri: Uri = "/".parse().expect("valid URI");
+        let view = RequestView::with_body_decoding(
+            &Method::POST,
+            &uri,
+            &headers,
+            b"q=%27",
+            "127.0.0.1".parse().expect("valid IP"),
+            false,
+        );
+        assert!(view.body_forms.is_empty());
+    }
+
+    #[test]
+    fn arbitrary_uri_forms_never_panic() {
+        let headers = HeaderMap::new();
         let mut state = 0x1234_5678_9ABC_DEF0u64;
         for _ in 0..5_000 {
             let length = (next_random(&mut state) % 64) as usize;
@@ -169,7 +189,10 @@ mod tests {
                     char::from(byte)
                 })
                 .collect();
-            let _ = percent_decode(&text);
+            if let Ok(uri) = format!("/{text}?{text}").parse::<Uri>() {
+                let view = view(&uri, &headers, b"");
+                let _ = view.path_forms.len() + view.query_forms.len();
+            }
         }
     }
 

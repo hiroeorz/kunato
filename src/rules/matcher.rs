@@ -77,10 +77,10 @@ impl Matcher {
 
     fn matches_request(&self, view: &RequestView<'_>) -> bool {
         if !self.paths.is_empty() {
-            let matched = self
-                .paths
+            let matched = view
+                .path_forms
                 .iter()
-                .any(|regex| regex.is_match(view.path) || regex.is_match(&view.decoded_path));
+                .any(|form| self.paths.iter().any(|regex| regex.is_match(form)));
             if !matched {
                 return false;
             }
@@ -135,28 +135,20 @@ impl Matcher {
 
 impl PayloadMatcher {
     fn matches(&self, view: &RequestView<'_>, response: Option<&ResponseView<'_>>) -> bool {
-        if self.targets & TARGET_PATH != 0
-            && (self.hits(view.path) || self.hits(&view.decoded_path))
-        {
+        if self.targets & TARGET_PATH != 0 && view.path_forms.iter().any(|form| self.hits(form)) {
             return true;
         }
 
-        if self.targets & TARGET_QUERY != 0
-            && (view.query.is_some_and(|query| self.hits(query))
-                || view
-                    .decoded_query
-                    .as_deref()
-                    .is_some_and(|query| self.hits(query)))
-        {
+        if self.targets & TARGET_QUERY != 0 && view.query_forms.iter().any(|form| self.hits(form)) {
             return true;
         }
 
         if self.targets & TARGET_BODY != 0
-            && (!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body))
+            && ((!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body)))
                 || view
-                    .decoded_body
-                    .as_deref()
-                    .is_some_and(|body| self.hits(&String::from_utf8_lossy(body))))
+                    .body_forms
+                    .iter()
+                    .any(|form| self.hits(&String::from_utf8_lossy(form))))
         {
             return true;
         }
@@ -323,6 +315,55 @@ mod tests {
             ..Matcher::default()
         };
         assert!(matcher.matches(&view(&method, &uri, &headers, b"q=%27+union%2Fselect")));
+    }
+
+    #[test]
+    fn double_encoded_query_is_matched() {
+        let method = Method::GET;
+        let uri: Uri = "/?q=union%2520select".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)union\s+select")],
+                targets: TARGET_QUERY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn double_encoded_path_is_matched() {
+        let method = Method::GET;
+        let uri: Uri = "/files/%252e%252e%252fetc/passwd"
+            .parse()
+            .expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            paths: vec![regex(r"\.\./")],
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn multipart_filename_is_scanned_by_body_targets() {
+        let method = Method::POST;
+        let uri: Uri = "/upload".parse().expect("valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("multipart/form-data; boundary=X"),
+        );
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../etc/passwd\"\r\n\r\nblob\r\n--X--\r\n";
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)\.\./")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, body)));
     }
 
     #[test]

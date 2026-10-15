@@ -3681,3 +3681,12 @@ POST /api/search header="Content-Encoding: gzip" bodyhex=1f8b08000000000002032bb
 POST /api/login header="Content-Encoding: deflate" bodyhex=789c53a9ceca4bc9b4ca49492cb0d2d74f2c29494cce4e2dd24bad48cc2dc849d54fac0500cab60c2e
 POST /api/comment header="Content-Encoding: br" bodyhex=1b1800f8a5535e6278242186949220fc524c89e958
 POST /api/search header="Content-Encoding: gzip" header="Content-Type: application/x-www-form-urlencoded" bodyhex=1f8b08000000000002032bb4553532d72ecdcbcccfd32e4ecd494d2ed1360400b051cb0214000000
+
+# --- Double-encoding and multipart regression ---
+# Encoded twice (or hidden in multipart file names); Kunato must decode up to
+# two percent passes and flatten multipart fields and file names before
+# matching, while forwarding the original bytes unchanged.
+GET /?q=union%2520select
+GET /?x=%253Cscript%253E
+GET /?file=..%252f..%252fetc%252fpasswd
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-traversal.txt

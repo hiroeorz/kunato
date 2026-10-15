@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Read;
 
 use brotli_decompressor::Decompressor as BrotliDecoder;
@@ -5,6 +6,10 @@ use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
 
 const DECODE_BUFFER_BYTES: usize = 8 * 1024;
+const MAX_PERCENT_DECODE_PASSES: usize = 2;
+const MAX_MULTIPART_PARTS: usize = 64;
+const MAX_MULTIPART_NAME_BYTES: usize = 1024;
+const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
 
 pub fn decode_content_encoding(body: &[u8], headers: &HeaderMap, limit: usize) -> Option<Vec<u8>> {
     if body.is_empty() || limit == 0 {
@@ -28,22 +33,90 @@ pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
     if body.is_empty() {
         return None;
     }
-    let media_type = headers
-        .get(CONTENT_TYPE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .next()?
-        .trim()
-        .to_ascii_lowercase();
+    let content_type = headers.get(CONTENT_TYPE)?.to_str().ok()?;
+    let media_type = content_type.split(';').next()?.trim().to_ascii_lowercase();
 
     if media_type == "application/x-www-form-urlencoded" {
         Some(form_decode(body))
     } else if media_type == "application/json" || media_type.ends_with("+json") {
         Some(json_unescape(body))
+    } else if media_type == "multipart/form-data" {
+        multipart_flatten(body, &multipart_boundary(content_type)?)
     } else {
         None
     }
+}
+
+/// Decoded variants of a request body for inspection: the content-type decoded
+/// form followed by up to [`MAX_PERCENT_DECODE_PASSES`] percent-encoded passes.
+/// The raw body is inspected separately and is not repeated here.
+pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
+    let mut forms = Vec::new();
+    let Some(formatted) = decode_body_format(body, headers) else {
+        return forms;
+    };
+    let mut current = String::from_utf8_lossy(&formatted).into_owned();
+    if current.is_empty() {
+        return forms;
+    }
+    if current.as_bytes() != body {
+        forms.push(current.as_bytes().to_vec());
+    }
+    for _ in 0..MAX_PERCENT_DECODE_PASSES {
+        let next = percent_decode(&current).into_owned();
+        if next == current {
+            break;
+        }
+        forms.push(next.as_bytes().to_vec());
+        current = next;
+    }
+    forms
+}
+
+/// Percent-decoded variants of `input`, starting with the raw form, with at
+/// most [`MAX_PERCENT_DECODE_PASSES`] passes. Repeating or unchanged forms are
+/// dropped, so plain text yields a single borrowed variant.
+pub fn percent_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
+    let mut forms = Vec::with_capacity(MAX_PERCENT_DECODE_PASSES + 1);
+    forms.push(Cow::Borrowed(input));
+    if !input.contains('%') {
+        return forms;
+    }
+    let mut current = input.to_owned();
+    for _ in 0..MAX_PERCENT_DECODE_PASSES {
+        let next = percent_decode(&current).into_owned();
+        if next == current {
+            break;
+        }
+        forms.push(Cow::Owned(next.clone()));
+        current = next;
+    }
+    forms
+}
+
+pub fn percent_decode(input: &str) -> Cow<'_, str> {
+    if !input.contains('%') {
+        return Cow::Borrowed(input);
+    }
+
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
 }
 
 fn single_encoding(value: &HeaderValue) -> Option<String> {
@@ -111,6 +184,202 @@ fn form_decode(body: &[u8]) -> Vec<u8> {
         }
     }
     output
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    for parameter in content_type.split(';').skip(1) {
+        let parameter = parameter.trim();
+        let Some((name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or(value);
+        if value.is_empty()
+            || value.len() > MAX_MULTIPART_BOUNDARY_BYTES
+            || !value.is_ascii()
+            || value.bytes().any(|byte| byte.is_ascii_whitespace())
+        {
+            return None;
+        }
+        return Some(value.to_owned());
+    }
+    None
+}
+
+/// Flattens the textual parts of a `multipart/form-data` body into one document
+/// for inspection: field values and file names joined by newlines. Binary part
+/// payloads are included verbatim; the result is bounded by the input size and
+/// the part/name limits. Malformed or oversized input yields `None`.
+fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
+    let delimiter = format!("--{boundary}");
+    let closing = format!("--{boundary}--");
+    let mut output = Vec::new();
+    let mut current: Option<Vec<u8>> = None;
+    let mut parts = 0usize;
+
+    for line in body.split_inclusive(|&byte| byte == b'\n') {
+        let trimmed = trim_line_end(line);
+        let is_delimiter = trimmed == delimiter.as_bytes();
+        let is_closing = trimmed == closing.as_bytes();
+        if is_delimiter || is_closing {
+            if let Some(part) = current.take() {
+                parts += 1;
+                if parts > MAX_MULTIPART_PARTS {
+                    return None;
+                }
+                flatten_part(&part, &mut output);
+            }
+            if is_closing {
+                break;
+            }
+            current = Some(Vec::new());
+            continue;
+        }
+        if let Some(part) = current.as_mut() {
+            part.extend_from_slice(line);
+        }
+    }
+
+    if let Some(part) = current {
+        if parts >= MAX_MULTIPART_PARTS {
+            return None;
+        }
+        flatten_part(&part, &mut output);
+    }
+
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
+    }
+}
+
+fn flatten_part(part: &[u8], output: &mut Vec<u8>) {
+    let (headers, value) = split_part(part);
+    let value = trim_line_end(value);
+    if !value.is_empty() {
+        output.extend_from_slice(value);
+        output.push(b'\n');
+    }
+    if let Ok(headers) = std::str::from_utf8(headers)
+        && let Some(disposition) = header_value(headers, "content-disposition")
+        && let Some(filename) = disposition_filename(disposition)
+        && !filename.is_empty()
+    {
+        output.extend_from_slice(truncate_utf8(filename, MAX_MULTIPART_NAME_BYTES).as_bytes());
+        output.push(b'\n');
+    }
+}
+
+fn split_part(part: &[u8]) -> (&[u8], &[u8]) {
+    let mut offset = 0;
+    for line in part.split_inclusive(|&byte| byte == b'\n') {
+        if trim_line_end(line).is_empty() {
+            return (&part[..offset], &part[offset + line.len()..]);
+        }
+        offset += line.len();
+    }
+    (part, &[])
+}
+
+fn trim_line_end(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    for line in headers.lines() {
+        let Some((header_name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if header_name.trim().eq_ignore_ascii_case(name) {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
+fn disposition_filename(disposition: &str) -> Option<String> {
+    if let Some(encoded) = disposition_param(disposition, "filename*") {
+        if let Some((_, rest)) = encoded.split_once('\'')
+            && let Some((_, value)) = rest.split_once('\'')
+        {
+            return Some(percent_decode(value).into_owned());
+        }
+        return Some(encoded);
+    }
+    disposition_param(disposition, "filename")
+}
+
+fn disposition_param(header: &str, key: &str) -> Option<String> {
+    let bytes = header.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index] != b';' {
+            index += 1;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index] == b' ' {
+            index += 1;
+        }
+        let name_start = index;
+        while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b';' {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            continue;
+        }
+        let name = &header[name_start..index];
+        index += 1;
+        while index < bytes.len() && bytes[index] == b' ' {
+            index += 1;
+        }
+        let value = if index < bytes.len() && bytes[index] == b'"' {
+            index += 1;
+            let mut out = Vec::new();
+            while index < bytes.len() && bytes[index] != b'"' {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    out.push(bytes[index + 1]);
+                    index += 2;
+                } else {
+                    out.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            if index < bytes.len() {
+                index += 1;
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        } else {
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            header[value_start..index].trim().to_owned()
+        };
+        if name.trim().eq_ignore_ascii_case(key) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 fn json_unescape(body: &[u8]) -> Vec<u8> {
@@ -371,8 +640,122 @@ mod tests {
     }
 
     #[test]
+    fn percent_decode_forms_include_intermediate_passes() {
+        let decoded = percent_decode_forms("%252e%252e");
+        let forms: Vec<&str> = decoded.iter().map(|form| form.as_ref()).collect();
+        assert_eq!(forms, vec!["%252e%252e", "%2e%2e", ".."]);
+    }
+
+    #[test]
+    fn percent_decode_forms_keep_plain_input_borrowed() {
+        let forms = percent_decode_forms("/plain");
+        assert_eq!(forms.len(), 1);
+        assert!(matches!(forms[0], Cow::Borrowed("/plain")));
+    }
+
+    #[test]
+    fn percent_decode_forms_keep_invalid_escapes() {
+        let forms = percent_decode_forms("100%%zz");
+        assert_eq!(forms, vec![Cow::Borrowed("100%%zz")]);
+    }
+
+    #[test]
+    fn percent_decode_forms_decode_lossy_utf8() {
+        let forms = percent_decode_forms("%FF%FE");
+        assert_eq!(forms.len(), 2);
+        assert_eq!(forms[0], "%FF%FE");
+        assert_eq!(forms[1], "\u{FFFD}\u{FFFD}");
+    }
+
+    fn multipart_headers(boundary: &str) -> HeaderMap {
+        headers(
+            CONTENT_TYPE,
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
+    }
+
+    #[test]
+    fn multipart_values_and_filenames_are_flattened() {
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"user\"\r\n\r\nadmin\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../etc/passwd\"\r\nContent-Type: text/plain\r\n\r\nblob\r\n--X--\r\n";
+        let decoded = decode_body_format(body, &multipart_headers("X")).expect("multipart decoded");
+        let text = String::from_utf8(decoded).expect("valid utf8");
+        assert!(text.contains("admin"));
+        assert!(text.contains("../../etc/passwd"));
+    }
+
+    #[test]
+    fn multipart_quoted_boundary_is_supported() {
+        let body = b"--b-1\r\n\r\nvalue\r\n--b-1--\r\n";
+        let decoded = decode_body_format(
+            body,
+            &headers(
+                CONTENT_TYPE,
+                "multipart/form-data; charset=utf-8; boundary=\"b-1\"",
+            ),
+        )
+        .expect("multipart decoded");
+        assert_eq!(decoded, b"value\n");
+    }
+
+    #[test]
+    fn multipart_filename_star_is_percent_decoded() {
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"f\"; filename*=UTF-8''..%2F..%2Fetc%2Fpasswd\r\n\r\nx\r\n--X--\r\n";
+        let decoded = decode_body_format(body, &multipart_headers("X")).expect("multipart decoded");
+        let text = String::from_utf8(decoded).expect("valid utf8");
+        assert!(text.contains("../../etc/passwd"));
+    }
+
+    #[test]
+    fn multipart_lf_only_bodies_are_supported() {
+        let body = b"--X\nContent-Disposition: form-data; name=\"a\"\n\nv\n--X--\n";
+        let decoded = decode_body_format(body, &multipart_headers("X")).expect("multipart decoded");
+        assert_eq!(decoded, b"v\n");
+    }
+
+    #[test]
+    fn multipart_without_closing_delimiter_is_tolerated() {
+        let body = b"--X\r\n\r\nvalue";
+        let decoded = decode_body_format(body, &multipart_headers("X")).expect("multipart decoded");
+        assert_eq!(decoded, b"value\n");
+    }
+
+    #[test]
+    fn multipart_without_boundary_is_left_alone() {
+        assert!(
+            decode_body_format(
+                b"--X\r\n\r\nv\r\n--X--\r\n",
+                &headers(CONTENT_TYPE, "multipart/form-data")
+            )
+            .is_none()
+        );
+        assert!(decode_body_format(b"not multipart", &multipart_headers("X")).is_none());
+    }
+
+    #[test]
+    fn multipart_part_limit_falls_back() {
+        let mut body = Vec::new();
+        for index in 0..=MAX_MULTIPART_PARTS {
+            body.extend_from_slice(format!("--X\r\n\r\nv{index}\r\n").as_bytes());
+        }
+        body.extend_from_slice(b"--X--\r\n");
+        assert!(decode_body_format(&body, &multipart_headers("X")).is_none());
+    }
+
+    #[test]
+    fn multipart_bodies_are_percent_decoded_after_flattening() {
+        let body = b"--X\r\n\r\nq=%2527\r\n--X--\r\n";
+        let forms = decoded_body_forms(body, &multipart_headers("X"));
+        let forms: Vec<&str> = forms
+            .iter()
+            .map(|form| std::str::from_utf8(form).expect("utf8"))
+            .collect();
+        assert_eq!(forms, vec!["q=%2527\n", "q=%27\n", "q='\n"]);
+    }
+
+    #[test]
     fn arbitrary_input_never_panics() {
         let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let multipart = multipart_headers("boundary");
         for _ in 0..5_000 {
             let length = (next_random(&mut state) % 48) as usize;
             let body: Vec<u8> = (0..length)
@@ -383,6 +766,9 @@ mod tests {
                 &headers(CONTENT_TYPE, "application/x-www-form-urlencoded"),
             );
             let _ = decode_body_format(&body, &headers(CONTENT_TYPE, "application/json"));
+            let _ = decode_body_format(&body, &multipart);
+            let _ = decoded_body_forms(&body, &multipart);
+            let _ = percent_decode_forms(&String::from_utf8_lossy(&body));
             let _ = decode_content_encoding(&body, &headers(CONTENT_ENCODING, "gzip"), 1024);
             let _ = decode_content_encoding(&body, &headers(CONTENT_ENCODING, "deflate"), 1024);
             let _ = decode_content_encoding(&body, &headers(CONTENT_ENCODING, "br"), 1024);

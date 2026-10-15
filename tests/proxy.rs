@@ -827,6 +827,78 @@ async fn json_request_body_is_rule_evaluated() {
 }
 
 #[tokio::test]
+async fn double_encoded_query_payloads_are_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [query] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/?q=union%2520select", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = send(running.addr, Method::GET, "/safe", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn double_encoded_body_payloads_are_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        b"q=1%2520union%2520select%2520password".to_vec(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn multipart_filename_traversal_is_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: traversal\n    action: BLOCK\n    rules:\n      - name: dot-dot-slash\n        match: {{ regex: '\\.\\./', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../etc/passwd\"\r\nContent-Type: text/plain\r\n\r\nblob\r\n--X--\r\n";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body.to_vec(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let safe = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"report.txt\"\r\nContent-Type: text/plain\r\n\r\nblob\r\n--X--\r\n";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        safe.to_vec(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn gzip_response_body_is_rule_evaluated() {
     let upstream = spawn_encoded_response_upstream(
         StatusCode::OK,

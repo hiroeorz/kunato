@@ -512,10 +512,15 @@ authenticity. Detached signatures (minisign) are planned as a hardening step.
 Match conditions are combined with logical AND; a list value means OR within that
 field. At least one condition must be specified. Regular expressions are compiled
 once at load time, and an invalid pattern rejects the configuration. Path and query
-values are matched both raw and percent-decoded, so `%3Cscript%3E` and `<script>`
-both match. Bodies are matched raw and decoded by `Content-Type`
-(`application/x-www-form-urlencoded` and JSON string escapes such as `\u0075`), and
-are decompressed first when `Content-Encoding` is `gzip`, `deflate`, or `br`.
+values are matched raw and through up to two percent-decode passes, so
+`%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match. Bodies are matched raw
+and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
+escapes such as `\u0075`, and `multipart/form-data` flattened to field values and
+file names), then through the same percent-decode passes, and are decompressed
+first when `Content-Encoding` is `gzip`, `deflate`, or `br`. Multipart parsing is
+bounded to 64 parts with 1 KiB names and file names; malformed multipart bodies
+are inspected raw only. No other normalization (Unicode folding, HTML entity
+decoding) is performed.
 
 | Field              | Description                                                                                                             |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
