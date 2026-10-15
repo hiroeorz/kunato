@@ -5,7 +5,7 @@ use bytes::Bytes;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use hyper::body::Frame;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::CompiledConfig;
 use crate::metrics::Metrics;
@@ -69,14 +69,34 @@ pub async fn inspect(
     peer: SocketAddr,
     response: Response<ProxyBody>,
 ) -> Result<Response<ProxyBody>, HttpError> {
-    let buffered = buffer_prefix(response, config.limits.max_response_body_bytes)
-        .await
-        .map_err(|err| {
+    let buffered = match tokio::time::timeout(
+        config.timeouts.upstream_response,
+        buffer_prefix(response, config.limits.max_response_body_bytes),
+    )
+    .await
+    {
+        Err(_) => {
+            metrics.upstream_timeouts.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                timeout = ?config.timeouts.upstream_response,
+                "timed out buffering upstream response for inspection"
+            );
+            return Err(HttpError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream response timed out",
+            ));
+        }
+        Ok(Err(err)) => {
             debug!(error = %err, "failed to buffer upstream response for inspection");
-            HttpError::new(StatusCode::BAD_GATEWAY, "upstream response failed")
-        })?;
+            return Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream response failed",
+            ));
+        }
+        Ok(Ok(buffered)) => buffered,
+    };
 
-    let inspected_prefix = if config.has_response_body_rules() {
+    let decoded_prefix = if config.has_response_body_rules() {
         crate::decoding::decode_content_encoding(
             &buffered.prefix,
             &buffered.parts.headers,
@@ -85,7 +105,23 @@ pub async fn inspect(
     } else {
         None
     };
-    let inspected_prefix = inspected_prefix.as_deref().unwrap_or(&buffered.prefix);
+    let decode_truncated = decoded_prefix
+        .as_ref()
+        .is_some_and(|decoded| decoded.truncated);
+    if decode_truncated {
+        metrics
+            .response_decode_truncated
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            limit = config.limits.max_response_body_bytes,
+            status = buffered.parts.status.as_u16(),
+            "decompressed response body truncated for inspection"
+        );
+    }
+    let inspected_prefix = decoded_prefix
+        .as_ref()
+        .map(|decoded| decoded.body.as_slice())
+        .unwrap_or(&buffered.prefix);
 
     let view = RequestView::with_body_decoding(
         &request.method,
@@ -99,7 +135,7 @@ pub async fn inspect(
         buffered.parts.status,
         &buffered.parts.headers,
         inspected_prefix,
-        buffered.truncated,
+        buffered.truncated || decode_truncated,
     );
     let outcome = eval::evaluate_response(config, &view, &response_view);
 

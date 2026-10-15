@@ -25,7 +25,7 @@ use crate::proxy::{ProxyBody, full_body};
 pub(crate) struct Upgrade {
     pub on_upgrade: OnUpgrade,
     pub shutdown: watch::Receiver<bool>,
-    pub guard: Option<ConnectionGuard>,
+    pub guard_slot: Arc<Mutex<Option<ConnectionGuard>>>,
 }
 
 pub(crate) async fn forward_handshake(
@@ -133,12 +133,17 @@ pub(crate) async fn forward_handshake(
     *handshake.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
     copy_handshake_response_headers(response.headers(), handshake.headers_mut());
 
+    let guard = upgrade
+        .guard_slot
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
     tokio::spawn(tunnel(
         upgrade.on_upgrade,
         upstream_upgrade,
         config.timeouts.websocket_idle,
         upgrade.shutdown,
-        upgrade.guard,
+        guard,
         peer,
     ));
     Ok(handshake)

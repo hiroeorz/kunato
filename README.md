@@ -530,7 +530,11 @@ Match conditions are combined with logical AND; a list value means OR within tha
 field. At least one condition must be specified. Regular expressions are compiled
 once at load time, and an invalid pattern rejects the configuration. Path and query
 values are matched raw and through up to two percent-decode passes, so
-`%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match. Bodies are matched raw
+`%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match; paths are additionally
+matched in normalized form (dot segments resolved, duplicate slashes merged), so
+`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. Header values
+are decoded with UTF-8 replacement, so a single invalid byte cannot hide a value
+from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
 escapes such as `\u0075`, and `multipart/form-data` flattened to field values and
 file names), then through the same percent-decode passes, and are decompressed
@@ -588,7 +592,9 @@ debug level. Rules therefore see at most the prefix; to reject oversized bodies
 outright, add an explicit rule (for example a `content-length` header regex).
 Request decoding is bounded by `max_body_bytes` and response decoding by
 `max_response_body_bytes`, so decompression bombs cannot exceed the configured
-buffer sizes.
+buffer sizes. A decoded body cut off at the limit is counted separately
+(`kunato_request_decode_truncated_total`,
+`kunato_response_decode_truncated_total`) and logged at warning level.
 
 ### Response headers
 

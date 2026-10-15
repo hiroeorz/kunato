@@ -71,7 +71,7 @@ pub async fn serve(
             incoming = endpoint.accept() => {
                 match incoming {
                     Some(incoming) => {
-                        let peer = incoming.remote_address();
+                        let peer = server::normalize_peer(incoming.remote_address());
                         match context.try_acquire_connection(peer.ip()) {
                             Some(guard) => {
                                 let context = context.clone();

@@ -150,6 +150,31 @@ async fn spawn_encoded_response_upstream(
     addr
 }
 
+async fn spawn_stalling_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\npartial")
+                    .await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_identifying_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -284,6 +309,7 @@ async fn websocket_handshake(addr: SocketAddr, path: &str) -> (String, TcpStream
 
 struct Running {
     addr: SocketAddr,
+    metrics: Arc<Metrics>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -300,7 +326,7 @@ async fn start_kunato(yaml: &str) -> Running {
     let listen = compiled.listen;
     let config = Arc::new(ArcSwap::from_pointee(compiled));
     let metrics = Arc::new(Metrics::new());
-    let server = Server::bind(listen, config, metrics)
+    let server = Server::bind(listen, config, metrics.clone())
         .await
         .expect("bind kunato");
     let addr = server.local_addr().expect("local address");
@@ -308,6 +334,7 @@ async fn start_kunato(yaml: &str) -> Running {
     let task = tokio::spawn(server.run(shutdown_rx));
     Running {
         addr,
+        metrics,
         shutdown,
         task,
     }
@@ -1628,6 +1655,256 @@ categories:
 
     let (status, _) = send_h2c(running.addr, Method::GET, "/", "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn non_utf8_header_does_not_bypass_header_rules() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: scanners
+    action: BLOCK
+    rules:
+      - name: sqlmap
+        match: {{ headers: {{ user-agent: '(?i)sqlmap' }} }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("http://{}/", running.addr))
+        .header("host", running.addr.to_string())
+        .header(
+            "user-agent",
+            HeaderValue::from_bytes(b"sqlmap/1.0\xff").expect("valid header bytes"),
+        )
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+    let response = client.request(request).await.expect("request");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn normalized_paths_are_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "ADMIN-PANEL").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: admin
+    action: BLOCK
+    rules:
+      - name: admin-area
+        match: {{ path: '^/admin$' }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    for path in [
+        "//admin",
+        "/./admin",
+        "/x/../admin",
+        "/a/b/../../admin",
+        "/%2fadmin",
+    ] {
+        let (status, _) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "path {path} bypassed the rule"
+        );
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn dual_stack_listener_normalizes_ipv4_mapped_clients() {
+    let probe = TcpListener::bind("[::]:0").await;
+    let Ok(probe) = probe else {
+        return;
+    };
+    let probe_port = probe.local_addr().expect("probe address").port();
+    if TcpStream::connect(("127.0.0.1", probe_port)).await.is_err() {
+        return;
+    }
+    drop(probe);
+
+    let upstream = spawn_header_echo_upstream("x-forwarded-for").await;
+    let yaml = format!(
+        "listen: \"[::]:0\"
+upstream: http://{upstream}
+categories:
+  - name: local-only
+    action: BLOCK
+    rules:
+      - name: block-loopback
+        match: {{ source_ip: 127.0.0.1 }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    assert!(running.addr.is_ipv6());
+    let addr = SocketAddr::from(([127, 0, 0, 1], running.addr.port()));
+
+    let (status, _) = send(addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+
+    let upstream = spawn_header_echo_upstream("x-forwarded-for").await;
+    let running = start_kunato(&format!(
+        "listen: \"[::]:0\"\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+    let addr = SocketAddr::from(([127, 0, 0, 1], running.addr.port()));
+
+    let (status, body) = send(addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "127.0.0.1");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn decompressed_request_truncation_is_reported() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_body_bytes: 64 }}
+categories:
+  - name: signatures
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: never-matches-xyz, in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        gzip(&vec![b'a'; 4096]),
+        &[("content-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_decode_truncated_total 1"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("kunato_request_truncated_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn decompressed_response_truncation_is_reported() {
+    let upstream = spawn_encoded_response_upstream(
+        StatusCode::OK,
+        vec![(
+            HeaderName::from_static("content-encoding"),
+            HeaderValue::from_static("gzip"),
+        )],
+        gzip(&vec![b'a'; 4096]),
+    )
+    .await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_response_body_bytes: 64 }}
+categories:
+  - name: response-signatures
+    phase: response
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: never-matches-xyz, in: [response_body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_response_decode_truncated_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn stalled_upstream_response_returns_gateway_timeout() {
+    let upstream = spawn_stalling_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+timeouts: {{ upstream_response: 300ms }}
+categories:
+  - name: response-signatures
+    phase: response
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: never-matches-xyz }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_upstream_timeouts_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn failed_websocket_upgrade_keeps_connection_budget() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection: {{ max_connections_per_ip: 1, max_connections: 8 }}
+categories: []
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, _held) = websocket_handshake(running.addr, "/nope").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 404"),
+        "unexpected handshake: {handshake}"
+    );
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
     running.stop().await;
 }

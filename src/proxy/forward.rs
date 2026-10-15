@@ -8,6 +8,7 @@ use hyper::body::Incoming;
 use tracing::debug;
 
 use crate::config::{CompiledConfig, ResponseSpec};
+use crate::protection::normalize_ip;
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::{BoxError, ProxyBody, full_body};
 
@@ -128,7 +129,7 @@ pub(crate) fn set_forwarded_headers(
     peer: SocketAddr,
     scheme: &'static str,
 ) {
-    if let Ok(forwarded_for) = HeaderValue::from_str(&peer.ip().to_string()) {
+    if let Ok(forwarded_for) = HeaderValue::from_str(&normalize_ip(peer.ip()).to_string()) {
         target.insert("x-forwarded-for", forwarded_for);
     }
     let forwarded_proto = if scheme == "https" {
@@ -204,4 +205,26 @@ pub(crate) fn is_hop_by_hop(name: &HeaderName) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_mapped_peers_are_normalized_in_forwarded_headers() {
+        let mut target = HeaderMap::new();
+        let source = HeaderMap::new();
+        let uri: http::Uri = "/".parse().expect("valid URI");
+        let peer: SocketAddr = "[::ffff:10.0.0.1]:1234".parse().expect("valid peer");
+
+        set_forwarded_headers(&mut target, &source, &uri, peer, "http");
+
+        assert_eq!(
+            target
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok()),
+            Some("10.0.0.1")
+        );
+    }
 }

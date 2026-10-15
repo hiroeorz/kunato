@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::metrics::Metrics;
-use crate::protection::{ConnectionGuard, Decision, ProtectionState};
+use crate::protection::{ConnectionGuard, Decision, ProtectionState, normalize_ip};
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
@@ -151,6 +151,7 @@ impl Server {
                 accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, peer)) => {
+                            let peer = normalize_peer(peer);
                             let context = context.clone();
                             let connection_shutdown = shutdown.clone();
                             let config = context.config();
@@ -186,6 +187,10 @@ impl Server {
             let _ = task.await;
         }
     }
+}
+
+pub(crate) fn normalize_peer(peer: SocketAddr) -> SocketAddr {
+    SocketAddr::new(normalize_ip(peer.ip()), peer.port())
 }
 
 pub(crate) async fn drain_connections(connections: &mut JoinSet<()>, grace: Duration) {
@@ -371,11 +376,10 @@ async fn handle_request(
     guard_slot: Arc<std::sync::Mutex<Option<ConnectionGuard>>>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let upgrade = if is_websocket_upgrade(&request) {
-        let guard = guard_slot.lock().ok().and_then(|mut slot| slot.take());
         Some(Upgrade {
             on_upgrade: hyper::upgrade::on(&mut request),
             shutdown,
-            guard,
+            guard_slot,
         })
     } else {
         None
@@ -603,11 +607,27 @@ async fn process(
         ));
     }
 
-    let inspected_body = if config.has_body_target_rules() {
+    let decoded_body = if config.has_body_target_rules() {
         crate::decoding::decode_content_encoding(body, &parts.headers, config.limits.max_body_bytes)
     } else {
         None
     };
+    if decoded_body
+        .as_ref()
+        .is_some_and(|decoded| decoded.truncated)
+    {
+        context
+            .metrics
+            .request_decode_truncated
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            client = %peer.ip(),
+            limit = config.limits.max_body_bytes,
+            path = %parts.uri.path(),
+            "decompressed request body truncated for inspection"
+        );
+    }
+    let inspected_body = decoded_body.map(|decoded| decoded.body);
     let inspected_body = inspected_body.as_deref().unwrap_or(body);
     let view = RequestView::with_body_decoding(
         &parts.method,

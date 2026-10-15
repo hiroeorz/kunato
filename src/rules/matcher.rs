@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use http::Method;
 use http::header::HeaderName;
 use ipnet::IpNet;
@@ -22,6 +24,12 @@ impl StatusRange {
     pub fn contains(self, status: u16) -> bool {
         (self.start..=self.end).contains(&status)
     }
+}
+
+/// Header values are matched lossily so that a single invalid byte cannot hide
+/// an otherwise matching value (RFC 9110 allows obs-text bytes in field values).
+fn header_text(value: &http::HeaderValue) -> Cow<'_, str> {
+    String::from_utf8_lossy(value.as_bytes())
 }
 
 #[derive(Debug, Default)]
@@ -62,11 +70,11 @@ impl Matcher {
         }
 
         for (name, regexes) in &self.response_headers {
-            let matched = response.headers.get_all(name).iter().any(|value| {
-                value
-                    .to_str()
-                    .is_ok_and(|value| regexes.iter().any(|re| re.is_match(value)))
-            });
+            let matched = response
+                .headers
+                .get_all(name)
+                .iter()
+                .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))));
             if !matched {
                 return false;
             }
@@ -101,11 +109,11 @@ impl Matcher {
         }
 
         for (name, regexes) in &self.headers {
-            let matched = view.headers.get_all(name).iter().any(|value| {
-                value
-                    .to_str()
-                    .is_ok_and(|value| regexes.iter().any(|re| re.is_match(value)))
-            });
+            let matched = view
+                .headers
+                .get_all(name)
+                .iter()
+                .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))));
             if !matched {
                 return false;
             }
@@ -115,7 +123,8 @@ impl Matcher {
             let matched = cookie_pairs(view.headers)
                 .iter()
                 .any(|(cookie_name, value)| {
-                    *cookie_name == name && regexes.iter().any(|re| re.is_match(value))
+                    cookie_name.as_ref() == name.as_str()
+                        && regexes.iter().any(|re| re.is_match(value.as_ref()))
                 });
             if !matched {
                 return false;
@@ -156,7 +165,7 @@ impl PayloadMatcher {
         if self.targets & TARGET_COOKIES != 0
             && cookie_pairs(view.headers)
                 .iter()
-                .any(|(_, value)| self.hits(value))
+                .any(|(_, value)| self.hits(value.as_ref()))
         {
             return true;
         }
@@ -165,7 +174,7 @@ impl PayloadMatcher {
             && view
                 .headers
                 .values()
-                .any(|value| value.to_str().is_ok_and(|value| self.hits(value)))
+                .any(|value| self.hits(&header_text(value)))
         {
             return true;
         }
@@ -252,6 +261,41 @@ mod tests {
             ..Matcher::default()
         };
         assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn non_utf8_header_values_are_still_matched() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_bytes(b"sqlmap/1.0\xff").expect("valid header bytes"),
+        );
+        let matcher = Matcher {
+            headers: vec![(HeaderName::from_static("user-agent"), vec![regex("sqlmap")])],
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn non_utf8_headers_are_scanned_by_payload_targets() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api",
+            HeaderValue::from_bytes(b"${jndi:ldap://x/a}\xff").expect("valid header bytes"),
+        );
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"\$\{jndi:")],
+                targets: TARGET_HEADERS,
+            }),
+            ..Matcher::default()
+        };
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
     }
 
     #[test]

@@ -4,7 +4,8 @@ use std::net::IpAddr;
 use http::header::{COOKIE, HeaderMap};
 use http::{Method, StatusCode, Uri};
 
-use crate::decoding::{decoded_body_forms, percent_decode_forms};
+use crate::decoding::{decoded_body_forms, normalize_path, percent_decode_forms};
+use crate::protection::normalize_ip;
 
 pub struct RequestView<'a> {
     pub method: &'a Method,
@@ -37,7 +38,7 @@ impl<'a> RequestView<'a> {
     ) -> Self {
         Self {
             method,
-            path_forms: percent_decode_forms(uri.path()),
+            path_forms: path_forms(uri.path()),
             query_forms: uri.query().map(percent_decode_forms).unwrap_or_default(),
             headers,
             body,
@@ -46,9 +47,25 @@ impl<'a> RequestView<'a> {
             } else {
                 Vec::new()
             },
-            source_ip,
+            source_ip: normalize_ip(source_ip),
         }
     }
+}
+
+/// Percent-decoded variants of a path plus its normalized form, so rules see
+/// the same path an upstream server that merges slashes and resolves dot
+/// segments would route on.
+fn path_forms(path: &str) -> Vec<Cow<'_, str>> {
+    let mut forms = percent_decode_forms(path);
+    let last = forms.last().map(|form| form.as_ref()).unwrap_or(path);
+    if let Some(normalized) = normalize_path(last)
+        && !forms
+            .iter()
+            .any(|form| form.as_ref() == normalized.as_str())
+    {
+        forms.push(Cow::Owned(normalized));
+    }
+    forms
 }
 
 pub struct ResponseView<'a> {
@@ -74,16 +91,29 @@ impl<'a> ResponseView<'a> {
     }
 }
 
-pub fn cookie_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
+pub fn cookie_pairs(headers: &HeaderMap) -> Vec<(Cow<'_, str>, Cow<'_, str>)> {
     let mut pairs = Vec::new();
     for value in headers.get_all(COOKIE) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for part in value.split(';') {
-            let part = part.trim();
-            if let Some((name, value)) = part.split_once('=') {
-                pairs.push((name.trim(), value.trim()));
+        match value.to_str() {
+            Ok(value) => {
+                for part in value.split(';') {
+                    let part = part.trim();
+                    if let Some((name, value)) = part.split_once('=') {
+                        pairs.push((Cow::Borrowed(name.trim()), Cow::Borrowed(value.trim())));
+                    }
+                }
+            }
+            Err(_) => {
+                let lossy = String::from_utf8_lossy(value.as_bytes());
+                for part in lossy.split(';') {
+                    let part = part.trim();
+                    if let Some((name, value)) = part.split_once('=') {
+                        pairs.push((
+                            Cow::Owned(name.trim().to_owned()),
+                            Cow::Owned(value.trim().to_owned()),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -127,9 +157,59 @@ mod tests {
             vec![
                 "/files/%252e%252e%252fetc",
                 "/files/%2e%2e%2fetc",
-                "/files/../etc"
+                "/files/../etc",
+                "/etc"
             ]
         );
+    }
+
+    #[test]
+    fn path_forms_include_the_normalized_path() {
+        let headers = HeaderMap::new();
+        for (raw, expected) in [
+            ("//admin", "/admin"),
+            ("/./admin", "/admin"),
+            ("/x/../admin", "/admin"),
+            ("/%2fadmin", "/admin"),
+            ("/a/b/../../admin", "/admin"),
+        ] {
+            let uri: Uri = raw.parse().expect("valid URI");
+            let view = view(&uri, &headers, b"");
+            assert!(
+                view.path_forms.iter().any(|form| form.as_ref() == expected),
+                "expected {expected} among forms of {raw}: {:?}",
+                view.path_forms
+            );
+        }
+    }
+
+    #[test]
+    fn ipv4_mapped_source_addresses_are_normalized() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/".parse().expect("valid URI");
+        let view = RequestView::new(
+            &Method::GET,
+            &uri,
+            &headers,
+            b"",
+            "::ffff:10.0.0.1".parse().expect("valid IP"),
+        );
+        assert_eq!(
+            view.source_ip,
+            "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn cookie_pairs_tolerate_non_utf8_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_bytes(b"session=abc; evil=\xff").expect("valid header bytes"),
+        );
+        let pairs = cookie_pairs(&headers);
+        assert!(pairs.iter().any(|(name, _)| name.as_ref() == "session"));
+        assert!(pairs.iter().any(|(name, _)| name.as_ref() == "evil"));
     }
 
     #[test]

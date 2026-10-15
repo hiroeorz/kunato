@@ -380,7 +380,7 @@ fn is_allowlisted(ip: IpAddr, allowlist: &[IpNet]) -> bool {
     allowlist.iter().any(|network| network.contains(&ip))
 }
 
-fn normalize_ip(ip: IpAddr) -> IpAddr {
+pub(crate) fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(address) => match address.to_ipv4_mapped() {
             Some(mapped) => IpAddr::V4(mapped),

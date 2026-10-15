@@ -11,7 +11,16 @@ const MAX_MULTIPART_PARTS: usize = 64;
 const MAX_MULTIPART_NAME_BYTES: usize = 1024;
 const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
 
-pub fn decode_content_encoding(body: &[u8], headers: &HeaderMap, limit: usize) -> Option<Vec<u8>> {
+pub struct DecodedBody {
+    pub body: Vec<u8>,
+    pub truncated: bool,
+}
+
+pub fn decode_content_encoding(
+    body: &[u8],
+    headers: &HeaderMap,
+    limit: usize,
+) -> Option<DecodedBody> {
     if body.is_empty() || limit == 0 {
         return None;
     }
@@ -22,10 +31,13 @@ pub fn decode_content_encoding(body: &[u8], headers: &HeaderMap, limit: usize) -
         "br" => read_bounded(BrotliDecoder::new(body, DECODE_BUFFER_BYTES), limit),
         _ => return None,
     };
-    if decoded.is_empty() {
+    if decoded.0.is_empty() {
         None
     } else {
-        Some(decoded)
+        Some(DecodedBody {
+            body: decoded.0,
+            truncated: decoded.1,
+        })
     }
 }
 
@@ -33,7 +45,7 @@ pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
     if body.is_empty() {
         return None;
     }
-    let content_type = headers.get(CONTENT_TYPE)?.to_str().ok()?;
+    let content_type = String::from_utf8_lossy(headers.get(CONTENT_TYPE)?.as_bytes());
     let media_type = content_type.split(';').next()?.trim().to_ascii_lowercase();
 
     if media_type == "application/x-www-form-urlencoded" {
@@ -41,7 +53,7 @@ pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
     } else if media_type == "application/json" || media_type.ends_with("+json") {
         Some(json_unescape(body))
     } else if media_type == "multipart/form-data" {
-        multipart_flatten(body, &multipart_boundary(content_type)?)
+        multipart_flatten(body, &multipart_boundary(&content_type)?)
     } else {
         None
     }
@@ -94,6 +106,40 @@ pub fn percent_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
     forms
 }
 
+/// Normalizes an absolute path the way a typical upstream server does:
+/// removes `.` and `..` segments and merges duplicate slashes. Returns `None`
+/// when `path` is not absolute.
+pub fn normalize_path(path: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return None;
+    }
+
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path[1..].split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            segment => segments.push(segment),
+        }
+    }
+
+    if segments.is_empty() {
+        return Some("/".to_owned());
+    }
+
+    let mut normalized = String::with_capacity(path.len());
+    for segment in &segments {
+        normalized.push('/');
+        normalized.push_str(segment);
+    }
+    if path.ends_with('/') || path.ends_with("/.") || path.ends_with("/..") {
+        normalized.push('/');
+    }
+    Some(normalized)
+}
+
 pub fn percent_decode(input: &str) -> Cow<'_, str> {
     if !input.contains('%') {
         return Cow::Borrowed(input);
@@ -121,7 +167,8 @@ pub fn percent_decode(input: &str) -> Cow<'_, str> {
 
 fn single_encoding(value: &HeaderValue) -> Option<String> {
     let mut encoding: Option<String> = None;
-    for token in value.to_str().ok()?.split(',') {
+    let value = String::from_utf8_lossy(value.as_bytes());
+    for token in value.split(',') {
         let token = token.trim();
         if token.is_empty() || token.eq_ignore_ascii_case("identity") {
             continue;
@@ -134,7 +181,7 @@ fn single_encoding(value: &HeaderValue) -> Option<String> {
     encoding
 }
 
-fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
+fn read_bounded(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
     let mut output = Vec::new();
     let mut buffer = [0u8; DECODE_BUFFER_BYTES];
     while output.len() < limit {
@@ -144,12 +191,18 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
             Ok(read) => output.extend_from_slice(&buffer[..read]),
         }
     }
-    output
+
+    let mut truncated = false;
+    if limit > 0 && output.len() >= limit {
+        let mut probe = [0u8; 1];
+        truncated = matches!(reader.read(&mut probe), Ok(read) if read > 0);
+    }
+    (output, truncated)
 }
 
-fn decode_deflate(input: &[u8], limit: usize) -> Vec<u8> {
+fn decode_deflate(input: &[u8], limit: usize) -> (Vec<u8>, bool) {
     let decoded = read_bounded(ZlibDecoder::new(input), limit);
-    if decoded.is_empty() {
+    if decoded.0.is_empty() {
         read_bounded(DeflateDecoder::new(input), limit)
     } else {
         decoded
@@ -530,8 +583,10 @@ mod tests {
             &gzip(payload),
             &headers(CONTENT_ENCODING, "gzip"),
             payload.len(),
-        );
-        assert_eq!(decoded.as_deref(), Some(&payload[..]));
+        )
+        .expect("decoded");
+        assert_eq!(decoded.body, payload);
+        assert!(!decoded.truncated);
     }
 
     #[test]
@@ -542,8 +597,9 @@ mod tests {
                 &encoded,
                 &headers(CONTENT_ENCODING, "deflate"),
                 payload.len(),
-            );
-            assert_eq!(decoded.as_deref(), Some(&payload[..]));
+            )
+            .expect("decoded");
+            assert_eq!(decoded.body, payload);
         }
     }
 
@@ -554,8 +610,9 @@ mod tests {
             &brotli(payload),
             &headers(CONTENT_ENCODING, "br"),
             payload.len(),
-        );
-        assert_eq!(decoded.as_deref(), Some(&payload[..]));
+        )
+        .expect("decoded");
+        assert_eq!(decoded.body, payload);
     }
 
     #[test]
@@ -575,8 +632,27 @@ mod tests {
     #[test]
     fn decoded_output_is_bounded() {
         let encoded = gzip(&vec![b'a'; 64 * 1024]);
-        let decoded = decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "gzip"), 128);
-        assert_eq!(decoded.map(|body| body.len()), Some(128));
+        let decoded = decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "gzip"), 128)
+            .expect("decoded");
+        assert_eq!(decoded.body.len(), 128);
+    }
+
+    #[test]
+    fn truncated_decoding_is_reported() {
+        let encoded = gzip(&vec![b'a'; 64 * 1024]);
+        let decoded = decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "gzip"), 128)
+            .expect("decoded");
+        assert!(decoded.truncated);
+
+        let payload = b"a".repeat(128);
+        let decoded = decode_content_encoding(
+            &gzip(&payload),
+            &headers(CONTENT_ENCODING, "gzip"),
+            payload.len(),
+        )
+        .expect("decoded");
+        assert_eq!(decoded.body, payload);
+        assert!(!decoded.truncated);
     }
 
     #[test]
@@ -665,6 +741,23 @@ mod tests {
         assert_eq!(forms.len(), 2);
         assert_eq!(forms[0], "%FF%FE");
         assert_eq!(forms[1], "\u{FFFD}\u{FFFD}");
+    }
+
+    #[test]
+    fn normalize_path_removes_dot_segments_and_merges_slashes() {
+        assert_eq!(normalize_path("/admin").as_deref(), Some("/admin"));
+        assert_eq!(normalize_path("//admin").as_deref(), Some("/admin"));
+        assert_eq!(normalize_path("/./admin").as_deref(), Some("/admin"));
+        assert_eq!(normalize_path("/x/../admin").as_deref(), Some("/admin"));
+        assert_eq!(
+            normalize_path("/a/b/../../admin").as_deref(),
+            Some("/admin")
+        );
+        assert_eq!(normalize_path("/a/../..").as_deref(), Some("/"));
+        assert_eq!(normalize_path("/admin/").as_deref(), Some("/admin/"));
+        assert_eq!(normalize_path("/admin/.").as_deref(), Some("/admin/"));
+        assert_eq!(normalize_path("/").as_deref(), Some("/"));
+        assert_eq!(normalize_path("relative"), None);
     }
 
     fn multipart_headers(boundary: &str) -> HeaderMap {
