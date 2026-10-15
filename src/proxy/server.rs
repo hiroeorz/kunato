@@ -8,8 +8,8 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http::header::{CONNECTION, HeaderMap, HeaderValue, UPGRADE};
 use http::{Request, Response, StatusCode};
-use http_body_util::{BodyExt, LengthLimitError, Limited};
-use hyper::body::Incoming;
+use http_body_util::BodyExt;
+use hyper::body::{Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::AsyncWriteExt;
@@ -22,10 +22,10 @@ use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::metrics::Metrics;
 use crate::protection::{ConnectionGuard, Decision, ProtectionState};
-use crate::proxy::ProxyBody;
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
+use crate::proxy::{BoxError, PrefixBody, ProxyBody, full_body};
 use crate::proxy::{http3, tls};
 use crate::request_view::RequestView;
 use crate::rules::eval;
@@ -398,27 +398,67 @@ async fn handle_request(
     Ok(response)
 }
 
-async fn read_body(body: Incoming, config: &CompiledConfig) -> Result<Bytes, HttpError> {
-    match tokio::time::timeout(
-        config.timeouts.body_read,
-        Limited::new(body, config.limits.max_body_bytes).collect(),
-    )
-    .await
-    {
-        Err(_) => Err(HttpError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            "request body read timed out",
-        )),
-        Ok(Err(err)) => {
-            let (status, message) = if err.downcast_ref::<LengthLimitError>().is_some() {
-                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
-            } else {
-                (StatusCode::BAD_REQUEST, "malformed request body")
-            };
-            Err(HttpError::new(status, message))
+/// A request body read for inspection: a bounded prefix plus, when the body is
+/// larger, the untaken remainder stream that is forwarded after evaluation.
+struct RequestPayload {
+    prefix: Bytes,
+    pending: Vec<Frame<Bytes>>,
+    rest: Option<Incoming>,
+    truncated: bool,
+}
+
+async fn read_body(
+    mut body: Incoming,
+    config: &CompiledConfig,
+) -> Result<RequestPayload, HttpError> {
+    let limit = config.limits.max_body_bytes;
+    let deadline = tokio::time::Instant::now() + config.timeouts.body_read;
+    let mut prefix: Vec<u8> = Vec::new();
+    let mut pending: Vec<Frame<Bytes>> = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        let frame = match tokio::time::timeout_at(deadline, body.frame()).await {
+            Err(_) => {
+                return Err(HttpError::new(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "request body read timed out",
+                ));
+            }
+            Ok(None) => break,
+            Ok(Some(Err(_))) => {
+                return Err(HttpError::new(
+                    StatusCode::BAD_REQUEST,
+                    "malformed request body",
+                ));
+            }
+            Ok(Some(Ok(frame))) => frame,
+        };
+
+        match frame.into_data() {
+            Ok(data) => {
+                if prefix.len() + data.len() > limit {
+                    let take = limit.saturating_sub(prefix.len());
+                    prefix.extend_from_slice(&data[..take]);
+                    let remainder = data.slice(take..);
+                    if !remainder.is_empty() {
+                        pending.push(Frame::data(remainder));
+                    }
+                    truncated = true;
+                    break;
+                }
+                prefix.extend_from_slice(&data);
+            }
+            Err(frame) => pending.push(frame),
         }
-        Ok(Ok(collected)) => Ok(collected.to_bytes()),
     }
+
+    Ok(RequestPayload {
+        prefix: Bytes::from(prefix),
+        pending,
+        rest: if truncated { Some(body) } else { None },
+        truncated,
+    })
 }
 
 pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody> {
@@ -438,7 +478,13 @@ pub(crate) async fn process_request(
     config: &CompiledConfig,
     context: &Context,
 ) -> Response<ProxyBody> {
-    match process(parts, body, peer, config, context, None).await {
+    let payload = RequestPayload {
+        prefix: body,
+        pending: Vec::new(),
+        rest: None,
+        truncated: false,
+    };
+    match process(parts, payload, peer, config, context, None).await {
         Ok(response) => response,
         Err(err) => rejected(peer, &err),
     }
@@ -487,13 +533,26 @@ fn record_upstream_error(context: &Context, result: &Result<Response<ProxyBody>,
 
 async fn process(
     parts: http::request::Parts,
-    body: Bytes,
+    payload: RequestPayload,
     peer: SocketAddr,
     config: &CompiledConfig,
     context: &Context,
     upgrade: Option<Upgrade>,
 ) -> Result<Response<ProxyBody>, HttpError> {
     context.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    let body = &payload.prefix;
+    if payload.truncated {
+        context
+            .metrics
+            .request_truncated
+            .fetch_add(1, Ordering::Relaxed);
+        debug!(
+            client = %peer.ip(),
+            limit = config.limits.max_body_bytes,
+            path = %parts.uri.path(),
+            "request body truncated for inspection; streaming the remainder"
+        );
+    }
 
     match context
         .protection
@@ -545,15 +604,11 @@ async fn process(
     }
 
     let inspected_body = if config.has_body_target_rules() {
-        crate::decoding::decode_content_encoding(
-            &body,
-            &parts.headers,
-            config.limits.max_body_bytes,
-        )
+        crate::decoding::decode_content_encoding(body, &parts.headers, config.limits.max_body_bytes)
     } else {
         None
     };
-    let inspected_body = inspected_body.as_deref().unwrap_or(&body);
+    let inspected_body = inspected_body.as_deref().unwrap_or(body);
     let view = RequestView::with_body_decoding(
         &parts.method,
         &parts.uri,
@@ -601,19 +656,45 @@ async fn process(
     drop(view);
 
     if let Some(upgrade) = upgrade {
-        let result =
-            websocket::forward_handshake(config, parts, body, context.scheme, peer, upgrade).await;
+        if payload.rest.is_some() {
+            return Err(HttpError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "upgrade request body too large",
+            ));
+        }
+        let result = websocket::forward_handshake(
+            config,
+            parts,
+            payload.prefix,
+            context.scheme,
+            peer,
+            upgrade,
+        )
+        .await;
         record_upstream_error(context, &result);
         return result;
     }
+
+    let (outbound_body, exchange_timeout) = match payload.rest {
+        Some(rest) => {
+            let rest = rest.map_err(|err| Box::new(err) as BoxError).boxed();
+            let body = PrefixBody::new(payload.prefix.clone(), payload.pending, rest).boxed();
+            (body, config.timeouts.body_read)
+        }
+        None => (
+            full_body(payload.prefix.clone()),
+            config.timeouts.upstream_response,
+        ),
+    };
 
     let result = forward::forward_request(
         &context.client,
         config,
         &parts,
-        body.clone(),
+        outbound_body,
         peer,
         context.scheme,
+        exchange_timeout,
     )
     .await;
     record_upstream_error(context, &result);

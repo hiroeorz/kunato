@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use bytes::Bytes;
-use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use hyper_util::client::legacy::Client;
@@ -9,9 +7,11 @@ use hyper_util::client::legacy::Error as ClientError;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
+use crate::proxy::ProxyBody;
+
 #[derive(Clone)]
 pub struct UpstreamClient {
-    client: Client<HttpConnector, Full<Bytes>>,
+    client: Client<HttpConnector, ProxyBody>,
 }
 
 impl UpstreamClient {
@@ -25,7 +25,7 @@ impl UpstreamClient {
 
     pub async fn request(
         &self,
-        request: Request<Full<Bytes>>,
+        request: Request<ProxyBody>,
     ) -> Result<Response<Incoming>, ClientError> {
         self.client.request(request).await
     }

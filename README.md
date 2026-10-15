@@ -572,9 +572,15 @@ timeouts: { header_read: 10s, body_read: 30s }
 limits: { max_body_bytes: 1048576 }
 ```
 
-Bodies decoded for inspection (see Match fields) are bounded by `max_body_bytes`
-for requests and `max_response_body_bytes` for responses, so decompression bombs
-cannot exceed the configured buffer sizes.
+The first `max_body_bytes` of each request body are buffered for rule
+inspection and content decoding; larger bodies are not rejected. The buffered
+prefix is evaluated, the remainder streams to the upstream unchanged, and the
+request is counted as truncated (`kunato_request_truncated_total`) and logged at
+debug level. Rules therefore see at most the prefix; to reject oversized bodies
+outright, add an explicit rule (for example a `content-length` header regex).
+Request decoding is bounded by `max_body_bytes` and response decoding by
+`max_response_body_bytes`, so decompression bombs cannot exceed the configured
+buffer sizes.
 
 ### Response headers
 

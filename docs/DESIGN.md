@@ -98,10 +98,12 @@ Components:
    size/count limits, and URL length limit. Malformed input: `400`.
 3. **Protection** — ban check, per-IP token bucket, global RPS guard. Rate/ban
    violations produce `429` or `503` with `Retry-After`.
-4. **Buffer body** — read up to `limits.max_body_bytes`. Larger bodies: `413`.
-   Buffer only because rules may inspect `body`; responses are always streamed.
-   Encoded bodies are decompressed and content-type decoded for inspection when
-   body-targeting rules exist; forwarded bytes stay unchanged.
+4. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
+   prefix. Larger bodies stream to the upstream after rule evaluation, with a
+   truncation log and metric. Buffer only because rules may inspect `body`;
+   responses are always streamed. Encoded bodies are decompressed and
+   content-type decoded for inspection when body-targeting rules exist;
+   forwarded bytes stay unchanged.
 5. **Rule evaluation** — build a borrowed `RequestView` and evaluate the compiled
    categories/rules. Produces `Allow` (default), `Block(response)`, or `Log` +
    continuation.
@@ -122,10 +124,15 @@ Components:
 
 ### Body policy
 
-Phase 1 buffers the full request body up to `max_body_bytes` (default 1 MiB) so
-that `in: [body]` rules always see the complete payload. Phase 2 adds prefix
-inspection with streaming pass-through for large uploads (inspect the first N
-bytes, stream the rest uninspected, log `body_truncated`).
+The first `max_body_bytes` of a request body (default 1 MiB) are buffered so
+that `in: [body]` rules always see a bounded prefix; content decoding applies to
+that prefix. When the body is larger, the remainder streams to the upstream
+uninspected: the request is logged and counted as truncated
+(`kunato_request_truncated_total`), and the exchange runs under
+`timeouts.body_read` instead of `timeouts.upstream_response`. To reject
+oversized bodies instead, add an explicit rule (for example a `content-length`
+header regex). Responses already buffer only a prefix
+(`max_response_body_bytes`) and stream the rest.
 
 ### Request normalization
 
@@ -286,6 +293,8 @@ contract; response rules follow the same contract with the response view.
 - `response.body` is capped at 8 KiB at load time.
 - Buffered response bodies are capped at `limits.max_response_body_bytes`; only
   the prefix is evaluated, and the remainder streams through uninspected.
+  Request bodies are buffered up to `limits.max_body_bytes`; the remainder
+  streams to the upstream uninspected and is logged as truncated.
 - Default block response: `403 Forbidden`, `text/plain`.
 
 ## 7. DoS / DDoS Protection
@@ -564,8 +573,8 @@ response-phase rules.
 - TLS: certificate hot reload.
 - WebSocket over HTTP/2 and HTTP/3 (RFC 8441 / RFC 9220 extended CONNECT).
 - Pluggable tunnel payload inspection (currently upgrades are opaque).
-- Streaming request body inspection for large uploads (prefix inspection; the
-  response side already inspects only a bounded prefix).
+- HTTP/3 request body streaming (TCP listeners stream bodies past the prefix;
+  HTTP/3 bodies above `max_body_bytes` are still rejected with `413`).
 - Multiple upstreams and load balancing.
 - Admin API beyond the `/metrics` endpoint.
 - Config includes/anchors for large rule sets.

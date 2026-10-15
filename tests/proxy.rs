@@ -692,15 +692,39 @@ categories:
 }
 
 #[tokio::test]
-async fn oversized_body_is_rejected() {
-    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+async fn oversized_body_is_streamed_to_upstream() {
+    let upstream = spawn_body_echo_upstream().await;
     let yaml = format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\n"
     );
     let running = start_kunato(&yaml).await;
 
-    let (status, _) = send(running.addr, Method::POST, "/upload", "0123456789").await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+    let (status, echoed) =
+        send_bytes(running.addr, Method::POST, "/upload", body.clone(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, body);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn body_rules_inspect_only_the_prefix() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\ncategories:\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: prefix-signature\n        match: {{ regex: 'BLOCKME', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut body = b"BLOCKME".to_vec();
+    body.extend_from_slice(&vec![b'x'; 64 * 1024]);
+    let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &[]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let mut body = b"AAAAAAAA".to_vec();
+    body.extend_from_slice(b"BLOCKME");
+    let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &[]).await;
+    assert_eq!(status, StatusCode::OK);
 
     running.stop().await;
 }
@@ -953,7 +977,7 @@ async fn body_at_limit_is_accepted() {
     assert_eq!(status, StatusCode::OK);
 
     let (status, _) = send(running.addr, Method::POST, "/over", "123456789").await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(status, StatusCode::OK);
 
     running.stop().await;
 }

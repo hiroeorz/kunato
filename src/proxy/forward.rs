@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use bytes::Bytes;
 use http::header::{CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue};
 use http::{Request, Response, StatusCode, Version};
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use tracing::debug;
 
@@ -71,9 +70,10 @@ pub async fn forward_request(
     client: &UpstreamClient,
     config: &CompiledConfig,
     parts: &http::request::Parts,
-    body: Bytes,
+    body: ProxyBody,
     peer: SocketAddr,
     scheme: &'static str,
+    exchange_timeout: Duration,
 ) -> Result<Response<ProxyBody>, HttpError> {
     let path_and_query = parts
         .uri
@@ -86,7 +86,7 @@ pub async fn forward_request(
         HttpError::new(StatusCode::BAD_GATEWAY, "invalid upstream URI")
     })?;
 
-    let mut request = Request::new(Full::new(body));
+    let mut request = Request::new(body);
     *request.method_mut() = parts.method.clone();
     *request.uri_mut() = uri;
     *request.version_mut() = Version::HTTP_11;
@@ -99,8 +99,7 @@ pub async fn forward_request(
         scheme,
     );
 
-    let result =
-        tokio::time::timeout(config.timeouts.upstream_response, client.request(request)).await;
+    let result = tokio::time::timeout(exchange_timeout, client.request(request)).await;
 
     let response = match result {
         Err(_) => {
