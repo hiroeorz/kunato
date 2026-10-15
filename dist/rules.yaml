@@ -1098,6 +1098,37 @@ categories:
       # Replication Receiver random argument.
       - name: ahsay-updatereceivers-command
         match: { path: '(?i)^/rps/api/json/UpdateReceivers\.do$', regex: '(?i)random[^&]{0,40}(;|\||&&|\$\(|`)', in: [body, query] }
+      # CVE-2026-10520 (Ivanti Sentry): the MICS configuration handler accepts
+      # an unauthenticated execute-system command document.
+      - name: ivanti-sentry-commandexec
+        match:
+          path: '(?i)^/mics/api/v2/sentry/mics-config/handleMessage$'
+          regex: '(?i)(commandexec|reqandres|/configuration/system/)'
+          in: [body]
+      # CVE-2026-8037 (Progress Kemp LoadMaster): four single quotes in the
+      # /accessv2 apiuser field overflow the unescaped, unterminated buffer
+      # into the adjacent sprayed command payload.
+      - name: loadmaster-accessv2-quote-overflow
+        match: { path: '(?i)^/accessv2$', regex: '(?i)"apiuser"\s*:\s*"''{4}', in: [body] }
+      # CVE-2026-21589 (Atlassian Jira/Confluence/Bitbucket): the resource
+      # download handler follows ..:: pseudo-directories into WEB-INF.
+      - name: atlassian-wildcard-path-traversal
+        match: { regex: '(?i)\.\.::', in: [path] }
+      # CVE-2026-55573 (e107): install.php unserializes the previous_steps POST
+      # parameter into an attacker-controlled callable.
+      - name: e107-install-previous-steps-deserialization
+        match: { path: '(?i)^/install\.php$', regex: '(?i)previous_steps=[^&]*O:\d+:', in: [body] }
+      # CVE-2026-59774 (Gitea): the Org-mode renderer resolves #+INCLUDE
+      # directives to server-side files through the markup API.
+      - name: gitea-orgmode-include-file-read
+        match: { path: '(?i)^/api/v1/markup$', regex: '(?i)#\+INCLUDE\s*:', in: [body] }
+      # CVE-2026-107204 (LMCache): /run_script executes caller-supplied Python.
+      - name: lmcache-run-script-exec
+        match: { path: '(?i)^/run_script$', regex: '(?i)(__import__|os\.system|subprocess|builtins)', in: [body] }
+      # CVE-2026-107640 (Integrics Enswitch): the password update API treats a
+      # missing reset key as a valid empty reset.
+      - name: enswitch-password-reset-bypass
+        match: { path: '(?i)^/api/json/user/password/update/?$', regex: '(?i)(username|user)', in: [body] }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes as received
