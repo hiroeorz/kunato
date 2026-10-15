@@ -275,6 +275,7 @@ fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
     let mut output = Vec::new();
     let mut current: Option<Vec<u8>> = None;
     let mut parts = 0usize;
+    let mut closed = false;
 
     for line in body.split_inclusive(|&byte| byte == b'\n') {
         let trimmed = trim_line_end(line);
@@ -289,6 +290,7 @@ fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
                 flatten_part(&part, &mut output);
             }
             if is_closing {
+                closed = true;
                 break;
             }
             current = Some(Vec::new());
@@ -299,14 +301,7 @@ fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
         }
     }
 
-    if let Some(part) = current {
-        if parts >= MAX_MULTIPART_PARTS {
-            return None;
-        }
-        flatten_part(&part, &mut output);
-    }
-
-    if output.is_empty() {
+    if !closed || output.is_empty() {
         None
     } else {
         Some(output)
@@ -806,10 +801,9 @@ mod tests {
     }
 
     #[test]
-    fn multipart_without_closing_delimiter_is_tolerated() {
+    fn multipart_without_closing_delimiter_is_left_raw() {
         let body = b"--X\r\n\r\nvalue";
-        let decoded = decode_body_format(body, &multipart_headers("X")).expect("multipart decoded");
-        assert_eq!(decoded, b"value\n");
+        assert!(decode_body_format(body, &multipart_headers("X")).is_none());
     }
 
     #[test]

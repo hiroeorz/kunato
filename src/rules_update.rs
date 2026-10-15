@@ -69,7 +69,15 @@ pub async fn run(
             continue;
         }
 
-        let succeeded = match update_once(&settings, &rules_file, &state_file).await {
+        let outcome = tokio::select! {
+            result = update_once(&main_config, &settings, &rules_file, &state_file) => result,
+            _ = shutdown.changed() => {
+                info!("rules update cancelled for shutdown");
+                break;
+            }
+        };
+
+        let succeeded = match outcome {
             Ok(UpdateOutcome::Updated) => {
                 metrics.rules_update_success.fetch_add(1, Ordering::Relaxed);
                 metrics
@@ -96,19 +104,22 @@ pub async fn run(
             }
         };
 
-        let delay = if succeeded {
-            jittered(settings.interval, settings.jitter_percent)
-        } else {
-            settings.interval.min(FAILURE_RETRY)
-        };
+        if succeeded {
+            continue;
+        }
+        let delay = settings.interval.min(FAILURE_RETRY);
         if wait_for_shutdown(&mut shutdown, delay).await {
             break;
         }
     }
 }
 
-/// Download, verify, validate, and atomically replace the rules file.
+/// Download, verify, validate against the whole configuration, and atomically
+/// replace the rules file. `main_config` is the entry configuration whose
+/// `rules_file` must resolve to `rules_file`; the candidate is compiled together
+/// with the inline and overrides sources before anything is written.
 pub async fn update_once(
+    main_config: &Path,
     settings: &RulesUpdate,
     rules_file: &Path,
     state_file: &Path,
@@ -135,6 +146,7 @@ pub async fn update_once(
     else {
         let next = UpdateState {
             last_success: Some(unix_now()),
+            next_due: Some(next_due(settings)),
             ..state
         };
         write_state(&next, state_file);
@@ -158,14 +170,41 @@ pub async fn update_once(
         ));
     }
 
+    let candidate = config::load_with_rules_candidate(main_config, text)?;
+    match &candidate.rules_file {
+        Some(installed) if same_path(installed, rules_file) => {}
+        _ => {
+            return Err(Error::Message(format!(
+                "`{}` does not point `rules_file` at `{}`",
+                main_config.display(),
+                rules_file.display()
+            )));
+        }
+    }
+
     write_atomic(rules_file, &bytes)?;
+    let now = unix_now();
     let next = UpdateState {
-        last_success: Some(unix_now()),
+        last_success: Some(now),
+        next_due: Some(
+            now.saturating_add(jittered(settings.interval, settings.jitter_percent).as_secs()),
+        ),
         etag,
         last_modified,
     };
     write_state(&next, state_file);
     Ok(UpdateOutcome::Updated)
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::path::absolute(a), std::path::absolute(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+fn next_due(settings: &RulesUpdate) -> u64 {
+    unix_now().saturating_add(jittered(settings.interval, settings.jitter_percent).as_secs())
 }
 
 pub fn state_path(rules_file: &Path) -> PathBuf {
@@ -217,9 +256,14 @@ async fn fetch(
             StatusCode::OK => {
                 let etag = header_string(response.headers(), ETAG);
                 let last_modified = header_string(response.headers(), LAST_MODIFIED);
-                let bytes = read_body(response.into_body(), max_bytes).await?;
+                let body = tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    read_body(response.into_body(), max_bytes),
+                )
+                .await
+                .map_err(|_| Error::Message("rules update body read timed out".to_owned()))??;
                 return Ok(Fetched::Body {
-                    bytes,
+                    bytes: body,
                     etag,
                     last_modified,
                 });
@@ -231,9 +275,13 @@ async fn fetch(
                         "rules update redirect ({status}) without a Location header"
                     )));
                 };
-                current = Uri::from_str(&location).map_err(|err| {
-                    Error::Message(format!("invalid redirect target `{location}`: {err}"))
-                })?;
+                let target = resolve_location(&current, &location)?;
+                if !redirect_allowed(url, &target) {
+                    return Err(Error::Message(format!(
+                        "rules update redirect to `{target}` violates the transport policy"
+                    )));
+                }
+                current = target;
             }
             status => {
                 return Err(Error::Message(format!(
@@ -245,6 +293,50 @@ async fn fetch(
     Err(Error::Message(
         "too many redirects while fetching rules".to_owned(),
     ))
+}
+
+/// Resolve a `Location` header against the URL that produced it, supporting
+/// absolute, scheme-relative, and path-relative targets.
+fn resolve_location(current: &Uri, location: &str) -> Result<Uri, Error> {
+    let next = Uri::from_str(location)
+        .map_err(|err| Error::Message(format!("invalid redirect target `{location}`: {err}")))?;
+    if next.scheme().is_some() && next.authority().is_some() {
+        return Ok(next);
+    }
+    let mut parts = current.clone().into_parts();
+    if next.authority().is_some() {
+        parts.authority = next.authority().cloned();
+    }
+    parts.path_and_query = next.path_and_query().cloned();
+    Uri::from_parts(parts)
+        .map_err(|err| Error::Message(format!("invalid redirect target `{location}`: {err}")))
+}
+
+/// Redirects must never weaken transport security: an HTTPS acquisition may
+/// only follow HTTPS redirects, and a loopback-HTTP acquisition may only follow
+/// HTTPS or loopback HTTP.
+fn redirect_allowed(start: &Uri, next: &Uri) -> bool {
+    match next.scheme_str() {
+        Some("https") => next.authority().is_some(),
+        Some("http") => {
+            start.scheme_str() != Some("https")
+                && next
+                    .authority()
+                    .is_some_and(|authority| host_is_loopback(authority.host()))
+        }
+        _ => false,
+    }
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn header_string(headers: &http::HeaderMap, name: http::header::HeaderName) -> Option<String> {
@@ -343,6 +435,7 @@ fn write_state(state: &UpdateState, path: &Path) {
 #[derive(Debug, Clone, Default)]
 struct UpdateState {
     last_success: Option<u64>,
+    next_due: Option<u64>,
     etag: Option<String>,
     last_modified: Option<String>,
 }
@@ -366,6 +459,7 @@ impl UpdateState {
             };
             match key.trim() {
                 "last_success" => state.last_success = value.trim().parse().ok(),
+                "next_due" => state.next_due = value.trim().parse().ok(),
                 "etag" if !value.trim().is_empty() => state.etag = Some(value.trim().to_owned()),
                 "last_modified" if !value.trim().is_empty() => {
                     state.last_modified = Some(value.trim().to_owned());
@@ -381,6 +475,9 @@ impl UpdateState {
         if let Some(last_success) = self.last_success {
             let _ = writeln!(text, "last_success={last_success}");
         }
+        if let Some(next_due) = self.next_due {
+            let _ = writeln!(text, "next_due={next_due}");
+        }
         if let Some(etag) = &self.etag {
             let _ = writeln!(text, "etag={etag}");
         }
@@ -392,28 +489,34 @@ impl UpdateState {
 }
 
 fn delay_until_due(state: &UpdateState, settings: &RulesUpdate) -> Option<Duration> {
+    if let Some(next_due) = state.next_due {
+        let now = Duration::from_secs(unix_now());
+        return Duration::from_secs(next_due).checked_sub(now);
+    }
     let last_success = state.last_success?;
     let due = Duration::from_secs(last_success).saturating_add(settings.interval);
     let now = Duration::from_secs(unix_now());
     due.checked_sub(now)
 }
 
+/// Randomize the next check by the configured percentage in both directions:
+/// the result falls in `[interval * (1 - percent/100), interval * (1 + percent/100)]`.
 fn jittered(interval: Duration, percent: u8) -> Duration {
     if percent == 0 {
         return interval;
     }
-    let spread = interval.as_millis() * u128::from(percent) / 100;
+    let base = interval.as_millis();
+    let spread = base.saturating_mul(u128::from(percent)) / 100;
     if spread == 0 {
         return interval;
     }
-    let half = spread / 2;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| u128::from(duration.subsec_nanos()))
         .unwrap_or(0);
-    let offset = nanos % spread;
-    let base = interval.as_millis();
-    Duration::from_millis((base.saturating_sub(half).saturating_add(offset)) as u64)
+    let offset = nanos % spread.saturating_mul(2).saturating_add(1);
+    let millis = base.saturating_sub(spread).saturating_add(offset);
+    Duration::from_millis(u64::try_from(millis).unwrap_or(u64::MAX))
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>, delay: Duration) -> bool {
@@ -467,12 +570,17 @@ mod tests {
     #[test]
     fn jitter_stays_within_bounds() {
         let interval = Duration::from_secs(3600);
-        for _ in 0..64 {
+        for _ in 0..256 {
             let jittered = jittered(interval, 10);
-            assert!(jittered >= Duration::from_secs(3420));
-            assert!(jittered < Duration::from_secs(3780));
+            assert!(jittered >= Duration::from_secs(3240));
+            assert!(jittered <= Duration::from_secs(3960));
         }
         assert_eq!(jittered(interval, 0), interval);
+        for _ in 0..256 {
+            let jittered = jittered(interval, 50);
+            assert!(jittered >= Duration::from_secs(1800));
+            assert!(jittered <= Duration::from_secs(5400));
+        }
     }
 
     #[test]
@@ -497,17 +605,91 @@ mod tests {
     }
 
     #[test]
+    fn delay_prefers_the_jittered_next_due() {
+        let settings = RulesUpdate {
+            interval: Duration::from_secs(3600),
+            jitter_percent: 10,
+            ..RulesUpdate::default()
+        };
+        let now = unix_now();
+        let state = UpdateState {
+            last_success: Some(now),
+            next_due: Some(now.saturating_add(3240)),
+            ..UpdateState::default()
+        };
+        let delay = delay_until_due(&state, &settings).expect("due in the future");
+        assert!(delay <= Duration::from_secs(3240));
+        assert!(delay >= Duration::from_secs(3235));
+    }
+
+    #[test]
+    fn redirect_policy_rejects_downgrades_and_remote_http() {
+        let https_start: Uri = "https://rules.example/path".parse().expect("valid URI");
+        let http_loopback: Uri = "http://127.0.0.1:8080/path".parse().expect("valid URI");
+
+        assert!(redirect_allowed(
+            &https_start,
+            &"https://mirror.example/rules".parse().expect("valid URI")
+        ));
+        assert!(!redirect_allowed(
+            &https_start,
+            &"http://127.0.0.1:8080/rules".parse().expect("valid URI")
+        ));
+        assert!(!redirect_allowed(
+            &https_start,
+            &"http://rules.example/rules".parse().expect("valid URI")
+        ));
+        assert!(redirect_allowed(
+            &http_loopback,
+            &"https://rules.example/rules".parse().expect("valid URI")
+        ));
+        assert!(redirect_allowed(
+            &http_loopback,
+            &"http://localhost:9090/rules".parse().expect("valid URI")
+        ));
+        assert!(!redirect_allowed(
+            &http_loopback,
+            &"http://rules.example/rules".parse().expect("valid URI")
+        ));
+        assert!(!redirect_allowed(
+            &http_loopback,
+            &"ftp://rules.example/rules".parse().expect("valid URI")
+        ));
+    }
+
+    #[test]
+    fn relative_redirects_resolve_against_the_current_url() {
+        let current: Uri = "https://rules.example/v1/rules.yaml"
+            .parse()
+            .expect("valid URI");
+        assert_eq!(
+            resolve_location(&current, "/v2/rules.yaml").expect("resolved"),
+            "https://rules.example/v2/rules.yaml"
+                .parse::<Uri>()
+                .expect("valid URI")
+        );
+        assert_eq!(
+            resolve_location(&current, "https://other.example/rules.yaml").expect("resolved"),
+            "https://other.example/rules.yaml"
+                .parse::<Uri>()
+                .expect("valid URI")
+        );
+    }
+
+    #[test]
     fn state_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("state");
         let state = UpdateState {
             last_success: Some(42),
+            next_due: Some(3600),
             etag: Some("\"abc\"".to_owned()),
             last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_owned()),
         };
         state.write(&path).expect("write state");
         let read = UpdateState::read(&path);
         assert_eq!(read.last_success, Some(42));
+        assert_eq!(read.next_due, Some(3600));
         assert_eq!(read.etag.as_deref(), Some("\"abc\""));
         assert_eq!(
             read.last_modified.as_deref(),

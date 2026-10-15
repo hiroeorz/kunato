@@ -93,6 +93,11 @@ pub async fn serve(
                     None => break,
                 }
             }
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(err) = result {
+                    debug!(error = %err, "HTTP/3 connection task failed");
+                }
+            }
         }
     }
 
@@ -250,11 +255,14 @@ async fn send_response(
 
     while let Some(frame) = body.frame().await {
         match frame {
-            Ok(frame) => {
-                if let Ok(data) = frame.into_data() {
-                    stream.send_data(data).await?;
+            Ok(frame) => match frame.into_data() {
+                Ok(data) => stream.send_data(data).await?,
+                Err(frame) => {
+                    if let Ok(trailers) = frame.into_trailers() {
+                        stream.send_trailers(trailers).await?;
+                    }
                 }
-            }
+            },
             Err(_) => {
                 stream.stop_stream(Code::H3_INTERNAL_ERROR);
                 return Ok(());

@@ -12,6 +12,7 @@ use crate::proxy::ProxyBody;
 #[derive(Clone)]
 pub struct UpstreamClient {
     client: Client<HttpConnector, ProxyBody>,
+    connect_timeout: Duration,
 }
 
 impl UpstreamClient {
@@ -20,7 +21,14 @@ impl UpstreamClient {
         connector.set_connect_timeout(Some(connect_timeout));
         connector.enforce_http(true);
         let client = Client::builder(TokioExecutor::new()).build(connector);
-        Self { client }
+        Self {
+            client,
+            connect_timeout,
+        }
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
     }
 
     pub async fn request(

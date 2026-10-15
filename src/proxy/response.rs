@@ -34,14 +34,15 @@ pub async fn buffer_prefix(
         let frame = frame?;
         match frame.into_data() {
             Ok(data) => {
-                if prefix.len() + data.len() > limit {
-                    let take = limit.saturating_sub(prefix.len());
+                let room = limit.saturating_sub(prefix.len());
+                if data.len() >= room {
+                    let take = room.min(data.len());
                     prefix.extend_from_slice(&data[..take]);
                     let remainder = data.slice(take..);
                     if !remainder.is_empty() {
                         pending.push(Frame::data(remainder));
                     }
-                    truncated = true;
+                    truncated = data.len() > take;
                     break;
                 }
                 prefix.extend_from_slice(&data);

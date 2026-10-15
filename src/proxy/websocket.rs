@@ -28,14 +28,22 @@ pub(crate) struct Upgrade {
     pub guard_slot: Arc<Mutex<Option<ConnectionGuard>>>,
 }
 
+pub(crate) enum Handshake {
+    /// The upstream accepted the upgrade; the response is the opaque `101`.
+    Upgraded(Response<ProxyBody>),
+    /// The upstream answered with a regular response that still needs the
+    /// response phase.
+    Response(Response<ProxyBody>),
+}
+
 pub(crate) async fn forward_handshake(
     config: &CompiledConfig,
-    parts: http::request::Parts,
+    parts: &http::request::Parts,
     body: Bytes,
     scheme: &'static str,
     peer: SocketAddr,
     upgrade: Upgrade,
-) -> Result<Response<ProxyBody>, HttpError> {
+) -> Result<Handshake, HttpError> {
     let path_and_query = parts
         .uri
         .path_and_query()
@@ -48,13 +56,16 @@ pub(crate) async fn forward_handshake(
     })?;
     let host = base
         .host()
-        .ok_or_else(|| HttpError::new(StatusCode::BAD_GATEWAY, "invalid upstream host"))?
-        .to_owned();
+        .ok_or_else(|| HttpError::new(StatusCode::BAD_GATEWAY, "invalid upstream host"))?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
     let port = base.port_u16().unwrap_or(80);
 
     let stream = match tokio::time::timeout(
         config.timeouts.upstream_connect,
-        TcpStream::connect((host.as_str(), port)),
+        TcpStream::connect((host, port)),
     )
     .await
     {
@@ -91,7 +102,7 @@ pub(crate) async fn forward_handshake(
         HttpError::new(StatusCode::BAD_GATEWAY, "invalid upstream URI")
     })?;
     let mut request = Request::new(Full::new(body));
-    *request.method_mut() = parts.method;
+    *request.method_mut() = parts.method.clone();
     *request.uri_mut() = uri;
     copy_handshake_request_headers(&parts.headers, request.headers_mut());
     forward::set_forwarded_headers(
@@ -125,7 +136,7 @@ pub(crate) async fn forward_handshake(
     };
 
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        return Ok(forward::convert_response(response));
+        return Ok(Handshake::Response(forward::convert_response(response)));
     }
 
     let upstream_upgrade = hyper::upgrade::on(&mut response);
@@ -146,7 +157,7 @@ pub(crate) async fn forward_handshake(
         guard,
         peer,
     ));
-    Ok(handshake)
+    Ok(Handshake::Upgraded(handshake))
 }
 
 fn copy_handshake_request_headers(source: &HeaderMap, target: &mut HeaderMap) {

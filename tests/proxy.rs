@@ -1908,3 +1908,159 @@ categories: []
 
     running.stop().await;
 }
+
+async fn spawn_prefix_stalling_upstream(body: &'static [u8], content_length: usize) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let headers =
+                    format!("HTTP/1.1 200 OK\r\ncontent-length: {content_length}\r\n\r\n");
+                let _ = stream.write_all(headers.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            });
+        }
+    });
+
+    addr
+}
+
+#[tokio::test]
+async fn partial_http2_preface_is_closed_within_the_header_timeout() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ntimeouts: {{ header_read: 100ms }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect kunato");
+    stream.write_all(b"P").await.expect("write partial preface");
+    let mut response = Vec::new();
+    let read =
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await;
+    assert!(
+        read.is_ok(),
+        "a partial preface must not keep the connection spinning past the deadline"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_upstream_error_respects_response_rules() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: upstream-errors
+    phase: response
+    action: BLOCK
+    response: {{ status: 451 }}
+    rules:
+      - name: not-found
+        match: {{ status: 404 }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, _stream) = websocket_handshake(running.addr, "/nope").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 451"),
+        "non-101 upgrade responses must pass through response rules: {handshake}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn request_prefix_at_limit_is_inspected_without_waiting_for_eof() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_body_bytes: 8 }}
+timeouts: {{ body_read: 300ms }}
+categories:
+  - name: signatures
+    action: BLOCK
+    rules:
+      - name: prefix-signature
+        match: {{ regex: '^ABCDEFGH$', in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect kunato");
+    let request =
+        "POST /upload HTTP/1.1\r\nhost: kunato.test\r\ncontent-length: 100\r\n\r\nABCDEFGH";
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write partial body");
+    let mut response = Vec::new();
+    let read =
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await;
+    assert!(read.is_ok(), "request evaluation must not wait for EOF");
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 403"),
+        "the exact-limit prefix must be evaluated: {response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn response_prefix_at_limit_is_inspected_without_waiting_for_eof() {
+    let upstream = spawn_prefix_stalling_upstream(b"ABCDEFGH", 100).await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_response_body_bytes: 8 }}
+timeouts: {{ upstream_response: 300ms }}
+categories:
+  - name: response-signatures
+    phase: response
+    action: BLOCK
+    rules:
+      - name: prefix-signature
+        match: {{ regex: '^ABCDEFGH$', in: [response_body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_authority_is_forwarded_as_host() {
+    let upstream = spawn_header_echo_upstream("host").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (status, body) = send_h2c(running.addr, Method::GET, "/echo", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, running.addr.to_string());
+
+    running.stop().await;
+}

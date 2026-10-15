@@ -1,7 +1,9 @@
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -12,7 +14,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -44,7 +46,7 @@ enum Protocol {
 #[derive(Clone)]
 pub struct Context {
     config: Arc<ArcSwap<CompiledConfig>>,
-    client: UpstreamClient,
+    client: Arc<ArcSwap<UpstreamClient>>,
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
@@ -55,6 +57,19 @@ pub struct Context {
 impl Context {
     pub fn config(&self) -> Arc<CompiledConfig> {
         self.config.load_full()
+    }
+
+    /// Return an upstream client built for the snapshot's connect timeout,
+    /// rebuilding it after a hot reload changed the timeout.
+    pub(crate) fn client_for(&self, config: &CompiledConfig) -> Arc<UpstreamClient> {
+        let current = self.client.load();
+        if current.connect_timeout() == config.timeouts.upstream_connect {
+            return Arc::clone(&current);
+        }
+        drop(current);
+        let replacement = Arc::new(UpstreamClient::new(config.timeouts.upstream_connect));
+        self.client.store(Arc::clone(&replacement));
+        replacement
     }
 
     pub(crate) fn try_acquire_connection(&self, ip: IpAddr) -> Option<ConnectionGuard> {
@@ -83,7 +98,7 @@ impl Server {
                 source,
             })?;
         let local_addr = listener.local_addr()?;
-        let client = UpstreamClient::new(config.load().timeouts.upstream_connect);
+        let connect_timeout = config.load().timeouts.upstream_connect;
         let (tls_acceptor, scheme) = match config.load().tls.as_ref() {
             Some(tls) => {
                 let server_config = tls::load_server_config(&tls.cert_file, &tls.key_file)?;
@@ -109,7 +124,7 @@ impl Server {
             listener,
             context: Context {
                 config,
-                client,
+                client: Arc::new(ArcSwap::from_pointee(UpstreamClient::new(connect_timeout))),
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
                 tls_acceptor,
@@ -176,6 +191,11 @@ impl Server {
                         Err(err) => warn!(error = %err, "failed to accept connection"),
                     }
                 }
+                Some(result) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(err) = result {
+                        debug!(error = %err, "connection task failed");
+                    }
+                }
             }
         }
 
@@ -218,7 +238,7 @@ async fn reject_connection(mut stream: tokio::net::TcpStream) {
 }
 
 async fn serve_connection(
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     peer: SocketAddr,
     context: Context,
     header_read_timeout: Duration,
@@ -256,12 +276,13 @@ async fn serve_connection(
             .await;
         }
         None => {
-            let Some(protocol) = detect_protocol(&stream, header_read_timeout).await else {
+            let Some((protocol, prefix)) = detect_protocol(&mut stream, header_read_timeout).await
+            else {
                 debug!(client = %peer, "connection ended before HTTP version detection");
                 return;
             };
             serve_io(
-                TokioIo::new(stream),
+                TokioIo::new(PrefixedIo::new(stream, prefix)),
                 protocol,
                 peer,
                 context,
@@ -274,28 +295,96 @@ async fn serve_connection(
     }
 }
 
-async fn detect_protocol(stream: &tokio::net::TcpStream, timeout: Duration) -> Option<Protocol> {
+/// Classify a plaintext connection as HTTP/1 or HTTP/2 by reading just enough
+/// of the HTTP/2 preface, returning the consumed bytes so they can be replayed
+/// to the protocol parser. Reads are bounded by the deadline and never busy-loop
+/// on unread data.
+async fn detect_protocol(
+    stream: &mut tokio::net::TcpStream,
+    timeout: Duration,
+) -> Option<(Protocol, Vec<u8>)> {
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut buf = [0u8; H2_PREFACE.len()];
+    let mut buf = Vec::with_capacity(H2_PREFACE.len());
 
     loop {
-        let filled = match tokio::time::timeout_at(deadline, stream.peek(&mut buf)).await {
-            Ok(Ok(filled)) if filled > 0 => filled,
-            _ => return None,
+        if buf.len() >= H2_PREFACE.len() {
+            return Some((Protocol::Http2, buf));
+        }
+        let mut chunk = [0u8; 32];
+        let read = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(read)) => read,
+            Ok(Err(_)) => return None,
         };
+        buf.extend_from_slice(&chunk[..read]);
+        let seen = &buf[..buf.len().min(H2_PREFACE.len())];
+        if !H2_PREFACE.starts_with(seen) {
+            return Some((Protocol::Http1, buf));
+        }
+    }
 
-        let available = &buf[..filled.min(H2_PREFACE.len())];
-        if !H2_PREFACE.starts_with(available) {
-            return Some(Protocol::Http1);
-        }
-        if filled >= H2_PREFACE.len() {
-            return Some(Protocol::Http2);
-        }
+    if buf.is_empty() {
+        None
+    } else {
+        Some((Protocol::Http1, buf))
+    }
+}
 
-        match tokio::time::timeout_at(deadline, stream.readable()).await {
-            Ok(Ok(())) => {}
-            _ => return None,
+/// Replays bytes that were consumed during protocol detection before the
+/// wrapped stream, then delegates every operation to it.
+struct PrefixedIo<S> {
+    prefix: Vec<u8>,
+    offset: usize,
+    inner: S,
+}
+
+impl<S> PrefixedIo<S> {
+    fn new(inner: S, prefix: Vec<u8>) -> Self {
+        Self {
+            prefix,
+            offset: 0,
+            inner,
         }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedIo<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let remaining = &this.prefix[this.offset..];
+        if !remaining.is_empty() {
+            let take = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..take]);
+            this.offset += take;
+            if this.offset == this.prefix.len() {
+                this.prefix.clear();
+                this.offset = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -310,8 +399,9 @@ async fn serve_io<I>(
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let max_header_list_size =
-        u32::try_from(context.config().limits.max_header_bytes).unwrap_or(u32::MAX);
+    let limits = context.config();
+    let max_header_list_size = u32::try_from(limits.limits.max_header_bytes).unwrap_or(u32::MAX);
+    let max_headers = limits.limits.max_headers;
     let guard_slot = Arc::new(std::sync::Mutex::new(Some(guard)));
     let service_shutdown = shutdown.clone();
     let service = service_fn(move |request: Request<Incoming>| {
@@ -327,6 +417,7 @@ async fn serve_io<I>(
             builder
                 .keep_alive(true)
                 .timer(TokioTimer::new())
+                .max_headers(max_headers)
                 .header_read_timeout(header_read_timeout);
             let connection = builder.serve_connection(io, service).with_upgrades();
             let mut connection = std::pin::pin!(connection);
@@ -420,6 +511,7 @@ async fn read_body(
     let mut prefix: Vec<u8> = Vec::new();
     let mut pending: Vec<Frame<Bytes>> = Vec::new();
     let mut truncated = false;
+    let mut stop = false;
 
     loop {
         let frame = match tokio::time::timeout_at(deadline, body.frame()).await {
@@ -441,14 +533,16 @@ async fn read_body(
 
         match frame.into_data() {
             Ok(data) => {
-                if prefix.len() + data.len() > limit {
-                    let take = limit.saturating_sub(prefix.len());
+                let room = limit.saturating_sub(prefix.len());
+                if data.len() >= room {
+                    let take = room.min(data.len());
                     prefix.extend_from_slice(&data[..take]);
                     let remainder = data.slice(take..);
                     if !remainder.is_empty() {
                         pending.push(Frame::data(remainder));
                     }
-                    truncated = true;
+                    truncated = data.len() > take;
+                    stop = true;
                     break;
                 }
                 prefix.extend_from_slice(&data);
@@ -460,7 +554,7 @@ async fn read_body(
     Ok(RequestPayload {
         prefix: Bytes::from(prefix),
         pending,
-        rest: if truncated { Some(body) } else { None },
+        rest: if stop { Some(body) } else { None },
         truncated,
     })
 }
@@ -515,34 +609,33 @@ fn header_has_token(headers: &HeaderMap, name: http::header::HeaderName, token: 
     })
 }
 
-fn record_upstream_error(context: &Context, result: &Result<Response<ProxyBody>, HttpError>) {
-    if let Err(err) = result {
-        match err.status {
-            StatusCode::GATEWAY_TIMEOUT => {
-                context
-                    .metrics
-                    .upstream_timeouts
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            StatusCode::BAD_GATEWAY => {
-                context
-                    .metrics
-                    .upstream_connect_errors
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
+fn record_upstream_error(context: &Context, err: &HttpError) {
+    match err.status {
+        StatusCode::GATEWAY_TIMEOUT => {
+            context
+                .metrics
+                .upstream_timeouts
+                .fetch_add(1, Ordering::Relaxed);
         }
+        StatusCode::BAD_GATEWAY => {
+            context
+                .metrics
+                .upstream_connect_errors
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
     }
 }
 
 async fn process(
-    parts: http::request::Parts,
+    mut parts: http::request::Parts,
     payload: RequestPayload,
     peer: SocketAddr,
     config: &CompiledConfig,
     context: &Context,
     upgrade: Option<Upgrade>,
 ) -> Result<Response<ProxyBody>, HttpError> {
+    forward::normalize_host_header(&mut parts);
     context.metrics.requests.fetch_add(1, Ordering::Relaxed);
     let body = &payload.prefix;
     if payload.truncated {
@@ -684,15 +777,33 @@ async fn process(
         }
         let result = websocket::forward_handshake(
             config,
-            parts,
-            payload.prefix,
+            &parts,
+            payload.prefix.clone(),
             context.scheme,
             peer,
             upgrade,
         )
         .await;
-        record_upstream_error(context, &result);
-        return result;
+        if let Err(err) = &result {
+            record_upstream_error(context, err);
+        }
+        return match result? {
+            websocket::Handshake::Upgraded(response) => Ok(response),
+            websocket::Handshake::Response(response) => {
+                if !config.has_response_rules() {
+                    return Ok(response);
+                }
+                crate::proxy::response::inspect(
+                    config,
+                    &context.metrics,
+                    &parts,
+                    inspected_body,
+                    peer,
+                    response,
+                )
+                .await
+            }
+        };
     }
 
     let (outbound_body, exchange_timeout) = match payload.rest {
@@ -701,14 +812,24 @@ async fn process(
             let body = PrefixBody::new(payload.prefix.clone(), payload.pending, rest).boxed();
             (body, config.timeouts.body_read)
         }
+        None if !payload.pending.is_empty() => (
+            PrefixBody::new(
+                payload.prefix.clone(),
+                payload.pending,
+                full_body(Bytes::new()),
+            )
+            .boxed(),
+            config.timeouts.upstream_response,
+        ),
         None => (
             full_body(payload.prefix.clone()),
             config.timeouts.upstream_response,
         ),
     };
 
+    let client = context.client_for(config);
     let result = forward::forward_request(
-        &context.client,
+        &client,
         config,
         &parts,
         outbound_body,
@@ -717,7 +838,9 @@ async fn process(
         exchange_timeout,
     )
     .await;
-    record_upstream_error(context, &result);
+    if let Err(err) = &result {
+        record_upstream_error(context, err);
+    }
     let response = result?;
 
     if !config.has_response_rules() {
@@ -733,4 +856,62 @@ async fn process(
         response,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn connected_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect client");
+        let (server, _) = listener.accept().await.expect("accept");
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn detects_a_split_http2_preface_and_returns_its_bytes() {
+        let (mut client, mut server) = connected_pair().await;
+        let (first, rest) = H2_PREFACE.split_at(3);
+        client.write_all(first).await.expect("write first half");
+        let detect =
+            tokio::spawn(async move { detect_protocol(&mut server, Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client.write_all(rest).await.expect("write second half");
+
+        let (protocol, prefix) = detect.await.expect("detect task").expect("detected");
+        assert_eq!(protocol, Protocol::Http2);
+        assert_eq!(prefix, H2_PREFACE);
+    }
+
+    #[tokio::test]
+    async fn a_partial_preface_stops_at_the_deadline_without_spinning() {
+        let (mut client, mut server) = connected_pair().await;
+        client.write_all(b"P").await.expect("write partial preface");
+
+        let start = std::time::Instant::now();
+        let detected = detect_protocol(&mut server, Duration::from_millis(100)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "detection must be bounded by the deadline"
+        );
+        assert!(matches!(detected, Some((Protocol::Http1, _))));
+    }
+
+    #[tokio::test]
+    async fn an_http1_request_is_classified_immediately() {
+        let (mut client, mut server) = connected_pair().await;
+        client
+            .write_all(b"GET / HTTP/1.1\r\nhost: test\r\n\r\n")
+            .await
+            .expect("write request");
+        let (protocol, prefix) = detect_protocol(&mut server, Duration::from_secs(5))
+            .await
+            .expect("detected");
+        assert_eq!(protocol, Protocol::Http1);
+        assert!(prefix.starts_with(b"GET /"));
+    }
 }

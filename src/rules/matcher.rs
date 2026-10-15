@@ -42,6 +42,10 @@ pub struct Matcher {
     pub statuses: Vec<StatusRange>,
     pub response_headers: Vec<(HeaderName, Vec<Regex>)>,
     pub payload: Option<PayloadMatcher>,
+    /// ALLOW rules must agree with every path form (raw, decoded, normalized),
+    /// so an allowlisted raw path cannot shadow a BLOCK on the canonical path
+    /// that an upstream would route.
+    pub path_match_all: bool,
 }
 
 #[derive(Debug)]
@@ -85,10 +89,17 @@ impl Matcher {
 
     fn matches_request(&self, view: &RequestView<'_>) -> bool {
         if !self.paths.is_empty() {
-            let matched = view
-                .path_forms
-                .iter()
-                .any(|form| self.paths.iter().any(|regex| regex.is_match(form)));
+            let matched = if self.path_match_all {
+                !view.path_forms.is_empty()
+                    && view
+                        .path_forms
+                        .iter()
+                        .all(|form| self.paths.iter().any(|regex| regex.is_match(form)))
+            } else {
+                view.path_forms
+                    .iter()
+                    .any(|form| self.paths.iter().any(|regex| regex.is_match(form)))
+            };
             if !matched {
                 return false;
             }
@@ -138,14 +149,26 @@ impl Matcher {
         let Some(payload) = &self.payload else {
             return true;
         };
-        payload.matches(view, response)
+        payload.matches(view, response, self.path_match_all)
     }
 }
 
 impl PayloadMatcher {
-    fn matches(&self, view: &RequestView<'_>, response: Option<&ResponseView<'_>>) -> bool {
-        if self.targets & TARGET_PATH != 0 && view.path_forms.iter().any(|form| self.hits(form)) {
-            return true;
+    fn matches(
+        &self,
+        view: &RequestView<'_>,
+        response: Option<&ResponseView<'_>>,
+        path_match_all: bool,
+    ) -> bool {
+        if self.targets & TARGET_PATH != 0 {
+            let hit = if path_match_all {
+                !view.path_forms.is_empty() && view.path_forms.iter().all(|form| self.hits(form))
+            } else {
+                view.path_forms.iter().any(|form| self.hits(form))
+            };
+            if hit {
+                return true;
+            }
         }
 
         if self.targets & TARGET_QUERY != 0 && view.query_forms.iter().any(|form| self.hits(form)) {

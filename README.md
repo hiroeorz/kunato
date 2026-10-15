@@ -469,14 +469,18 @@ rules_update:
 ```
 
 The URL must use https; plain http is accepted only for loopback hosts, which is
-handy for tests and local mirrors. Every `interval` the updater sends a
+handy for tests and local mirrors. Redirects must satisfy the same policy for
+the URL they started from: an https download only follows https, and a
+loopback-http download only follows https or loopback http, so a redirect can
+never downgrade the transport. Every `interval` the updater sends a
 conditional request (`If-None-Match`/`If-Modified-Since`), downloads any new
 file, verifies its SHA256 digest against `checksum_url`, validates it with the
-full rule compiler (regex and ReDoS guards included), replaces the file
+full rule compiler (regex and ReDoS guards included) together with the inline
+and overrides sources, replaces the file
 atomically, and lets the hot reload path apply it. Any failure — network,
 checksum mismatch, invalid rules, size limit — leaves the current rules
 untouched and is reported in the logs and metrics. The updater state (last
-success, HTTP validators) is stored next to the rules file.
+success, next due time, HTTP validators) is stored next to the rules file.
 `kunato update-rules` performs a single check and exits; the installer uses it
 for the first download.
 
@@ -527,12 +531,17 @@ tracked like the automatic per-IP limits (IPv6 aggregated by
 ### Match fields
 
 Match conditions are combined with logical AND; a list value means OR within that
-field. At least one condition must be specified. Regular expressions are compiled
+field, and empty pattern lists (`headers: { x-required: [] }`) are rejected so a
+condition can never silently disappear. At least one condition must be
+specified. Regular expressions are compiled
 once at load time, and an invalid pattern rejects the configuration. Path and query
 values are matched raw and through up to two percent-decode passes, so
 `%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match; paths are additionally
 matched in normalized form (dot segments resolved, duplicate slashes merged), so
-`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. Header values
+`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. A `BLOCK` or
+`LOG` rule matches any form, while an `ALLOW` rule must match every path form:
+an allowlisted raw path such as `/public/../private` cannot shadow a `BLOCK` on
+the canonical path an upstream would route. Header values
 are decoded with UTF-8 replacement, so a single invalid byte cannot hide a value
 from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
@@ -568,6 +577,7 @@ upstream and to the client are never modified.
 ### Timeouts and limits
 
 Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
+Values must fit in the unit (no silent overflow) and must not exceed 365 days.
 Defaults:
 
 | Timeout             | Default | Limit                     | Default |

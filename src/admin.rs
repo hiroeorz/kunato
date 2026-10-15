@@ -1,22 +1,29 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::config::Admin;
 use crate::error::Error;
 use crate::metrics::Metrics;
 use crate::protection::ProtectionState;
+use crate::proxy::server::drain_connections;
 use crate::proxy::{ProxyBody, full_body};
+
+const MAX_ADMIN_CONNECTIONS: usize = 64;
+const ADMIN_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const ADMIN_CONNECTION_GRACE: Duration = Duration::from_secs(5);
 
 pub struct AdminServer {
     listener: TcpListener,
@@ -48,6 +55,8 @@ impl AdminServer {
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        let limit = Arc::new(Semaphore::new(MAX_ADMIN_CONNECTIONS));
+        let mut connections = JoinSet::new();
         loop {
             tokio::select! {
                 changed = shutdown.changed() => {
@@ -60,29 +69,54 @@ impl AdminServer {
                         Ok((stream, peer)) => {
                             let metrics = self.metrics.clone();
                             let protection = self.protection.clone();
-                            tokio::spawn(async move {
-                                let io = TokioIo::new(stream);
-                                let service = service_fn(move |request: Request<Incoming>| {
-                                    let metrics = metrics.clone();
-                                    let protection = protection.clone();
-                                    async move { handle(request, metrics, protection).await }
-                                });
-                                if let Err(err) = http1::Builder::new()
-                                    .keep_alive(true)
-                                    .serve_connection(io, service)
-                                    .await
-                                {
-                                    debug!(client = %peer, error = %err, "admin connection closed with error");
+                            match Arc::clone(&limit).try_acquire_owned() {
+                                Ok(permit) => {
+                                    connections.spawn(serve_connection(stream, peer, metrics, protection, permit));
                                 }
-                            });
+                                Err(_) => {
+                                    warn!(client = %peer, "admin connection limit exceeded");
+                                    drop(stream);
+                                }
+                            }
                         }
                         Err(err) => warn!(error = %err, "failed to accept admin connection"),
+                    }
+                }
+                Some(result) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(err) = result {
+                        debug!(error = %err, "admin connection task failed");
                     }
                 }
             }
         }
 
+        drop(self.listener);
+        drain_connections(&mut connections, ADMIN_CONNECTION_GRACE).await;
         info!("admin listener stopped");
+    }
+}
+
+async fn serve_connection(
+    stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    metrics: Arc<Metrics>,
+    protection: Arc<ProtectionState>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let io = TokioIo::new(stream);
+    let service = service_fn(move |request: Request<Incoming>| {
+        let metrics = metrics.clone();
+        let protection = protection.clone();
+        async move { handle(request, metrics, protection).await }
+    });
+    let result = http1::Builder::new()
+        .keep_alive(true)
+        .timer(TokioTimer::new())
+        .header_read_timeout(ADMIN_HEADER_TIMEOUT)
+        .serve_connection(io, service)
+        .await;
+    if let Err(err) = result {
+        debug!(client = %peer, error = %err, "admin connection closed with error");
     }
 }
 

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::Method;
@@ -28,6 +30,8 @@ const MAX_RESPONSE_HEADER_ENTRIES: usize = 64;
 const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
 const MAX_RULES_UPDATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RULES_UPDATE_JITTER_PERCENT: u8 = 50;
+const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -780,9 +784,11 @@ pub struct CompiledRule {
     pub action: Option<Action>,
     pub response: Option<ResponseSpec>,
     pub limit: Option<RuleLimit>,
-    pub limit_key: u32,
+    pub limit_key: RuleLimitKey,
     pub matcher: Matcher,
 }
+
+pub type RuleLimitKey = Arc<(String, String)>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuleLimit {
@@ -791,6 +797,16 @@ pub struct RuleLimit {
 }
 
 pub fn load(path: &Path) -> Result<CompiledConfig, Error> {
+    load_candidate(path, None)
+}
+
+/// Validate a managed rules candidate against the main and overrides files
+/// before it is installed, including on the first download.
+pub fn load_with_rules_candidate(path: &Path, rules: &str) -> Result<CompiledConfig, Error> {
+    load_candidate(path, Some(rules))
+}
+
+fn load_candidate(path: &Path, candidate: Option<&str>) -> Result<CompiledConfig, Error> {
     let spec = read_spec(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let rules_file = spec
@@ -801,7 +817,10 @@ pub fn load(path: &Path) -> Result<CompiledConfig, Error> {
         .overrides_file
         .as_deref()
         .map(|overrides| resolve_path(base, overrides));
-    let rules = load_rules_spec(&rules_file)?;
+    let rules = match candidate {
+        Some(text) => serde_saphyr::from_str(text)?,
+        None => load_rules_spec(&rules_file)?,
+    };
     let overrides = load_rules_spec(&overrides_file)?;
     let sources = RulesSources {
         overrides,
@@ -833,11 +852,39 @@ pub fn load_settings(path: &Path) -> Result<CompiledConfig, Error> {
 }
 
 fn read_spec(path: &Path) -> Result<ConfigSpec, Error> {
-    let text = std::fs::read_to_string(path).map_err(|source| Error::ConfigRead {
+    let text = read_config_text(path)?;
+    Ok(serde_saphyr::from_str(&text)?)
+}
+
+pub(crate) fn read_config_text(path: &Path) -> Result<String, Error> {
+    let read = || -> std::io::Result<String> {
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration source must be a regular file",
+            ));
+        }
+        let file = std::fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration source must be a regular file",
+            ));
+        }
+        let mut text = String::new();
+        file.take(MAX_CONFIG_BYTES + 1).read_to_string(&mut text)?;
+        if text.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "configuration source exceeds the 16 MiB limit",
+            ));
+        }
+        Ok(text)
+    };
+    read().map_err(|source| Error::ConfigRead {
         path: path.to_path_buf(),
         source,
-    })?;
-    Ok(serde_saphyr::from_str(&text)?)
+    })
 }
 
 fn resolve_path(base: &Path, path: &Path) -> PathBuf {
@@ -852,10 +899,7 @@ fn load_rules_spec(path: &Option<PathBuf>) -> Result<RulesFileSpec, Error> {
     let Some(path) = path else {
         return Ok(RulesFileSpec::default());
     };
-    let text = std::fs::read_to_string(path).map_err(|source| Error::ConfigRead {
-        path: path.clone(),
-        source,
-    })?;
+    let text = read_config_text(path)?;
     if text.trim().is_empty() {
         return Ok(RulesFileSpec::default());
     }
@@ -1051,8 +1095,14 @@ fn compile_categories(
                     }
                 }
 
-                let matcher = compile_matcher(&rule.matcher, category.phase, &rule_context, issues);
                 let effective_action = rule.action.or(category.action);
+                let matcher = compile_matcher(
+                    &rule.matcher,
+                    category.phase,
+                    effective_action,
+                    &rule_context,
+                    issues,
+                );
                 if !scoring && category.enabled && rule.enabled && effective_action.is_none() {
                     issues.push(format!(
                         "{rule_context}: no effective action; set `action` on the rule or the category"
@@ -1067,7 +1117,10 @@ fn compile_categories(
                     issues,
                 );
 
-                if !category.enabled || !rule.enabled || disabled.contains(rule.name.as_str()) {
+                if !category.enabled
+                    || !rule.enabled
+                    || (*source != "overrides file" && disabled.contains(rule.name.as_str()))
+                {
                     continue;
                 }
 
@@ -1075,9 +1128,7 @@ fn compile_categories(
                     name: rule.name.clone(),
                     action: rule.action,
                     response: rule.response.clone(),
-                    limit_key: limit
-                        .map(|_| rule_limit_key(&category.name, &rule.name))
-                        .unwrap_or(0),
+                    limit_key: Arc::new((category.name.clone(), rule.name.clone())),
                     limit,
                     matcher,
                 });
@@ -1139,21 +1190,6 @@ fn compile_limit(
         requests: spec.requests,
         window: spec.window,
     })
-}
-
-/// Stable identifier for a rule's limit bucket: survives hot reloads because
-/// it hashes the category and rule names instead of compiled positions.
-fn rule_limit_key(category: &str, rule: &str) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in category
-        .bytes()
-        .chain(std::iter::once(0))
-        .chain(rule.bytes())
-    {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
 }
 
 fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
@@ -1378,14 +1414,17 @@ fn validate_admin(spec: &AdminSpec, issues: &mut Vec<String>) {
 }
 
 fn validate_protection(spec: &ProtectionSpec, issues: &mut Vec<String>) {
-    if spec.requests_per_second <= 0.0 {
-        issues.push("protection.requests_per_second must be greater than zero".to_owned());
+    if !spec.requests_per_second.is_finite() || spec.requests_per_second <= 0.0 {
+        issues
+            .push("protection.requests_per_second must be finite and greater than zero".to_owned());
     }
-    if spec.burst < 1.0 {
-        issues.push("protection.burst must be at least 1".to_owned());
+    if !spec.burst.is_finite() || spec.burst < 1.0 {
+        issues.push("protection.burst must be finite and at least 1".to_owned());
     }
-    if spec.global_requests_per_second <= 0.0 {
-        issues.push("protection.global_requests_per_second must be greater than zero".to_owned());
+    if !spec.global_requests_per_second.is_finite() || spec.global_requests_per_second <= 0.0 {
+        issues.push(
+            "protection.global_requests_per_second must be finite and greater than zero".to_owned(),
+        );
     }
     if spec.max_connections == 0 {
         issues.push("protection.max_connections must be greater than zero".to_owned());
@@ -1474,10 +1513,14 @@ fn compile_upstream(raw: &str, issues: &mut Vec<String>) -> Option<Upstream> {
 fn compile_matcher(
     spec: &MatchSpec,
     phase: Phase,
+    action: Option<Action>,
     context: &str,
     issues: &mut Vec<String>,
 ) -> Matcher {
-    let mut matcher = Matcher::default();
+    let mut matcher = Matcher {
+        path_match_all: action == Some(Action::Allow),
+        ..Matcher::default()
+    };
     let mut has_condition = false;
 
     if let Some(patterns) = &spec.path {
@@ -1769,6 +1812,11 @@ fn compile_header_matchers(
 ) -> Vec<(HeaderName, Vec<Regex>)> {
     let mut matchers = Vec::new();
     for (name, patterns) in map {
+        if matches!(patterns, StringOrSeq::Many(values) if values.is_empty()) {
+            issues.push(format!(
+                "{context}: header `{name}` patterns must not be empty"
+            ));
+        }
         let Ok(header) = HeaderName::from_bytes(name.as_bytes()) else {
             issues.push(format!("{context}: invalid header name `{name}`"));
             continue;
@@ -1792,6 +1840,11 @@ fn compile_cookie_matchers(
 ) -> Vec<(String, Vec<Regex>)> {
     let mut matchers = Vec::new();
     for (name, patterns) in map {
+        if matches!(patterns, StringOrSeq::Many(values) if values.is_empty()) {
+            issues.push(format!(
+                "{context}: cookie `{name}` patterns must not be empty"
+            ));
+        }
         if name.trim().is_empty() {
             issues.push(format!("{context}: cookie name must not be empty"));
             continue;
@@ -1820,7 +1873,9 @@ where
     D: Deserializer<'de>,
 {
     match DurationValue::deserialize(deserializer)? {
-        DurationValue::Seconds(seconds) => Ok(Duration::from_secs(seconds)),
+        DurationValue::Seconds(seconds) => {
+            bounded_duration(Duration::from_secs(seconds)).map_err(DeError::custom)
+        }
         DurationValue::Text(text) => parse_duration(&text).map_err(DeError::custom),
     }
 }
@@ -1848,13 +1903,29 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
         .parse()
         .map_err(|_| format!("invalid duration `{text}`"))?;
 
-    Ok(match unit {
+    let duration = match unit {
         "ms" => Duration::from_millis(value),
         "s" => Duration::from_secs(value),
-        "m" => Duration::from_secs(value * 60),
-        "h" => Duration::from_secs(value * 3600),
+        "m" => Duration::from_secs(
+            value
+                .checked_mul(60)
+                .ok_or_else(|| format!("duration `{text}` overflows"))?,
+        ),
+        "h" => Duration::from_secs(
+            value
+                .checked_mul(3600)
+                .ok_or_else(|| format!("duration `{text}` overflows"))?,
+        ),
         _ => unreachable!("unit is one of the known suffixes"),
-    })
+    };
+    bounded_duration(duration)
+}
+
+fn bounded_duration(duration: Duration) -> Result<Duration, String> {
+    if duration > MAX_DURATION {
+        return Err("duration must not exceed 365 days".to_owned());
+    }
+    Ok(duration)
 }
 
 fn de_opt_string_or_seq<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
@@ -2019,7 +2090,10 @@ mod tests {
         let limit = rule.limit.expect("compiled limit");
         assert_eq!(limit.requests, 5);
         assert_eq!(limit.window, Duration::from_secs(30));
-        assert_ne!(rule.limit_key, 0);
+        assert_eq!(
+            *rule.limit_key,
+            ("brute-force".to_owned(), "login".to_owned())
+        );
     }
 
     #[test]
@@ -2968,5 +3042,222 @@ rules_file: missing.yaml
             .expect("checksum file is not empty")
             .to_owned();
         assert_eq!(expected, crate::rules_update::sha256_hex(rules));
+    }
+
+    #[test]
+    fn rejects_durations_that_overflow_their_unit() {
+        let error = parse_with(BASE, "timeouts: { header_read: 18446744073709551615h }\n")
+            .expect_err("must fail");
+        assert!(error.to_string().contains("overflows"), "{error}");
+        let error = parse_with(BASE, "timeouts: { body_read: 18446744073709551615m }\n")
+            .expect_err("must fail");
+        assert!(error.to_string().contains("overflows"), "{error}");
+    }
+
+    #[test]
+    fn rejects_durations_beyond_the_cap() {
+        for value in ["999999999999999s", "1000000000000s", "8761h"] {
+            let error = parse_with(BASE, &format!("timeouts: {{ header_read: {value} }}\n"))
+                .expect_err("must fail");
+            assert!(
+                error.to_string().contains("365 days"),
+                "unexpected error for {value}: {error}"
+            );
+        }
+        for value in [3600u64, 86400] {
+            parse_with(BASE, &format!("timeouts: {{ header_read: {value} }}\n"))
+                .expect("ordinary durations are accepted");
+        }
+        parse_with(BASE, "timeouts: { header_read: 364d }\n").expect_err("unknown unit suffix");
+    }
+
+    #[test]
+    fn rejects_non_finite_protection_rates() {
+        for field in ["requests_per_second", "global_requests_per_second", "burst"] {
+            let yaml = format!("protection: {{ {field}: 1e400 }}\n");
+            assert!(
+                parse_with(BASE, &yaml).is_err(),
+                "{field} must reject non-finite values"
+            );
+        }
+    }
+
+    #[test]
+    fn tiny_finite_rates_are_accepted() {
+        parse_with(
+            BASE,
+            "protection: { requests_per_second: 1e-300, burst: 1 }\n",
+        )
+        .expect("tiny finite rates are accepted");
+    }
+
+    #[test]
+    fn rejects_empty_header_and_cookie_pattern_lists() {
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: c
+    action: BLOCK
+    rules:
+      - name: r
+        match: { headers: { x-required: [] } }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: c
+    action: BLOCK
+    rules:
+      - name: r
+        match: { cookies: { session: [] } }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: c
+    phase: response
+    action: BLOCK
+    rules:
+      - name: r
+        match: { response_headers: { server: [] } }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"), "{error}");
+    }
+
+    #[test]
+    fn rule_limit_keys_use_full_identity() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: c
+    action: BLOCK
+    rules:
+      - name: r95977
+        limit: { requests: 1, window: 1h }
+        match: { path: ^/a }
+      - name: r353080
+        limit: { requests: 1, window: 1h }
+        match: { path: ^/b }
+",
+        )
+        .expect("valid config");
+        let first = &config.categories[0].rules[0];
+        let second = &config.categories[0].rules[1];
+        assert_ne!(first.limit_key, second.limit_key);
+    }
+
+    #[test]
+    fn overrides_disabled_rules_do_not_drop_overrides_own_rules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            &dir.path().join("overrides.yaml"),
+            "categories:
+  - name: local
+    action: ALLOW
+    rules:
+      - name: shared
+        match: { path: ^/shared }
+disabled_rules: [shared]
+",
+        );
+        write(
+            &dir.path().join("rules.yaml"),
+            "categories:
+  - name: auto
+    action: BLOCK
+    rules:
+      - name: shared
+        match: { path: ^/shared }
+      - name: other
+        match: { path: ^/other }
+",
+        );
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: rules.yaml
+overrides_file: overrides.yaml
+",
+        );
+
+        let config = load(&main).expect("valid config");
+        let local = config
+            .categories
+            .iter()
+            .find(|category| category.name == "local")
+            .expect("local category");
+        assert_eq!(local.rules.len(), 1);
+        assert_eq!(local.rules[0].name, "shared");
+        let auto = config
+            .categories
+            .iter()
+            .find(|category| category.name == "auto")
+            .expect("auto category");
+        assert_eq!(auto.rules.len(), 1);
+        assert_eq!(auto.rules[0].name, "other");
+    }
+
+    #[test]
+    fn candidate_rules_validate_against_inline_and_overrides_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            &dir.path().join("overrides.yaml"),
+            "categories:
+  - name: local
+    action: ALLOW
+    rules:
+      - name: trusted
+        match: { source_ip: 127.0.0.1/32 }
+",
+        );
+        let main = dir.path().join("kunato.yaml");
+        write(
+            &main,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: rules.yaml
+overrides_file: overrides.yaml
+categories:
+  - name: inline
+    action: LOG
+    rules:
+      - name: inline-rule
+        match: { path: ^/inline }
+",
+        );
+
+        let candidate = "categories:
+  - name: auto
+    action: BLOCK
+    rules:
+      - name: catch-all
+        match: { path: ^/ }
+";
+        let compiled = load_with_rules_candidate(&main, candidate)
+            .expect("candidate compiles without the file");
+        assert_eq!(compiled.categories.len(), 3);
+
+        let conflicting = "categories:
+  - name: inline
+    action: BLOCK
+    rules:
+      - name: duplicated
+        match: { path: ^/dup }
+";
+        let error = load_with_rules_candidate(&main, conflicting)
+            .expect_err("duplicate category must fail");
+        assert!(error.to_string().contains("duplicate category"), "{error}");
     }
 }

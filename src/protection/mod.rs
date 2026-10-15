@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use ipnet::IpNet;
 use tokio::time::Instant;
 
-use crate::config::{Protection, RuleLimit};
+use crate::config::{Protection, RuleLimit, RuleLimitKey};
 
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
@@ -25,6 +25,9 @@ pub struct ProtectionState {
     shards: Vec<Mutex<Shard>>,
     rule_shards: Vec<Mutex<RuleShard>>,
     global_connections: AtomicU32,
+    active_connections: AtomicU64,
+    tracked_ips: AtomicUsize,
+    tracked_rules: AtomicUsize,
     global_requests: Mutex<GlobalWindow>,
 }
 
@@ -40,6 +43,9 @@ impl ProtectionState {
             shards,
             rule_shards,
             global_connections: AtomicU32::new(0),
+            active_connections: AtomicU64::new(0),
+            tracked_ips: AtomicUsize::new(0),
+            tracked_rules: AtomicUsize::new(0),
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
                 count: 0,
@@ -48,7 +54,7 @@ impl ProtectionState {
     }
 
     pub fn active_connections(&self) -> u64 {
-        u64::from(self.global_connections.load(Ordering::Relaxed))
+        self.active_connections.load(Ordering::Relaxed)
     }
 
     pub fn check_request(&self, ip: IpAddr, config: &Protection) -> Decision {
@@ -70,47 +76,25 @@ impl ProtectionState {
     ) -> Option<ConnectionGuard> {
         let key = tracking_key(ip, config);
 
-        if !config.enabled {
-            return Some(ConnectionGuard {
-                state: Arc::clone(self),
-                key,
-                per_ip: false,
-                counted: false,
-            });
+        if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
+            return Some(self.connection_guard(key, false, false));
         }
 
-        if self.global_connections.fetch_add(1, Ordering::AcqRel) + 1 > config.max_connections {
-            self.global_connections.fetch_sub(1, Ordering::AcqRel);
+        if self
+            .global_connections
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                (count < config.max_connections).then(|| count + 1)
+            })
+            .is_err()
+        {
             return None;
         }
 
-        if is_allowlisted(normalize_ip(ip), &config.allowlist) {
-            return Some(ConnectionGuard {
-                state: Arc::clone(self),
-                key,
-                per_ip: false,
-                counted: true,
-            });
-        }
-
         let now = Instant::now();
-        let mut shard = lock(&self.shards[shard_index(key)]);
-
-        if !shard.entries.contains_key(&key) {
-            if shard.entries.len() >= config.max_tracked_ips {
-                evict_stale(&mut shard.entries, now);
-            }
-            if shard.entries.len() >= config.max_tracked_ips {
-                drop(shard);
-                return Some(ConnectionGuard {
-                    state: Arc::clone(self),
-                    key,
-                    per_ip: false,
-                    counted: true,
-                });
-            }
-            shard.entries.insert(key, Entry::new(now, config.burst));
-        }
+        let Some(mut shard) = self.client_shard(key, config, now) else {
+            self.global_connections.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        };
 
         let Some(entry) = shard.entries.get_mut(&key) else {
             self.global_connections.fetch_sub(1, Ordering::AcqRel);
@@ -126,27 +110,62 @@ impl ProtectionState {
         entry.last_seen = now;
         drop(shard);
 
-        Some(ConnectionGuard {
+        Some(self.connection_guard(key, true, true))
+    }
+
+    fn connection_guard(
+        self: &Arc<Self>,
+        key: IpAddr,
+        per_ip: bool,
+        counted: bool,
+    ) -> ConnectionGuard {
+        self.active_connections.fetch_add(1, Ordering::Relaxed);
+        ConnectionGuard {
             state: Arc::clone(self),
             key,
-            per_ip: true,
-            counted: true,
-        })
+            per_ip,
+            counted,
+        }
+    }
+
+    fn client_shard(
+        &self,
+        key: IpAddr,
+        config: &Protection,
+        now: Instant,
+    ) -> Option<MutexGuard<'_, Shard>> {
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        if shard.entries.contains_key(&key) {
+            return Some(shard);
+        }
+        if !reserve_slot(&self.tracked_ips, config.max_tracked_ips) {
+            drop(shard);
+            for shard in &self.shards {
+                let mut shard = lock(shard);
+                let before = shard.entries.len();
+                evict_stale(&mut shard.entries, now);
+                self.tracked_ips
+                    .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
+            }
+            shard = lock(&self.shards[shard_index(key)]);
+            if shard.entries.contains_key(&key) {
+                return Some(shard);
+            }
+            if !reserve_slot(&self.tracked_ips, config.max_tracked_ips) {
+                return None;
+            }
+        }
+        shard.entries.insert(key, Entry::new(now, config.burst));
+        Some(shard)
     }
 
     fn check_client(&self, key: IpAddr, config: &Protection) -> Option<Decision> {
         let now = Instant::now();
-        let mut shard = lock(&self.shards[shard_index(key)]);
-
-        if !shard.entries.contains_key(&key) {
-            if shard.entries.len() >= config.max_tracked_ips {
-                evict_stale(&mut shard.entries, now);
-            }
-            if shard.entries.len() >= config.max_tracked_ips {
-                return None;
-            }
-            shard.entries.insert(key, Entry::new(now, config.burst));
-        }
+        let Some(mut shard) = self.client_shard(key, config, now) else {
+            return Some(Decision::Overloaded {
+                retry_after: GLOBAL_WINDOW,
+            });
+        };
 
         let entry = shard.entries.get_mut(&key)?;
         entry.last_seen = now;
@@ -179,7 +198,7 @@ impl ProtectionState {
             entry.window_start = now;
             entry.violations = 0;
         }
-        entry.violations += 1;
+        entry.violations = entry.violations.saturating_add(1);
 
         if entry.violations >= config.ban.violations {
             entry.violations = 0;
@@ -197,7 +216,8 @@ impl ProtectionState {
         }
 
         let deficit = (1.0 - entry.tokens).max(0.001);
-        let retry_after = Duration::from_secs_f64(deficit / config.requests_per_second);
+        let retry_after = Duration::try_from_secs_f64(deficit / config.requests_per_second)
+            .unwrap_or(Duration::MAX);
         Some(Decision::RateLimited { retry_after })
     }
 
@@ -209,7 +229,7 @@ impl ProtectionState {
             window.started = now;
             window.count = 0;
         }
-        window.count += 1;
+        window.count = window.count.saturating_add(1);
 
         if window.count as f64 > config.global_requests_per_second {
             return Decision::Overloaded {
@@ -224,7 +244,7 @@ impl ProtectionState {
     /// `limit.requests` per `limit.window` (burst up to `requests`).
     pub fn check_rule_limit(
         &self,
-        key: u32,
+        key: &RuleLimitKey,
         ip: IpAddr,
         limit: &RuleLimit,
         config: &Protection,
@@ -235,26 +255,44 @@ impl ProtectionState {
 
         let now = Instant::now();
         let tracking = tracking_key(ip, config);
-        let map_key = (key, tracking);
+        let map_key = (Arc::clone(key), tracking);
         let mut shard = lock(&self.rule_shards[shard_index(tracking)]);
 
         if !shard.entries.contains_key(&map_key) {
-            if shard.entries.len() >= config.max_tracked_ips {
-                shard.entries.retain(|_, bucket| {
-                    now.saturating_duration_since(bucket.last_seen) < STALE_AFTER
-                });
+            if !reserve_slot(&self.tracked_rules, config.max_tracked_ips) {
+                drop(shard);
+                for shard in &self.rule_shards {
+                    let mut shard = lock(shard);
+                    let before = shard.entries.len();
+                    shard.entries.retain(|_, bucket| {
+                        now.saturating_duration_since(bucket.last_seen) < bucket.retention
+                    });
+                    self.tracked_rules
+                        .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
+                }
+                shard = lock(&self.rule_shards[shard_index(tracking)]);
+                if !shard.entries.contains_key(&map_key) {
+                    if !reserve_slot(&self.tracked_rules, config.max_tracked_ips) {
+                        return false;
+                    }
+                    let burst = f64::from(limit.requests);
+                    shard
+                        .entries
+                        .insert(map_key.clone(), RuleBucket::new(now, burst, limit.window));
+                }
+            } else {
+                let burst = f64::from(limit.requests);
+                shard
+                    .entries
+                    .insert(map_key.clone(), RuleBucket::new(now, burst, limit.window));
             }
-            if shard.entries.len() >= config.max_tracked_ips {
-                return true;
-            }
-            let burst = f64::from(limit.requests);
-            shard.entries.insert(map_key, RuleBucket::new(now, burst));
         }
 
         let Some(bucket) = shard.entries.get_mut(&map_key) else {
-            return true;
+            return false;
         };
         bucket.last_seen = now;
+        bucket.retention = limit.window.max(STALE_AFTER);
 
         let burst = f64::from(limit.requests);
         let rate = burst / limit.window.as_secs_f64().max(0.001);
@@ -279,11 +317,23 @@ impl ProtectionState {
 /// stays transparent while its source is within budget and fires beyond it.
 pub trait RuleLimitCheck {
     /// Returns `true` while `ip` stays within the rule's budget.
-    fn permit(&self, key: u32, ip: IpAddr, limit: &RuleLimit, protection: &Protection) -> bool;
+    fn permit(
+        &self,
+        key: &RuleLimitKey,
+        ip: IpAddr,
+        limit: &RuleLimit,
+        protection: &Protection,
+    ) -> bool;
 }
 
 impl RuleLimitCheck for ProtectionState {
-    fn permit(&self, key: u32, ip: IpAddr, limit: &RuleLimit, protection: &Protection) -> bool {
+    fn permit(
+        &self,
+        key: &RuleLimitKey,
+        ip: IpAddr,
+        limit: &RuleLimit,
+        protection: &Protection,
+    ) -> bool {
         self.check_rule_limit(key, ip, limit, protection)
     }
 }
@@ -303,6 +353,9 @@ pub struct ConnectionGuard {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
+        self.state
+            .active_connections
+            .fetch_sub(1, Ordering::Relaxed);
         if self.counted {
             self.state.global_connections.fetch_sub(1, Ordering::AcqRel);
         }
@@ -322,21 +375,23 @@ struct Shard {
 
 #[derive(Default)]
 struct RuleShard {
-    entries: HashMap<(u32, IpAddr), RuleBucket>,
+    entries: HashMap<(RuleLimitKey, IpAddr), RuleBucket>,
 }
 
 struct RuleBucket {
     tokens: f64,
     last_refill: Instant,
     last_seen: Instant,
+    retention: Duration,
 }
 
 impl RuleBucket {
-    fn new(now: Instant, burst: f64) -> Self {
+    fn new(now: Instant, burst: f64, window: Duration) -> Self {
         Self {
             tokens: burst,
             last_refill: now,
             last_seen: now,
+            retention: window.max(STALE_AFTER),
         }
     }
 }
@@ -432,6 +487,14 @@ fn evict_stale(entries: &mut HashMap<IpAddr, Entry>, now: Instant) {
             || entry.banned_until.is_some_and(|until| until > now)
             || now.saturating_duration_since(entry.last_seen) < STALE_AFTER
     });
+}
+
+fn reserve_slot(counter: &AtomicUsize, limit: usize) -> bool {
+    counter
+        .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+            (count < limit).then(|| count + 1)
+        })
+        .is_ok()
 }
 
 fn escalated_duration(base: Duration, max: Duration, ban_count: u32) -> Duration {
@@ -784,15 +847,19 @@ mod tests {
         }
     }
 
+    fn rule_key(number: u32) -> RuleLimitKey {
+        Arc::new(("test".to_owned(), number.to_string()))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rule_limit_allows_burst_then_blocks() {
         let state = ProtectionState::new();
         let config = config();
         let limit = rule_limit(2, 10);
 
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
-        assert!(!state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
     }
 
     #[tokio::test(start_paused = true)]
@@ -801,12 +868,12 @@ mod tests {
         let config = config();
         let limit = rule_limit(2, 10);
 
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
-        assert!(!state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
 
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
     }
 
     #[tokio::test(start_paused = true)]
@@ -815,11 +882,11 @@ mod tests {
         let config = config();
         let limit = rule_limit(1, 10);
 
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
-        assert!(!state.check_rule_limit(7, ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &config));
 
-        assert!(state.check_rule_limit(8, ip("10.0.0.1"), &limit, &config));
-        assert!(state.check_rule_limit(7, ip("10.0.0.2"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(8), ip("10.0.0.1"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.2"), &limit, &config));
     }
 
     #[tokio::test(start_paused = true)]
@@ -828,8 +895,8 @@ mod tests {
         let config = config();
         let limit = rule_limit(1, 10);
 
-        assert!(state.check_rule_limit(7, ip("2001:db8:1:2::1"), &limit, &config));
-        assert!(!state.check_rule_limit(7, ip("2001:db8:1:2::2"), &limit, &config));
+        assert!(state.check_rule_limit(&rule_key(7), ip("2001:db8:1:2::1"), &limit, &config));
+        assert!(!state.check_rule_limit(&rule_key(7), ip("2001:db8:1:2::2"), &limit, &config));
     }
 
     #[tokio::test(start_paused = true)]
@@ -839,13 +906,87 @@ mod tests {
 
         let mut allowlisted = config();
         allowlisted.allowlist = vec!["10.0.0.0/8".parse().expect("valid CIDR")];
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &allowlisted));
-        assert!(state.check_rule_limit(7, ip("10.0.0.1"), &limit, &allowlisted));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &allowlisted));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.1"), &limit, &allowlisted));
 
         let mut disabled = config();
         disabled.enabled = false;
-        assert!(state.check_rule_limit(7, ip("10.0.0.9"), &limit, &disabled));
-        assert!(state.check_rule_limit(7, ip("10.0.0.9"), &limit, &disabled));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.9"), &limit, &disabled));
+        assert!(state.check_rule_limit(&rule_key(7), ip("10.0.0.9"), &limit, &disabled));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_tracking_is_global_and_does_not_permit_untracked_sources() {
+        let state = Arc::new(ProtectionState::new());
+        let mut config = config();
+        config.max_tracked_ips = 1;
+        let first = state
+            .try_acquire_connection(ip("10.0.0.1"), &config)
+            .expect("first connection");
+        assert!(
+            state
+                .try_acquire_connection(ip("10.0.0.2"), &config)
+                .is_none()
+        );
+        assert!(matches!(
+            state.check_request(ip("10.0.0.2"), &config),
+            Decision::Overloaded { .. }
+        ));
+        assert_eq!(state.tracked_ips.load(Ordering::Relaxed), 1);
+        drop(first);
+        tokio::time::advance(STALE_AFTER).await;
+        assert!(
+            state
+                .try_acquire_connection(ip("10.0.0.2"), &config)
+                .is_some()
+        );
+        assert_eq!(state.tracked_ips.load(Ordering::Relaxed), 1);
+
+        let limit = rule_limit(1, 3600);
+        assert!(state.check_rule_limit(&rule_key(1), ip("10.0.0.1"), &limit, &config));
+        assert!(!state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
+        tokio::time::advance(STALE_AFTER).await;
+        assert!(!state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
+        assert_eq!(state.tracked_rules.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn exempt_connections_are_measured_without_consuming_budgets() {
+        let state = Arc::new(ProtectionState::new());
+        let mut config = config();
+        config.max_connections = 1;
+        config.allowlist = vec!["10.0.0.0/8".parse().expect("allowlist")];
+        let first = state
+            .try_acquire_connection(ip("10.0.0.1"), &config)
+            .expect("regular connection");
+        let exempt = state
+            .try_acquire_connection(ip("10.0.0.2"), &config)
+            .expect("exempt connection");
+        config.enabled = false;
+        let disabled = state
+            .try_acquire_connection(ip("10.0.0.3"), &config)
+            .expect("disabled protection");
+        assert_eq!(state.active_connections(), 3);
+        drop((first, exempt, disabled));
+        assert_eq!(state.active_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn tiny_positive_rates_never_panic() {
+        let state = ProtectionState::new();
+        let mut config = config();
+        config.requests_per_second = 1e-300;
+        config.burst = 1.0;
+        assert_eq!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::RateLimited { .. }
+        ));
     }
 
     #[test]

@@ -121,7 +121,8 @@ Components:
 9. **Tunnel upgrades** — a WebSocket handshake is evaluated like any other
    request, then forwarded over a dedicated upstream connection. On `101`, both
    sides are upgraded and a bidirectional tunnel is held until EOF, the idle
-   timeout, or shutdown. Upgrade responses bypass response-rule inspection.
+   timeout, or shutdown. Only successful `101` tunnels bypass response-rule
+   inspection; non-`101` responses take the normal response path.
 
 ### Body policy
 
@@ -163,7 +164,10 @@ header regex). Responses already buffer only a prefix
 
 ### Forwarding rules
 
-- Preserve method, path, query, and body; preserve the `Host` header.
+- Preserve method, path, query, and body; preserve the `Host` header. For
+  HTTP/2 and HTTP/3, where there is no `Host` field, the `:authority`
+  pseudo-header is promoted to `Host` before rule evaluation and forwarding, so
+  header rules and the upstream request see the same host on every protocol.
 - Forward upstream requests as HTTP/1.1 regardless of the downstream protocol.
 - Strip hop-by-hop headers (`Connection`, `Keep-Alive`, `TE`, `Trailer`,
   `Transfer-Encoding`, `Upgrade`, `Proxy-*`) plus headers named by `Connection`.
@@ -185,7 +189,9 @@ header regex). Responses already buffer only a prefix
   condition.
 - Unknown YAML fields are rejected (`deny_unknown_fields`) so typos fail loudly.
 - Numeric and duration bounds are enforced (durations like `10s` or `1m` are
-  parsed into `Duration`).
+  parsed into `Duration`; unit overflow and values above 365 days are rejected,
+  and rates/bursts must be finite). Empty header or cookie pattern lists are
+  rejected rather than turning a condition into an always-true one.
 
 ### Startup
 
@@ -194,8 +200,11 @@ descriptive message (fail fast).
 
 ### Reload
 
-The watcher listens on the config file **and its parent directory** (editors often
-replace files via rename). Events are debounced (250 ms). A reload re-runs the
+The watcher reacts to `notify` events on the config file **and its parent
+directory** (editors often replace files via rename), debounced (250 ms), and in
+addition polls the source files for mtime/size changes every 2 s. The poll keeps
+hot reload working when the platform watcher cannot be created or a watch
+registration fails. A reload re-runs the
 parse → validate → compile pipeline; on success the snapshot is swapped with
 `ArcSwap::store`; on failure the previous snapshot stays active and the error is
 logged. In-flight requests keep using the snapshot they loaded.
@@ -213,11 +222,14 @@ Categories can be split across three documents: `overrides_file`, inline
 `categories`, and `rules_file`. They are merged in that order before compilation,
 so override categories are evaluated first and names must be globally unique. The
 external files are categories-only; `overrides_file` additionally accepts
-`disabled_rules`, which drops matching rule names from every source.
+`disabled_rules`, which drops matching rule names from every other source (the
+overrides file's own rules stay active).
 
 `rules_update` optionally refreshes `rules_file` on an interval: a conditional
-HTTPS request, a SHA256 check against `checksum_url`, full parse/compile
-validation, and an atomic rename. The file watcher then swaps in the new
+HTTPS request whose redirects must not downgrade the transport policy, a SHA256
+check against `checksum_url`, full parse/compile validation **together with the
+inline and overrides sources**, and an atomic rename. The file watcher then swaps
+in the new
 snapshot; any failure leaves the previous rules in place. `kunato update-rules`
 runs a single check for the installer and for manual use.
 
@@ -334,12 +346,15 @@ Protection is automatic and independent of the rule set. It consists of:
    requests are counted per source with the same tracking key, allowlist, and
    bounds as the per-IP limits; below the budget the rule is transparent and
    evaluation continues, at or above it the rule fires (`BLOCK` or `LOG` only).
-   Limits are bucketed per rule identity (a stable hash of category and rule
-   name, so hot reloads keep the counters) and are evaluated during the request
-   phase only.
+   Limits are bucketed per rule identity (the full category and rule name pair,
+   so hot reloads keep the counters and distinct rules never share a bucket)
+   and are evaluated during the request phase only.
 
-State is bounded: `max_tracked_ips` (default 100 000). When full, stale entries are
-evicted first; if still full, new addresses fall back to the global limiter.
+State is bounded: `max_tracked_ips` (default 100 000) caps the **total** number
+of tracked sources and rule-limit buckets across all shards. When full, stale
+entries are evicted first; if still full, untracked sources are not silently
+exempted — new connection admission is answered with an overload response and a
+rule limit that cannot be tracked applies its rule's action.
 `protection.allowlist` CIDRs are exempt from rate limits and bans. IPv6 addresses
 are aggregated by `aggregate_ipv6_prefix` (default 64) for rate limits, bans, and
 per-IP connection budgets, so rotating within a prefix cannot bypass them;

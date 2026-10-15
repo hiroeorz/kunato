@@ -189,7 +189,9 @@ async fn run_update_rules(config_path: &std::path::Path) -> Result<(), Error> {
         )));
     }
     let state_file = rules_update::state_path(rules_file);
-    match rules_update::update_once(&loaded.rules_update, rules_file, &state_file).await? {
+    match rules_update::update_once(config_path, &loaded.rules_update, rules_file, &state_file)
+        .await?
+    {
         UpdateOutcome::Updated => println!("rules updated: {}", rules_file.display()),
         UpdateOutcome::NotModified => println!("rules are up to date: {}", rules_file.display()),
     }

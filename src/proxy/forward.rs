@@ -92,6 +92,9 @@ pub async fn forward_request(
     *request.uri_mut() = uri;
     *request.version_mut() = Version::HTTP_11;
     copy_forward_headers(&parts.headers, request.headers_mut());
+    if let Some(host) = parts.headers.get(HOST).cloned() {
+        request.headers_mut().insert(HOST, host);
+    }
     set_forwarded_headers(
         request.headers_mut(),
         &parts.headers,
@@ -146,6 +149,21 @@ pub(crate) fn set_forwarded_headers(
     });
     if let Some(host) = forwarded_host {
         target.insert("x-forwarded-host", host);
+    }
+}
+
+/// Give an HTTP/2 or HTTP/3 request an explicit `Host` header derived from the
+/// `:authority` pseudo-header, so header rules and the forwarded request see the
+/// same host the client addressed on every protocol version.
+pub(crate) fn normalize_host_header(parts: &mut http::request::Parts) {
+    if parts.headers.contains_key(HOST) {
+        return;
+    }
+    let Some(authority) = parts.uri.authority() else {
+        return;
+    };
+    if let Ok(value) = HeaderValue::from_str(authority.as_str()) {
+        parts.headers.insert(HOST, value);
     }
 }
 
@@ -225,6 +243,41 @@ mod tests {
                 .get("x-forwarded-for")
                 .and_then(|value| value.to_str().ok()),
             Some("10.0.0.1")
+        );
+    }
+
+    #[test]
+    fn authority_becomes_host_for_http2_requests() {
+        let request = Request::builder()
+            .uri("http://public.example:8080/path")
+            .body(())
+            .expect("valid request");
+        let (mut parts, ()) = request.into_parts();
+        normalize_host_header(&mut parts);
+        assert_eq!(
+            parts
+                .headers
+                .get(HOST)
+                .and_then(|value| value.to_str().ok()),
+            Some("public.example:8080")
+        );
+    }
+
+    #[test]
+    fn explicit_host_is_not_overwritten() {
+        let request = Request::builder()
+            .uri("http://public.example/path")
+            .header(HOST, "origin.example")
+            .body(())
+            .expect("valid request");
+        let (mut parts, ()) = request.into_parts();
+        normalize_host_header(&mut parts);
+        assert_eq!(
+            parts
+                .headers
+                .get(HOST)
+                .and_then(|value| value.to_str().ok()),
+            Some("origin.example")
         );
     }
 }

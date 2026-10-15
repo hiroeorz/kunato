@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -13,6 +13,7 @@ use crate::config::{self, CompiledConfig};
 use crate::metrics::Metrics;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// All files that make up the active configuration: the main file, the managed
 /// rules file, and the optional overrides file.
@@ -42,28 +43,34 @@ pub async fn watch(
     let initial = source_paths(&main, &config.load());
     let watched: Arc<Mutex<BTreeSet<PathBuf>>> =
         Arc::new(Mutex::new(initial.iter().cloned().collect()));
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
+    let (event_tx, mut event_rx) = mpsc::channel::<()>(1);
+    let notify_tx = event_tx.clone();
     let filter = watched.clone();
 
     let mut watcher =
         match notify::recommended_watcher(move |result: notify::Result<Event>| match result {
             Ok(event) if is_relevant(&event, &filter) => {
-                let _ = event_tx.send(event);
+                let _ = notify_tx.try_send(());
             }
             Ok(_) => {}
             Err(err) => warn!(error = %err, "filesystem watch error"),
         }) {
-            Ok(watcher) => watcher,
+            Ok(watcher) => Some(watcher),
             Err(err) => {
-                error!(error = %err, "failed to create file watcher; hot reload disabled");
-                return;
+                warn!(error = %err, "failed to create file watcher; using polling");
+                None
             }
         };
 
     let mut state = WatchState::default();
-    for source in &initial {
-        state.add(&mut watcher, source);
+    if let Some(watcher) = &mut watcher {
+        for source in &initial {
+            state.add(watcher, source);
+        }
     }
+    let mut stamps = source_stamps(&initial);
+    let mut poll = tokio::time::interval(POLL_INTERVAL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     info!(
         paths = ?initial,
@@ -71,22 +78,66 @@ pub async fn watch(
     );
 
     loop {
-        tokio::select! {
+        if *shutdown.borrow() {
+            break;
+        }
+        let changed = tokio::select! {
             _ = shutdown.changed() => break,
             event = event_rx.recv() => {
                 match event {
                     None => break,
-                    Some(event) => {
-                        trace!(kind = ?event.kind, paths = ?event.paths, "configuration source changed");
+                    Some(()) => {
+                        trace!("configuration source changed");
                         debounce(&mut event_rx).await;
-                        if let Some(sources) = reload(&main, &config, &metrics, disable_protection) {
-                            state.sync(&mut watcher, &watched, &sources);
-                        }
+                        true
                     }
                 }
             }
+            _ = poll.tick() => {
+                let sources = source_paths(&main, &config.load());
+                let current = source_stamps(&sources);
+                if current.keys().ne(stamps.keys()) {
+                    if let Some(watcher) = &mut watcher {
+                        state.sync(watcher, &watched, &sources);
+                    }
+                    *lock(&watched) = sources.into_iter().collect();
+                    stamps = current;
+                    false
+                } else {
+                    current != stamps
+                }
+            }
+        };
+        if changed {
+            let path = main.clone();
+            let reload_config = Arc::clone(&config);
+            let metrics = Arc::clone(&metrics);
+            let loaded = tokio::task::spawn_blocking(move || {
+                reload(&path, &reload_config, &metrics, disable_protection)
+            })
+            .await;
+            if let Ok(Some(sources)) = loaded {
+                if let Some(watcher) = &mut watcher {
+                    state.sync(watcher, &watched, &sources);
+                }
+                *lock(&watched) = sources.into_iter().collect();
+            }
+            stamps = source_stamps(&source_paths(&main, &config.load()));
         }
     }
+    drop(event_tx);
+}
+
+fn source_stamps(paths: &[PathBuf]) -> BTreeMap<PathBuf, Option<(SystemTime, u64)>> {
+    paths
+        .iter()
+        .map(|path| {
+            let stamp = std::fs::metadata(path)
+                .ok()
+                .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len())));
+            (path.clone(), stamp)
+        })
+        .collect()
 }
 
 pub fn reload(
@@ -229,7 +280,7 @@ fn is_relevant(event: &Event, watched: &Mutex<BTreeSet<PathBuf>>) -> bool {
     relevant_kind && event.paths.iter().any(|path| lock(watched).contains(path))
 }
 
-async fn debounce(rx: &mut mpsc::UnboundedReceiver<Event>) {
+async fn debounce(rx: &mut mpsc::Receiver<()>) {
     let deadline = tokio::time::Instant::now() + DEBOUNCE;
     while let Ok(Some(_)) = tokio::time::timeout_at(deadline, rx.recv()).await {}
 }
@@ -278,6 +329,31 @@ mod tests {
         reload(&path, &config, &Metrics::new(), false);
 
         assert_eq!(config.load().limits.max_body_bytes, 42);
+    }
+
+    #[test]
+    fn reload_recovers_after_a_rejected_duration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nlimits: { max_body_bytes: 42 }\n",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\ntimeouts: { header_read: 18446744073709551615h }\n",
+        );
+        assert!(reload(&path, &config, &Metrics::new(), false).is_none());
+        assert_eq!(config.load().limits.max_body_bytes, 42);
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nlimits: { max_body_bytes: 7 }\n",
+        );
+        assert!(reload(&path, &config, &Metrics::new(), false).is_some());
+        assert_eq!(config.load().limits.max_body_bytes, 7);
     }
 
     #[test]

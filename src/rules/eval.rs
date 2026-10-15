@@ -106,7 +106,7 @@ fn evaluate_phase(
 
             if let Some(limit) = &rule.limit {
                 let within = limits.is_some_and(|check| {
-                    check.permit(rule.limit_key, view.source_ip, limit, &config.protection)
+                    check.permit(&rule.limit_key, view.source_ip, limit, &config.protection)
                 });
                 if within {
                     continue;
