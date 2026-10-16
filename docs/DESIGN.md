@@ -448,7 +448,9 @@ Default limits:
   reload.
 - Distribution: single static binary (musl target), no runtime dependencies.
 - An example configuration is shipped as `rules.example.yaml`.
-- Optional TLS termination via `rustls` when a `tls` block is configured.
+- Optional TLS termination via `rustls` when a `tls` block is configured, or
+  automatic certificates through ACME (`tls.acme`) with TLS-ALPN-01 challenges
+  served on the TLS listener.
 
 ## 11. Module Layout
 
@@ -460,6 +462,7 @@ src/
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
   metrics.rs       # Prometheus counters and gauges
+  acme.rs          # ACME certificate management (Let's Encrypt) and cache
   config/
     mod.rs         # Schema types, load, validate, compile
     watcher.rs     # File watching and reload
@@ -511,6 +514,8 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
 | `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |
 | `rustls`, `tokio-rustls`  | TLS termination                | Pure-Rust TLS 1.2/1.3 with the ring provider.              |
+| `tokio-rustls-acme`       | Automatic certificates         | ACME client with TLS-ALPN-01, renewal, and resolver support; default webpki roots disabled to stay within the license policy. |
+| `rustls-native-certs`     | ACME API trust store           | Uses the system CA store for ACME directory requests.      |
 | `quinn`, `h3`, `h3-quinn` | HTTP/3 over QUIC               | Mature Rust QUIC stack and the hyperium HTTP/3 implementation. |
 | `thiserror`               | Error types                    | Explicit, low-boilerplate error enums.                     |
 | `tempfile` (dev)          | Test fixtures                  | Writing config files for reload tests.                     |
@@ -601,7 +606,8 @@ response-phase rules.
 
 ## 16. Open Questions and Future Work
 
-- TLS: certificate hot reload.
+- TLS: hot reload of static certificates (ACME-managed certificates rotate
+  automatically).
 - WebSocket over HTTP/2 and HTTP/3 (RFC 8441 / RFC 9220 extended CONNECT).
 - Pluggable tunnel payload inspection (currently upgrades are opaque).
 - HTTP/3 request body streaming (TCP listeners stream bodies past the prefix;

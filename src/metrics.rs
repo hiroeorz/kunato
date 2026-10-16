@@ -26,6 +26,10 @@ pub struct Metrics {
     pub rules_update_failure: AtomicU64,
     pub rules_update_not_modified: AtomicU64,
     pub rules_last_success: AtomicU64,
+    pub acme_issued: AtomicU64,
+    pub acme_cached: AtomicU64,
+    pub acme_errors: AtomicU64,
+    pub acme_last_success: AtomicU64,
 }
 
 impl Metrics {
@@ -53,6 +57,10 @@ impl Metrics {
             rules_update_failure: AtomicU64::new(0),
             rules_update_not_modified: AtomicU64::new(0),
             rules_last_success: AtomicU64::new(0),
+            acme_issued: AtomicU64::new(0),
+            acme_cached: AtomicU64::new(0),
+            acme_errors: AtomicU64::new(0),
+            acme_last_success: AtomicU64::new(0),
         }
     }
 
@@ -185,6 +193,30 @@ impl Metrics {
             "Unix time of the last successful rules update check.",
             self.rules_last_success.load(Ordering::Relaxed),
         );
+        counter(
+            &mut out,
+            "kunato_acme_issued_total",
+            "Certificates issued through ACME.",
+            self.acme_issued.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_acme_cached_total",
+            "ACME certificates loaded from the cache.",
+            self.acme_cached.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_acme_errors_total",
+            "ACME certificate acquisition and renewal errors.",
+            self.acme_errors.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
+            "kunato_acme_last_success_timestamp_seconds",
+            "Unix time of the last deployed ACME certificate.",
+            self.acme_last_success.load(Ordering::Relaxed),
+        );
         gauge(
             &mut out,
             "kunato_active_connections",
@@ -229,12 +261,15 @@ mod tests {
         let metrics = Metrics::new();
         metrics.requests.fetch_add(2, Ordering::Relaxed);
         metrics.blocked.fetch_add(1, Ordering::Relaxed);
+        metrics.acme_issued.fetch_add(1, Ordering::Relaxed);
 
         let text = metrics.render(3);
 
         assert!(text.contains("# TYPE kunato_requests_total counter"));
         assert!(text.contains("kunato_requests_total 2"));
         assert!(text.contains("kunato_blocked_total 1"));
+        assert!(text.contains("kunato_acme_issued_total 1"));
+        assert!(text.contains("kunato_acme_last_success_timestamp_seconds 0"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));
         assert!(text.contains("kunato_active_connections 3"));
         assert!(text.contains("kunato_uptime_seconds"));

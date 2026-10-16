@@ -37,6 +37,7 @@ src/
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
   metrics.rs       # Prometheus counters and gauges
+  acme.rs          # ACME certificate management (Let's Encrypt) and cache
   request_view.rs  # Borrowed request representation for the rule engine
   config/
     mod.rs         # YAML schema, loading, validation, compilation
@@ -77,6 +78,11 @@ evaluation, proxying, and protection logic must not bleed into each other.
   rules match upstream status, response headers, and the response body prefix
   (`limits.max_response_body_bytes`); `status`, `response_headers`, and the
   `response_body` target are rejected in request-phase categories.
+- `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01
+  challenges; it replaces `tls.cert_file`/`tls.key_file`, is validated at load
+  time (no wildcards, no IPs), and is applied at startup like the rest of the
+  `tls` block. Issued material is cached under `tls.acme.cache_dir` (default
+  `/var/lib/kunato/acme`, mode 0600 files in a 0700 directory).
 - Evaluation order is document order; `enabled: false` disables a category or rule.
 - Write rules in the compact style shown in `README.md`: `name` on one line and a
   flow-style `match` mapping on the next, falling back to block style only for

@@ -73,6 +73,23 @@ pub struct InitArgs {
     #[arg(long, value_name = "PATH", requires = "cert_file")]
     pub key_file: Option<PathBuf>,
 
+    /// Obtain certificates automatically through ACME (Let's Encrypt); repeat
+    /// for every domain.
+    #[arg(
+        long = "acme-domain",
+        value_name = "DOMAIN",
+        conflicts_with_all = ["cert_file", "key_file"]
+    )]
+    pub acme_domains: Vec<String>,
+
+    /// Contact email registered with the ACME account.
+    #[arg(long, value_name = "EMAIL", requires = "acme_domains")]
+    pub acme_contact: Option<String>,
+
+    /// Use the Let's Encrypt staging directory (untrusted test certificates).
+    #[arg(long, requires = "acme_domains")]
+    pub acme_staging: bool,
+
     /// Rules file refreshed by the daily updater.
     #[arg(long, default_value = DEFAULT_RULES_FILE, value_name = "PATH")]
     pub rules_file: PathBuf,
@@ -102,7 +119,25 @@ impl InitArgs {
         out.push_str(&format!("listen: {}\n", self.listen));
         out.push_str(&format!("upstream: {}\n", yaml_scalar(&self.upstream)));
 
-        if let (Some(cert), Some(key)) = (&self.cert_file, &self.key_file) {
+        if !self.acme_domains.is_empty() {
+            out.push_str(
+                "\n# Automatic certificates through ACME (TLS-ALPN-01 on :443). Every domain\n\
+                 # must resolve to this server and TCP port 443 must stay reachable.\n",
+            );
+            out.push_str("tls:\n");
+            out.push_str("  acme:\n");
+            out.push_str("    enabled: true\n");
+            out.push_str("    domains:\n");
+            for domain in &self.acme_domains {
+                out.push_str(&format!("      - {}\n", yaml_scalar(domain)));
+            }
+            if let Some(contact) = &self.acme_contact {
+                out.push_str(&format!("    contact: {}\n", yaml_scalar(contact)));
+            }
+            if self.acme_staging {
+                out.push_str("    staging: true\n");
+            }
+        } else if let (Some(cert), Some(key)) = (&self.cert_file, &self.key_file) {
             out.push_str("\n# Server certificate and key. Required when listening on :443.\n");
             out.push_str("tls:\n");
             out.push_str(&format!("  cert_file: {}\n", yaml_scalar(&path_str(cert))));
@@ -180,6 +215,9 @@ mod tests {
             listen: "0.0.0.0:443".parse().expect("addr"),
             cert_file: Some(PathBuf::from("/etc/kunato/tls/cert.pem")),
             key_file: Some(PathBuf::from("/etc/kunato/tls/key.pem")),
+            acme_domains: Vec::new(),
+            acme_contact: None,
+            acme_staging: false,
             rules_file: PathBuf::from(DEFAULT_RULES_FILE),
             rules_url: DEFAULT_RULES_URL.to_owned(),
             overrides_file: Some(PathBuf::from("/etc/kunato/overrides.yaml")),
@@ -213,6 +251,24 @@ mod tests {
         let text = args.render().expect("render");
         let compiled = config::parse(&text).expect("generated config must be valid");
         assert!(compiled.tls.is_none());
+    }
+
+    #[test]
+    fn renders_acme_configuration() {
+        let mut args = args();
+        args.cert_file = None;
+        args.key_file = None;
+        args.acme_domains = vec!["example.com".to_owned(), "www.example.com".to_owned()];
+        args.acme_contact = Some("admin@example.com".to_owned());
+        let text = args.render().expect("render");
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        let acme = compiled
+            .tls
+            .expect("tls block")
+            .acme
+            .expect("acme settings");
+        assert_eq!(acme.domains, vec!["example.com", "www.example.com"]);
+        assert_eq!(acme.contact.as_deref(), Some("admin@example.com"));
     }
 
     #[test]

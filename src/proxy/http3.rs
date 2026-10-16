@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
+use crate::acme::AcmeService;
 use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::protection::ConnectionGuard;
@@ -26,16 +27,31 @@ pub struct Listener {
     pub local_addr: SocketAddr,
 }
 
-pub fn bind(config: &CompiledConfig, fallback: SocketAddr) -> Result<Option<Listener>, Error> {
+pub fn bind(
+    config: &CompiledConfig,
+    fallback: SocketAddr,
+    acme: Option<&AcmeService>,
+) -> Result<Option<Listener>, Error> {
     if !config.http3.enabled {
         return Ok(None);
     }
-    let Some(tls) = &config.tls else {
-        return Err(Error::Tls("http3 requires a tls block".to_owned()));
-    };
 
     let listen = config.http3.listen.unwrap_or(fallback);
-    let server_config = tls::load_quic_server_config(&tls.cert_file, &tls.key_file)?;
+    let server_config = match acme {
+        Some(service) => service.quic_config(),
+        None => {
+            let Some(tls) = &config.tls else {
+                return Err(Error::Tls("http3 requires a tls block".to_owned()));
+            };
+            let (Some(cert_file), Some(key_file)) = (&tls.cert_file, &tls.key_file) else {
+                return Err(Error::Tls(
+                    "tls.cert_file and tls.key_file are required unless tls.acme is enabled"
+                        .to_owned(),
+                ));
+            };
+            tls::load_quic_server_config(cert_file, key_file)?
+        }
+    };
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
         .map_err(|err| Error::Tls(format!("failed to initialize QUIC: {err}")))?;
     let endpoint =

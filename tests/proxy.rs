@@ -326,7 +326,7 @@ async fn start_kunato(yaml: &str) -> Running {
     let listen = compiled.listen;
     let config = Arc::new(ArcSwap::from_pointee(compiled));
     let metrics = Arc::new(Metrics::new());
-    let server = Server::bind(listen, config, metrics.clone())
+    let server = Server::bind(listen, config, metrics.clone(), None)
         .await
         .expect("bind kunato");
     let addr = server.local_addr().expect("local address");
@@ -1462,6 +1462,7 @@ categories:
         "127.0.0.1:0".parse().expect("address"),
         config,
         metrics.clone(),
+        None,
     )
     .await
     .expect("bind kunato");

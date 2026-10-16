@@ -360,8 +360,32 @@ fn default_admin_listen() -> SocketAddr {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsSpec {
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
+    #[serde(default)]
+    pub cert_file: Option<PathBuf>,
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
+    #[serde(default)]
+    pub acme: Option<AcmeSpec>,
+}
+
+/// Automatic certificate management through the ACME protocol (RFC 8555).
+/// Challenges use TLS-ALPN-01 on the TLS listener, so the configured domains
+/// must resolve to this server and TCP port 443 must be reachable.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub contact: Option<String>,
+    #[serde(default)]
+    pub staging: bool,
+    #[serde(default)]
+    pub directory: Option<String>,
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -564,10 +588,24 @@ impl From<&LimitsSpec> for Limits {
     }
 }
 
+/// Where automatically managed certificates are cached between restarts.
+pub const DEFAULT_ACME_CACHE_DIR: &str = "/var/lib/kunato/acme";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tls {
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+    pub acme: Option<Acme>,
+}
+
+/// Resolved ACME settings: the directory URL and cache path defaults are
+/// applied here so the runtime never deals with optional variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Acme {
+    pub domains: Vec<String>,
+    pub contact: Option<String>,
+    pub directory: String,
+    pub cache_dir: PathBuf,
 }
 
 impl From<&TlsSpec> for Tls {
@@ -575,6 +613,32 @@ impl From<&TlsSpec> for Tls {
         Self {
             cert_file: spec.cert_file.clone(),
             key_file: spec.key_file.clone(),
+            acme: spec
+                .acme
+                .as_ref()
+                .filter(|acme| acme.enabled)
+                .map(Acme::from),
+        }
+    }
+}
+
+impl From<&AcmeSpec> for Acme {
+    fn from(spec: &AcmeSpec) -> Self {
+        let directory = spec.directory.clone().unwrap_or_else(|| {
+            match spec.staging {
+                true => tokio_rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY,
+                false => tokio_rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            }
+            .to_owned()
+        });
+        Self {
+            domains: spec.domains.clone(),
+            contact: spec.contact.clone(),
+            directory,
+            cache_dir: spec
+                .cache_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_ACME_CACHE_DIR)),
         }
     }
 }
@@ -1224,12 +1288,97 @@ fn validate_tls(spec: &Option<TlsSpec>, issues: &mut Vec<String>) {
     let Some(tls) = spec else {
         return;
     };
-    if tls.cert_file.as_os_str().is_empty() {
-        issues.push("tls.cert_file must not be empty".to_owned());
+    let acme_enabled = tls.acme.as_ref().is_some_and(|acme| acme.enabled);
+    match acme_enabled {
+        true => {
+            if tls.cert_file.is_some() || tls.key_file.is_some() {
+                issues.push(
+                    "tls.cert_file and tls.key_file cannot be combined with tls.acme".to_owned(),
+                );
+            }
+            if let Some(acme) = &tls.acme {
+                validate_acme(acme, issues);
+            }
+        }
+        false => match (&tls.cert_file, &tls.key_file) {
+            (Some(cert), Some(key)) => {
+                if cert.as_os_str().is_empty() {
+                    issues.push("tls.cert_file must not be empty".to_owned());
+                }
+                if key.as_os_str().is_empty() {
+                    issues.push("tls.key_file must not be empty".to_owned());
+                }
+            }
+            _ => issues.push(
+                "tls.cert_file and tls.key_file are required unless tls.acme is enabled".to_owned(),
+            ),
+        },
     }
-    if tls.key_file.as_os_str().is_empty() {
-        issues.push("tls.key_file must not be empty".to_owned());
+}
+
+fn validate_acme(acme: &AcmeSpec, issues: &mut Vec<String>) {
+    if acme.domains.is_empty() {
+        issues.push("tls.acme.domains must contain at least one domain".to_owned());
     }
+    for domain in &acme.domains {
+        if let Err(reason) = validate_acme_domain(domain) {
+            issues.push(format!("tls.acme.domains: `{domain}` {reason}"));
+        }
+    }
+    if acme.staging && acme.directory.is_some() {
+        issues.push("tls.acme.staging cannot be combined with tls.acme.directory".to_owned());
+    }
+    if let Some(directory) = &acme.directory
+        && !directory.starts_with("https://")
+    {
+        issues.push("tls.acme.directory must be an https:// URL".to_owned());
+    }
+    if let Some(contact) = &acme.contact
+        && (contact.trim().is_empty() || !contact.contains('@'))
+    {
+        issues.push("tls.acme.contact must be an email address".to_owned());
+    }
+    if let Some(cache_dir) = &acme.cache_dir
+        && cache_dir.as_os_str().is_empty()
+    {
+        issues.push("tls.acme.cache_dir must not be empty".to_owned());
+    }
+}
+
+fn validate_acme_domain(domain: &str) -> Result<(), &'static str> {
+    if domain.is_empty() {
+        return Err("must not be empty");
+    }
+    if domain.len() > 253 {
+        return Err("is longer than 253 bytes");
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return Err("must not start or end with a dot");
+    }
+    if domain.contains('*') {
+        return Err("must not be a wildcard; TLS-ALPN-01 cannot validate wildcards");
+    }
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return Err("must be a DNS name, not an IP address");
+    }
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Err("contains an empty label");
+        }
+        if label.len() > 63 {
+            return Err("contains a label longer than 63 bytes");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("contains a label starting or ending with a hyphen");
+        }
+        if !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("contains characters other than ASCII letters, digits, and hyphens");
+        }
+    }
+    Ok(())
 }
 
 fn validate_http3(spec: &Http3Spec, tls: &Option<TlsSpec>, issues: &mut Vec<String>) {
@@ -2402,7 +2551,15 @@ mod tests {
         )
         .expect("valid config");
         let tls = config.tls.expect("tls block");
-        assert_eq!(tls.cert_file, PathBuf::from("/etc/kunato/cert.pem"));
+        assert_eq!(
+            tls.cert_file.as_deref(),
+            Some(Path::new("/etc/kunato/cert.pem"))
+        );
+        assert_eq!(
+            tls.key_file.as_deref(),
+            Some(Path::new("/etc/kunato/key.pem"))
+        );
+        assert!(tls.acme.is_none());
     }
 
     #[test]
@@ -2410,6 +2567,152 @@ mod tests {
         let error =
             parse_with(BASE, "tls: { cert_file: '', key_file: key.pem }\n").expect_err("must fail");
         assert!(error.to_string().contains("cert_file"));
+    }
+
+    #[test]
+    fn requires_cert_and_key_without_acme() {
+        let error = parse_with(BASE, "tls: { cert_file: cert.pem }\n").expect_err("must fail");
+        assert!(error.to_string().contains("tls.cert_file and tls.key_file"));
+        let error = parse_with(BASE, "tls: {}\n").expect_err("must fail");
+        assert!(error.to_string().contains("tls.cert_file and tls.key_file"));
+    }
+
+    #[test]
+    fn parses_acme_block() {
+        let config = parse_with(
+            BASE,
+            "tls:
+  acme:
+    enabled: true
+    domains: [example.com, www.example.com]
+    contact: admin@example.com
+",
+        )
+        .expect("valid config");
+        let tls = config.tls.expect("tls block");
+        assert!(tls.cert_file.is_none());
+        let acme = tls.acme.expect("acme settings");
+        assert_eq!(acme.domains, vec!["example.com", "www.example.com"]);
+        assert_eq!(acme.contact.as_deref(), Some("admin@example.com"));
+        assert_eq!(
+            acme.directory,
+            tokio_rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY
+        );
+        assert_eq!(acme.cache_dir, PathBuf::from(DEFAULT_ACME_CACHE_DIR));
+    }
+
+    #[test]
+    fn acme_staging_directory_resolution() {
+        let config = parse_with(
+            BASE,
+            "tls: { acme: { enabled: true, domains: [example.com], staging: true } }\n",
+        )
+        .expect("valid config");
+        let acme = config.tls.expect("tls block").acme.expect("acme settings");
+        assert_eq!(
+            acme.directory,
+            tokio_rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY
+        );
+
+        let config = parse_with(
+            BASE,
+            "tls:
+  acme:
+    enabled: true
+    domains: [example.com]
+    directory: https://acme.internal:14000/dir
+    cache_dir: /srv/kunato/acme
+",
+        )
+        .expect("valid config");
+        let acme = config.tls.expect("tls block").acme.expect("acme settings");
+        assert_eq!(acme.directory, "https://acme.internal:14000/dir");
+        assert_eq!(acme.cache_dir, PathBuf::from("/srv/kunato/acme"));
+
+        let error = parse_with(
+            BASE,
+            "tls:
+  acme:
+    enabled: true
+    domains: [example.com]
+    staging: true
+    directory: https://acme.internal:14000/dir
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("staging cannot be combined"));
+
+        let error = parse_with(
+            BASE,
+            "tls:
+  acme:
+    enabled: true
+    domains: [example.com]
+    directory: http://acme.internal:14000/dir
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("https"));
+    }
+
+    #[test]
+    fn rejects_acme_without_domains() {
+        let error = parse_with(BASE, "tls: { acme: { enabled: true } }\n").expect_err("must fail");
+        assert!(error.to_string().contains("tls.acme.domains"));
+    }
+
+    #[test]
+    fn rejects_acme_wildcards_and_invalid_domains() {
+        let error = parse_with(
+            BASE,
+            "tls: { acme: { enabled: true, domains: ['*.example.com'] } }\n",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("wildcard"));
+
+        let error = parse_with(
+            BASE,
+            "tls: { acme: { enabled: true, domains: [192.0.2.1] } }\n",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("IP address"));
+
+        let error = parse_with(
+            BASE,
+            "tls: { acme: { enabled: true, domains: ['exa mple.com'] } }\n",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("characters"));
+    }
+
+    #[test]
+    fn rejects_acme_with_static_certificate() {
+        let error = parse_with(
+            BASE,
+            "tls:
+  cert_file: cert.pem
+  key_file: key.pem
+  acme: { enabled: true, domains: [example.com] }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn disabled_acme_falls_back_to_static_certificate() {
+        let config = parse_with(
+            BASE,
+            "tls:
+  cert_file: cert.pem
+  key_file: key.pem
+  acme: { enabled: false, domains: [example.com] }
+",
+        )
+        .expect("valid config");
+        let tls = config.tls.expect("tls block");
+        assert!(tls.acme.is_none());
+        assert_eq!(tls.cert_file.as_deref(), Some(Path::new("cert.pem")));
     }
 
     #[test]

@@ -395,7 +395,7 @@ tls: { cert_file: new-cert.pem, key_file: new-key.pem }
         reload(&path, &config, &Metrics::new(), false);
 
         let tls = config.load().tls.clone().expect("tls block");
-        assert_eq!(tls.cert_file, PathBuf::from("old-cert.pem"));
+        assert_eq!(tls.cert_file.as_deref(), Some(Path::new("old-cert.pem")));
     }
 
     #[test]

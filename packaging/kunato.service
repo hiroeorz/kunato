@@ -18,6 +18,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 StateDirectory=kunato
+StateDirectoryMode=0700
 LimitNOFILE=65536
 
 [Install]

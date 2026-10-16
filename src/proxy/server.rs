@@ -18,8 +18,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio_rustls_acme::AcmeAcceptor;
 use tracing::{debug, info, warn};
 
+use crate::acme::AcmeService;
 use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::metrics::Metrics;
@@ -44,12 +46,22 @@ enum Protocol {
 }
 
 #[derive(Clone)]
+enum TlsMode {
+    Plain,
+    Static(tokio_rustls::TlsAcceptor),
+    Acme {
+        acceptor: AcmeAcceptor,
+        config: Arc<rustls::ServerConfig>,
+    },
+}
+
+#[derive(Clone)]
 pub struct Context {
     config: Arc<ArcSwap<CompiledConfig>>,
     client: Arc<ArcSwap<UpstreamClient>>,
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    tls: TlsMode,
     scheme: &'static str,
     alt_svc: Option<HeaderValue>,
 }
@@ -90,6 +102,7 @@ impl Server {
         addr: SocketAddr,
         config: Arc<ArcSwap<CompiledConfig>>,
         metrics: Arc<Metrics>,
+        acme: Option<&AcmeService>,
     ) -> Result<Self, Error> {
         let listener = TcpListener::bind(addr)
             .await
@@ -98,18 +111,34 @@ impl Server {
                 source,
             })?;
         let local_addr = listener.local_addr()?;
-        let connect_timeout = config.load().timeouts.upstream_connect;
-        let (tls_acceptor, scheme) = match config.load().tls.as_ref() {
-            Some(tls) => {
-                let server_config = tls::load_server_config(&tls.cert_file, &tls.key_file)?;
-                (
-                    Some(tokio_rustls::TlsAcceptor::from(server_config)),
-                    "https",
-                )
-            }
-            None => (None, "http"),
+        let snapshot = config.load();
+        let connect_timeout = snapshot.timeouts.upstream_connect;
+        let (tls, scheme) = match acme {
+            Some(service) => (
+                TlsMode::Acme {
+                    acceptor: service.acceptor(),
+                    config: service.tls_config(),
+                },
+                "https",
+            ),
+            None => match snapshot.tls.as_ref() {
+                Some(tls) => {
+                    let (Some(cert_file), Some(key_file)) = (&tls.cert_file, &tls.key_file) else {
+                        return Err(Error::Tls(
+                            "tls.cert_file and tls.key_file are required unless tls.acme is enabled"
+                                .to_owned(),
+                        ));
+                    };
+                    let server_config = tls::load_server_config(cert_file, key_file)?;
+                    (
+                        TlsMode::Static(tokio_rustls::TlsAcceptor::from(server_config)),
+                        "https",
+                    )
+                }
+                None => (TlsMode::Plain, "http"),
+            },
         };
-        let (http3, alt_svc) = match http3::bind(&config.load(), local_addr) {
+        let (http3, alt_svc) = match http3::bind(&snapshot, local_addr, acme) {
             Ok(Some(listener)) => {
                 info!(addr = %listener.local_addr, "HTTP/3 listening");
                 (Some(listener.endpoint), listener.alt_svc)
@@ -120,6 +149,7 @@ impl Server {
                 (None, None)
             }
         };
+        drop(snapshot);
         Ok(Self {
             listener,
             context: Context {
@@ -127,7 +157,7 @@ impl Server {
                 client: Arc::new(ArcSwap::from_pointee(UpstreamClient::new(connect_timeout))),
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
-                tls_acceptor,
+                tls,
                 scheme,
                 alt_svc,
             },
@@ -245,8 +275,8 @@ async fn serve_connection(
     shutdown: watch::Receiver<bool>,
     guard: ConnectionGuard,
 ) {
-    match context.tls_acceptor.clone() {
-        Some(acceptor) => {
+    match context.tls.clone() {
+        TlsMode::Static(acceptor) => {
             let tls = match tokio::time::timeout(header_read_timeout, acceptor.accept(stream)).await
             {
                 Ok(Ok(tls)) => tls,
@@ -259,23 +289,41 @@ async fn serve_connection(
                     return;
                 }
             };
-            let protocol = if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-                Protocol::Http2
-            } else {
-                Protocol::Http1
-            };
-            serve_io(
-                TokioIo::new(tls),
-                protocol,
-                peer,
-                context,
-                header_read_timeout,
-                shutdown,
-                guard,
-            )
-            .await;
+            serve_tls_connection(tls, peer, context, header_read_timeout, shutdown, guard).await;
         }
-        None => {
+        TlsMode::Acme { acceptor, config } => {
+            let handshake =
+                match tokio::time::timeout(header_read_timeout, acceptor.accept(stream)).await {
+                    Ok(Ok(Some(handshake))) => handshake,
+                    Ok(Ok(None)) => {
+                        debug!(client = %peer, "TLS-ALPN-01 challenge completed");
+                        return;
+                    }
+                    Ok(Err(err)) => {
+                        debug!(client = %peer, error = %err, "TLS handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        debug!(client = %peer, "TLS handshake timed out");
+                        return;
+                    }
+                };
+            let tls = match tokio::time::timeout(header_read_timeout, handshake.into_stream(config))
+                .await
+            {
+                Ok(Ok(tls)) => tls,
+                Ok(Err(err)) => {
+                    debug!(client = %peer, error = %err, "TLS handshake failed");
+                    return;
+                }
+                Err(_) => {
+                    debug!(client = %peer, "TLS handshake timed out");
+                    return;
+                }
+            };
+            serve_tls_connection(tls, peer, context, header_read_timeout, shutdown, guard).await;
+        }
+        TlsMode::Plain => {
             let Some((protocol, prefix)) = detect_protocol(&mut stream, header_read_timeout).await
             else {
                 debug!(client = %peer, "connection ended before HTTP version detection");
@@ -293,6 +341,31 @@ async fn serve_connection(
             .await;
         }
     }
+}
+
+async fn serve_tls_connection(
+    tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    peer: SocketAddr,
+    context: Context,
+    header_read_timeout: Duration,
+    shutdown: watch::Receiver<bool>,
+    guard: ConnectionGuard,
+) {
+    let protocol = if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+        Protocol::Http2
+    } else {
+        Protocol::Http1
+    };
+    serve_io(
+        TokioIo::new(tls),
+        protocol,
+        peer,
+        context,
+        header_read_timeout,
+        shutdown,
+        guard,
+    )
+    .await;
 }
 
 /// Classify a plaintext connection as HTTP/1 or HTTP/2 by reading just enough

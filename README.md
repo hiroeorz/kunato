@@ -89,8 +89,9 @@ curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/instal
 ```
 
 The installer asks for the upstream URL (default `http://127.0.0.1:3000`;
-press Enter to accept) and, when listening on `:443`, for a certificate and key.
-Pass every answer as a flag together with `--yes` for unattended installs:
+press Enter to accept) and, when listening on `:443`, for automatic Let's
+Encrypt domain(s) or a certificate and key. Pass every answer as a flag
+together with `--yes` for unattended installs:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh \
@@ -251,6 +252,9 @@ service. Key options:
 | `--upstream URL`          | Upstream server the WAF forwards to; required on first install.          |
 | `--listen ADDR`           | Listen address (default `0.0.0.0:443`).                                   |
 | `--tls-cert`/`--tls-key`  | PEM certificate chain and key; copied to `/etc/kunato/tls/`.             |
+| `--acme-domain DOMAIN`    | Obtain Let's Encrypt certificates automatically; repeatable.             |
+| `--acme-contact EMAIL`    | Contact email registered with the ACME account.                          |
+| `--acme-staging`          | Use the Let's Encrypt staging directory (for testing).                   |
 | `--rules-url URL`         | Managed rule set URL (see Managed Rules and Automatic Updates).          |
 | `--no-start`              | Install and validate without enabling or starting the service.            |
 | `--yes`                   | Never prompt; fail instead of asking.                                    |
@@ -269,6 +273,11 @@ install -m 0640 -o root -g kunato /etc/letsencrypt/live/example.com/privkey.pem 
 systemctl restart kunato
 ```
 
+Instead of passing certificate files, pass one or more `--acme-domain
+example.com` flags. Kunato then obtains the certificate itself and renews it
+without a deploy hook or restart; see
+[Automatic certificates](#automatic-certificates-lets-encrypt).
+
 Running the installer again upgrades the binary and unit while keeping the
 existing configuration.
 
@@ -282,8 +291,9 @@ cargo build --release --target x86_64-unknown-linux-musl
 ```
 
 Install the binary to `/usr/local/bin/kunato`, generate a configuration with
-`kunato init --upstream <url> --tls-cert <pem> --tls-key <pem> --output
-/etc/kunato/kunato.yaml`, download the first rules file with `kunato
+`kunato init --upstream <url> --acme-domain example.com --output
+/etc/kunato/kunato.yaml` (or `--tls-cert <pem> --tls-key <pem>` for a manually
+managed certificate), download the first rules file with `kunato
 update-rules`, and enable `packaging/kunato.service`. `rules.example.yaml` is a
 practical starting point with rules for SQL/NoSQL injection, XSS, path traversal,
 command injection, SSRF, XXE, malicious uploads, scanners, sensitive files, and
@@ -637,10 +647,12 @@ admin:
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
 BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding,
-upstream failures, configuration reloads, and rules update outcomes; gauges cover
-active connections, uptime, and the time of the last successful rules update.
-Non-loopback addresses are rejected at validation time, and if the port is
-already in use Kunato logs a warning and continues without the admin endpoint.
+upstream failures, configuration reloads, rules update outcomes, and ACME
+certificate issuance, cache loads, and errors; gauges cover active connections,
+uptime, the time of the last successful rules update, and the time of the last
+deployed ACME certificate. Non-loopback addresses are rejected at validation
+time, and if the port is already in use Kunato logs a warning and continues
+without the admin endpoint.
 
 ### TLS
 
@@ -654,13 +666,63 @@ tls:
 
 Without this block Kunato serves plain HTTP. When TLS is enabled, forwarded
 requests carry `X-Forwarded-Proto: https`. TLS settings are applied at startup;
-changing them requires a restart (the running instance keeps the active
-certificate and key). Invalid or unreadable files fail startup.
+changing them requires a restart. Invalid or unreadable files fail startup.
 
 With TLS, Kunato negotiates the protocol through ALPN and prefers `h2`;
 cleartext clients may use h2c prior knowledge. HTTP/1.1 clients are always
-accepted, and requests are forwarded to the upstream over HTTP/1.1. Automatic
-certificate rotation is not supported yet.
+accepted, and requests are forwarded to the upstream over HTTP/1.1. Static
+certificates are read once at startup; rotate them by replacing the files and
+restarting, or use `tls.acme` below.
+
+#### Automatic certificates (Let's Encrypt)
+
+Kunato can obtain and renew certificates automatically through the ACME
+protocol (RFC 8555) without any helper process. Challenges are answered with
+TLS-ALPN-01 on the same port as regular TLS traffic, so no extra port is
+needed:
+
+```yaml
+tls:
+  acme:
+    enabled: true
+    domains: [example.com, www.example.com]
+    contact: admin@example.com   # optional
+```
+
+Requirements:
+
+- every domain must resolve to this server (A/AAAA records) and TCP port 443
+  must be reachable from the internet; wildcard names and setups behind a
+  TLS-terminating CDN or proxy cannot be validated with TLS-ALPN-01;
+- `domains` entries must be DNS names, not IP addresses (use punycode for
+  international names).
+
+Kunato registers an ACME account (using `contact` for expiry notices when
+set), answers the challenge, and serves the issued chain. Certificates renew
+automatically once about two thirds of their validity have elapsed — roughly
+30 days before expiry for the 90-day Let's Encrypt certificates — with
+exponential backoff while the ACME server is unreachable. The certificate and
+account key are cached under `cache_dir` (default `/var/lib/kunato/acme`,
+created with mode 0700) so restarts keep serving the cached certificate
+without contacting the ACME server again.
+
+Set `staging: true` to use the Let's Encrypt staging directory (untrusted
+test certificates), or `directory: https://…` for a custom ACME directory such
+as an internal CA; the two cannot be combined and `directory` must be an
+`https://` URL. `contact` is optional and may be given with or without the
+`mailto:` prefix.
+
+On the first start the certificate is ordered asynchronously and TLS
+handshakes fail until it has been issued (a few seconds). On later starts the
+cached certificate is loaded before the listener starts accepting connections.
+`tls.acme` is applied at startup like the rest of the `tls` block; changing it
+requires a restart. The certificate cache lives under the service state
+directory, so keep `StateDirectoryMode=0700` (set in the packaged unit) and
+`cache_dir` writable by the service user.
+
+`scripts/acme-pebble-test.sh` runs the integration tests for issuance, HTTP/3
+serving, renewal, and cache reuse against a local
+[Pebble](https://github.com/letsencrypt/pebble) server in Docker.
 
 ### HTTP/3
 

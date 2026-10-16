@@ -6,6 +6,7 @@ use clap::Parser;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
+use kunato::acme::AcmeService;
 use kunato::admin::AdminServer;
 use kunato::cli::{Cli, Command, InitArgs};
 use kunato::config;
@@ -63,14 +64,22 @@ async fn run(cli: Cli) -> Result<(), Error> {
 
     let listen = initial.listen;
     let admin_config = initial.admin.clone();
+    let acme_spec = initial.tls.as_ref().and_then(|tls| tls.acme.clone());
     let config = Arc::new(ArcSwap::from_pointee(initial));
     let metrics = Arc::new(Metrics::new());
 
-    let server = Server::bind(listen, config.clone(), metrics.clone()).await?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let acme = match &acme_spec {
+        Some(settings) => {
+            Some(AcmeService::start(settings, metrics.clone(), shutdown_rx.clone()).await?)
+        }
+        None => None,
+    };
+
+    let server = Server::bind(listen, config.clone(), metrics.clone(), acme.as_ref()).await?;
     let protection = server.protection();
     info!(addr = %server.local_addr()?, config = %cli.config.display(), "kunato started");
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
     let watcher_task = tokio::spawn(watcher::watch(
         cli.config.clone(),
@@ -123,6 +132,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let _ = rules_update_task.await;
     if let Some(admin_task) = admin_task {
         let _ = admin_task.await;
+    }
+    if let Some(acme) = acme {
+        let _ = acme.into_driver().await;
     }
 
     Ok(())

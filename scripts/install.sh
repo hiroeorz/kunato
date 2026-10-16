@@ -23,6 +23,9 @@ DEFAULT_UPSTREAM="http://127.0.0.1:3000"
 LISTEN="0.0.0.0:443"
 TLS_CERT=""
 TLS_KEY=""
+ACME_DOMAINS=""
+ACME_CONTACT=""
+ACME_STAGING=0
 RULES_URL="$DEFAULT_RULES_URL"
 NO_START=0
 ASSUME_YES=0
@@ -49,6 +52,9 @@ Options:
   --listen ADDR        Address to listen on (default: 0.0.0.0:443).
   --tls-cert PATH      PEM certificate chain; copied to /etc/kunato/tls/cert.pem.
   --tls-key PATH       PEM private key; copied to /etc/kunato/tls/key.pem.
+  --acme-domain DOMAIN Obtain Let's Encrypt certificates automatically (repeatable).
+  --acme-contact EMAIL Contact email registered with the ACME account.
+  --acme-staging       Use the Let's Encrypt staging directory (for testing).
   --rules-url URL      Managed rule set URL (default: dist/rules.yaml on main).
   --no-start           Install and validate, but do not enable/start the service.
   --yes                Never prompt; fail instead of asking.
@@ -87,6 +93,20 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--tls-key requires a value"
             TLS_KEY="$2"
             shift 2
+            ;;
+        --acme-domain)
+            [ $# -ge 2 ] || die "--acme-domain requires a value"
+            ACME_DOMAINS="${ACME_DOMAINS:+$ACME_DOMAINS }$2"
+            shift 2
+            ;;
+        --acme-contact)
+            [ $# -ge 2 ] || die "--acme-contact requires a value"
+            ACME_CONTACT="$2"
+            shift 2
+            ;;
+        --acme-staging)
+            ACME_STAGING=1
+            shift
             ;;
         --rules-url)
             [ $# -ge 2 ] || die "--rules-url requires a value"
@@ -128,6 +148,9 @@ if [ -n "$TLS_CERT" ] && [ -z "$TLS_KEY" ]; then
 fi
 if [ -n "$TLS_KEY" ] && [ -z "$TLS_CERT" ]; then
     die "--tls-cert is required together with --tls-key"
+fi
+if [ -n "$TLS_CERT" ] && [ -n "$ACME_DOMAINS" ]; then
+    die "--acme-domain cannot be combined with --tls-cert/--tls-key"
 fi
 
 detect_target() {
@@ -259,18 +282,22 @@ initialize_configuration() {
             fi
             UPSTREAM=$(ask "Upstream URL (the web server Kunato protects)" "$DEFAULT_UPSTREAM")
         fi
-        if [ -z "$TLS_CERT" ] && [ "$LISTEN" != "${LISTEN#*:443}" ]; then
-            TLS_CERT=$(ask "TLS certificate path (empty to listen without TLS)" "")
-            if [ -n "$TLS_CERT" ]; then
-                TLS_KEY=$(ask "TLS private key path" "")
-                [ -n "$TLS_KEY" ] || die "a private key is required when a certificate is configured"
-                copy_tls_material
+        if [ -z "$TLS_CERT" ] && [ -z "$ACME_DOMAINS" ] && [ "$LISTEN" != "${LISTEN#*:443}" ]; then
+            answer=$(ask "Let's Encrypt domain(s) for automatic certificates, comma separated (empty to provide a certificate)" "")
+            ACME_DOMAINS=$(printf '%s' "$answer" | tr ',' ' ')
+            if [ -z "$ACME_DOMAINS" ]; then
+                TLS_CERT=$(ask "TLS certificate path (empty to listen without TLS)" "")
+                if [ -n "$TLS_CERT" ]; then
+                    TLS_KEY=$(ask "TLS private key path" "")
+                    [ -n "$TLS_KEY" ] || die "a private key is required when a certificate is configured"
+                    copy_tls_material
+                fi
             fi
         fi
-        if [ -z "$TLS_CERT" ] && [ "$ASSUME_YES" -eq 1 ] && [ "$LISTEN" != "${LISTEN#*:443}" ]; then
-            die "--tls-cert and --tls-key are required when listening on :443; use --listen for setups behind another TLS-terminating proxy"
+        if [ -z "$TLS_CERT" ] && [ -z "$ACME_DOMAINS" ] && [ "$ASSUME_YES" -eq 1 ] && [ "$LISTEN" != "${LISTEN#*:443}" ]; then
+            die "--tls-cert/--tls-key or --acme-domain is required when listening on :443; use --listen for setups behind another TLS-terminating proxy"
         fi
-        if [ -z "$TLS_CERT" ]; then
+        if [ -z "$TLS_CERT" ] && [ -z "$ACME_DOMAINS" ]; then
             log "warning: listening without TLS material; ensure a proxy or load balancer terminates TLS"
         fi
 
@@ -279,6 +306,15 @@ initialize_configuration() {
         init_args="--upstream $UPSTREAM --listen $LISTEN --rules-url $RULES_URL --output $CONFIG_PATH"
         if [ -n "$TLS_CERT" ]; then
             init_args="$init_args --cert-file $TLS_DIR/cert.pem --key-file $TLS_DIR/key.pem"
+        fi
+        for domain in $ACME_DOMAINS; do
+            init_args="$init_args --acme-domain $domain"
+        done
+        if [ -n "$ACME_CONTACT" ]; then
+            init_args="$init_args --acme-contact $ACME_CONTACT"
+        fi
+        if [ "$ACME_STAGING" -eq 1 ]; then
+            init_args="$init_args --acme-staging"
         fi
         # shellcheck disable=SC2086 # init_args is a deliberately split argument list
         "$BIN_PATH" init $init_args

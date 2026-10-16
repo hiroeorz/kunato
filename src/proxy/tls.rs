@@ -4,6 +4,7 @@ use std::sync::Arc;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::ResolvesServerCert;
 
 use crate::error::Error;
 
@@ -50,6 +51,23 @@ fn build_server_config(
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)
         .map_err(|err| Error::Tls(format!("invalid certificate or private key: {err}")))?;
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+
+    Ok(Arc::new(config))
+}
+
+/// Build a server config whose certificate comes from a resolver. Used for
+/// ACME-managed certificates that rotate at runtime.
+pub(crate) fn server_config_with_resolver(
+    resolver: Arc<dyn ResolvesServerCert>,
+    alpn: &[&[u8]],
+) -> Result<Arc<ServerConfig>, Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|err| Error::Tls(format!("failed to initialize TLS: {err}")))?
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
     config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
 
     Ok(Arc::new(config))
