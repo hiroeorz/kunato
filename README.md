@@ -2,11 +2,9 @@
 
 [![CI](https://github.com/hiroeorz/kunato/actions/workflows/ci.yml/badge.svg)](https://github.com/hiroeorz/kunato/actions/workflows/ci.yml)
 
-![Kunato overview: client requests pass through the inspection engine, malicious traffic such as SQL injection, XSS, path traversal, and DDoS is blocked, allowed requests are forwarded to the upstream server, and rules are refreshed daily from CVE data](./KunatoFlow.png)
+Kunato is a lightweight Web Application Firewall (WAF) written in Rust, built for personal users who want an easy-to-deploy protection layer in front of their web applications.
 
-Kunato is a lightweight Web Application Firewall (WAF) written in Rust, built for
-personal users who want an easy-to-deploy protection layer in front of their web
-applications.
+![Kunato overview: client requests pass through the inspection engine, malicious traffic such as SQL injection, XSS, path traversal, and DDoS is blocked, allowed requests are forwarded to the upstream server, and rules are refreshed daily from CVE data](./KunatoFlow.png)
 
 It runs as a reverse proxy between clients (browsers, apps) and your HTTP server,
 inspects incoming requests against categorized, YAML-defined rules, and applies one
