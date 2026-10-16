@@ -1153,6 +1153,17 @@ categories:
       # missing reset key as a valid empty reset.
       - name: enswitch-password-reset-bypass
         match: { path: '(?i)^/api/json/user/password/update/?$', regex: '(?i)(username|user)', in: [body] }
+      # CVE-2026-111687 (WeRSS / we-mp-rss): the public /rss/{feed_id} endpoint
+      # compiles the template parameter and reaches object-subclass traversal.
+      - name: werss-rss-template-ssti
+        match:
+          path: '(?i)^/rss/[^/]+$'
+          regex: '\{\{=[^}]{0,200}(constructor|__class__|subclasses|process|global)'
+          in: [query]
+      # CVE-2026-111641 (FastapiAdmin): the auto-login endpoints are
+      # unauthenticated and mint a session for any user.
+      - name: fastapiadmin-auto-login-bypass
+        match: { path: '(?i)^/api/v1/auth/auto-login(/|$)' }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes as received
