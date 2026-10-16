@@ -75,6 +75,40 @@ GET / header="Cookie: sid=1 or 1=1"
 GET / header="Cookie: sid=1 union select 1"
 GET / header="Cookie: token=1' or '1'='1'"
 
+# --- SQL injection: blind inference and exfiltration channels ---
+# `', (SELECT sleep(3))#` closes the INSERT string literal, evaluates the
+# predicate in a subquery and comments out the tail. The same walkthrough
+# infers one character or bit at a time (time channel) and reads values
+# through the display (subquery, UNION) and error channels. Comments between
+# a function name and its parenthesis must not hide the timing primitives.
+POST /entries header="Content-Type: application/x-www-form-urlencoded" body="name=', (SELECT sleep(3))#"
+POST /entries header="Content-Type: application/x-www-form-urlencoded" body="name=%27%2C+%28SELECT+sleep%283%29%29%23"
+GET /entry?name=%27%2C%20(SELECT%20sleep(3))%23
+GET /?id=1%20AND%20sleep(3)
+GET /?id=1%20AND%20sleep%2F**%2F(3)
+GET /?id=1%20AND%20SLEEP/*!*/(3)
+GET /?id=1%20AND%20SLEEP/*!50000*/(3)
+GET /?id=1%20AND%20/*!50000sleep*/(3)
+GET /?id=1%20AND%20BENCHMARK/**/(5000000,1)
+GET /?id=1%20WAITFOR%2F**%2FDELAY%20'0:0:3'
+POST /entries header="Content-Type: application/x-www-form-urlencoded" body="name=', (SELECT IF(SUBSTR((SELECT password FROM users LIMIT 1),1,1)='A',sleep(5),0))#"
+POST /entries header="Content-Type: application/x-www-form-urlencoded" body="name=', (SELECT IF(ASCII(SUBSTR((SELECT password FROM users LIMIT 1),1,1))&1=1,sleep(5),0))#"
+GET /?id=1%27%20AND%20ASCII(SUBSTR(password,1,1))%3E64%23
+GET /?id=1%27%20AND%20SUBSTR(password,1,1)%3D%27a%27%23
+GET /?id=1%27%20AND%20SUBSTRING(password,1,1)%3D%27a%27%23
+GET /?id=1%27%20AND%20MID(password,1,1)%3D%27a%27%23
+GET /?id=1%27%20AND%20ORD(password)%3E64%23
+GET /?id=1/*!50000union*/select
+POST /entries header="Content-Type: application/x-www-form-urlencoded" body="name=', (SELECT password FROM users LIMIT 1))#"
+GET /?id=-1%27%20UNION%20SELECT%20user(),password%20FROM%20users%23
+GET /?id=1%27%20AND%20UPDATEXML(1,CONCAT(0x7e,(SELECT%20password%20FROM%20users%20LIMIT%201)),1)%23
+GET /?id=1%27%20AND%20EXTRACTVALUE(1,CONCAT(0x7e,(SELECT%20password%20FROM%20users%20LIMIT%201)))%23
+GET /?id=1%27%20AND%20(SELECT%201%20FROM%20(SELECT%20COUNT(*),CONCAT((SELECT%20password%20FROM%20users%20LIMIT%201),FLOOR(RAND(0)*2))x%20FROM%20information_schema.tables%20GROUP%20BY%20x)a)%23
+GET / header="Cookie: sid=1' AND sleep(3)#"
+GET / header="Cookie: sid=1' AND ASCII(SUBSTR((SELECT password FROM users LIMIT 1),1,1))&1=1#"
+GET / header="Cookie: sid=1' AND ASCII(SUBSTR(password,1,1))>64#"
+GET / header="Cookie: sid=1' AND (SELECT 1)=1#"
+
 # --- NoSQL injection ---
 GET /?filter[$ne]=1
 GET /?filter[$gt]=0

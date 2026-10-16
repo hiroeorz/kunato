@@ -469,8 +469,10 @@ categories:
         match: { path: '(?i)^/wan\.htm$' }
       - name: dlink-cwm-index
         match: { path: '(?i)^/index\.php/index/index' }
+      # The shared subquery signature; cookie values carry the same predicate
+      # in session-based injection.
       - name: lansweeper-sqli
-        match: { regex: '(?i)\(select\b', in: [query, body] }
+        match: { regex: '(?i)\(select\b', in: [query, body, cookies] }
       - name: grafana-anonymous-snapshots
         match: { path: '(?i)^/api/snapshots$' }
       - name: webmin-rpc-command
@@ -928,8 +930,18 @@ categories:
         match: { regex: '(?i)\b(or|and)\b[\s+]+[\x27"\(\)]?\d+[\x27"\(\)]?[\s+]*=[\s+]*[\x27"\(\)]?\d+[\x27"\(\)]?', in: [query, body, cookies] }
       - name: stacked-queries
         match: { regex: '(?i);\s*(select|insert|update|delete|drop|alter|create|truncate)\b', in: [query, body, cookies] }
+      # MySQL accepts comments between a function name and its parenthesis, so
+      # the timing rule tolerates whitespace and /*...*/ or --/# comments there.
       - name: time-based
-        match: { regex: '(?i)(\b(sleep|benchmark|pg_sleep)\s*\(|\bwaitfor[\s+]+delay\b)', in: [query, body, cookies] }
+        match: { regex: '(?i)(\b(sleep|benchmark|pg_sleep)\b(?:/\*(?:[^*]|\*[^/])*\*/|[\s#]|--[^\n]*\n)*\(|\bwaitfor\b(?:/\*(?:[^*]|\*[^/])*\*/|[\s#]|--[^\n]*\n)+\bdelay\b)', in: [query, body, cookies] }
+      # Blind inference reads one character or bit at a time; the predicate
+      # wraps ASCII/SUBSTR/MID/ORD and compares the result.
+      - name: blind-inference-functions
+        match: { regex: '(?i)\b(ascii|ord|substr(?:ing)?|mid)\s*\([^;]{0,80}\){1,3}\s*(?:[<>=!&|]|\blike\b)', in: [query, body, cookies] }
+      # Executable comments /*!...*/ hide the keyword that follows them from
+      # word-boundary and adjacency patterns.
+      - name: mysql-executable-comments
+        match: { regex: '(?i)/\*!\s*\d{0,6}\s*(select|union|insert|update|delete|drop|alter|create|truncate|sleep|benchmark|pg_sleep|waitfor|updatexml|extractvalue)\b', in: [query, body, cookies] }
       - name: database-metadata
         match: { regex: '(?i)(information_schema|sysobjects|syscolumns|xp_cmdshell|load_file|into\s+(out|dump)file|@@version)', in: [query, body, cookies] }
       - name: comment-obfuscation
