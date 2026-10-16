@@ -167,6 +167,9 @@ POST /feedback body="message=The ASCII (American Standard Code for Information I
 POST /feedback body="message=Please ping me when the report is ready."
 POST /feedback body="message=We use cat videos and touch screens in our demos."
 GET /api/reports?dir=asc&type=daily
+GET /api/items?page=2&id=5
+GET /api/items?page=3&cat=books
+GET /api/checks?limit=10&host=web1
 POST /subscribe body=email=tanaka@example.com
 POST /newsletter body="email=tanaka@example.com&format=html"
 POST /cart/add body=item=42&quantity=2
