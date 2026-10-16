@@ -69,6 +69,31 @@ impl ProtectionState {
         self.check_global(config)
     }
 
+    /// Ban pre-check used before a request body is ingested. Consumes no rate
+    /// budget and never creates tracking state; an untracked source is not
+    /// evaluated here (the full check runs after the body was read).
+    pub fn check_banned(&self, ip: IpAddr, config: &Protection) -> Option<Decision> {
+        if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
+            return None;
+        }
+
+        let key = tracking_key(ip, config);
+        let now = Instant::now();
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        let entry = shard.entries.get_mut(&key)?;
+        let until = entry.banned_until?;
+        if now < until {
+            Some(Decision::Banned {
+                retry_after: until.saturating_duration_since(now),
+            })
+        } else {
+            entry.banned_until = None;
+            entry.violations = 0;
+            entry.window_start = now;
+            None
+        }
+    }
+
     pub fn try_acquire_connection(
         self: &Arc<Self>,
         ip: IpAddr,
@@ -602,6 +627,43 @@ mod tests {
             state.check_request(ip("10.0.0.1"), &config),
             Decision::Allow
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ban_precheck_reports_tracked_bans_only() {
+        let state = ProtectionState::new();
+        let config = config();
+        assert!(state.check_banned(ip("10.0.0.1"), &config).is_none());
+
+        assert_eq!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::RateLimited { .. }
+        ));
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Banned { .. }
+        ));
+
+        assert!(matches!(
+            state.check_banned(ip("10.0.0.1"), &config),
+            Some(Decision::Banned { .. })
+        ));
+        assert!(state.check_banned(ip("10.0.0.2"), &config).is_none());
+
+        let mut allowlisted = config.clone();
+        allowlisted.allowlist = vec!["10.0.0.0/8".parse().expect("valid CIDR")];
+        assert!(state.check_banned(ip("10.0.0.1"), &allowlisted).is_none());
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(state.check_banned(ip("10.0.0.1"), &config).is_none());
     }
 
     #[tokio::test(start_paused = true)]

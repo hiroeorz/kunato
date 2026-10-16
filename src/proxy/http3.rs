@@ -1,13 +1,15 @@
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use h3::error::{Code, StreamError};
 use h3::server::{RequestResolver, RequestStream};
-use h3_quinn::BidiStream;
 use http::header::HeaderValue;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
+use hyper::body::{Body, Frame};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -18,7 +20,7 @@ use crate::error::Error;
 use crate::protection::ConnectionGuard;
 use crate::proxy::ProxyBody;
 use crate::proxy::forward::HttpError;
-use crate::proxy::server::{self, Context};
+use crate::proxy::server::{self, Context, RequestPayload};
 use crate::proxy::tls;
 
 pub struct Listener {
@@ -54,12 +56,16 @@ pub fn bind(
     };
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
         .map_err(|err| Error::Tls(format!("failed to initialize QUIC: {err}")))?;
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let mut transport = quinn::TransportConfig::default();
+    transport
+        .max_concurrent_bidi_streams(quinn::VarInt::from(config.limits.max_concurrent_streams));
+    server_config.transport_config(Arc::new(transport));
     let endpoint =
-        quinn::Endpoint::server(quinn::ServerConfig::with_crypto(Arc::new(crypto)), listen)
-            .map_err(|source| Error::Bind {
-                addr: listen.to_string(),
-                source,
-            })?;
+        quinn::Endpoint::server(server_config, listen).map_err(|source| Error::Bind {
+            addr: listen.to_string(),
+            source,
+        })?;
     let local_addr = endpoint.local_addr().unwrap_or(listen);
     let alt_svc = HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", local_addr.port())).ok();
 
@@ -201,7 +207,7 @@ async fn handle_request(
     peer: SocketAddr,
     context: Context,
 ) {
-    let (request, mut stream) = match resolver.resolve_request().await {
+    let (request, stream) = match resolver.resolve_request().await {
         Ok(value) => value,
         Err(err) => {
             debug!(client = %peer, error = %err, "malformed HTTP/3 request");
@@ -211,25 +217,78 @@ async fn handle_request(
 
     let config = context.config();
     let (parts, _) = request.into_parts();
-    let mut response = match read_body(&mut stream, &config).await {
-        Ok(body) => server::process_request(parts, body, peer, &config, &context).await,
-        Err(err) => server::rejected(peer, &err),
+    let (mut send, recv) = stream.split();
+    let mut response = match server::early_protection_error(&context, peer, &config) {
+        Some(err) => server::rejected(peer, &err),
+        None => match read_prefix(recv, &config).await {
+            Ok(payload) => server::process_payload(parts, payload, peer, &config, &context).await,
+            Err(err) => server::rejected(peer, &err),
+        },
     };
     config.response_headers.apply(response.headers_mut());
-    if let Err(err) = send_response(&mut stream, response).await {
+    if let Err(err) = send_response(&mut send, response).await {
         debug!(client = %peer, error = %err, "failed to send HTTP/3 response");
     }
 }
 
-async fn read_body(
-    stream: &mut RequestStream<BidiStream<Bytes>, Bytes>,
+/// A streaming body over the receive half of an HTTP/3 request stream, used
+/// when only a prefix of the request body was buffered for inspection.
+struct RequestBody {
+    recv: RequestStream<h3_quinn::RecvStream, Bytes>,
+    done: bool,
+}
+
+impl RequestBody {
+    fn new(recv: RequestStream<h3_quinn::RecvStream, Bytes>) -> Self {
+        Self { recv, done: false }
+    }
+}
+
+impl Body for RequestBody {
+    type Data = Bytes;
+    type Error = crate::proxy::BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
+        }
+        match this.recv.poll_recv_data(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(Some(mut chunk))) => {
+                let data = chunk.copy_to_bytes(chunk.remaining());
+                Poll::Ready(Some(Ok(Frame::data(data))))
+            }
+            Poll::Ready(Ok(None)) => {
+                this.done = true;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Err(err)) => {
+                this.done = true;
+                Poll::Ready(Some(Err(Box::new(err))))
+            }
+        }
+    }
+}
+
+/// Buffer a bounded prefix of the request body and keep the receive half for
+/// the remainder, mirroring the TCP path's body policy: bodies larger than
+/// `limits.max_body_bytes` are inspected by prefix and the rest is streamed.
+async fn read_prefix(
+    mut recv: RequestStream<h3_quinn::RecvStream, Bytes>,
     config: &CompiledConfig,
-) -> Result<Bytes, HttpError> {
+) -> Result<RequestPayload, HttpError> {
+    let limit = config.limits.max_body_bytes;
     let deadline = tokio::time::Instant::now() + config.timeouts.body_read;
-    let mut body = BytesMut::new();
+    let mut prefix: Vec<u8> = Vec::new();
+    let mut pending: Vec<Frame<Bytes>> = Vec::new();
+    let mut hit_limit = false;
 
     loop {
-        let mut chunk = match tokio::time::timeout_at(deadline, stream.recv_data()).await {
+        let mut chunk = match tokio::time::timeout_at(deadline, recv.recv_data()).await {
             Err(_) => {
                 return Err(HttpError::new(
                     StatusCode::REQUEST_TIMEOUT,
@@ -246,21 +305,36 @@ async fn read_body(
             Ok(Ok(Some(chunk))) => chunk,
         };
 
-        if body.len() + chunk.remaining() > config.limits.max_body_bytes {
-            return Err(HttpError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request body too large",
-            ));
-        }
         let chunk = chunk.copy_to_bytes(chunk.remaining());
-        body.extend_from_slice(&chunk);
+        let room = limit.saturating_sub(prefix.len());
+        if chunk.len() >= room {
+            let take = room.min(chunk.len());
+            prefix.extend_from_slice(&chunk[..take]);
+            let remainder = chunk.slice(take..);
+            if !remainder.is_empty() {
+                pending.push(Frame::data(remainder));
+            }
+            hit_limit = true;
+            break;
+        }
+        prefix.extend_from_slice(&chunk);
     }
 
-    Ok(body.freeze())
+    let rest = if hit_limit {
+        Some(RequestBody::new(recv).boxed())
+    } else {
+        None
+    };
+    Ok(RequestPayload {
+        prefix: Bytes::from(prefix),
+        pending,
+        rest,
+        truncated: hit_limit,
+    })
 }
 
 async fn send_response(
-    stream: &mut RequestStream<BidiStream<Bytes>, Bytes>,
+    stream: &mut RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
     response: Response<ProxyBody>,
 ) -> Result<(), StreamError> {
     let (parts, mut body) = response.into_parts();

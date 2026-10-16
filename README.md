@@ -512,7 +512,7 @@ authenticity. Detached signatures (minisign) are planned as a hardening step.
 | `enabled`     | Set to `false` to skip the category. Defaults to `true`.                                             |
 | `phase`       | `request` (default) or `response`; selects when the category is evaluated.                            |
 | `action`      | Default action (`BLOCK`, `ALLOW`, or `LOG`) for the category's rules.                                |
-| `response`    | Default response for `BLOCK` rules. Defaults to `403 Forbidden`.                                      |
+| `response`    | Default response for `BLOCK` rules (`status` from 200 to 599). Defaults to `403 Forbidden`.           |
 | `threshold`   | Scoring mode: each matching rule adds 1 and the category action applies at the threshold.             |
 | `rules`       | Ordered list of rules.                                                                               |
 
@@ -550,8 +550,10 @@ field, and empty pattern lists (`headers: { x-required: [] }`) are rejected so a
 condition can never silently disappear. At least one condition must be
 specified. Regular expressions are compiled
 once at load time, and an invalid pattern rejects the configuration. Path and query
-values are matched raw and through up to two percent-decode passes, so
-`%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match; paths are additionally
+values are matched raw and through up to two decode passes, so
+`%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match. Queries follow
+`application/x-www-form-urlencoded` conventions, so `+` is decoded to a space
+(`?q=union+select` matches like `?q=union%20select`); paths are additionally
 matched in normalized form (dot segments resolved, duplicate slashes merged), so
 `//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. A `BLOCK` or
 `LOG` rule matches any form, while an `ALLOW` rule must match every path form:
@@ -561,8 +563,12 @@ are decoded with UTF-8 replacement, so a single invalid byte cannot hide a value
 from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
 escapes such as `\u0075`, and `multipart/form-data` flattened to field values and
-file names), then through the same percent-decode passes, and are decompressed
-first when `Content-Encoding` is `gzip`, `deflate`, or `br`. Multipart parsing is
+file names), then through the same percent-decode passes; bodies whose content
+type is unknown still get the percent passes. Bodies are decompressed first when
+`Content-Encoding` is `gzip`, `deflate`, or `br`: all gzip members are decoded,
+and stacked encodings are decoded in reverse order (up to three layers; deeper or
+unknown encodings are inspected as received and counted in
+`kunato_request_decode_skipped_total`). Multipart parsing is
 bounded to 64 parts with 1 KiB names and file names; malformed multipart bodies
 are inspected raw only. No other normalization (Unicode folding, HTML entity
 decoding) is performed.
@@ -570,7 +576,7 @@ decoding) is performed.
 | Field              | Description                                                                                                             |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `path`             | Regex(es) matched against the request path.                                                                             |
-| `method`           | One or more HTTP methods (for example `GET` or `[POST, PUT]`).                                                          |
+| `method`           | One or more HTTP methods (for example `GET` or `[POST, PUT]`); names are case-sensitive, so write them in upper case. |
 | `source_ip`        | IP address(es) or CIDR range(s) the client must come from.                                                              |
 | `headers`          | Map of request header name to regex(es); header names are case-insensitive.                                             |
 | `cookies`          | Map of cookie name to regex(es).                                                                                        |
@@ -584,9 +590,11 @@ Response-phase rules may combine request conditions (`path`, `method`, `source_i
 can require a path and a response body signature. `status`, `response_headers`, and
 the `response_body` target are rejected in request-phase categories. Response
 bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
-matching, and only the first `limits.max_response_body_bytes` are inspected (the
-decoded output is bounded by the same limit). Stacked or unknown encodings are
-inspected as received. Decoding is inspection-only: the bytes forwarded to the
+matching (all gzip members, stacked encodings in reverse order up to three
+layers), and only the first `limits.max_response_body_bytes` are inspected (the
+decoded output is bounded by the same limit). Unknown or deeper encodings are
+inspected as received and counted in `kunato_response_decode_skipped_total`.
+Decoding is inspection-only: the bytes forwarded to the
 upstream and to the client are never modified.
 
 ### Timeouts and limits
@@ -602,7 +610,15 @@ Defaults:
 | `upstream_connect`  | `5s`    | `max_headers`             | 100     |
 | `upstream_response` | `30s`   | `max_body_bytes`          | 1 MiB   |
 | `shutdown_grace`    | `10s`   | `max_response_body_bytes` | 1 MiB   |
-| `websocket_idle`    | `10m`   |                           |         |
+| `websocket_idle`    | `10m`   | `max_concurrent_streams`  | 100     |
+
+`max_path_bytes` bounds the whole request target (path plus query string), not
+just the path. `max_concurrent_streams` caps concurrent request streams per
+HTTP/2 connection (and per QUIC connection for HTTP/3), which also bounds how
+much request-body buffering a single connection can hold at once. HTTP/2
+connections are pinged after 30 seconds without activity and closed when the
+ping is not acknowledged within 20 seconds, so idle clients cannot hold
+connection slots forever.
 
 ```yaml
 timeouts: { header_read: 10s, body_read: 30s }
@@ -652,7 +668,10 @@ admin:
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
 BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding,
-upstream failures, configuration reloads, rules update outcomes, and ACME
+upstream failures, configuration reloads, rules update outcomes, body
+truncation and decoding decisions (including bodies whose encoding could not be
+decoded: `kunato_request_decode_skipped_total`,
+`kunato_response_decode_skipped_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
 uptime, the time of the last successful rules update, and the time of the last
 deployed ACME certificate. Non-loopback addresses are rejected at validation

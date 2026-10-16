@@ -152,9 +152,14 @@ pub fn reload(
             if disable_protection {
                 new_config.protection.enabled = false;
             }
-            let (active_listen, active_tls, active_http3) = {
+            let (active_listen, active_tls, active_http3, active_admin) = {
                 let current = config.load();
-                (current.listen, current.tls.clone(), current.http3)
+                (
+                    current.listen,
+                    current.tls.clone(),
+                    current.http3,
+                    current.admin.clone(),
+                )
             };
             if new_config.listen != active_listen {
                 warn!(
@@ -175,6 +180,12 @@ pub fn reload(
                     "HTTP/3 settings changes require a restart; keeping the active HTTP/3 configuration"
                 );
                 new_config.http3 = active_http3;
+            }
+            if new_config.admin != active_admin {
+                warn!(
+                    "admin settings changes require a restart; keeping the active admin listener"
+                );
+                new_config.admin = active_admin;
             }
 
             let sources = source_paths(path, &new_config);
@@ -425,6 +436,31 @@ http3: { enabled: false }
         let http3 = config.load().http3;
         assert!(http3.enabled);
         assert_eq!(http3.listen.map(|addr| addr.port()), Some(443));
+    }
+
+    #[test]
+    fn reload_keeps_active_admin_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+admin: { enabled: true, listen: 127.0.0.1:9090 }
+",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+admin: { enabled: true, listen: 127.0.0.1:9999 }
+",
+        );
+        reload(&path, &config, &Metrics::new(), false);
+
+        assert_eq!(config.load().admin.listen.port(), 9090);
     }
 
     #[test]

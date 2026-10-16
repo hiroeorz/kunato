@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
-use hyper::body::Frame;
+use hyper::body::{Body, Frame};
 use tracing::{debug, info, warn};
 
 use crate::config::CompiledConfig;
@@ -28,7 +28,8 @@ pub async fn buffer_prefix(
     let (parts, mut body) = response.into_parts();
     let mut prefix: Vec<u8> = Vec::new();
     let mut pending: Vec<Frame<Bytes>> = Vec::new();
-    let mut truncated = false;
+    let mut overflowed = false;
+    let mut hit_limit = false;
 
     while let Some(frame) = body.frame().await {
         let frame = frame?;
@@ -41,8 +42,9 @@ pub async fn buffer_prefix(
                     let remainder = data.slice(take..);
                     if !remainder.is_empty() {
                         pending.push(Frame::data(remainder));
+                        overflowed = true;
                     }
-                    truncated = data.len() > take;
+                    hit_limit = true;
                     break;
                 }
                 prefix.extend_from_slice(&data);
@@ -51,6 +53,12 @@ pub async fn buffer_prefix(
         }
     }
 
+    let truncated = overflowed
+        || (hit_limit
+            && body
+                .size_hint()
+                .exact()
+                .is_none_or(|remaining| remaining > 0));
     let prefix = Bytes::from(prefix);
     let body = PrefixBody::new(prefix.clone(), pending, body).boxed();
 
@@ -106,6 +114,18 @@ pub async fn inspect(
     } else {
         None
     };
+    if config.has_response_body_rules()
+        && !buffered.prefix.is_empty()
+        && crate::decoding::encoding_is_uninspectable(&buffered.parts.headers)
+    {
+        metrics
+            .response_decode_skipped
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            status = buffered.parts.status.as_u16(),
+            "response body encoding cannot be decoded for inspection"
+        );
+    }
     let decode_truncated = decoded_prefix
         .as_ref()
         .is_some_and(|decoded| decoded.truncated);

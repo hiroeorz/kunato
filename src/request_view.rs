@@ -4,7 +4,9 @@ use std::net::IpAddr;
 use http::header::{COOKIE, HeaderMap};
 use http::{Method, StatusCode, Uri};
 
-use crate::decoding::{decoded_body_forms, normalize_path, percent_decode_forms};
+use crate::decoding::{
+    decoded_body_forms, normalize_path, percent_decode_forms, query_decode_forms,
+};
 use crate::protection::normalize_ip;
 
 pub struct RequestView<'a> {
@@ -39,7 +41,7 @@ impl<'a> RequestView<'a> {
         Self {
             method,
             path_forms: path_forms(uri.path()),
-            query_forms: uri.query().map(percent_decode_forms).unwrap_or_default(),
+            query_forms: uri.query().map(query_decode_forms).unwrap_or_default(),
             headers,
             body,
             body_forms: if decode_body && !body.is_empty() {
@@ -219,6 +221,15 @@ mod tests {
         let view = view(&uri, &headers, b"");
         let forms: Vec<&str> = view.query_forms.iter().map(|form| form.as_ref()).collect();
         assert_eq!(forms, vec!["q=%2525", "q=%25", "q=%"]);
+    }
+
+    #[test]
+    fn query_forms_decode_plus_as_space() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/?q=union+select".parse().expect("valid URI");
+        let view = view(&uri, &headers, b"");
+        let forms: Vec<&str> = view.query_forms.iter().map(|form| form.as_ref()).collect();
+        assert_eq!(forms, vec!["q=union+select", "q=union select"]);
     }
 
     #[test]

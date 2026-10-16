@@ -1171,12 +1171,16 @@ timeouts:
 # The body limit also bounds upload size. Raise max_body_bytes if your
 # application receives larger uploads. max_response_body_bytes bounds how much
 # of each upstream response response rules inspect before streaming the rest.
+# max_path_bytes bounds the whole request target (path plus query string).
+# max_concurrent_streams caps concurrent request streams per HTTP/2 or QUIC
+# connection, which also bounds in-flight request-body buffering.
 limits:
   max_path_bytes: 8192
   max_header_bytes: 32768
   max_headers: 100
   max_body_bytes: 1048576
   max_response_body_bytes: 1048576
+  max_concurrent_streams: 100
 
 protection:
   enabled: true

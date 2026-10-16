@@ -2,11 +2,12 @@ use std::borrow::Cow;
 use std::io::Read;
 
 use brotli_decompressor::Decompressor as BrotliDecoder;
-use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
 
 const DECODE_BUFFER_BYTES: usize = 8 * 1024;
 const MAX_PERCENT_DECODE_PASSES: usize = 2;
+const MAX_CONTENT_ENCODING_LAYERS: usize = 3;
 const MAX_MULTIPART_PARTS: usize = 64;
 const MAX_MULTIPART_NAME_BYTES: usize = 1024;
 const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
@@ -24,21 +25,46 @@ pub fn decode_content_encoding(
     if body.is_empty() || limit == 0 {
         return None;
     }
-    let encoding = single_encoding(headers.get(CONTENT_ENCODING)?)?;
-    let decoded = match encoding.as_str() {
-        "gzip" | "x-gzip" => read_bounded(GzDecoder::new(body), limit),
-        "deflate" => decode_deflate(body, limit),
-        "br" => read_bounded(BrotliDecoder::new(body, DECODE_BUFFER_BYTES), limit),
-        _ => return None,
-    };
-    if decoded.0.is_empty() {
-        None
-    } else {
-        Some(DecodedBody {
-            body: decoded.0,
-            truncated: decoded.1,
-        })
+    let encodings = content_encodings(headers.get(CONTENT_ENCODING)?)?;
+    if encodings.is_empty() {
+        return None;
     }
+
+    let mut decoded: Vec<u8> = Vec::new();
+    let mut first = true;
+    let mut truncated = false;
+    for encoding in encodings.iter().rev() {
+        let input: &[u8] = if first { body } else { &decoded };
+        let (layer, layer_truncated) = match encoding.as_str() {
+            "gzip" | "x-gzip" => read_bounded(MultiGzDecoder::new(input), limit),
+            "deflate" => decode_deflate(input, limit),
+            "br" => read_bounded(BrotliDecoder::new(input, DECODE_BUFFER_BYTES), limit),
+            _ => return None,
+        };
+        if layer.is_empty() {
+            return None;
+        }
+        decoded = layer;
+        first = false;
+        if layer_truncated {
+            truncated = true;
+            break;
+        }
+    }
+
+    Some(DecodedBody {
+        body: decoded,
+        truncated,
+    })
+}
+
+/// True when the message declares a `Content-Encoding` that cannot be decoded
+/// for inspection: an unknown encoding, an invalid value, or more than
+/// [`MAX_CONTENT_ENCODING_LAYERS`] layers. `identity` is not uninspectable.
+pub fn encoding_is_uninspectable(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_ENCODING)
+        .is_some_and(|value| content_encodings(value).is_none())
 }
 
 pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
@@ -61,19 +87,29 @@ pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
 
 /// Decoded variants of a request body for inspection: the content-type decoded
 /// form followed by up to [`MAX_PERCENT_DECODE_PASSES`] percent-encoded passes.
-/// The raw body is inspected separately and is not repeated here.
+/// Unknown content types still get the percent passes, because applications may
+/// decode the body regardless of the declared type. The raw body is inspected
+/// separately and is not repeated here.
 pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
     let mut forms = Vec::new();
-    let Some(formatted) = decode_body_format(body, headers) else {
-        return forms;
+    let mut current = match decode_body_format(body, headers) {
+        Some(formatted) => {
+            let current = String::from_utf8_lossy(&formatted).into_owned();
+            if current.is_empty() {
+                return forms;
+            }
+            if current.as_bytes() != body {
+                forms.push(current.as_bytes().to_vec());
+            }
+            current
+        }
+        None => {
+            if !body.contains(&b'%') {
+                return forms;
+            }
+            String::from_utf8_lossy(body).into_owned()
+        }
     };
-    let mut current = String::from_utf8_lossy(&formatted).into_owned();
-    if current.is_empty() {
-        return forms;
-    }
-    if current.as_bytes() != body {
-        forms.push(current.as_bytes().to_vec());
-    }
     for _ in 0..MAX_PERCENT_DECODE_PASSES {
         let next = percent_decode(&current).into_owned();
         if next == current {
@@ -97,6 +133,28 @@ pub fn percent_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
     let mut current = input.to_owned();
     for _ in 0..MAX_PERCENT_DECODE_PASSES {
         let next = percent_decode(&current).into_owned();
+        if next == current {
+            break;
+        }
+        forms.push(Cow::Owned(next.clone()));
+        current = next;
+    }
+    forms
+}
+
+/// Decoded variants of a query string, starting with the raw form, with at
+/// most [`MAX_PERCENT_DECODE_PASSES`] passes. Query strings are parsed with
+/// `application/x-www-form-urlencoded` rules by application frameworks, so
+/// `+` decodes to a space in addition to the `%XX` escapes.
+pub fn query_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
+    let mut forms = Vec::with_capacity(MAX_PERCENT_DECODE_PASSES + 1);
+    forms.push(Cow::Borrowed(input));
+    if !input.contains('%') && !input.contains('+') {
+        return forms;
+    }
+    let mut current = input.to_owned();
+    for _ in 0..MAX_PERCENT_DECODE_PASSES {
+        let next = String::from_utf8_lossy(&form_decode(current.as_bytes())).into_owned();
         if next == current {
             break;
         }
@@ -165,37 +223,52 @@ pub fn percent_decode(input: &str) -> Cow<'_, str> {
     Cow::Owned(String::from_utf8_lossy(&decoded).into_owned())
 }
 
-fn single_encoding(value: &HeaderValue) -> Option<String> {
-    let mut encoding: Option<String> = None;
-    let value = String::from_utf8_lossy(value.as_bytes());
-    for token in value.split(',') {
+/// Parse the `Content-Encoding` field into the ordered list of encodings this
+/// build can decode. Returns `None` for unknown encodings, invalid values, or
+/// more than [`MAX_CONTENT_ENCODING_LAYERS`] layers; `identity` entries are
+/// dropped, so an empty list means there is nothing to decode.
+fn content_encodings(value: &HeaderValue) -> Option<Vec<String>> {
+    let mut encodings = Vec::new();
+    let text = String::from_utf8_lossy(value.as_bytes());
+    for token in text.split(',') {
         let token = token.trim();
         if token.is_empty() || token.eq_ignore_ascii_case("identity") {
             continue;
         }
-        if encoding.is_some() {
+        if encodings.len() >= MAX_CONTENT_ENCODING_LAYERS {
             return None;
         }
-        encoding = Some(token.to_ascii_lowercase());
+        let token = token.to_ascii_lowercase();
+        if !matches!(token.as_str(), "gzip" | "x-gzip" | "deflate" | "br") {
+            return None;
+        }
+        encodings.push(token);
     }
-    encoding
+    Some(encodings)
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
     let mut output = Vec::new();
     let mut buffer = [0u8; DECODE_BUFFER_BYTES];
+    let mut truncated = false;
     while output.len() < limit {
         let want = (limit - output.len()).min(buffer.len());
         match reader.read(&mut buffer[..want]) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(read) => output.extend_from_slice(&buffer[..read]),
+            Err(_) => {
+                truncated = true;
+                break;
+            }
         }
     }
 
-    let mut truncated = false;
     if limit > 0 && output.len() >= limit {
         let mut probe = [0u8; 1];
-        truncated = matches!(reader.read(&mut probe), Ok(read) if read > 0);
+        match reader.read(&mut probe) {
+            Ok(read) => truncated = read > 0,
+            Err(_) => truncated = true,
+        }
     }
     (output, truncated)
 }
@@ -611,17 +684,98 @@ mod tests {
     }
 
     #[test]
-    fn stacked_encodings_are_left_uninspected() {
+    fn multi_member_gzip_bodies_are_decoded() {
+        let mut encoded = gzip(b"benign-first-member");
+        encoded.extend_from_slice(&gzip(b" UNION SELECT password"));
+
+        let decoded =
+            decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "gzip"), 1024 * 1024)
+                .expect("decoded");
+        assert_eq!(
+            decoded.body,
+            b"benign-first-member UNION SELECT password".to_vec()
+        );
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn stacked_encodings_are_decoded_in_reverse_order() {
         let payload = b"q=1 union select password";
         let stacked = zlib(&gzip(payload));
-        assert!(
-            decode_content_encoding(
-                &stacked,
-                &headers(CONTENT_ENCODING, "gzip, deflate"),
-                payload.len()
-            )
-            .is_none()
+        let decoded =
+            decode_content_encoding(&stacked, &headers(CONTENT_ENCODING, "gzip, deflate"), 1024)
+                .expect("decoded");
+        assert_eq!(decoded.body, payload);
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn too_many_encoding_layers_are_left_uninspected() {
+        let mut payload = gzip(b"payload");
+        for _ in 0..3 {
+            payload = gzip(&payload);
+        }
+        let stacked = headers(CONTENT_ENCODING, "gzip, gzip, gzip, gzip");
+        assert!(decode_content_encoding(&payload, &stacked, 1024).is_none());
+        assert!(encoding_is_uninspectable(&stacked));
+    }
+
+    #[test]
+    fn encoding_classification_covers_identity_and_unknown() {
+        assert!(!encoding_is_uninspectable(&HeaderMap::new()));
+        assert!(!encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "identity"
+        )));
+        assert!(!encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "gzip"
+        )));
+        assert!(!encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "identity, br"
+        )));
+        assert!(encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "zstd"
+        )));
+        assert!(encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "gzip, zstd"
+        )));
+    }
+
+    #[test]
+    fn query_forms_decode_plus_as_space() {
+        let decoded = query_decode_forms("q=union+select&x=%2527");
+        let forms: Vec<&str> = decoded.iter().map(|form| form.as_ref()).collect();
+        assert_eq!(
+            forms,
+            vec![
+                "q=union+select&x=%2527",
+                "q=union select&x=%27",
+                "q=union select&x='"
+            ]
         );
+    }
+
+    #[test]
+    fn query_forms_keep_plain_input_borrowed() {
+        let forms = query_decode_forms("q=plain");
+        assert_eq!(forms.len(), 1);
+        assert!(matches!(forms[0], Cow::Borrowed("q=plain")));
+    }
+
+    #[test]
+    fn body_percent_decoding_applies_without_a_known_content_type() {
+        let forms = decoded_body_forms(b"q=%27%20or%201%3D1", &HeaderMap::new());
+        let decoded = String::from_utf8_lossy(&forms[0]);
+        assert_eq!(decoded, "q=' or 1=1");
+    }
+
+    #[test]
+    fn body_forms_are_empty_without_percent_escapes() {
+        assert!(decoded_body_forms(b"plain text", &HeaderMap::new()).is_empty());
     }
 
     #[test]

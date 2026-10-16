@@ -321,6 +321,8 @@ pub struct LimitsSpec {
     pub max_body_bytes: usize,
     #[serde(default = "default_max_body_bytes")]
     pub max_response_body_bytes: usize,
+    #[serde(default = "default_max_concurrent_streams")]
+    pub max_concurrent_streams: u32,
 }
 
 impl Default for LimitsSpec {
@@ -331,6 +333,7 @@ impl Default for LimitsSpec {
             max_headers: default_max_headers(),
             max_body_bytes: default_max_body_bytes(),
             max_response_body_bytes: default_max_body_bytes(),
+            max_concurrent_streams: default_max_concurrent_streams(),
         }
     }
 }
@@ -544,6 +547,10 @@ fn default_max_body_bytes() -> usize {
     1024 * 1024
 }
 
+fn default_max_concurrent_streams() -> u32 {
+    100
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
     pub header_read: Duration,
@@ -574,6 +581,7 @@ pub struct Limits {
     pub max_headers: usize,
     pub max_body_bytes: usize,
     pub max_response_body_bytes: usize,
+    pub max_concurrent_streams: u32,
 }
 
 impl From<&LimitsSpec> for Limits {
@@ -584,6 +592,7 @@ impl From<&LimitsSpec> for Limits {
             max_headers: spec.max_headers,
             max_body_bytes: spec.max_body_bytes,
             max_response_body_bytes: spec.max_response_body_bytes,
+            max_concurrent_streams: spec.max_concurrent_streams,
         }
     }
 }
@@ -700,7 +709,7 @@ impl ResponseHeaders {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admin {
     pub enabled: bool,
     pub listen: SocketAddr,
@@ -1268,6 +1277,9 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
             issues.push(format!("limits.{name} must be greater than zero"));
         }
     }
+    if !(1..=1000).contains(&limits.max_concurrent_streams) {
+        issues.push("limits.max_concurrent_streams must be between 1 and 1000".to_owned());
+    }
 }
 
 fn validate_timeouts(timeouts: &TimeoutsSpec, issues: &mut Vec<String>) {
@@ -1609,9 +1621,9 @@ fn validate_protection(spec: &ProtectionSpec, issues: &mut Vec<String>) {
 }
 
 fn validate_response(response: &ResponseSpec, context: &str, issues: &mut Vec<String>) {
-    if !(100..=599).contains(&response.status) {
+    if !(200..=599).contains(&response.status) {
         issues.push(format!(
-            "{context}: invalid response status {}",
+            "{context}: block and error responses must use a status from 200 to 599, got {}",
             response.status
         ));
     }
@@ -1849,11 +1861,32 @@ fn compile_methods(values: &[String], context: &str, issues: &mut Vec<String>) -
     let mut methods = Vec::new();
     for value in values {
         match Method::from_bytes(value.as_bytes()) {
-            Ok(method) => methods.push(method),
+            Ok(method) => {
+                if is_lowercase_standard_method(value) {
+                    issues.push(format!(
+                        "{context}: `{value}` is case-sensitive; write `{}`",
+                        value.to_ascii_uppercase()
+                    ));
+                } else {
+                    methods.push(method);
+                }
+            }
             Err(_) => issues.push(format!("{context}: invalid HTTP method `{value}`")),
         }
     }
     methods
+}
+
+/// HTTP methods are case-sensitive tokens, so `post` parses as a distinct
+/// extension method that can never match a real `POST` request. Catch the
+/// lowercase spelling of standard methods at load time instead of letting the
+/// rule silently never fire.
+fn is_lowercase_standard_method(value: &str) -> bool {
+    const STANDARD: [&str; 9] = [
+        "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+    ];
+    let upper = value.to_ascii_uppercase();
+    value != upper && STANDARD.contains(&upper.as_str())
 }
 
 fn compile_networks(values: &[String], context: &str, issues: &mut Vec<String>) -> Vec<IpNet> {
@@ -2501,6 +2534,61 @@ mod tests {
     fn rejects_zero_limits() {
         let error = parse_with(BASE, "limits: { max_body_bytes: 0 }\n").expect_err("must fail");
         assert!(error.to_string().contains("max_body_bytes"));
+    }
+
+    #[test]
+    fn parses_and_validates_max_concurrent_streams() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert_eq!(config.limits.max_concurrent_streams, 100);
+
+        let config =
+            parse_with(BASE, "limits: { max_concurrent_streams: 32 }\n").expect("valid config");
+        assert_eq!(config.limits.max_concurrent_streams, 32);
+
+        for value in [0, 1001] {
+            let error = parse_with(
+                BASE,
+                &format!("limits: {{ max_concurrent_streams: {value} }}\n"),
+            )
+            .expect_err("must fail");
+            assert!(
+                error.to_string().contains("max_concurrent_streams"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_lowercase_standard_methods() {
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: broken
+    action: BLOCK
+    rules:
+      - name: rule
+        match: { method: post, path: / }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("POST"), "{error}");
+    }
+
+    #[test]
+    fn rejects_informational_response_status() {
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: broken
+    action: BLOCK
+    response: { status: 101 }
+    rules:
+      - name: rule
+        match: { path: / }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("200 to 599"), "{error}");
     }
 
     #[test]

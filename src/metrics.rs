@@ -14,6 +14,8 @@ pub struct Metrics {
     pub request_truncated: AtomicU64,
     pub response_decode_truncated: AtomicU64,
     pub request_decode_truncated: AtomicU64,
+    pub response_decode_skipped: AtomicU64,
+    pub request_decode_skipped: AtomicU64,
     pub rate_limited: AtomicU64,
     pub rule_limited: AtomicU64,
     pub banned: AtomicU64,
@@ -45,6 +47,8 @@ impl Metrics {
             request_truncated: AtomicU64::new(0),
             response_decode_truncated: AtomicU64::new(0),
             request_decode_truncated: AtomicU64::new(0),
+            response_decode_skipped: AtomicU64::new(0),
+            request_decode_skipped: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             rule_limited: AtomicU64::new(0),
             banned: AtomicU64::new(0),
@@ -120,6 +124,18 @@ impl Metrics {
             "kunato_request_decode_truncated_total",
             "Decompressed request bodies truncated for inspection.",
             self.request_decode_truncated.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_response_decode_skipped_total",
+            "Response bodies with an encoding that could not be decoded for inspection.",
+            self.response_decode_skipped.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_request_decode_skipped_total",
+            "Request bodies with an encoding that could not be decoded for inspection.",
+            self.request_decode_skipped.load(Ordering::Relaxed),
         );
         counter(
             &mut out,

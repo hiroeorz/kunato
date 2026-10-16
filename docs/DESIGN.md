@@ -95,7 +95,7 @@ Components:
    HTTP/2 preface within the header read timeout; TLS connections use the ALPN
    result; QUIC connections carry `h3` in ALPN. hyper (or `h3` for HTTP/3) then
    parses the request line and headers with a header read timeout, header
-   size/count limits, and URL length limit. Malformed input: `400`.
+   size/count limits, and a request-target length limit. Malformed input: `400`.
 3. **Protection** — ban check, per-IP token bucket, global RPS guard. Rate/ban
    violations produce `429` or `503` with `Retry-After`.
 4. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
@@ -140,24 +140,30 @@ header regex). Responses already buffer only a prefix
 
 - Header names are case-insensitive (hyper). Header values are matched verbatim
   after lossy UTF-8 decoding, so invalid bytes cannot hide a matching value.
-- `path` and `query` are matched raw and through up to two percent-decode passes
+- `path` and `query` are matched raw and through up to two decode passes
   (a compile-time constant), so `%253Cscript%253E`, `%3Cscript%3E`, and
-  `<script>` all match. Paths are additionally matched in normalized form (dot
+  `<script>` all match. Query strings use `application/x-www-form-urlencoded`
+  decoding, so `+` is matched as a space as well. Paths are additionally
+  matched in normalized form (dot
   segments resolved, duplicate slashes merged) to mirror upstream
   canonicalization. Cookies are matched raw.
 - Request bodies are matched raw, then content-type decoded
   (`application/x-www-form-urlencoded`, JSON string escapes such as `\u0075`,
   and `multipart/form-data` flattened to field values and file names), then
-  through the same percent-decode passes. Multipart parsing is bounded (64
+  through the same percent-decode passes; bodies with an unknown content type
+  still get the percent passes. Multipart parsing is bounded (64
   parts, 1 KiB names/file names); malformed or oversized multipart bodies fall
   back to raw inspection.
 - Bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
-  inspection only; forwarded bytes are never modified. Decoding is bounded by
+  inspection only; forwarded bytes are never modified. All gzip members are
+  decoded and stacked encodings are decoded in reverse order, up to three
+  layers; unknown or deeper encodings are inspected as received and counted
+  (`kunato_request_decode_skipped_total` /
+  `kunato_response_decode_skipped_total`). Decoding is bounded by
   `limits.max_body_bytes` / `limits.max_response_body_bytes`, and a decoded body
   cut off at the limit raises its own log entry and counter
   (`kunato_request_decode_truncated_total` /
-  `kunato_response_decode_truncated_total`); stacked or unknown encodings are
-  inspected as received.
+  `kunato_response_decode_truncated_total`).
 - No other normalization is performed (no Unicode folding, no HTML entity
   decoding). Entity and fullwidth folding are deferred until anomaly scoring
   can absorb their false positives.
@@ -171,9 +177,11 @@ header regex). Responses already buffer only a prefix
 - Forward upstream requests as HTTP/1.1 regardless of the downstream protocol.
 - Strip hop-by-hop headers (`Connection`, `Keep-Alive`, `TE`, `Trailer`,
   `Transfer-Encoding`, `Upgrade`, `Proxy-*`) plus headers named by `Connection`.
-- Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. If the peer
-  is in `trusted_proxies`, append to an existing `X-Forwarded-For`; otherwise
-  overwrite it with the direct peer address.
+- Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. The
+  `X-Forwarded-For` value is always overwritten with the direct peer address, so
+  client-supplied values cannot spoof the source; trusted-proxy append support
+  (for deployments behind a CDN or load balancer) is future work, and until it
+  exists `source_ip` rules and protection budgets see the direct peer.
 - WebSocket handshakes keep `Connection` and `Upgrade` (normalized to
   `Connection: Upgrade` and `Upgrade: websocket`) while all other hop-by-hop
   headers are stripped both ways.
@@ -210,8 +218,8 @@ parse → validate → compile pipeline; on success the snapshot is swapped with
 logged. In-flight requests keep using the snapshot they loaded.
 
 Reloadable: categories/rules, protection, timeouts, limits, upstream.
-Restart-only: `listen` address, `tls`, and `http3`. Changing them during reload
-logs a warning and keeps the current listener.
+Restart-only: `listen` address, `tls`, `http3`, and `admin`. Changing them during
+reload logs a warning and keeps the current listener.
 
 Watcher implementation: `notify` crate, with an mtime polling fallback (2 s) if the
 platform watcher fails. Tests drive the reload function directly.
@@ -394,7 +402,8 @@ reapplied after every hot reload.
 - Upstream failures: connect errors → `502`, response timeout → `504`. No
   automatic retries by default (avoids duplicating non-idempotent requests).
 - Config reload failures never affect the running instance.
-- All memory and concurrency is bounded: body size, header size/count, URL length,
+- All memory and concurrency is bounded: body size, header size/count,
+  request-target length, concurrent HTTP/2 and QUIC streams per connection,
   regex size, per-IP state, connection count, ban table.
 - Graceful shutdown: stop accepting, drain in-flight requests up to
   `shutdown_grace` (default 10 s), then exit.
@@ -405,19 +414,24 @@ Default timeouts:
 | ------------------ | ------- |
 | `header_read`      | 10 s    |
 | `body_read`        | 30 s    |
-| `idle`             | 60 s    |
 | `upstream_connect` | 5 s     |
 | `upstream_response`| 30 s    |
 | `shutdown_grace`   | 10 s    |
+| `websocket_idle`   | 10 min  |
+
+Idle HTTP/2 connections are pinged after 30 s and closed after 20 s without an
+acknowledgement, so idle clients cannot hold connection slots indefinitely.
 
 Default limits:
 
-| Setting            | Default |
-| ------------------ | ------- |
-| `max_path_bytes`   | 8 KiB   |
-| `max_header_bytes` | 32 KiB  |
-| `max_headers`      | 100     |
-| `max_body_bytes`   | 1 MiB   |
+| Setting                   | Default |
+| ------------------------- | ------- |
+| `max_path_bytes`          | 8 KiB   |
+| `max_header_bytes`        | 32 KiB  |
+| `max_headers`             | 100     |
+| `max_body_bytes`          | 1 MiB   |
+| `max_response_body_bytes` | 1 MiB   |
+| `max_concurrent_streams`  | 100     |
 
 ## 9. Observability
 
@@ -534,10 +548,11 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
   mock upstream and cover: pass-through, each action, category override,
   `ALLOW` short-circuit, `LOG` continuation, response-phase blocking and
   logging, response status/header matching, oversized response prefix handling,
-  reload success, reload failure retention, `413` / `429` / `503` / `502` /
+  reload success, reload failure retention, `429` / `503` / `502` /
   `504`, graceful shutdown, h2c prior knowledge, rule evaluation over HTTP/2
   including response rules, ALPN `h2` over TLS, HTTP/3 pass-through and rule
-  evaluation over QUIC, `Alt-Svc` advertisement, and WebSocket tunneling,
+  evaluation over QUIC, HTTP/3 body streaming past the prefix, `Alt-Svc`
+  advertisement, and WebSocket tunneling,
   blocking, upstream rejection, and idle teardown.
 - Tests are deterministic: paused time for limiter tests, no external network
   access, ephemeral ports, temporary config files.
@@ -610,8 +625,8 @@ response-phase rules.
   automatically).
 - WebSocket over HTTP/2 and HTTP/3 (RFC 8441 / RFC 9220 extended CONNECT).
 - Pluggable tunnel payload inspection (currently upgrades are opaque).
-- HTTP/3 request body streaming (TCP listeners stream bodies past the prefix;
-  HTTP/3 bodies above `max_body_bytes` are still rejected with `413`).
+- Trusted-proxy handling for `X-Forwarded-For` and client-IP rules behind a CDN
+  or load balancer.
 - Multiple upstreams and load balancing.
 - Admin API beyond the `/metrics` endpoint.
 - Config includes/anchors for large rule sets.

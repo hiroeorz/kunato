@@ -400,6 +400,14 @@ fn gzip(data: &[u8]) -> Vec<u8> {
     encoder.finish().expect("gzip finish")
 }
 
+fn zlib(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).expect("zlib write");
+    encoder.finish().expect("zlib finish")
+}
+
 async fn send_with_headers(
     addr: SocketAddr,
     method: Method,
@@ -813,6 +821,51 @@ async fn gzip_request_body_is_rule_evaluated() {
 }
 
 #[tokio::test]
+async fn multi_member_gzip_request_body_is_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut body = gzip(b"benign first member");
+    body.extend_from_slice(&gzip(b" union select password"));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        body,
+        &[("content-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn stacked_content_encodings_are_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = zlib(&gzip(b"q=1 union select password"));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        body,
+        &[("content-encoding", "gzip, deflate")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn compressed_request_body_is_forwarded_unchanged() {
     let upstream = spawn_body_echo_upstream().await;
     let yaml = format!(
@@ -891,6 +944,23 @@ async fn double_encoded_query_payloads_are_rule_evaluated() {
     let (status, body) = send(running.addr, Method::GET, "/safe", "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn plus_separated_query_payloads_are_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [query] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/?q=union+select+password", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send(running.addr, Method::GET, "/?q=unionxxselect", "").await;
+    assert_eq!(status, StatusCode::OK);
 
     running.stop().await;
 }
@@ -1083,6 +1153,23 @@ async fn oversized_headers_are_rejected() {
         response.starts_with("HTTP/1.1 431"),
         "unexpected response: {response}"
     );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn oversized_request_target_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_path_bytes: 16 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/?q=0123456789abcdef", "").await;
+    assert_eq!(status, StatusCode::URI_TOO_LONG);
+
+    let (status, _) = send(running.addr, Method::GET, "/?q=short", "").await;
+    assert_eq!(status, StatusCode::OK);
 
     running.stop().await;
 }
@@ -1344,6 +1431,30 @@ async fn http3_sets_forwarded_host_and_advertises_alt_svc() {
 
     drop(sender);
     let _ = connection_task.await;
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_oversized_body_is_streamed_to_upstream() {
+    let upstream = spawn_body_echo_upstream().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "limits: { max_body_bytes: 8 }\ncategories: []",
+    )
+    .await;
+
+    let body: String = (0..4096)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect();
+    let (status, echoed, _) =
+        send_h3(running.addr, certificate, Method::POST, "/upload", &body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, body);
+
     running.stop().await;
 }
 

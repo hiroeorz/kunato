@@ -11,7 +11,7 @@ use bytes::Bytes;
 use http::header::{CONNECTION, HeaderMap, HeaderValue, UPGRADE};
 use http::{Request, Response, StatusCode};
 use http_body_util::BodyExt;
-use hyper::body::{Frame, Incoming};
+use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -38,6 +38,11 @@ const RAW_503: &[u8] =
     b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
 
 const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// HTTP/2 connections are pinged after this much idle time and closed when the
+/// pings go unanswered, so idle clients cannot hold connection slots forever.
+const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Protocol {
@@ -475,6 +480,7 @@ async fn serve_io<I>(
     let limits = context.config();
     let max_header_list_size = u32::try_from(limits.limits.max_header_bytes).unwrap_or(u32::MAX);
     let max_headers = limits.limits.max_headers;
+    let max_concurrent_streams = limits.limits.max_concurrent_streams;
     let guard_slot = Arc::new(std::sync::Mutex::new(Some(guard)));
     let service_shutdown = shutdown.clone();
     let service = service_fn(move |request: Request<Incoming>| {
@@ -512,7 +518,10 @@ async fn serve_io<I>(
             let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
             builder
                 .timer(TokioTimer::new())
-                .max_header_list_size(max_header_list_size);
+                .max_header_list_size(max_header_list_size)
+                .max_concurrent_streams(max_concurrent_streams)
+                .keep_alive_interval(Some(H2_KEEP_ALIVE_INTERVAL))
+                .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT);
             let connection = builder.serve_connection(io, service);
             let mut connection = std::pin::pin!(connection);
             tokio::select! {
@@ -551,9 +560,12 @@ async fn handle_request(
 
     let config = context.config();
     let (parts, body) = request.into_parts();
-    let result = match read_body(body, &config).await {
-        Ok(body) => process(parts, body, peer, &config, &context, upgrade).await,
-        Err(err) => Err(err),
+    let result = match early_protection_error(&context, peer, &config) {
+        Some(err) => Err(err),
+        None => match read_body(body, &config).await {
+            Ok(body) => process(parts, body, peer, &config, &context, upgrade).await,
+            Err(err) => Err(err),
+        },
     };
     let mut response = match result {
         Ok(response) => response,
@@ -566,13 +578,61 @@ async fn handle_request(
     Ok(response)
 }
 
+/// Ban pre-check that runs before a request body is ingested. A hit is counted
+/// like a regular rejection so the request totals stay consistent.
+pub(crate) fn early_protection_error(
+    context: &Context,
+    peer: SocketAddr,
+    config: &CompiledConfig,
+) -> Option<HttpError> {
+    context
+        .protection
+        .check_banned(peer.ip(), &config.protection)
+        .and_then(|decision| {
+            context.metrics.requests.fetch_add(1, Ordering::Relaxed);
+            protection_error(context, decision)
+        })
+}
+
+/// Map a protection decision to the error response Kunato returns, recording
+/// the matching metric. `Decision::Allow` maps to `None`.
+pub(crate) fn protection_error(context: &Context, decision: Decision) -> Option<HttpError> {
+    match decision {
+        Decision::Allow => None,
+        Decision::RateLimited { retry_after } => {
+            context.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+            Some(HttpError::with_retry_after(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate limit exceeded",
+                retry_after,
+            ))
+        }
+        Decision::Banned { retry_after } => {
+            context.metrics.banned.fetch_add(1, Ordering::Relaxed);
+            Some(HttpError::with_retry_after(
+                StatusCode::TOO_MANY_REQUESTS,
+                "client temporarily banned",
+                retry_after,
+            ))
+        }
+        Decision::Overloaded { retry_after } => {
+            context.metrics.overloaded.fetch_add(1, Ordering::Relaxed);
+            Some(HttpError::with_retry_after(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server overloaded",
+                retry_after,
+            ))
+        }
+    }
+}
+
 /// A request body read for inspection: a bounded prefix plus, when the body is
 /// larger, the untaken remainder stream that is forwarded after evaluation.
-struct RequestPayload {
-    prefix: Bytes,
-    pending: Vec<Frame<Bytes>>,
-    rest: Option<Incoming>,
-    truncated: bool,
+pub(crate) struct RequestPayload {
+    pub(crate) prefix: Bytes,
+    pub(crate) pending: Vec<Frame<Bytes>>,
+    pub(crate) rest: Option<ProxyBody>,
+    pub(crate) truncated: bool,
 }
 
 async fn read_body(
@@ -583,8 +643,8 @@ async fn read_body(
     let deadline = tokio::time::Instant::now() + config.timeouts.body_read;
     let mut prefix: Vec<u8> = Vec::new();
     let mut pending: Vec<Frame<Bytes>> = Vec::new();
-    let mut truncated = false;
-    let mut stop = false;
+    let mut overflowed = false;
+    let mut hit_limit = false;
 
     loop {
         let frame = match tokio::time::timeout_at(deadline, body.frame()).await {
@@ -613,9 +673,9 @@ async fn read_body(
                     let remainder = data.slice(take..);
                     if !remainder.is_empty() {
                         pending.push(Frame::data(remainder));
+                        overflowed = true;
                     }
-                    truncated = data.len() > take;
-                    stop = true;
+                    hit_limit = true;
                     break;
                 }
                 prefix.extend_from_slice(&data);
@@ -624,10 +684,20 @@ async fn read_body(
         }
     }
 
+    let truncated = overflowed
+        || (hit_limit
+            && body
+                .size_hint()
+                .exact()
+                .is_none_or(|remaining| remaining > 0));
     Ok(RequestPayload {
         prefix: Bytes::from(prefix),
         pending,
-        rest: if stop { Some(body) } else { None },
+        rest: if hit_limit {
+            Some(body.map_err(|err| Box::new(err) as BoxError).boxed())
+        } else {
+            None
+        },
         truncated,
     })
 }
@@ -642,19 +712,13 @@ pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody>
     forward::error_response_for(err)
 }
 
-pub(crate) async fn process_request(
+pub(crate) async fn process_payload(
     parts: http::request::Parts,
-    body: Bytes,
+    payload: RequestPayload,
     peer: SocketAddr,
     config: &CompiledConfig,
     context: &Context,
 ) -> Response<ProxyBody> {
-    let payload = RequestPayload {
-        prefix: body,
-        pending: Vec::new(),
-        rest: None,
-        truncated: false,
-    };
     match process(parts, payload, peer, config, context, None).await {
         Ok(response) => response,
         Err(err) => rejected(peer, &err),
@@ -724,38 +788,18 @@ async fn process(
         );
     }
 
-    match context
+    let decision = context
         .protection
-        .check_request(peer.ip(), &config.protection)
-    {
-        Decision::Allow => {}
-        Decision::RateLimited { retry_after } => {
-            context.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
-            return Err(HttpError::with_retry_after(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate limit exceeded",
-                retry_after,
-            ));
-        }
-        Decision::Banned { retry_after } => {
-            context.metrics.banned.fetch_add(1, Ordering::Relaxed);
-            return Err(HttpError::with_retry_after(
-                StatusCode::TOO_MANY_REQUESTS,
-                "client temporarily banned",
-                retry_after,
-            ));
-        }
-        Decision::Overloaded { retry_after } => {
-            context.metrics.overloaded.fetch_add(1, Ordering::Relaxed);
-            return Err(HttpError::with_retry_after(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server overloaded",
-                retry_after,
-            ));
-        }
+        .check_request(peer.ip(), &config.protection);
+    if let Some(err) = protection_error(context, decision) {
+        return Err(err);
     }
 
-    if parts.uri.path().len() > config.limits.max_path_bytes {
+    let request_target = parts
+        .uri
+        .path_and_query()
+        .map_or(0, |target| target.as_str().len());
+    if request_target > config.limits.max_path_bytes {
         return Err(HttpError::new(StatusCode::URI_TOO_LONG, "URI too long"));
     }
 
@@ -778,6 +822,20 @@ async fn process(
     } else {
         None
     };
+    if config.has_body_target_rules()
+        && !body.is_empty()
+        && crate::decoding::encoding_is_uninspectable(&parts.headers)
+    {
+        context
+            .metrics
+            .request_decode_skipped
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            client = %peer.ip(),
+            path = %parts.uri.path(),
+            "request body encoding cannot be decoded for inspection"
+        );
+    }
     if decoded_body
         .as_ref()
         .is_some_and(|decoded| decoded.truncated)
@@ -881,7 +939,6 @@ async fn process(
 
     let (outbound_body, exchange_timeout) = match payload.rest {
         Some(rest) => {
-            let rest = rest.map_err(|err| Box::new(err) as BoxError).boxed();
             let body = PrefixBody::new(payload.prefix.clone(), payload.pending, rest).boxed();
             (body, config.timeouts.body_read)
         }
