@@ -20,6 +20,11 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **HTTP/2, HTTP/3, and HTTP/1.1** — Accepts HTTP/2 over TLS (ALPN) and
   cleartext h2c (prior knowledge), plus optional HTTP/3 over QUIC, falling back
   to HTTP/1.1 automatically. Upstream requests are sent over HTTP/1.1.
+- **Automatic TLS certificates** — Obtains and renews Let's Encrypt
+  certificates directly over the ACME protocol (TLS-ALPN-01 on the HTTPS
+  port). No external tools such as certbot, no cron job, and no deploy hooks:
+  list your domains under `tls.acme` and Kunato handles issuance, renewal, and
+  in-place rotation, caching the certificate locally between restarts.
 - **WebSocket proxying** — Forwards HTTP/1.1 upgrade handshakes to the upstream
   and tunnels the connection both ways. The handshake passes through the rule
   engine and protection budgets; idle tunnels are closed automatically.
