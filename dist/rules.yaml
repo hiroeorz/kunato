@@ -927,6 +927,10 @@ categories:
       # wraps ASCII/SUBSTR/MID/ORD and compares the result.
       - name: blind-inference-functions
         match: { regex: '(?i)\b(ascii|ord|substr(?:ing)?|mid)\s*\([^;]{0,80}\){1,3}\s*(?:[<>=!&|]|\blike\b)', in: [query, body, cookies] }
+      # The same inference without a function call: a LIKE prefix test in a
+      # boolean context, with a quoted or hex literal.
+      - name: blind-inference-like
+        match: { regex: '(?i)\b(and|or)\s+[a-z_][a-z0-9_.]*\s+like\s+(0x[0-9a-f]+|[\x27"])', in: [query, body, cookies] }
       # Executable comments /*!...*/ hide the keyword that follows them from
       # word-boundary and adjacency patterns.
       - name: mysql-executable-comments
@@ -1157,7 +1161,8 @@ categories:
         match: { regex: '-----BEGIN [A-Z ]*PRIVATE KEY-----', in: [response_body] }
       - name: stack-trace
         match: { regex: '(?i)(traceback \(most recent call last\)|stack backtrace:|panic: runtime error:)' }
-      - name: sql-error-message
+      - name: sql-error-message     # blocks: SQL errors leak schema and query text
+        action: BLOCK
         match: { regex: '(?i)(sql syntax.*(mysql|mariadb)|ORA-[0-9]{5}|postgresql.*(error|exception)|sqlite3\.OperationalError)' }
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
