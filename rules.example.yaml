@@ -1114,6 +1114,23 @@ categories:
       - name: yaml-python-tags
         match: { regex: '(?i)!!python/[a-z/]+', in: [query, body] }
 
+  # PHP object injection: serialized object (`O:`) and custom (`C:`) values in
+  # cookies, query, or parameters that reach `unserialize`.
+  - name: php-deserialization
+    action: BLOCK
+    rules:
+      - name: serialized-objects
+        match: { regex: '(?i)(^|[^a-z0-9])(O|C):\d+:"', in: [cookies, query, body] }
+
+  # Java deserialization payloads: the base64 `rO0AB` magic and the
+  # percent-encoded stream header. Raw \xac\xed bytes are not matched because
+  # they occur naturally in binary bodies.
+  - name: java-deserialization
+    action: BLOCK
+    rules:
+      - name: serialized-streams
+        match: { regex: '(?i)(rO0AB|%AC%ED%00%05)', in: [cookies, query, body] }
+
   # Encoding tricks used to smuggle paths and headers.
   - name: protocol-anomalies
     action: BLOCK
@@ -1197,13 +1214,46 @@ categories:
       - name: nextjs-dev-routes
         match: { regex: '(?i)^(/__nextjs|/_next/webpack-hmr)', in: [path] }
 
+  # Development-only Laravel endpoints; they must not exist in production.
+  # The Horizon dashboard is production software and stays in admin-interfaces
+  # (LOG) instead.
+  - name: laravel-debug-endpoints
+    action: BLOCK
+    rules:
+      - name: laravel-debug-routes
+        match: { regex: '(?i)^(/telescope|/_debugbar)(/|$)', in: [path] }
+
+  # Vite and Nuxt development servers; the /@fs/ handler reads arbitrary files.
+  - name: vite-dev-endpoints
+    action: BLOCK
+    rules:
+      - name: vite-dev-routes
+        match: { regex: '(?i)^(/@fs/|/@vite/|/@id/|/__vite_ping|/__nuxt_devtools__)', in: [path] }
+
+  # Spring Boot Actuator endpoints that dump configuration, secrets, heaps, or
+  # thread state; health and info stay open for monitoring probes.
+  - name: spring-actuator
+    action: BLOCK
+    rules:
+      - name: actuator-sensitive-endpoints
+        match: { regex: '(?i)^/actuator/(env|heapdump|threaddump|mappings|beans|configprops|jolokia|loggers|httptrace|httpexchanges|auditevents|scheduledtasks|shutdown|caches|sessions|flyway|liquibase|quartz|integrationgraph)(/|$)', in: [path] }
+
+  # Model management and notebook kernel endpoints of AI services (Ollama,
+  # Jupyter). Deployments that drive these through Kunato intentionally need an
+  # override.
+  - name: ai-service-management
+    action: BLOCK
+    rules:
+      - name: management-endpoints
+        match: { regex: '(?i)^/api/(pull|delete|create|push|copy|kernels|terminals)(/|$)', in: [path] }
+
   # Credentials, repository metadata, and backup files are hidden with a 404.
   - name: sensitive-files
     action: BLOCK
     response: { status: 404, body: Not Found }
     rules:
       - name: credentials-and-config
-        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|settings\.py|local_settings\.py|wp-config\.php)', in: [path] }
+        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|settings\.py|local_settings\.py|composer\.(json|lock)|wp-config\.php)', in: [path] }
       - name: backup-and-dump-files
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
       # Rails writes its default logs here; the directory must not be served.
@@ -1220,7 +1270,7 @@ categories:
     action: LOG
     rules:
       - name: common-admin-paths
-        match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$)|sidekiq(/|$)|pghero(/|$)|flipper(/|$)|blazer(/|$)|delayed_job(/|$)|good_job(/|$))', in: [path] }
+        match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$)|sidekiq(/|$)|pghero(/|$)|flipper(/|$)|blazer(/|$)|delayed_job(/|$)|good_job(/|$)|horizon(/|$))', in: [path] }
 
   # JSON Web Token attacks: unsecured (alg=none) headers, tokens whose signature
   # segment is missing, and key-lookup headers (kid/jku/jwk/x5u/x5c) that point

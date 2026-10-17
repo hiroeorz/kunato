@@ -354,6 +354,18 @@ GET /_next/data/BUILD123/en/page.json
 GET /_next/image?url=%2Fhero.png&w=640&q=75
 GET /docs?q=Object.prototype.hasOwnProperty.call
 
+# --- PHP, Java, frontend, and AI near-misses: benign look-alikes must pass ---
+GET /horizon
+GET /api/composers
+POST /api/import body="ref=Item O:2 shipped"
+GET /actuator/health
+GET /actuator/info
+GET /@tanaka
+GET /_nuxt/entry-abc123.js
+GET /api/tags
+POST /api/generate body="{\"model\":\"llama3\",\"prompt\":\"hello\"}"
+GET /api/status
+
 # --- Encoded and international text ---
 GET /search?q=%E5%AF%BF%E5%8F%B8
 GET /search?q=caf%C3%A9

@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 460 rules then.
+2026-10-17; the managed set carried 466 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -143,13 +143,16 @@ often means "no signature shipped", not "impossible".
 | WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, author enumeration, xmlrpc logged). Plugin CVEs are out of scope by policy |
 | Joomla / Drupal and other CMS | ✅ | Many CVE-specific signatures |
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
-| PHP / Java / .NET Exploits | ✅ | Same |
+| PHP / Laravel Exploits | 🔶 | `laravel-debug-endpoints` (`/telescope`, `/_debugbar`), Composer file discovery, generic PHP object-injection shapes, and Horizon LOGging; Laravel/Symfony CVE signatures remain thin, and WordPress plugin CVEs are out of scope by policy (details below) |
+| Java / .NET Exploits | ✅ | Struts/Spring/Log4j and the framework CVE signatures, plus the Spring Actuator sensitive-path rules and generic Java deserialization shapes |
+| Vite / Nuxt Frontend Exposure | ✅ | `vite-dev-endpoints` blocks `/@fs/`, `/@vite/`, `/@id/`, `/__vite_ping`, and `/__nuxt_devtools__`; production `/_nuxt` assets and `@user` profile paths are pinned as allowed |
+| AI / LLM Service Exposure | 🔶 | `ai-service-management` blocks Ollama model management and Jupyter kernel/terminal endpoints; Gradio/Flowise/vLLM CVEs have no stable request shapes, while pickle, traversal, and SSRF classes are covered generically |
 | Node.js / Next.js Exploits | 🔶 | Next.js CVE signatures (middleware subrequest, image optimizer SSRF, RSC route variants, route-match headers), `nextjs-dev-endpoints`, and `prototype-pollution`; the npm ecosystem is watched daily and bundled only when a request shape exists (details below) |
 | Django / Python Framework Exploits | 🔶 | `django-debug-endpoints`, `settings.py` discovery, `python-deserialization`, and the Django DEBUG page rule; Django CVEs stay application-side (details below) |
 | Struts / Spring | ✅ | S2-xxx, Spring4Shell, and the framework CVE signatures |
 | Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal), `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, generic Ruby deserialization, and the bundled Rack multipart DoS shapes (CVE-2026-34827/34829); other 2025-2026 component CVEs (Active Storage, Rack::Static, Puma, Action View) are not virtual-patchable or not yet bundled. Laravel: only `laravel-ignition-endpoint` |
 | CVE-Based Virtual Patching | ✅ | Core feature: `cve-2010` ... `cve-2026` categories plus the daily `rules_update` (SHA256 verification, atomic swap) |
-| Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards, `rails-debug-endpoints` (BLOCK) for the dev-only `/rails/info`/`/rails/mailers`/`/rails/conductor` and `/letter_opener`, plus CVE-specific debug paths (AEM console, actuator, ...) |
+| Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards and Laravel Horizon, the per-stack dev-endpoint categories (Rails, Django, Next.js, Laravel, Vite) in BLOCK, plus CVE-specific debug paths (AEM console, actuator, ...) |
 
 ### Ruby on Rails coverage
 
@@ -188,6 +191,20 @@ not match the Marshal signatures.
 | Prototype pollution | ✅ | `prototype-pollution.pollution-paths` blocks `__proto__` and constructor-prototype paths in query, body, and cookies; runtime-to-RCE gadget chains stay application-side |
 | npm ecosystem | 🔶 | Daily sources reduce the blind spot (Node.js releases, npm advisories); individual npm CVEs are bundled only when a stable request shape exists |
 | Node.js runtime classes | ❌ | llhttp/HTTP smuggling and permission-model issues are protocol or engine concerns, not URL signatures |
+
+### PHP, Java, frontend, and AI service coverage
+
+| Area | Status | Evidence / notes |
+| --- | --- | --- |
+| Laravel debug exposure | ✅ | `laravel-debug-endpoints` BLOCKs `/telescope` and `/_debugbar`; the Horizon dashboard stays in `admin-interfaces` (LOG) |
+| Composer and lockfile discovery | ✅ | `sensitive-files` 404s `composer.json` and `composer.lock` |
+| PHP object injection | ✅ | `php-deserialization` blocks serialized `O:`/`C:` object values across cookies, query, and body |
+| Spring Actuator | ✅ | `spring-actuator` BLOCKs the secret- and state-dumping endpoints (`env`, `heapdump`, `mappings`, `jolokia`, `shutdown`, ...); `health` and `info` stay pinned as allowed |
+| Java deserialization | ✅ | `java-deserialization` covers base64 `rO0AB` and the encoded stream header `%AC%ED%00%05`; raw bytes are unmatched by design |
+| Vite / Nuxt dev exposure | ✅ | `vite-dev-endpoints` BLOCKs the Vite internals and Nuxt devtools; production assets stay open |
+| AI / notebook service management | 🔶 | `ai-service-management` BLOCKs the Ollama model-management and Jupyter kernel/terminal endpoints; deployments that drive them through Kunato need an override |
+| AI/LLM CVE shapes | 🔶 | Gradio (FileExplorer traversal, `proxy_url` SSRF), vLLM, and Flowise (sandbox escapes, OAuth token leaks) advisories have no stable request signatures; generic pickle, traversal, and SSRF layers apply |
+| PHP and Maven ecosystems | 🔶 | Packagist, FriendsOfPHP, and the `composer`/`maven` advisories are refreshed daily; individual CVEs are bundled only with a stable request shape |
 
 ## 10. Reconnaissance
 
