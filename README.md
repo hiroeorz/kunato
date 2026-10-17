@@ -527,6 +527,9 @@ incompatible publication cannot reach `main`. Reproduce it locally with
 against a specific tag with `KUNATO_RULES_BASELINE=v0.2.0`. The unit tests in
 `src/config/mod.rs` cover the rest of the publication: the file matches
 `rules.example.yaml` and `dist/rules.yaml.sha256` is current.
+[Daily rule updates and version compatibility](rule-updates.md) describes the
+whole mechanism: the two update streams, the failure mode, the guards, the
+counters an operator sees, and the release procedure for a new construct.
 
 A rule that genuinely needs a new construct therefore takes a release:
 

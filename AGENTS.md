@@ -56,6 +56,8 @@ scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, b
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md        # Overall design
+  cve-coverage.md  # Daily CVE intake tracker (one row per reviewed candidate)
+  rule-updates.md  # Daily rule updates and binary version compatibility
 packaging/
   kunato.service   # systemd unit
 rules.example.yaml # Example configuration
@@ -114,7 +116,8 @@ rule-set updates.
   reject the whole candidate and freeze its updates, so it needs a release
   rather than a rule update. `scripts/check-rules-compat.sh` is the gate (it
   builds the newest tag and validates the published file with it); see
-  `README.md`, "Rule set format compatibility".
+  `docs/rule-updates.md` for the mechanism and `README.md`, "Rule set format
+  compatibility", for the policy.
 - `README.md` is the source of truth for the full field reference. Keep it in sync
   with any schema change.
 

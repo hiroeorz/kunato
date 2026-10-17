@@ -248,7 +248,8 @@ its previous rules and its old coverage. `dist/rules.yaml` therefore stays
 inside the format of the newest release: `scripts/check-rules-compat.sh` builds
 the newest `v*` tag, validates the published file with that binary, and runs in
 CI and in the daily update workflow; a new construct needs a release instead of
-a rule update. See README, "Rule set format compatibility".
+a rule update. See `docs/rule-updates.md` for the mechanism, and "Rule set
+format compatibility" in README for the policy.
 
 ## 6. Rule Engine
 

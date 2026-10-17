@@ -64,6 +64,7 @@ order and stay inside the constraints at the end of this prompt.
   match targets, actions, and phases that the newest released binary implements;
   a construct it rejects makes every install reject the whole published set and
   stop receiving updates. `scripts/check-rules-compat.sh` is the gate; run it
-  after changing rules. When a CVE seems to need a new construct, leave the rule
-  out and report the gap instead.
+  after changing rules, and read `docs/rule-updates.md` when it fails. When a
+  CVE seems to need a new construct, leave the rule out and report the gap
+  instead.
 - Keep your final message short: selected CVEs, files changed, gate results.
