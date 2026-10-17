@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 452 rules then.
+2026-10-17; the managed set carried 454 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -44,7 +44,7 @@ often means "no signature shipped", not "impossible".
 | HTML Injection | 🔶 | script/iframe-like tags are blocked; generic tags (`<div>`) pass |
 | JavaScript Injection | ✅ | `javascript-uri` plus `dom-sinks` |
 | CSS Injection | ❌ | No rules |
-| Open Redirect | 🔶 | `open-redirect.redirect-parameter-url` blocks absolute and protocol-relative targets on the common parameter names (`redirect[_to|_url|_path]`, `next`, `return_to`, `continue`, `goto`, `dest[ination]`, `target_url`, `out_url`); custom parameter names and same-site absolute redirects stay indistinguishable, and `redirect_uri`/payment return URLs are intentionally excluded |
+| Open Redirect | 🔶 | `open-redirect.redirect-parameter-url` blocks absolute and protocol-relative targets on the common parameter names (`redirect[_to|_url|_path]`, `next`, `return_to`, `continue`, `goto`, `dest[ination]`, `target_url`, `out_url`); custom parameter names and same-site absolute redirects stay indistinguishable, `redirect_uri`/payment return URLs are intentionally excluded, and response-phase rules can inspect the `Location` header for defense in depth |
 | Clickjacking | ❌ | No detection. Mitigation is possible via `response_headers.set` (`X-Frame-Options`/CSP), i.e. header policy rather than detection |
 
 ## 3. Path and File Operations
@@ -69,9 +69,9 @@ often means "no signature shipped", not "impossible".
 | HTTP Request Splitting | 🔶 | `crlf-injection` plus embedded-HTTP inspection |
 | HTTP Response Splitting | 🔶 | Same (CRLF in headers is blocked) |
 | HTTP Parameter Pollution (HPP) | ❌ | Duplicate-parameter inspection/normalization is absent |
-| Host Header Injection | 🔶 | `malformed-host-header` and `oversized-host-header` only; host-rewrite abuse depends on the application |
+| Host Header Injection | 🔶 | `malformed-host-header` and `oversized-host-header` only; host-rewrite abuse depends on the application. A client-supplied `X-Forwarded-Host` is replaced with the Host header, but an `allowed_hosts` policy is not implemented (the Rack/Forwarded allowlist CVEs are CVSS 4.8, below the bundling bar) |
 | Invalid Content-Length / Transfer-Encoding | 🔶 | Rejected at the protocol layer plus CVE-specific rules; no generic rule |
-| HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH) |
+| HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
 | Oversized Header / Request | 🔶 | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Request bodies are not rejected: only the first 1 MiB is inspected and the rest streams through (an explicit content-length rule is needed to reject) |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
@@ -145,9 +145,33 @@ often means "no signature shipped", not "impossible".
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
 | PHP / Java / .NET / Node.js Exploits | ✅ | Same |
 | Struts / Spring | ✅ | S2-xxx, Spring4Shell, and the framework CVE signatures |
-| Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal) plus `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, and generic Ruby deserialization; the 2025-2026 component CVEs (Active Storage, Rack, Puma, Action View) are not yet bundled. Laravel: only `laravel-ignition-endpoint` |
+| Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal), `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, generic Ruby deserialization, and the bundled Rack multipart DoS shapes (CVE-2026-34827/34829); other 2025-2026 component CVEs (Active Storage, Rack::Static, Puma, Action View) are not virtual-patchable or not yet bundled. Laravel: only `laravel-ignition-endpoint` |
 | CVE-Based Virtual Patching | ✅ | Core feature: `cve-2010` ... `cve-2026` categories plus the daily `rules_update` (SHA256 verification, atomic swap) |
 | Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards, `rails-debug-endpoints` (BLOCK) for the dev-only `/rails/info`/`/rails/mailers`/`/rails/conductor` and `/letter_opener`, plus CVE-specific debug paths (AEM console, actuator, ...) |
+
+### Ruby on Rails coverage
+
+Rails-specific attack surface beyond the CVE categories above; the rules live in
+`rails-debug-endpoints`, `ruby-deserialization`, `cve-2026-04-signatures`, the
+`sensitive-files` extensions, and the Rails additions to `admin-interfaces`.
+
+| Area | Status | Evidence / notes |
+| --- | --- | --- |
+| Rails CVE virtual patching | 🔶 | CVE-2019-5418 (`Accept` traversal) and the Rack multipart DoS shapes (CVE-2026-34827/34829) are bundled; other 2025-2026 component advisories are below the CVSS bar, have no stable request shape, or are patch-side (left-out comments in `blocked.txt`) |
+| Dev-only endpoints | ✅ | `rails-debug-endpoints` BLOCKs `/rails/info`, `/rails/mailers`, `/rails/conductor`, and `/letter_opener` |
+| Ops dashboards | 🔶 | `admin-interfaces` LOGs `/sidekiq`, `/pghero`, `/flipper`, `/blazer`, `/delayed_job`, `/good_job`; raise to BLOCK once admin addresses are allowlisted |
+| Secrets, config, logs, storage | ✅ | `sensitive-files` 404s `master.key`, `credentials/` keys, `database.yml`, `storage.yml`, `/log/*.log`, and the `/storage/` root |
+| Ruby deserialization | ✅ | `ruby-deserialization` covers base64 Marshal (`BAh7`), encoded raw `%04%08`, and YAML `!ruby/` tags across query/body/cookies; signed wrappers (`signed_id`, GlobalID, `MessageVerifier`) are not statically detectable |
+| Multipart boundary differentials | ✅ | The engine flattens every declared boundary (up to four) and falls back to raw percent passes beyond that, closing the CVE-2026-26961 WAF-bypass class |
+| `_method` overrides | 🔶 | Method conditions match the wire method; Rack accepts only standard overrides, so `bad-methods` cannot be bypassed |
+| Host / X-Forwarded-Host | 🔶 | A client-supplied `X-Forwarded-Host` is replaced with the Host header; no `allowed_hosts` policy yet |
+| Patch-side only | ❌ | Active Storage libvips variants (CVE-2026-66066) and Rack::Static prefix exposure (CVE-2026-34785) have no stable request shape — upgrade the gems |
+| Application-side | ❌ | CSRF, strong parameters/mass assignment, authorization, and `secret_key_base` exposure cannot be fixed by the WAF |
+
+Functional Rails routes (`/rails/active_storage/*`, `/rails/action_mailbox/*`,
+`/cable`) are deliberately passed through and pinned by the near-miss guards in
+`allowed.txt`; Active Storage signed URLs are JSON-then-base64 wrappers and do
+not match the Marshal signatures.
 
 ## 10. Reconnaissance
 
@@ -199,7 +223,7 @@ often means "no signature shipped", not "impossible".
 | Payload / Parameter Fragmentation | 🔶 | Embedded-HTTP inspection and multipart flattening exist; general fragmentation is unhandled |
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
 | Chunked Encoding Abuse | 🔶 | Rejected at the protocol layer (hyper) |
-| Multipart Boundary Abuse | 🔶 | 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule |
+| Multipart Boundary Abuse | ✅ | every declared boundary is flattened for inspection (up to four, closing the CVE-2026-26961 parser-differential class); 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule, and the Rack DoS signatures (escape-heavy part headers, chunked multipart uploads) |
 | JSON/XML Structure Evasion | 🔶 | JSON escapes are decoded; no dedicated structural detection |
 | Obfuscated JavaScript / SQL | ✅ | Whitespace- and comment-tolerant regexes |
 | WAF Fingerprinting | ❌ | Impossible to hide entirely (the block behavior is itself a signature) |
