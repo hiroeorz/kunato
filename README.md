@@ -304,11 +304,11 @@ managed certificate), download the first rules file with `kunato
 update-rules`, and enable `packaging/kunato.service`. `rules.example.yaml` is a
 practical starting point with rules for SQL/NoSQL injection, XSS, path traversal,
 command injection, SSRF, XXE, malicious uploads, scanners, sensitive files, and
-more. Tagging a release
-(`v*`) builds and uploads static musl tarballs, checksums, and the installer
-through GitHub Actions; bump `version` in `Cargo.toml` to the tag first, so
-`kunato --version` identifies the installed release (the release workflow
-rejects a tag that does not match).
+more. `scripts/release.sh X.Y.Z` cuts a release: it bumps the `version` in
+`Cargo.toml`, commits and pushes it, and tags and pushes `vX.Y.Z`. The tag
+builds and uploads static musl tarballs, checksums, and the installer through
+GitHub Actions; `kunato --version` identifies the installed release because
+the release workflow rejects a tag that does not match the package version.
 
 ## Configuration
 
