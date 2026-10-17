@@ -1408,6 +1408,12 @@ categories:
       # unauthenticated and mint a session for any user.
       - name: fastapiadmin-auto-login-bypass
         match: { path: '(?i)^/api/v1/auth/auto-login(/|$)' }
+      # CVE-2026-111391 (SGLang debug dumper): /dumper/configure evals a
+      # caller-supplied filter while the endpoint is unauthenticated; a
+      # re.search gadget walks __globals__ back to the real builtins. The
+      # dunder access is what legitimate filter expressions never need.
+      - name: sglang-dumper-filter-eval
+        match: { path: '(?i)^/dumper/configure$', regex: '(?i)(__globals__|__builtins__|__subclasses__|__class__)', in: [body, query] }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

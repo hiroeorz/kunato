@@ -422,3 +422,16 @@ POST /api/support/tickets header="Content-Type: application/json" header="Conten
 #     endpoints must keep passing. ---
 GET /docs/phpinfo-debugging
 GET /phpinfo-notes.md
+
+# --- Near-misses for the 2026-10 SQLi, command-injection, SSRF, traversal,
+#     and dumper-eval signatures: the same endpoints and parameters with
+#     ordinary values must keep passing. ---
+GET /search?q=1+OR+2+equals+union+of+sets
+GET /api/data/invoke?order_by=created_at&group_by=category
+GET /api/v1/Contact/streamAttachments?where%5B0%5D%5Btype%5D=equals&where%5B0%5D%5Bfield%5D=name&where%5B0%5D%5Bvalue%5D=Alice
+POST /api/admin/backup/restore header="Content-Type: application/x-www-form-urlencoded" body="filename=backup-2026-01-01.zip"
+POST /api/ticket-sales/export header="Content-Type: application/json" body="{\"svg\":\"<svg><rect width=10 height=10/></svg>\"}"
+GET /feed.php?url=https://example.com/feed.xml
+POST /management header="Content-Type: application/json" body="{\"operation\":\"take-snapshot\",\"address\":[],\"name\":\"snapshot-2026-10-17.xml\"}"
+GET /files?name=2026/01/report.pdf
+POST /dumper/configure header="Content-Type: application/json" body="{\"filter\":\"len(requests) > 2\"}"

