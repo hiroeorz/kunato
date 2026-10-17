@@ -306,7 +306,9 @@ practical starting point with rules for SQL/NoSQL injection, XSS, path traversal
 command injection, SSRF, XXE, malicious uploads, scanners, sensitive files, and
 more. Tagging a release
 (`v*`) builds and uploads static musl tarballs, checksums, and the installer
-through GitHub Actions.
+through GitHub Actions; bump `version` in `Cargo.toml` to the tag first, so
+`kunato --version` identifies the installed release (the release workflow
+rejects a tag that does not match).
 
 ## Configuration
 

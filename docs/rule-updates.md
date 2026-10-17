@@ -162,9 +162,12 @@ the offending field, repeated every ten minutes.
 1. Add the field, target, action, or phase to the engine, its tests, and
    `README.md`. No published rule may use it yet; the gate stays green because
    the published set has not changed.
-2. Cut a release (`v*` tag). `release.yml` builds the binaries and publishes the
-   rule set of that commit as a release asset; the gate's baseline becomes this
-   tag, and the installer serves it to new installs.
+2. Bump `version` in `Cargo.toml` to the tag (for example `0.3.0` for
+   `v0.3.0`) so `kunato --version` identifies the release; `release.yml` fails
+   the build when the tag and the package version disagree. Then cut the
+   release (`v*` tag). `release.yml` builds the binaries and publishes the rule
+   set of that commit as a release asset; the gate's baseline becomes this tag,
+   and the installer serves it to new installs.
 3. From now on daily updates may use the construct: the gate validates against
    the new baseline, and a rule that uses it only fails the build if the release
    is missing.
