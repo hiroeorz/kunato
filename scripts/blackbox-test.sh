@@ -55,6 +55,8 @@ config="$workdir/rules-test.yaml"
 blackbox_log="$workdir/blackbox.log"
 upstream_log="$workdir/upstream.log"
 kunato_log="$workdir/kunato.log"
+upstream_pidfile="$workdir/upstream.pid"
+kunato_pidfile="$workdir/kunato.pid"
 
 if [ "$skip_build" -eq 0 ]; then
     echo "building kunato, the example upstream, and the blackbox driver..."
@@ -101,21 +103,56 @@ for port in 3000 8080 9090; do
     fi
 done
 
-cleanup() {
-    if [ -n "${kunato_pid:-}" ]; then
-        kill "$kunato_pid" 2>/dev/null || true
-    fi
-    if [ -n "${upstream_pid:-}" ]; then
-        kill "$upstream_pid" 2>/dev/null || true
-    fi
+# Start a command in its own session and record the real pid, so cleanup works
+# even when bash inserts a wrapper shell around the background job.
+start_detached() {
+    local pidfile=$1
+    shift
+    setsid sh -c 'echo $$ >"$1"; shift; exec "$@"' sh "$pidfile" "$@" &
 }
-trap cleanup EXIT
 
-setsid ./target/release/examples/upstream --listen 127.0.0.1:3000 \
-    >"$upstream_log" 2>&1 </dev/null &
+cleanup() {
+    if [ -n "${blackbox_pid:-}" ]; then
+        kill "$blackbox_pid" 2>/dev/null || true
+    fi
+    for pidfile in "$kunato_pidfile" "$upstream_pidfile"; do
+        [ -f "$pidfile" ] || continue
+        pid=$(cat "$pidfile" 2>/dev/null || true)
+        [ -n "$pid" ] || continue
+        kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    done
+    for _ in $(seq 1 20); do
+        alive=0
+        for pidfile in "$kunato_pidfile" "$upstream_pidfile"; do
+            [ -f "$pidfile" ] || continue
+            pid=$(cat "$pidfile" 2>/dev/null || true)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                alive=1
+            fi
+        done
+        if [ "$alive" -eq 0 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    for pidfile in "$kunato_pidfile" "$upstream_pidfile"; do
+        [ -f "$pidfile" ] || continue
+        pid=$(cat "$pidfile" 2>/dev/null || true)
+        if [ -n "$pid" ]; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidfile"
+    done
+}
+
+trap cleanup EXIT
+trap 'cleanup; exit 1' INT TERM
+
+start_detached "$upstream_pidfile" ./target/release/examples/upstream --listen 127.0.0.1:3000 \
+    >"$upstream_log" 2>&1 </dev/null
 upstream_pid=$!
-setsid ./target/release/kunato --config "$config" --disable-protection --log-level debug \
-    >"$kunato_log" 2>&1 </dev/null &
+start_detached "$kunato_pidfile" ./target/release/kunato --config "$config" --disable-protection --log-level debug \
+    >"$kunato_log" 2>&1 </dev/null
 kunato_pid=$!
 
 ready=0
@@ -145,7 +182,12 @@ fi
     --blocked blackbox/requests/blocked.txt \
     --allowed blackbox/requests/allowed.txt \
     --addr 127.0.0.1:8080 \
-    --parallelism "$parallelism" >"$blackbox_log" 2>&1 || true
+    --parallelism "$parallelism" >"$blackbox_log" 2>&1 &
+blackbox_pid=$!
+set +e
+wait "$blackbox_pid"
+set -e
+blackbox_pid=
 
 set +e
 python3 "$script_dir/blackbox-report.py" "$blackbox_log" \
