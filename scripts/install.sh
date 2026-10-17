@@ -303,21 +303,20 @@ initialize_configuration() {
 
         log "writing $CONFIG_PATH"
         install -d -m 0750 -o root -g kunato "$CONFIG_DIR"
-        init_args="--upstream $UPSTREAM --listen $LISTEN --rules-url $RULES_URL --output $CONFIG_PATH"
+        set -- --upstream "$UPSTREAM" --listen "$LISTEN" --rules-url "$RULES_URL" --output "$CONFIG_PATH"
         if [ -n "$TLS_CERT" ]; then
-            init_args="$init_args --cert-file $TLS_DIR/cert.pem --key-file $TLS_DIR/key.pem"
+            set -- "$@" --cert-file "$TLS_DIR/cert.pem" --key-file "$TLS_DIR/key.pem"
         fi
         for domain in $ACME_DOMAINS; do
-            init_args="$init_args --acme-domain $domain"
+            set -- "$@" --acme-domain "$domain"
         done
         if [ -n "$ACME_CONTACT" ]; then
-            init_args="$init_args --acme-contact $ACME_CONTACT"
+            set -- "$@" --acme-contact "$ACME_CONTACT"
         fi
         if [ "$ACME_STAGING" -eq 1 ]; then
-            init_args="$init_args --acme-staging"
+            set -- "$@" --acme-staging
         fi
-        # shellcheck disable=SC2086 # init_args is a deliberately split argument list
-        "$BIN_PATH" init $init_args
+        "$BIN_PATH" init "$@"
         chown root:kunato "$CONFIG_PATH"
         chmod 0640 "$CONFIG_PATH"
     fi

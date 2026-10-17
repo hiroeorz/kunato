@@ -325,6 +325,11 @@ use a different file (for example `rules.example.yaml` when running from source)
   evaluated before every other rule source.
 - `rules_update` — daily refresh of `rules_file` (see Managed rules and updates).
 
+`listen` accepts IPv4 and IPv6 socket addresses; quote IPv6 literals in YAML
+(`listen: "[::]:443"`). On Linux, `[::]` is dual-stack and also serves IPv4
+clients as IPv4-mapped addresses, even if the host has no routable IPv6 address;
+use `0.0.0.0` where the kernel has IPv6 disabled or `net.ipv6.bindv6only=1`.
+
 Each category groups related rules (for example SQL injection or XSS signatures)
 and defines a default action that its rules inherit. Individual rules can override
 the category defaults.
