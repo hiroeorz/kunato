@@ -86,29 +86,30 @@ Client ──────►  ┌───────────────�
 ## Getting Started
 
 Kunato ships as a single static binary for Linux. On a server with systemd, one
-command installs the binary, the service, the configuration, and the initial rule
-set:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh | sudo sh
-```
-
-The installer asks for the upstream URL (default `http://127.0.0.1:3000`;
-press Enter to accept) and, when listening on `:443`, for automatic Let's
-Encrypt domain(s) or a certificate and key. Pass every answer as a flag
-together with `--yes` for unattended installs:
+command installs the binary, the service, the configuration, and the initial
+rule set, and terminates TLS with an automatically obtained Let's Encrypt
+certificate:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh \
   | sudo sh -s -- \
-      --upstream http://127.0.0.1:3000 \
-      --tls-cert /etc/letsencrypt/live/example.com/fullchain.pem \
-      --tls-key /etc/letsencrypt/live/example.com/privkey.pem \
+      --upstream http://127.0.0.1:8080 \
+      --acme-domain example.com \
+      --acme-contact admin@example.com \
       --yes
 ```
 
-The service starts automatically. Confirm it is running, then edit
-`/etc/kunato/kunato.yaml`; changes are applied without a restart:
+Replace the upstream with the web server Kunato protects, and the domain and
+contact with a DNS name that resolves to this server and an address for
+Let's Encrypt expiry notices. Automatic certificates need TCP port 443
+reachable from the internet, so wildcards and setups behind a TLS-terminating
+CDN or proxy must manage certificates manually (see [Deployment](#deployment)
+for the full option list).
+
+The service starts automatically; the first start orders the certificate in
+the background, so allow a few seconds before TLS works. Confirm it is
+running, then edit `/etc/kunato/kunato.yaml`; changes are applied without a
+restart:
 
 ```sh
 systemctl status kunato
