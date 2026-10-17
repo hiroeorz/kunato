@@ -344,6 +344,16 @@ POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_fil
 POST /api/upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-benign.txt
 POST /api/search header="Content-Type: application/json" chunked=1 body="{\"query\":\"rust\"}"
 
+# --- Django, Next.js, and Node.js near-misses: benign look-alikes must pass ---
+GET /api/settings
+GET /api/items?cursor=Z2FzLWN1cnNvcg
+POST /api/import body="type: !!str 42"
+GET /static/admin/css/base.css
+GET /_next/static/chunks/main-app-abc123.js
+GET /_next/data/BUILD123/en/page.json
+GET /_next/image?url=%2Fhero.png&w=640&q=75
+GET /docs?q=Object.prototype.hasOwnProperty.call
+
 # --- Encoded and international text ---
 GET /search?q=%E5%AF%BF%E5%8F%B8
 GET /search?q=caf%C3%A9

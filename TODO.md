@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 454 rules then.
+2026-10-17; the managed set carried 460 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -143,7 +143,9 @@ often means "no signature shipped", not "impossible".
 | WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, author enumeration, xmlrpc logged). Plugin CVEs are out of scope by policy |
 | Joomla / Drupal and other CMS | ✅ | Many CVE-specific signatures |
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
-| PHP / Java / .NET / Node.js Exploits | ✅ | Same |
+| PHP / Java / .NET Exploits | ✅ | Same |
+| Node.js / Next.js Exploits | 🔶 | Next.js CVE signatures (middleware subrequest, image optimizer SSRF, RSC route variants, route-match headers), `nextjs-dev-endpoints`, and `prototype-pollution`; the npm ecosystem is watched daily and bundled only when a request shape exists (details below) |
+| Django / Python Framework Exploits | 🔶 | `django-debug-endpoints`, `settings.py` discovery, `python-deserialization`, and the Django DEBUG page rule; Django CVEs stay application-side (details below) |
 | Struts / Spring | ✅ | S2-xxx, Spring4Shell, and the framework CVE signatures |
 | Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal), `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, generic Ruby deserialization, and the bundled Rack multipart DoS shapes (CVE-2026-34827/34829); other 2025-2026 component CVEs (Active Storage, Rack::Static, Puma, Action View) are not virtual-patchable or not yet bundled. Laravel: only `laravel-ignition-endpoint` |
 | CVE-Based Virtual Patching | ✅ | Core feature: `cve-2010` ... `cve-2026` categories plus the daily `rules_update` (SHA256 verification, atomic swap) |
@@ -172,6 +174,20 @@ Functional Rails routes (`/rails/active_storage/*`, `/rails/action_mailbox/*`,
 `/cable`) are deliberately passed through and pinned by the near-miss guards in
 `allowed.txt`; Active Storage signed URLs are JSON-then-base64 wrappers and do
 not match the Marshal signatures.
+
+### Django, Next.js, and Node.js coverage
+
+| Area | Status | Evidence / notes |
+| --- | --- | --- |
+| Django debug exposure | ✅ | `django-debug-endpoints` BLOCKs `/__debug__/` (debug toolbar); `settings.py` and `local_settings.py` probes are 404ed through `sensitive-files` |
+| Django DEBUG pages | ✅ | `response-leaks.django-debug-page` BLOCKs the technical 404/500 page that dumps settings, `SECRET_KEY`, SQL, and source; response rules are outside the black-box harness and have no request-line tests |
+| Django CVE shapes | 🔶 | No stable request signatures: CVE-2026-15307 (GeoDjango GDAL file writes/SSRF, 8.8) needs a crafted raster upload, and the cache/validator advisories are below the bar or application-side |
+| Python deserialization | ✅ | `python-deserialization` covers base64 pickle (`gAJ`/`gAS`/`gAR` prefixes), encoded raw `%80%0[24]`, and YAML `!!python/` tags |
+| Next.js dev exposure | ✅ | `nextjs-dev-endpoints` BLOCKs `/__nextjs*` and `/_next/webpack-hmr`; `/_next/static`, `/_next/data`, and `/_next/image` stay pinned as allowed guards |
+| Next.js CVE shapes | 🔶 | Middleware subrequest (CVE-2025-29927), image optimizer SSRF (CVE-2024-34351), RSC variants, and route-match cache poisoning are bundled; preview/draft-mode abuse is indistinguishable from legitimate preview traffic |
+| Prototype pollution | ✅ | `prototype-pollution.pollution-paths` blocks `__proto__` and constructor-prototype paths in query, body, and cookies; runtime-to-RCE gadget chains stay application-side |
+| npm ecosystem | 🔶 | Daily sources reduce the blind spot (Node.js releases, npm advisories); individual npm CVEs are bundled only when a stable request shape exists |
+| Node.js runtime classes | ❌ | llhttp/HTTP smuggling and permission-model issues are protocol or engine concerns, not URL signatures |
 
 ## 10. Reconnaissance
 

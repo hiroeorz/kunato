@@ -972,6 +972,14 @@ categories:
       - name: template-gadgets
         match: { regex: '(?i)(\{\{\s*(config|self|request|lipsum|cycler|joiner|namespace)\b|\{\{[^}]{0,80}__[a-z]+__|getTemplateFilter|<\s*#(assign|include|import|function)\b|\?new\(\)|\$\s*class\.inspect|#set\s*\(\s*\$)', in: [query, body, cookies] }
 
+  # Prototype pollution: payloads that reach recursive merge, query parsers,
+  # or template helpers through `__proto__` and constructor-prototype paths.
+  - name: prototype-pollution
+    action: BLOCK
+    rules:
+      - name: pollution-paths
+        match: { regex: '(?i)(__proto__|constructor\s*[\[.]\s*prototype)', in: [query, body, cookies] }
+
   # Cross-site scripting signatures.
   - name: xss
     action: BLOCK
@@ -1083,6 +1091,18 @@ categories:
       - name: yaml-ruby-tags
         match: { regex: '(?i)!ruby/[a-z]+', in: [query, body] }
 
+  # Python deserialization payloads: base64 pickle blobs (the `gAJ`/`gAS`/`gAR`
+  # prefixes are the base64 of the protocol 2 and 4 pickle headers),
+  # percent-encoded raw pickle bytes, and the PyYAML `!!python/` tags that
+  # reach unsafe loaders.
+  - name: python-deserialization
+    action: BLOCK
+    rules:
+      - name: pickle-payloads
+        match: { regex: '(^|[^A-Za-z0-9+/])(gA[JRS][A-Za-z0-9+/]{20,}=*|%80%0[24])', in: [cookies, query, body] }
+      - name: yaml-python-tags
+        match: { regex: '(?i)!!python/[a-z/]+', in: [query, body] }
+
   # Encoding tricks used to smuggle paths and headers.
   - name: protocol-anomalies
     action: BLOCK
@@ -1152,13 +1172,27 @@ categories:
       - name: letter-opener
         match: { regex: '(?i)^/letter_opener(/|$)', in: [path] }
 
+  # Development-only Django endpoints; they must not exist in production.
+  - name: django-debug-endpoints
+    action: BLOCK
+    rules:
+      - name: django-debug-toolbar
+        match: { regex: '(?i)^/__debug__/', in: [path] }
+
+  # Development-only Next.js endpoints; they must not exist in production.
+  - name: nextjs-dev-endpoints
+    action: BLOCK
+    rules:
+      - name: nextjs-dev-routes
+        match: { regex: '(?i)^(/__nextjs|/_next/webpack-hmr)', in: [path] }
+
   # Credentials, repository metadata, and backup files are hidden with a 404.
   - name: sensitive-files
     action: BLOCK
     response: { status: 404, body: Not Found }
     rules:
       - name: credentials-and-config
-        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|wp-config\.php)', in: [path] }
+        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|settings\.py|local_settings\.py|wp-config\.php)', in: [path] }
       - name: backup-and-dump-files
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
       # Rails writes its default logs here; the directory must not be served.
@@ -1289,6 +1323,11 @@ categories:
       - name: sql-error-message     # blocks: SQL errors leak schema and query text
         action: BLOCK
         match: { regex: '(?i)(sql syntax.*(mysql|mariadb)|ORA-[0-9]{5}|postgresql.*(error|exception)|sqlite3\.OperationalError)' }
+      # Django's technical 404/500 page dumps settings, the SECRET_KEY, SQL,
+      # and source while DEBUG = True; never forward it.
+      - name: django-debug-page
+        action: BLOCK
+        match: { regex: '(?i)(debug\s*=\s*true\s*</code>\s*in your django settings|you\x27re seeing this error because you have)' }
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
 

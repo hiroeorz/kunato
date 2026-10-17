@@ -595,6 +595,29 @@ POST /upload header="Content-Type: multipart/form-data; boundary=X" chunked=1 bo
 #     that boundary must not slip past the decoded-form rules. ---
 POST /upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-differential.txt
 
+# --- Django exposure and Python deserialization ---
+GET /__debug__/
+GET /__debug__/render_panel/
+GET /settings.py
+GET /local_settings.py
+GET / header="Cookie: sessionid=gAJ9cQBYGwAAAHBvbGx1dGVkX3Nlc3Npb25fZGF0YXEBcy4="
+GET /?data=%80%02%7Dq%01
+POST /api/import body="!!python/object/apply:os.system ['id']"
+GET /?yaml=!!python/object/apply:os.system
+POST /api/import header="Content-Type: application/json" body="{\"payload\":\"!!python/object/apply:os.system\"}"
+
+# --- Next.js development endpoints ---
+GET /__nextjs_original-stack-frame?isServer=true&isEdgeServer=false
+GET /__nextjs_launch-editor?file=%2Fhome%2Fapp%2Fpage.tsx
+GET /_next/webpack-hmr
+
+# --- Node.js prototype pollution ---
+GET /api/config?__proto__[polluted]=1
+GET /api/config?constructor[prototype][polluted]=1
+GET /api/config?constructor.prototype.polluted=1
+POST /api/config header="Content-Type: application/json" body="{\"__proto__\":{\"polluted\":true}}"
+POST /api/config body="__proto__.polluted=yes"
+
 # --- JSON Web Token attacks: unsecured (alg=none) headers, tokens with no
 #     signature, and key-lookup injection through kid/jku/x5u/x5c. Tokens are
 #     written the way jwt_tool, Burp JWT Editor, and the public PoCs emit them;
