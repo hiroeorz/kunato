@@ -960,6 +960,18 @@ categories:
       - name: mongo-operators
         match: { regex: '(?i)\$(where|ne|gt|gte|lt|lte|regex|exists|nin|or|and)\b', in: [query, body] }
 
+  # Server-side template injection: arithmetic probes and engine gadgets in the
+  # delimiters of the common engines (Jinja/Twig, Freemarker, Velocity,
+  # ERB/JSP, Thymeleaf, Smarty). `${...}` and `%{...}` shapes are covered by
+  # cve-2019-signatures.struts-expression-injection.
+  - name: ssti
+    action: BLOCK
+    rules:
+      - name: template-arithmetic
+        match: { regex: '(?i)(\{\{\s*[\d\x27"\[(][^}]{0,24}[\*\+\/%][^}]{0,24}\s*\}\}|\*\{\s*[\d\x27"\[(][^}]{0,24}[\*\+\/%][^}]{0,24}\s*\}|#\{\s*[\d\x27"\[(][^}]{0,24}[\*\+\/%][^}]{0,24}\s*\}|@\(\s*[\d\x27"\[(][^)]{0,24}[\*\+\/%][^)]{0,24}\s*\)|<%=\s*[\d\x27"\[(][^%]{0,48}[\*\+\/%][^%]{0,48}%>|\{\s*\d+\s*\*\s*\d+\s*\})', in: [query, body, cookies] }
+      - name: template-gadgets
+        match: { regex: '(?i)(\{\{\s*(config|self|request|lipsum|cycler|joiner|namespace)\b|\{\{[^}]{0,80}__[a-z]+__|getTemplateFilter|<\s*#(assign|include|import|function)\b|\?new\(\)|\$\s*class\.inspect|#set\s*\(\s*\$)', in: [query, body, cookies] }
+
   # Cross-site scripting signatures.
   - name: xss
     action: BLOCK
@@ -974,6 +986,15 @@ categories:
         match: { regex: '(?i)data\s*:\s*(text/html|text/javascript|application/javascript|application/xhtml)', in: [query, body, headers] }
       - name: dom-sinks
         match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body] }
+
+  # Open redirect: redirect-style parameters carrying absolute or
+  # protocol-relative URLs. OAuth redirect_uri and payment return URLs are
+  # intentionally not matched; those are registered out of band.
+  - name: open-redirect
+    action: BLOCK
+    rules:
+      - name: redirect-parameter-url
+        match: { regex: '(?i)(^|[?&"\x27\s])(redirect(_to|_url|_path)?|redir|return_to|next|continue|goto|dest(ination)?|target_url|out_url)["\x27]?\s*[:=]\s*"?((https?|ftps?)://|//)', in: [query, body, cookies] }
 
   # Directory traversal and local file inclusion.
   - name: path-traversal
@@ -1012,14 +1033,33 @@ categories:
       - name: encoded-path-separator
         match: { regex: '(?i)(%2f|%5c)', in: [path] }
 
-  # Server-side request forgery: cloud metadata endpoints and loopback targets.
+  # Remote file inclusion: include-style parameters that point at a remote
+  # URL, a protocol-relative URL, or a UNC host. Per-host allowlisting cannot
+  # be expressed as a request pattern, so every remote include is treated as
+  # hostile; sites that legitimately include from a fixed host need an
+  # override.
+  - name: remote-file-inclusion
+    action: BLOCK
+    rules:
+      - name: remote-url-include-parameter
+        match: { regex: '(?i)(^|[?&"\x27\s])(include|include_once|require|require_once|page|template|tpl|module|mod|load|import|file|path|dir|view|lang|content)["\x27]?\s*[:=]\s*"?(https?|ftps?|sftp|tftp|smb|nfs|gopher|dict)://', in: [query, body] }
+      - name: protocol-relative-include-parameter
+        match: { regex: '(?i)(^|[?&"\x27\s])(include|include_once|require|require_once|page|template|tpl|module|mod|load|import|file|path|dir|view|lang|content)["\x27]?\s*[:=]\s*"?[\\/]{2}', in: [query, body] }
+
+  # Server-side request forgery: cloud metadata endpoints, private,
+  # link-local, and CGNAT targets, encoded and shorthand loopback addresses,
+  # IPv6 equivalents, and protocol-relative values.
   - name: ssrf
     action: BLOCK
     rules:
       - name: metadata-endpoints
         match: { regex: '(?i)(169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)', in: [query, body] }
       - name: internal-addresses
-        match: { regex: '(?i)(https?|gopher|dict|ftp)://(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])', in: [query, body] }
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(127\.[0-9]|localhost([/:?#&"\x27\s]|$)|0\.0\.0\.0|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|\[::1\]|\[::\]|\[(f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?):|\[::ffff:(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|7f00:1\]))', in: [query, body] }
+      - name: encoded-addresses
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(2130706433|017700000001|0x7f0{5}1|0x7f\.0\.0\.1|0x7f\.1|0177\.0\.0\.1)([/:?#&"\x27\s]|$)', in: [query, body] }
+      - name: protocol-relative-internal
+        match: { regex: '(?i)//(127\.[0-9]|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|localhost([/:?#&"\x27\s]|$)|\[::1\])', in: [query, body] }
       - name: file-scheme
         match: { regex: '(?i)file://', in: [query, body] }
 

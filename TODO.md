@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 439 rules then.
+2026-10-17; the managed set carried 446 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -30,7 +30,7 @@ often means "no signature shipped", not "impossible".
 | LDAP Injection | ❌ | Only Log4Shell `jndi:ldap` strings; no generic filter-escape detection |
 | XPath Injection | ❌ | No rules |
 | XML Injection | 🔶 | XXE (`<!DOCTYPE[`/`<!ENTITY`) is generic and blocked; generic XML structure injection and SOAP deserialization are CVE-specific |
-| SSTI | 🔶 | CVE-specific only (FreeMarker, Velocity, phpcms, WeRSS, ...); no generic `{{7*7}}` style pattern |
+| SSTI | ✅ | `ssti`: generic arithmetic probes and engine gadgets for Jinja/Twig (`{{7*7}}`, dunder access), Freemarker (`<#assign`, `?new()`), Velocity (`$class.inspect`, `#set($`), ERB/JSP (`<%=`), Thymeleaf (`*{}`), and Smarty (`{7*7}`); `${`/`%{` are covered by `cve-2019-signatures.struts-expression-injection`; the CVE-specific set is retained |
 | Expression Language Injection | 🔶 | Same: CVE-specific (Ivanti EPMM, Struts OGNL, Nexus JavaEL, ...) |
 | CRLF Injection / HTTP Header Injection | ✅ | `protocol-anomalies.crlf-injection` (`%0d%0a` etc. in path/query/headers) |
 
@@ -44,7 +44,7 @@ often means "no signature shipped", not "impossible".
 | HTML Injection | 🔶 | script/iframe-like tags are blocked; generic tags (`<div>`) pass |
 | JavaScript Injection | ✅ | `javascript-uri` plus `dom-sinks` |
 | CSS Injection | ❌ | No rules |
-| Open Redirect | ❌ | No generic rule (customable with a query-URL regex) |
+| Open Redirect | 🔶 | `open-redirect.redirect-parameter-url` blocks absolute and protocol-relative targets on the common parameter names (`redirect[_to|_url|_path]`, `next`, `return_to`, `continue`, `goto`, `dest[ination]`, `target_url`, `out_url`); custom parameter names and same-site absolute redirects stay indistinguishable, and `redirect_uri`/payment return URLs are intentionally excluded |
 | Clickjacking | ❌ | No detection. Mitigation is possible via `response_headers.set` (`X-Frame-Options`/CSP), i.e. header policy rather than detection |
 
 ## 3. Path and File Operations
@@ -53,7 +53,7 @@ often means "no signature shipped", not "impossible".
 | --- | --- | --- |
 | Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
-| Remote File Inclusion (RFI) | ❌ | No generic rule (`file://` is blocked by `ssrf`; the rest is CVE-specific) |
+| Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
 | Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...); no MIME, magic-byte, or content inspection |
 | Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths) |
 | Double Extension | ✅ | The extension regex also matches `shell.php.jpg` (`\b` boundary) |
@@ -126,7 +126,7 @@ often means "no signature shipped", not "impossible".
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| SSRF | 🔶 | `ssrf`: cloud metadata IPs, 127.0.0.1/localhost/::1, `file://`. Arbitrary internal ranges (10.x, ...) and decimal/hex IP forms are uncovered |
+| SSRF | ✅ | `ssrf`: metadata endpoints, loopback (127/8, `localhost`, `[::1]`, `[::]`), RFC1918 ranges, link-local, CGNAT, decimal/hex/octal loopback forms, IPv6 ULA/link-local/mapped forms, protocol-relative values, non-HTTP schemes, and `file://`; DNS names that resolve internally remain outside static reach |
 | XXE | ✅ | `xxe` (DOCTYPE plus ENTITY) and CVE-specific rules |
 | Unsafe Deserialization | 🔶 | Dense CVE-specific signatures (`rO0AB`, WDDX, ObjectStateFormatter, XStream, OFBiz, ...); no generic rule |
 | RCE Payloads | ✅ | `command-injection` plus JNDI/OGNL/EL known-exploits plus the CVE set |
@@ -209,8 +209,8 @@ often means "no signature shipped", not "impossible".
 | Core item | Status |
 | --- | --- |
 | SQLi / XSS / Command Injection | ✅ |
-| Path Traversal / LFI | ✅ (RFI is ❌) |
-| SSRF | 🔶 (metadata and loopback only) |
+| Path Traversal / LFI / RFI | ✅ |
+| SSRF | ✅ |
 | XXE / RCE payloads | ✅ |
 | Malicious file upload | 🔶 (extension-based) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
@@ -224,9 +224,9 @@ often means "no signature shipped", not "impossible".
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
 either direction, arbitrary re-signing), GraphQL in general, LDAP/XPath
-injection, open redirect, CSS injection, HPP, MIME spoofing, phpinfo/Swagger
-discovery, behavioral bot detection, and the business-logic family (IDOR/BOLA,
-mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
+injection, open redirect via unlisted parameter names, CSS injection, HPP, MIME
+spoofing, phpinfo/Swagger discovery, behavioral bot detection, and the
+business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
 session design cannot be fixed by a WAF at all; Kunato can only assist through
 custom response-phase rules. Closing a gap usually means either a YAML rule
 (most request-shape gaps) or an engine feature (behavioral and stateful checks).

