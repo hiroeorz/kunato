@@ -548,6 +548,39 @@ GET /notes.swo
 GET /db.backup
 GET /old-config.old
 
+# --- Rails exposure: development-only debug endpoints, configuration and key
+#     files, log files, and the Active Storage root. Production deployments
+#     must not serve any of these. ---
+GET /rails/info/routes
+GET /rails/info/properties
+GET /rails/mailers
+GET /rails/mailers/user_mailer/welcome
+GET /rails/conductor/action_mailbox/inbound_emails
+GET /letter_opener
+GET /letter_opener/42
+GET /config/master.key
+GET /config/credentials/production.key
+GET /config/database.yml
+GET /config/storage.yml
+GET /log/development.log
+GET /log/production.log
+GET /log/test.log
+GET /storage/
+GET /storage/ab/cd/0123456789abcdef0123456789abcdef
+
+# --- Ruby deserialization: Marshal payloads (base64 BAh7 and encoded raw
+#     bytes) and YAML !ruby tags that reach Marshal.load or YAML.load object
+#     injection. ---
+GET / header="Cookie: _session_id=BAh7CEkiD3Nlc3Npb25faWQGOgZGVEkiJDBkM2Y2M2FhZjgzZTBkY2U3MGIzZTU2M2FhM2U4NzNkNgY7AFQ=--b4c1c2"
+GET /?payload=BAh7CEkiCGdpZAY6BkVUSSIZZ2lkOi8vYXBwL1VzZXIvMQY7AFQ=
+POST /api/import body="data=BAh7CEkiCGdpZAY6BkVUSSIZZ2lkOi8vYXBwL1VzZXIvMQY7AFQ="
+GET /?raw=%04%08%7B
+POST /api/config body="--- !ruby/object:Gem::Requirement requirements: {}"
+POST /api/config body="!ruby/hash:ActiveSupport::HashWithIndifferentAccess name: demo"
+POST /api/config body="--- !ruby/struct:OpenStruct name: demo"
+POST /api/config header="Content-Type: application/json" body="{\"payload\":\"!ruby/object:Gem::Installer\"}"
+GET /?yaml=!ruby/object:Gem::Requirement
+
 # --- JSON Web Token attacks: unsecured (alg=none) headers, tokens with no
 #     signature, and key-lookup injection through kid/jku/x5u/x5c. Tokens are
 #     written the way jwt_tool, Burp JWT Editor, and the public PoCs emit them;

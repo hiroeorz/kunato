@@ -231,6 +231,14 @@ GET /admin/settings
 POST /wp-login.php body=log=tanaka&pwd=secret
 GET /wp-json/wp/v2/posts
 
+# --- Rails dashboards (logged, not blocked) ---
+GET /sidekiq
+GET /pghero
+GET /flipper
+GET /blazer
+GET /delayed_job
+GET /good_job
+
 # --- Search engine crawlers (logged, not blocked) ---
 GET / ua="Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 GET /robots.txt ua="Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)"
@@ -321,6 +329,14 @@ GET /login?next=%2Fdashboard
 GET /logout?redirect_to=%2Fhome
 GET /auth?continue=%2Fsettings
 POST /login body="next=%2Fsettings&user=tanaka"
+
+# --- Rails exposure near-misses: functional Rails routes, YAML anchors, and
+#     Rails-style base64 that must keep passing ---
+GET /rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBBZz0iLCJleHAiOm51bGwsInB1cnBvc2UiOiJibG9iIn0=--a1b2c3d4/report.pdf
+POST /rails/active_storage/direct_uploads
+POST /api/config body="{defaults: &d 1, retry: *d}"
+GET /api/items?cursor=QmFzaWMtYmFzZTY0LWN1cnNvci0yMDI2
+GET /api/logs?from=2026-01-01&limit=100
 
 # --- Encoded and international text ---
 GET /search?q=%E5%AF%BF%E5%8F%B8

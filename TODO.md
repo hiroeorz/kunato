@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 446 rules then.
+2026-10-17; the managed set carried 452 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -119,7 +119,7 @@ often means "no signature shipped", not "impossible".
 | URL Manipulation | 🔶 | Path normalization, matrix parameters, and encoded separators are blocked; general parameter tampering is not |
 | Parameter Tampering | ❌ | Business-logic dependent |
 | Privilege-Escalation Requests | ❌ | No generic rule (many CVE-specific auth-bypass signatures exist) |
-| Admin Interface Access Attempts | 🔶 | `admin-interfaces` logs by default (BLOCK is the documented hardening) plus CVE-specific admin paths (AEM, h2-console, ...) |
+| Admin Interface Access Attempts | 🔶 | `admin-interfaces` logs by default (BLOCK is the documented hardening) plus CVE-specific admin paths (AEM, h2-console, ...) and the Rails dashboards (`sidekiq`, `pghero`, `flipper`, `blazer`, `delayed_job`, `good_job`) |
 | Hidden Endpoints / Non-Public APIs | ❌ | No rules |
 
 ## 8. Server-Side Attacks
@@ -128,7 +128,7 @@ often means "no signature shipped", not "impossible".
 | --- | --- | --- |
 | SSRF | ✅ | `ssrf`: metadata endpoints, loopback (127/8, `localhost`, `[::1]`, `[::]`), RFC1918 ranges, link-local, CGNAT, decimal/hex/octal loopback forms, IPv6 ULA/link-local/mapped forms, protocol-relative values, non-HTTP schemes, and `file://`; DNS names that resolve internally remain outside static reach |
 | XXE | ✅ | `xxe` (DOCTYPE plus ENTITY) and CVE-specific rules |
-| Unsafe Deserialization | 🔶 | Dense CVE-specific signatures (`rO0AB`, WDDX, ObjectStateFormatter, XStream, OFBiz, ...); no generic rule |
+| Unsafe Deserialization | 🔶 | Dense CVE-specific signatures (`rO0AB`, WDDX, ObjectStateFormatter, XStream, OFBiz, ...); `ruby-deserialization` adds generic Marshal (`BAh7`, encoded raw `%04%08`) and YAML `!ruby/` shapes for Ruby/Rails; other runtimes remain CVE-specific |
 | RCE Payloads | ✅ | `command-injection` plus JNDI/OGNL/EL known-exploits plus the CVE set |
 | Prototype Pollution | 🔶 | CVE-specific only (Kibana Timelion, React RSC `__proto__:then`) |
 | Object Injection | 🔶 | CVE-specific (Joomla, Yii, CraftCMS, ...) |
@@ -144,9 +144,10 @@ often means "no signature shipped", not "impossible".
 | Joomla / Drupal and other CMS | ✅ | Many CVE-specific signatures |
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
 | PHP / Java / .NET / Node.js Exploits | ✅ | Same |
-| Struts / Spring / Laravel / Rails | ✅ | S2-xxx, Spring4Shell, Rails-family CVE signatures |
+| Struts / Spring | ✅ | S2-xxx, Spring4Shell, and the framework CVE signatures |
+| Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal) plus `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, and generic Ruby deserialization; the 2025-2026 component CVEs (Active Storage, Rack, Puma, Action View) are not yet bundled. Laravel: only `laravel-ignition-endpoint` |
 | CVE-Based Virtual Patching | ✅ | Core feature: `cve-2010` ... `cve-2026` categories plus the daily `rules_update` (SHA256 verification, atomic swap) |
-| Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) plus CVE-specific debug paths (AEM console, actuator, ...) |
+| Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards, `rails-debug-endpoints` (BLOCK) for the dev-only `/rails/info`/`/rails/mailers`/`/rails/conductor` and `/letter_opener`, plus CVE-specific debug paths (AEM console, actuator, ...) |
 
 ## 10. Reconnaissance
 
@@ -155,7 +156,7 @@ often means "no signature shipped", not "impossible".
 | Vulnerability Scanner | ✅ | 20+ tools blocked by User-Agent (sqlmap, nikto, nmap, nuclei, Acunetix, ...) |
 | Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, and rate limits in combination; no behavioral detection of iterative probing |
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
-| `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404) |
+| `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`) |
 | phpinfo-style Information Endpoints | ❌ | No rules |
 | Swagger/OpenAPI Endpoint Discovery | ❌ | No rules |
 | Admin Page Discovery | 🔶 | `admin-interfaces` logs by default |

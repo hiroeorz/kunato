@@ -1081,6 +1081,19 @@ categories:
       - name: doctype-and-entity
         match: { regex: '(?i)<!DOCTYPE[^>]{0,200}\[|<!ENTITY\b', in: [body] }
 
+  # Ruby deserialization payloads: base64 Marshal blobs (BAh7 is the base64 of
+  # the "\x04\x08" Marshal header), percent-encoded raw Marshal bytes, and the
+  # YAML !ruby tags used for object injection through YAML.load. Active Storage
+  # signed IDs wrap a JSON document instead and do not carry the literal
+  # prefix.
+  - name: ruby-deserialization
+    action: BLOCK
+    rules:
+      - name: marshal-payloads
+        match: { regex: '(^|[^A-Za-z0-9+/])(BAh7[A-Za-z0-9+/_-]{20,}=*|%04%08)', in: [query, body, cookies] }
+      - name: yaml-ruby-tags
+        match: { regex: '(?i)!ruby/[a-z]+', in: [query, body] }
+
   # Encoding tricks used to smuggle paths and headers.
   - name: protocol-anomalies
     action: BLOCK
@@ -1141,15 +1154,31 @@ categories:
       - name: traversal-in-filename
         match: { regex: '(?i)filename\s*=\s*"[^"]*(\.\.[/\\]|\.\.%2f|\.\.%5c)', in: [body] }
 
+  # Development-only Rails endpoints; they must not exist in production.
+  - name: rails-debug-endpoints
+    action: BLOCK
+    rules:
+      - name: rails-internals
+        match: { regex: '(?i)^/rails/(info(/|$)|mailers(/|$)|conductor(/|$))', in: [path] }
+      - name: letter-opener
+        match: { regex: '(?i)^/letter_opener(/|$)', in: [path] }
+
   # Credentials, repository metadata, and backup files are hidden with a 404.
   - name: sensitive-files
     action: BLOCK
     response: { status: 404, body: Not Found }
     rules:
       - name: credentials-and-config
-        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials(\.|$)|secrets?\.(ya?ml|json|toml)|wp-config\.php)', in: [path] }
+        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|wp-config\.php)', in: [path] }
       - name: backup-and-dump-files
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
+      # Rails writes its default logs here; the directory must not be served.
+      - name: log-files
+        match: { regex: '(?i)^/log/[^/]*\.log$', in: [path] }
+      # Active Storage's DiskService root; files here are served through
+      # signed /rails/active_storage URLs, never directly.
+      - name: active-storage-root
+        match: { regex: '(?i)^/storage(/|$)', in: [path] }
 
   # Common admin interfaces are logged by default. Once you have allowlisted your
   # own admin addresses in trusted-sources, raise this category to BLOCK.
@@ -1157,7 +1186,7 @@ categories:
     action: LOG
     rules:
       - name: common-admin-paths
-        match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$))', in: [path] }
+        match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$)|sidekiq(/|$)|pghero(/|$)|flipper(/|$)|blazer(/|$)|delayed_job(/|$)|good_job(/|$))', in: [path] }
 
   # JSON Web Token attacks: unsecured (alg=none) headers, tokens whose signature
   # segment is missing, and key-lookup headers (kid/jku/jwk/x5u/x5c) that point
