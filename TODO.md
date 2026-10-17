@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 435 rules then.
+2026-10-17; the managed set carried 439 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -107,8 +107,8 @@ often means "no signature shipped", not "impossible".
 | OTP Brute Force | 🔶 | Rate limits only |
 | Session ID Anomalies | ❌ | No rules |
 | Cookie Tampering | 🔶 | Only specific CVE shapes (forged `STATE_COOKIE`, rememberMe `rO0`, ...) |
-| JWT Tampering | 🔶 | CVE-specific (default-secret tokens, ...) only |
-| JWT Algorithm Confusion | ❌ | No generic validation (listed as patch-side watch work in `blackbox/requests/blocked.txt`) |
+| JWT Tampering | 🔶 | The `jwt` category blocks unsecured (`alg:none`) and signature-less tokens, `kid`/`jku`/`jwk`/`x5u`/`x5c` key-lookup injection, and the zero-signature CVE-2022-21449 PoCs, across headers/cookies/query/body; claim tampering and re-signing with an unknown weak secret remain undetectable |
+| JWT Algorithm Confusion | 🔶 | The `none`-algorithm subset is blocked by `jwt.none-algorithm`; RS256↔HS256 confusion has no static shape (still patch-side watch work in `blackbox/requests/blocked.txt`) |
 
 ## 7. Authorization and Access Control
 
@@ -222,10 +222,11 @@ often means "no signature shipped", not "impossible".
 
 ## Notable Gaps
 
-JWT (including algorithm confusion), GraphQL in general, LDAP/XPath injection,
-open redirect, CSS injection, HPP, MIME spoofing, phpinfo/Swagger discovery,
-behavioral bot detection, and the business-logic family (IDOR/BOLA, mass
-assignment, parameter tampering). CSRF, IDOR, authorization gaps, and session
-design cannot be fixed by a WAF at all; Kunato can only assist through custom
-response-phase rules. Closing a gap usually means either a YAML rule (most
-request-shape gaps) or an engine feature (behavioral and stateful checks).
+JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
+either direction, arbitrary re-signing), GraphQL in general, LDAP/XPath
+injection, open redirect, CSS injection, HPP, MIME spoofing, phpinfo/Swagger
+discovery, behavioral bot detection, and the business-logic family (IDOR/BOLA,
+mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
+session design cannot be fixed by a WAF at all; Kunato can only assist through
+custom response-phase rules. Closing a gap usually means either a YAML rule
+(most request-shape gaps) or an engine feature (behavioral and stateful checks).

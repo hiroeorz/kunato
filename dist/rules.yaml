@@ -735,6 +735,11 @@ categories:
         match: { path: '(?i)^/misc/validate_binary_path$', regex: '(?i)utility_path', in: [body] }
       - name: manageengine-samlresponse
         match: { regex: '(?i)^/SamlResponseServlet$', in: [path] }
+      # CVE-2022-21449 (Java 15-18): the ECDSA verify path accepts the all-zero
+      # signature MAYCAQACAQA (a DER SEQUENCE of two zero INTEGERs), so any
+      # claims validate. Covers the public PoC tokens.
+      - name: java-empty-ecdsa-signature
+        match: { regex: '\.MAYCAQACAQA(?:\s|$|["&;,)\]}])', in: [query, body, cookies, headers] }
 
   # Request signatures for exploited 2023 vulnerabilities: file-transfer and
   # CI/CD flaws, appliance auth bypasses, and framework template injection.
@@ -1102,6 +1107,22 @@ categories:
     rules:
       - name: common-admin-paths
         match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$))', in: [path] }
+
+  # JSON Web Token attacks: unsecured (alg=none) headers, tokens whose signature
+  # segment is missing, and key-lookup headers (kid/jku/jwk/x5u/x5c) that point
+  # verification at attacker-controlled key material. Tokens are base64url, so
+  # the patterns match the encoded shapes of the common serializations; the JWT
+  # section of blackbox/requests/blocked.txt lists the covered shapes and the
+  # limits (algorithm confusion and claim tampering have no static signature).
+  - name: jwt
+    action: BLOCK
+    rules:
+      - name: none-algorithm
+        match: { regex: '(?i)(eyJhbGciOiJub25lI|eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lI|eyJhbGciOiAibm9uZS|eyJ0eXAiOiJKV1QiLCJhbGciOiAibm9uZS|eyJhbGciOiJOb25lI|eyJhbGciOiJOT05FI|eyJhbGciOiJuT25FI|"alg"\s*:\s*"none"[^}]{0,80}"typ"\s*:\s*"JWT"|"typ"\s*:\s*"JWT"[^}]{0,80}"alg"\s*:\s*"none")', in: [query, body, cookies, headers] }
+      - name: missing-signature
+        match: { regex: '(?:^|[\s=,;:"(\[{])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.(?:\s|$|["&;,)\]}])|(?:^|[\s=,;:"(\[{])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}(?:\s|$|["&;,)\]}])', in: [query, body, cookies, headers] }
+      - name: key-header-injection
+        match: { regex: '(ImtpZCI6Ii4u|ImtpZCI6Ii9kZXY|ImtpZCI6ImZpb|ImtpZCI6Imh0dHA|ImtpZCI6Inxp|ImtleXxpZCJ9|Ii4uLy4u|Li4vLi4v|8uLi8uLi9|VU5JT04gU0VMRUNU|Vx1MDAw|ImprdSI6|Imp3ayI6|Ing1dSI6|Ing1YyI6)', in: [query, body, cookies, headers] }
 
   # Request signatures for the 2026-10 KEV intake: pre-auth RCE, deserialization,
   # and command-injection paths with published request shapes.

