@@ -255,6 +255,7 @@ not match the Marshal signatures.
 | Null Byte | ✅ | `%00` blocked |
 | Payload / Parameter Fragmentation | 🔶 | Embedded-HTTP inspection and multipart flattening exist; general fragmentation is unhandled |
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
+| Content-Encoding Compression | ✅ | gzip (all members), deflate, br, and zstd bodies are decompressed for inspection, stacked up to three layers; zstd frames with a window over 8 MiB fall back to raw |
 | Chunked Encoding Abuse | 🔶 | Rejected at the protocol layer (hyper) |
 | Multipart Boundary Abuse | ✅ | every declared boundary is flattened for inspection (up to four, closing the CVE-2026-26961 parser-differential class); 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule, and the Rack DoS signatures (escape-heavy part headers, chunked multipart uploads) |
 | JSON/XML Structure Evasion | 🔶 | JSON escapes are decoded; no dedicated structural detection |

@@ -154,16 +154,17 @@ header regex). Responses already buffer only a prefix
   still get the percent passes. Multipart parsing is bounded (64
   parts, 1 KiB names/file names); malformed or oversized multipart bodies fall
   back to raw inspection.
-- Bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
-  inspection only; forwarded bytes are never modified. All gzip members are
-  decoded and stacked encodings are decoded in reverse order, up to three
-  layers; unknown or deeper encodings are inspected as received and counted
-  (`kunato_request_decode_skipped_total` /
+- Bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are
+  decompressed for inspection only; forwarded bytes are never modified. All gzip
+  members are decoded and stacked encodings are decoded in reverse order, up to
+  three layers; unknown or deeper encodings are inspected as received and
+  counted (`kunato_request_decode_skipped_total` /
   `kunato_response_decode_skipped_total`). Decoding is bounded by
   `limits.max_body_bytes` / `limits.max_response_body_bytes`, and a decoded body
   cut off at the limit raises its own log entry and counter
   (`kunato_request_decode_truncated_total` /
-  `kunato_response_decode_truncated_total`).
+  `kunato_response_decode_truncated_total`). zstd frames that declare a window
+  over 8 MiB are inspected as received so decoder state stays bounded.
 - No other normalization is performed (no Unicode folding, no HTML entity
   decoding). Entity and fullwidth folding are deferred until anomaly scoring
   can absorb their false positives.
@@ -537,6 +538,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
 | `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |
+| `ruzstd`                  | Zstandard decoding             | Pure-Rust decoder; frames with a window over 8 MiB fall back to raw inspection. |
 | `rustls`, `tokio-rustls`  | TLS termination                | Pure-Rust TLS 1.2/1.3 with the ring provider.              |
 | `tokio-rustls-acme`       | Automatic certificates         | ACME client with TLS-ALPN-01, renewal, and resolver support; default webpki roots disabled to stay within the license policy. |
 | `rustls-native-certs`     | ACME API trust store           | Uses the system CA store for ACME directory requests.      |
@@ -600,7 +602,7 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 - **Obfuscation** — path/query are matched raw and through up to two
   percent-decode passes, bodies are matched raw plus content-type decoded
   (forms, JSON escapes, multipart field values and file names) and then
-  percent-decoded again, and gzip/deflate/br bodies are decompressed for
+  percent-decoded again, and gzip/deflate/br/zstd bodies are decompressed for
   matching; encoded traversal, XSS, and compressed payloads are covered by
   rules. Multipart flattening and decode passes are bounded, and no decoding
   ever changes the forwarded bytes.

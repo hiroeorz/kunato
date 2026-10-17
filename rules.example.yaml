@@ -1410,11 +1410,12 @@ categories:
         match: { path: '(?i)^/api/v1/auth/auto-login(/|$)' }
 
   # Response inspection runs after the upstream response arrives. Response
-  # bodies are inspected up to limits.max_response_body_bytes as received
-  # (compressed bodies are not decompressed); when the limit is reached the
-  # prefix is inspected and the remainder is streamed through. The default
-  # `in` target is `response_body`; request conditions such as `path` still
-  # apply. BLOCK replaces the upstream response with the configured response.
+  # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
+  # br, and zstd bodies are decompressed for matching first. When the limit is
+  # reached the prefix is inspected and the remainder is streamed through. The
+  # default `in` target is `response_body`; request conditions such as `path`
+  # still apply. BLOCK replaces the upstream response with the configured
+  # response.
   - name: response-leaks
     phase: response
     action: LOG

@@ -4,8 +4,12 @@ use std::io::Read;
 use brotli_decompressor::Decompressor as BrotliDecoder;
 use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
+use ruzstd::decoding::StreamingDecoder as ZstdDecoder;
 
 const DECODE_BUFFER_BYTES: usize = 8 * 1024;
+/// Largest zstd frame window accepted for inspection. Frames that declare a
+/// larger window fall back to raw inspection so decode state stays bounded.
+const MAX_ZSTD_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PERCENT_DECODE_PASSES: usize = 2;
 const MAX_CONTENT_ENCODING_LAYERS: usize = 3;
 const MAX_MULTIPART_PARTS: usize = 64;
@@ -40,6 +44,10 @@ pub fn decode_content_encoding(
             "gzip" | "x-gzip" => read_bounded(MultiGzDecoder::new(input), limit),
             "deflate" => decode_deflate(input, limit),
             "br" => read_bounded(BrotliDecoder::new(input, DECODE_BUFFER_BYTES), limit),
+            "zstd" => match ZstdDecoder::new_with_max_window_size(input, MAX_ZSTD_WINDOW_BYTES) {
+                Ok(decoder) => read_bounded(decoder, limit),
+                Err(_) => return None,
+            },
             _ => return None,
         };
         if layer.is_empty() {
@@ -273,7 +281,10 @@ fn content_encodings(value: &HeaderValue) -> Option<Vec<String>> {
             return None;
         }
         let token = token.to_ascii_lowercase();
-        if !matches!(token.as_str(), "gzip" | "x-gzip" | "deflate" | "br") {
+        if !matches!(
+            token.as_str(),
+            "gzip" | "x-gzip" | "deflate" | "br" | "zstd"
+        ) {
             return None;
         }
         encodings.push(token);
@@ -684,6 +695,10 @@ mod tests {
         output
     }
 
+    fn zstd(data: &[u8]) -> Vec<u8> {
+        ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+    }
+
     fn headers(name: HeaderName, value: &str) -> HeaderMap {
         let mut map = HeaderMap::new();
         map.insert(name, HeaderValue::from_str(value).expect("valid header"));
@@ -730,6 +745,19 @@ mod tests {
     }
 
     #[test]
+    fn zstd_body_is_decoded() {
+        let payload = b"q=1 union select password";
+        let decoded = decode_content_encoding(
+            &zstd(payload),
+            &headers(CONTENT_ENCODING, "zstd"),
+            payload.len(),
+        )
+        .expect("decoded");
+        assert_eq!(decoded.body, payload);
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
     fn multi_member_gzip_bodies_are_decoded() {
         let mut encoded = gzip(b"benign-first-member");
         encoded.extend_from_slice(&gzip(b" UNION SELECT password"));
@@ -750,6 +778,17 @@ mod tests {
         let stacked = zlib(&gzip(payload));
         let decoded =
             decode_content_encoding(&stacked, &headers(CONTENT_ENCODING, "gzip, deflate"), 1024)
+                .expect("decoded");
+        assert_eq!(decoded.body, payload);
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn zstd_stacked_with_gzip_is_decoded_in_reverse_order() {
+        let payload = b"q=1 union select password";
+        let stacked = zstd(&gzip(payload));
+        let decoded =
+            decode_content_encoding(&stacked, &headers(CONTENT_ENCODING, "gzip, zstd"), 1024)
                 .expect("decoded");
         assert_eq!(decoded.body, payload);
         assert!(!decoded.truncated);
@@ -781,13 +820,21 @@ mod tests {
             CONTENT_ENCODING,
             "identity, br"
         )));
-        assert!(encoding_is_uninspectable(&headers(
+        assert!(!encoding_is_uninspectable(&headers(
             CONTENT_ENCODING,
             "zstd"
         )));
-        assert!(encoding_is_uninspectable(&headers(
+        assert!(!encoding_is_uninspectable(&headers(
             CONTENT_ENCODING,
             "gzip, zstd"
+        )));
+        assert!(encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "compress"
+        )));
+        assert!(encoding_is_uninspectable(&headers(
+            CONTENT_ENCODING,
+            "gzip, compress"
         )));
     }
 
@@ -851,10 +898,42 @@ mod tests {
     }
 
     #[test]
+    fn zstd_decoding_is_bounded_and_reports_truncation() {
+        let decoded = decode_content_encoding(
+            &zstd(&vec![b'a'; 64 * 1024]),
+            &headers(CONTENT_ENCODING, "zstd"),
+            128,
+        )
+        .expect("decoded");
+        assert_eq!(decoded.body.len(), 128);
+        assert!(decoded.truncated);
+    }
+
+    #[test]
+    fn oversized_zstd_windows_fall_back_to_raw_inspection() {
+        // A valid raw-block frame declaring a 16 MiB window (exponent 14),
+        // above the 8 MiB inspection cap. ruzstd's default limit accepts it,
+        // but Kunato's capped decoder must decline it.
+        let frame: [u8; 16] = [
+            0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x70, 0x39, 0x00, 0x00, b'p', b'a', b'y', b'l', b'o',
+            b'a', b'd',
+        ];
+        let mut decoder = ZstdDecoder::new(&frame[..]).expect("frame is valid");
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).expect("decodes");
+        assert_eq!(decoded, b"payload");
+
+        assert!(
+            decode_content_encoding(&frame, &headers(CONTENT_ENCODING, "zstd"), 1024).is_none()
+        );
+    }
+
+    #[test]
     fn unknown_or_invalid_encodings_fall_back() {
         let payload = b"payload";
         assert!(
-            decode_content_encoding(payload, &headers(CONTENT_ENCODING, "zstd"), 1024).is_none()
+            decode_content_encoding(payload, &headers(CONTENT_ENCODING, "compress"), 1024)
+                .is_none()
         );
         assert!(
             decode_content_encoding(payload, &headers(CONTENT_ENCODING, "gzip"), 1024).is_none()
@@ -863,7 +942,7 @@ mod tests {
         assert!(
             decode_content_encoding(
                 payload,
-                &headers(CONTENT_ENCODING, "gzip, deflate, br, zstd"),
+                &headers(CONTENT_ENCODING, "gzip, deflate, br, compress"),
                 1024
             )
             .is_none()

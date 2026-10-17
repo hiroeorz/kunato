@@ -27,6 +27,7 @@ quinn = { version = "0.11", default-features = false, features = ["log", "runtim
 regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-native-certs = "0.8"
+ruzstd = { version = "0.9", default-features = false, features = ["std", "hash"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "1.3", default-features = false, features = ["deserialize"] }
 sha2 = "0.11"

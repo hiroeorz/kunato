@@ -41,10 +41,10 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Response inspection** — Response-phase categories match upstream responses on
   status, headers, and body (up to a size limit) and can block, log, or pass them
   through. The remainder of oversized responses is streamed uninspected.
-- **Encoded body inspection** — Bodies compressed with gzip, deflate, or brotli are
-  decompressed for matching, and request bodies are additionally decoded by content
-  type (`application/x-www-form-urlencoded` and JSON escapes). Forwarded traffic is
-  never modified.
+- **Encoded body inspection** — Bodies compressed with gzip, deflate, brotli, or
+  zstd are decompressed for matching, and request bodies are additionally decoded
+  by content type (`application/x-www-form-urlencoded` and JSON escapes).
+  Forwarded traffic is never modified.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.
@@ -627,9 +627,9 @@ that declares several boundaries is flattened once per boundary (up to four),
 because parsers disagree on which one wins (Rack takes the last); messages that
 exceed that fall back to the percent passes on the raw body. Bodies are
 decompressed first when
-`Content-Encoding` is `gzip`, `deflate`, or `br`: all gzip members are decoded,
-and stacked encodings are decoded in reverse order (up to three layers; deeper or
-unknown encodings are inspected as received and counted in
+`Content-Encoding` is `gzip`, `deflate`, `br`, or `zstd`: all gzip members are
+decoded, and stacked encodings are decoded in reverse order (up to three layers;
+deeper or unknown encodings are inspected as received and counted in
 `kunato_request_decode_skipped_total`). Multipart parsing is
 bounded to 64 parts with 1 KiB names and file names; malformed multipart bodies
 are inspected raw only. No other normalization (Unicode folding, HTML entity
@@ -655,8 +655,8 @@ Response-phase rules may combine request conditions (`path`, `method`, `source_i
 `headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule
 can require a path and a response body signature. `status`, `response_headers`, and
 the `response_body` target are rejected in request-phase categories. Response
-bodies with `Content-Encoding: gzip`, `deflate`, or `br` are decompressed for
-matching (all gzip members, stacked encodings in reverse order up to three
+bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are decompressed
+for matching (all gzip members, stacked encodings in reverse order up to three
 layers), and only the first `limits.max_response_body_bytes` are inspected (the
 decoded output is bounded by the same limit). Unknown or deeper encodings are
 inspected as received and counted in `kunato_response_decode_skipped_total`.
