@@ -59,12 +59,31 @@ docs/
 packaging/
   kunato.service   # systemd unit
 rules.example.yaml # Example configuration
+TODO.md            # Attack-coverage tracker (covered / partial / gap per attack class)
 deny.toml          # Dependency, license, and advisory policy
 ```
 
 See `docs/DESIGN.md` for the full architecture. Update this section as the layout
 becomes real. Keep module responsibilities separated: configuration, rule
 evaluation, proxying, and protection logic must not bleed into each other.
+
+## Attack Coverage Tracking
+
+`TODO.md` tracks which attack classes the bundled rules and engine mechanisms
+cover, which are partial, and which are gaps, with the evidence (rule category
+names, mechanisms) behind every verdict. Update it whenever coverage changes:
+
+- new, removed, or renamed categories or rules in `rules.example.yaml` (and the
+  regenerated `dist/rules.yaml`),
+- new or changed engine capabilities (match fields, decoding, protection,
+  protocol limits, response handling),
+- a gap closed with a local YAML rule pattern worth documenting,
+- a verdict that the black-box suite contradicts.
+
+Keep statuses honest: a bundled rule or built-in mechanism is `Covered`, a
+CVE-specific signature or mitigation-only behavior is `Partial`, and absence of
+any mechanism is `Gap`. Refresh the snapshot date and re-check the counts after
+rule-set updates.
 
 ## Configuration Schema
 
