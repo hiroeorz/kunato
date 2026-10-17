@@ -28,6 +28,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const FAILURE_RETRY: Duration = Duration::from_secs(600);
 const DISABLED_POLL: Duration = Duration::from_secs(60);
 const MAX_REDIRECTS: usize = 5;
+/// Redirects may leave the configured origin at most this many times. CDNs
+/// legitimately bounce release assets to object storage, so one hop keeps the
+/// release channel working, but a chain that keeps moving the download between
+/// hosts is refused: the configured origin is the only host the operator chose.
+const MAX_CROSS_HOST_REDIRECTS: usize = 2;
 const MAX_CHECKSUM_BYTES: usize = 4096;
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 
@@ -271,6 +276,7 @@ async fn fetch(
     state: &UpdateState,
 ) -> Result<Fetched, Error> {
     let mut current = url.clone();
+    let mut cross_host_redirects = 0usize;
     for _ in 0..=MAX_REDIRECTS {
         let mut builder = Request::builder().method(Method::GET).uri(current.clone());
         if let Some(etag) = &state.etag
@@ -321,6 +327,20 @@ async fn fetch(
                         "rules update redirect to `{target}` violates the transport policy"
                     )));
                 }
+                if !same_host(url, &target) {
+                    cross_host_redirects += 1;
+                    if cross_host_redirects > MAX_CROSS_HOST_REDIRECTS {
+                        return Err(Error::Message(format!(
+                            "rules update redirected away from the configured origin across more than {MAX_CROSS_HOST_REDIRECTS} hosts"
+                        )));
+                    }
+                    info!(
+                        from = %current,
+                        to = %target,
+                        hops = cross_host_redirects,
+                        "rules update redirect moved the download to another host"
+                    );
+                }
                 current = target;
             }
             status => {
@@ -354,7 +374,8 @@ fn resolve_location(current: &Uri, location: &str) -> Result<Uri, Error> {
 
 /// Redirects must never weaken transport security: an HTTPS acquisition may
 /// only follow HTTPS redirects, and a loopback-HTTP acquisition may only follow
-/// HTTPS or loopback HTTP.
+/// HTTPS or loopback HTTP. How far the download may travel away from the
+/// configured origin is capped separately by [`MAX_CROSS_HOST_REDIRECTS`].
 fn redirect_allowed(start: &Uri, next: &Uri) -> bool {
     match next.scheme_str() {
         Some("https") => next.authority().is_some(),
@@ -368,11 +389,25 @@ fn redirect_allowed(start: &Uri, next: &Uri) -> bool {
     }
 }
 
-fn host_is_loopback(host: &str) -> bool {
-    let host = host
-        .strip_prefix('[')
+/// Bracket-stripped host, so IPv6 literals compare like their textual form.
+fn bare_host(host: &str) -> &str {
+    host.strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
-        .unwrap_or(host);
+        .unwrap_or(host)
+}
+
+/// The rules download stays on the configured origin apart from CDN hops:
+/// hostnames compare case-insensitively and ports and IPv6 brackets do not
+/// make a different host.
+fn same_host(a: &Uri, b: &Uri) -> bool {
+    match (a.authority(), b.authority()) {
+        (Some(a), Some(b)) => bare_host(a.host()).eq_ignore_ascii_case(bare_host(b.host())),
+        _ => false,
+    }
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    let host = bare_host(host);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -714,6 +749,40 @@ mod tests {
         assert!(!redirect_allowed(
             &http_loopback,
             &"ftp://rules.example/rules".parse().expect("valid URI")
+        ));
+    }
+
+    #[test]
+    fn same_host_lookup_ignores_case_ports_and_ipv6_brackets() {
+        let origin: Uri = "https://Mirror.Example/rules.yaml"
+            .parse()
+            .expect("valid URI");
+
+        assert!(same_host(
+            &origin,
+            &"https://mirror.example/rules".parse().expect("valid URI")
+        ));
+        assert!(same_host(
+            &origin,
+            &"https://MIRROR.EXAMPLE:8443/rules"
+                .parse()
+                .expect("valid URI")
+        ));
+        assert!(!same_host(
+            &origin,
+            &"https://mirror.other.example/rules"
+                .parse()
+                .expect("valid URI")
+        ));
+
+        let ipv6: Uri = "https://[::1]:8080/rules.yaml".parse().expect("valid URI");
+        assert!(same_host(
+            &ipv6,
+            &"https://[::1]:9090/rules".parse().expect("valid URI")
+        ));
+        assert!(!same_host(
+            &ipv6,
+            &"https://[::2]:8080/rules".parse().expect("valid URI")
         ));
     }
 

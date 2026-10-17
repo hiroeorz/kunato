@@ -28,6 +28,7 @@ ACME_CONTACT=""
 ACME_STAGING=0
 RULES_URL="$DEFAULT_RULES_URL"
 NO_START=0
+ALLOW_EMPTY_RULES=0
 ASSUME_YES=0
 UNINSTALL=0
 PURGE=0
@@ -57,6 +58,8 @@ Options:
   --acme-staging       Use the Let's Encrypt staging directory (for testing).
   --rules-url URL      Managed rule set URL (default: dist/rules.yaml on main).
   --no-start           Install and validate, but do not enable/start the service.
+  --allow-empty-rules  Start kunato even when the initial rules download fails
+                       (an empty rule set blocks nothing).
   --yes                Never prompt; fail instead of asking.
   --uninstall          Stop the service and remove the binary and unit file.
   --purge              With --uninstall, also remove /etc/kunato and /var/lib/kunato.
@@ -115,6 +118,10 @@ while [ $# -gt 0 ]; do
             ;;
         --no-start)
             NO_START=1
+            shift
+            ;;
+        --allow-empty-rules)
+            ALLOW_EMPTY_RULES=1
             shift
             ;;
         --yes)
@@ -323,9 +330,13 @@ initialize_configuration() {
 
     if [ ! -f "$RULES_FILE" ]; then
         log "downloading the managed rule set"
-        if ! "$BIN_PATH" update-rules --config "$CONFIG_PATH"; then
-            log "warning: initial rules download failed; starting with an empty rule set"
+        if "$BIN_PATH" update-rules --config "$CONFIG_PATH"; then
+            :
+        elif [ "$ALLOW_EMPTY_RULES" -eq 1 ]; then
+            log "warning: initial rules download failed; starting with an empty rule set per --allow-empty-rules"
             printf 'categories: []\n' >"$RULES_FILE"
+        else
+            die "the initial rules download failed; fix the network or --rules-url and re-run the installer (kunato update-rules --config $CONFIG_PATH retries it; --allow-empty-rules starts without rules anyway)"
         fi
         chown kunato:kunato "$RULES_FILE" 2>/dev/null || true
     fi

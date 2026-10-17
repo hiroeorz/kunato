@@ -264,6 +264,7 @@ service. Key options:
 | `--acme-staging`          | Use the Let's Encrypt staging directory (for testing).                   |
 | `--rules-url URL`         | Managed rule set URL (see Managed Rules and Automatic Updates).          |
 | `--no-start`              | Install and validate without enabling or starting the service.            |
+| `--allow-empty-rules`     | Start even when the initial rules download fails (blocks nothing).        |
 | `--yes`                   | Never prompt; fail instead of asking.                                    |
 | `--uninstall`             | Stop and remove the service and binary.                                  |
 | `--purge`                 | With `--uninstall`, also remove `/etc/kunato` and `/var/lib/kunato`.      |
@@ -496,7 +497,10 @@ The URL must use https; plain http is accepted only for loopback hosts, which is
 handy for tests and local mirrors. Redirects must satisfy the same policy for
 the URL they started from: an https download only follows https, and a
 loopback-http download only follows https or loopback http, so a redirect can
-never downgrade the transport. Every `interval` the updater sends a
+never downgrade the transport. Redirects may also leave the configured origin
+at most twice, which keeps the release channel's CDN bounce-through working
+while a chain that keeps moving the download to other hosts fails the update;
+every cross-host hop is logged. Every `interval` the updater sends a
 conditional request (`If-None-Match`/`If-Modified-Since`), downloads any new
 file, verifies its SHA256 digest against `checksum_url`, validates it with the
 full rule compiler (regex and ReDoS guards included) together with the inline

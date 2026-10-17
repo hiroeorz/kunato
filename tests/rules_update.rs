@@ -60,7 +60,13 @@ impl Route {
 }
 
 async fn spawn_server(routes: HashMap<String, Route>) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
+    spawn_server_on("127.0.0.1", routes).await
+}
+
+/// Distinct 127/8 spellings are distinct hosts for the redirect policy, so
+/// tests can bounce a download between loopback addresses without DNS.
+async fn spawn_server_on(host: &str, routes: HashMap<String, Route>) -> SocketAddr {
+    let listener = TcpListener::bind(format!("{host}:0"))
         .await
         .expect("bind mock server");
     let addr = listener.local_addr().expect("mock address");
@@ -394,6 +400,113 @@ async fn rejects_redirects_to_remote_http_and_keeps_the_file_absent() {
         .expect_err("remote http redirect must be rejected");
 
     assert!(error.to_string().contains("transport policy"), "{error}");
+    assert!(!rules_file.exists());
+}
+
+/// A cross-host hop is the normal CDN bounce-through, so the download still
+/// succeeds when it leaves the origin within the cap (two hops here).
+#[tokio::test]
+async fn allows_cross_host_redirects_up_to_the_cap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let mut final_routes = HashMap::new();
+    final_routes.insert(
+        "/real.yaml".to_owned(),
+        Route::body(RULES.as_bytes().to_vec()),
+    );
+    final_routes.insert(
+        "/rules.yaml.sha256".to_owned(),
+        Route::body(sha256_hex(RULES.as_bytes()).into_bytes()),
+    );
+    let final_addr = spawn_server_on("127.0.0.3", final_routes).await;
+
+    let mut second_routes = HashMap::new();
+    second_routes.insert(
+        "/hop.yaml".to_owned(),
+        Route::redirect(format!("http://127.0.0.3:{}/real.yaml", final_addr.port())),
+    );
+    let second_addr = spawn_server_on("127.0.0.2", second_routes).await;
+
+    let mut first_routes = HashMap::new();
+    first_routes.insert(
+        "/rules.yaml".to_owned(),
+        Route::redirect(format!("http://127.0.0.2:{}/hop.yaml", second_addr.port())),
+    );
+    first_routes.insert(
+        "/rules.yaml.sha256".to_owned(),
+        Route::body(sha256_hex(RULES.as_bytes()).into_bytes()),
+    );
+    let first_addr = spawn_server(first_routes).await;
+
+    let (settings, rules_file, main) = update_settings(dir.path(), first_addr.port(), 1024 * 1024);
+    let state_file = rules_update::state_path(&rules_file);
+
+    let outcome = rules_update::update_once(&main, &settings, &rules_file, &state_file)
+        .await
+        .expect("update within the cross-host cap succeeds");
+
+    assert_eq!(outcome, UpdateOutcome::Updated);
+    assert_eq!(
+        std::fs::read_to_string(&rules_file).expect("rules written"),
+        RULES
+    );
+}
+
+/// A chain that keeps moving the download away from the configured origin is
+/// refused; the installed rules file stays untouched.
+#[tokio::test]
+async fn caps_cross_host_redirect_hops() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let mut final_routes = HashMap::new();
+    final_routes.insert(
+        "/real.yaml".to_owned(),
+        Route::body(RULES.as_bytes().to_vec()),
+    );
+    final_routes.insert(
+        "/rules.yaml.sha256".to_owned(),
+        Route::body(sha256_hex(RULES.as_bytes()).into_bytes()),
+    );
+    let final_addr = spawn_server_on("127.0.0.4", final_routes).await;
+
+    let mut third_routes = HashMap::new();
+    third_routes.insert(
+        "/hop2.yaml".to_owned(),
+        Route::redirect(format!("http://127.0.0.4:{}/real.yaml", final_addr.port())),
+    );
+    let third_addr = spawn_server_on("127.0.0.3", third_routes).await;
+
+    let mut second_routes = HashMap::new();
+    second_routes.insert(
+        "/hop.yaml".to_owned(),
+        Route::redirect(format!("http://127.0.0.3:{}/hop2.yaml", third_addr.port())),
+    );
+    let second_addr = spawn_server_on("127.0.0.2", second_routes).await;
+
+    let mut first_routes = HashMap::new();
+    first_routes.insert(
+        "/rules.yaml".to_owned(),
+        Route::redirect(format!("http://127.0.0.2:{}/hop.yaml", second_addr.port())),
+    );
+    first_routes.insert(
+        "/rules.yaml.sha256".to_owned(),
+        Route::body(sha256_hex(RULES.as_bytes()).into_bytes()),
+    );
+    let first_addr = spawn_server(first_routes).await;
+
+    let (settings, rules_file, main) = update_settings(dir.path(), first_addr.port(), 1024 * 1024);
+    let state_file = rules_update::state_path(&rules_file);
+
+    let error = rules_update::update_once(&main, &settings, &rules_file, &state_file)
+        .await
+        .expect_err("a redirected redirect chain must be capped");
+
+    assert!(
+        error
+            .to_string()
+            .contains("away from the configured origin"),
+        "{error}"
+    );
     assert!(!rules_file.exists());
 }
 
