@@ -17,6 +17,47 @@ use hyper::body::{Body, Frame, SizeHint};
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
+/// A body whose prefix filled the inspection limit exactly may end right
+/// there, but `size_hint` reports "unknown" for chunked and HTTP/2 bodies, so
+/// the boundary is settled with a one-frame look-ahead: no further data
+/// (besides optional trailers) means the whole body fit in the prefix and the
+/// body is *not* truncated; another data frame means the remainder was never
+/// inspected and the body is truncated. The polled frame is recorded in
+/// `pending` so the replay stream (prefix, pending frames, rest) stays intact.
+/// A deadline that expires or a read failure leaves completeness unknown,
+/// which is labeled truncated.
+pub(crate) async fn settle_body_end<B>(
+    body: &mut B,
+    deadline: Option<tokio::time::Instant>,
+    pending: &mut Vec<Frame<Bytes>>,
+) -> bool
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    let frame = match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, body.frame()).await {
+            Ok(frame) => frame,
+            Err(_) => return true,
+        },
+        None => body.frame().await,
+    };
+    match frame {
+        None => false,
+        Some(Err(_)) => true,
+        Some(Ok(frame)) => match frame.into_data() {
+            Ok(data) => {
+                pending.push(Frame::data(data));
+                true
+            }
+            Err(frame) => {
+                // Trailers carry no inspected data; the body ends here.
+                pending.push(frame);
+                false
+            }
+        },
+    }
+}
+
 pub fn full_body(data: impl Into<Bytes>) -> ProxyBody {
     Full::new(data.into())
         .map_err(|never| match never {})

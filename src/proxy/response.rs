@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::config::CompiledConfig;
 use crate::metrics::Metrics;
 use crate::proxy::forward::{self, HttpError};
-use crate::proxy::{BoxError, PrefixBody, ProxyBody};
+use crate::proxy::{BoxError, PrefixBody, ProxyBody, settle_body_end};
 use crate::request_view::{RequestView, ResponseView};
 use crate::rules::eval;
 
@@ -53,12 +53,17 @@ pub async fn buffer_prefix(
         }
     }
 
-    let truncated = overflowed
-        || (hit_limit
-            && body
-                .size_hint()
-                .exact()
-                .is_none_or(|remaining| remaining > 0));
+    // `size_hint` cannot classify chunked bodies, so a body that ends exactly
+    // at the limit needs a look-ahead; the outer `upstream_response` timeout in
+    // `inspect` bounds any stall the look-ahead may observe.
+    let mut truncated = overflowed;
+    if hit_limit && !truncated {
+        truncated = match body.size_hint().exact() {
+            Some(remaining) => remaining > 0,
+            None => settle_body_end(&mut body, None, &mut pending).await,
+        };
+    }
+
     let prefix = Bytes::from(prefix);
     let body = PrefixBody::new(prefix.clone(), pending, body).boxed();
 

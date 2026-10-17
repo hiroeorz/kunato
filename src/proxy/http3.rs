@@ -18,10 +18,10 @@ use crate::acme::AcmeService;
 use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::protection::ConnectionGuard;
-use crate::proxy::ProxyBody;
 use crate::proxy::forward::HttpError;
 use crate::proxy::server::{self, Context, RequestPayload};
 use crate::proxy::tls;
+use crate::proxy::{ProxyBody, settle_body_end};
 
 pub struct Listener {
     pub endpoint: quinn::Endpoint,
@@ -222,7 +222,12 @@ async fn handle_request(
         Some(err) => server::rejected(peer, &err),
         None => match read_prefix(recv, &config).await {
             Ok(payload) => server::process_payload(parts, payload, peer, &config, &context).await,
-            Err(err) => server::rejected(peer, &err),
+            Err(err) => {
+                // The failure produced a real response, so count it like other
+                // rejections to keep the request totals consistent.
+                context.count_rejected_request();
+                server::rejected(peer, &err)
+            }
         },
     };
     config.response_headers.apply(response.headers_mut());
@@ -320,16 +325,22 @@ async fn read_prefix(
         prefix.extend_from_slice(&chunk);
     }
 
-    let rest = if hit_limit {
-        Some(RequestBody::new(recv).boxed())
-    } else {
-        None
-    };
+    let mut rest = None;
+    let mut truncated = hit_limit;
+    if hit_limit {
+        let mut tail = RequestBody::new(recv);
+        if pending.is_empty() {
+            // HTTP/3 reports no size hint, so settle the boundary at the
+            // limit with a one-frame look-ahead, mirroring the TCP path.
+            truncated = settle_body_end(&mut tail, Some(deadline), &mut pending).await;
+        }
+        rest = Some(tail.boxed());
+    }
     Ok(RequestPayload {
         prefix: Bytes::from(prefix),
         pending,
         rest,
-        truncated: hit_limit,
+        truncated,
     })
 }
 

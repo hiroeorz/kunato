@@ -125,6 +125,13 @@ pub async fn forward_request(
     Ok(convert_response(response))
 }
 
+/// Legacy identity headers that attestation proxies up the chain may have
+/// added. Clients can forge all of them, so applications behind Kunato must
+/// rely on the canonical `X-Forwarded-*` trio (rewritten below) instead; the
+/// forged copies are removed from every forwarded request.
+const LEGACY_IDENTITY_HEADERS: [&str; 4] =
+    ["forwarded", "x-real-ip", "x-client-ip", "x-forwarded-port"];
+
 pub(crate) fn set_forwarded_headers(
     target: &mut HeaderMap,
     source: &HeaderMap,
@@ -132,6 +139,9 @@ pub(crate) fn set_forwarded_headers(
     peer: SocketAddr,
     scheme: &'static str,
 ) {
+    for name in LEGACY_IDENTITY_HEADERS {
+        target.remove(name);
+    }
     if let Ok(forwarded_for) = HeaderValue::from_str(&normalize_ip(peer.ip()).to_string()) {
         target.insert("x-forwarded-for", forwarded_for);
     }
@@ -218,6 +228,7 @@ pub(crate) fn is_hop_by_hop(name: &HeaderName) -> bool {
             | "keep-alive"
             | "proxy-authenticate"
             | "proxy-authorization"
+            | "proxy-connection"
             | "te"
             | "trailer"
             | "transfer-encoding"
@@ -244,6 +255,41 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("10.0.0.1")
         );
+    }
+
+    #[test]
+    fn forged_legacy_identity_headers_are_removed() {
+        let mut target = HeaderMap::new();
+        target.insert("forwarded", HeaderValue::from_static("for=6.6.6.6"));
+        target.append("x-real-ip", HeaderValue::from_static("7.7.7.7"));
+        target.append("x-real-ip", HeaderValue::from_static("8.8.8.8"));
+        target.insert("x-client-ip", HeaderValue::from_static("9.9.9.9"));
+        target.insert("x-forwarded-port", HeaderValue::from_static("1234"));
+        let mut source = HeaderMap::new();
+        source.insert("x-real-ip", HeaderValue::from_static("10.10.10.10"));
+        let uri: http::Uri = "/".parse().expect("valid URI");
+        let peer: SocketAddr = "203.0.113.7:4444".parse().expect("valid peer");
+
+        set_forwarded_headers(&mut target, &source, &uri, peer, "http");
+
+        for name in LEGACY_IDENTITY_HEADERS {
+            assert!(
+                target.get(name).is_none(),
+                "{name} must not survive forwarding"
+            );
+        }
+        assert_eq!(
+            target
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok()),
+            Some("203.0.113.7")
+        );
+    }
+
+    #[test]
+    fn proxy_connection_is_hop_by_hop() {
+        assert!(is_hop_by_hop(&HeaderName::from_static("proxy-connection")));
+        assert!(!is_hop_by_hop(&HeaderName::from_static("x-real-ip")));
     }
 
     #[test]

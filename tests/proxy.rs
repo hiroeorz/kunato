@@ -1096,6 +1096,128 @@ async fn body_at_limit_is_accepted() {
     running.stop().await;
 }
 
+async fn send_chunked_request(addr: SocketAddr, path: &str, body: &[u8]) -> (StatusCode, String) {
+    let mut stream = TcpStream::connect(addr).await.expect("connect kunato");
+    let mut wire =
+        format!("POST {path} HTTP/1.1\r\nhost: kunato.test\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n")
+            .into_bytes();
+    wire.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+    wire.extend_from_slice(body);
+    wire.extend_from_slice(b"\r\n0\r\n\r\n");
+    stream
+        .write_all(&wire)
+        .await
+        .expect("write chunked request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response = String::from_utf8_lossy(&response).into_owned();
+    let status = response
+        .strip_prefix("HTTP/1.1 ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let status = StatusCode::from_u16(status).expect("status code");
+    let (_, body) = response.split_once("\r\n\r\n").expect("response head");
+    (status, body.to_owned())
+}
+
+/// A chunked body whose total size equals `max_body_bytes` is inspected in
+/// full: no truncation counter, and the replay body must stay byte-exact.
+#[tokio::test]
+async fn chunked_request_body_at_the_limit_is_not_truncated() {
+    let upstream = spawn_body_echo_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send_chunked_request(running.addr, "/exact", b"12345678").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "12345678");
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_truncated_total 0"),
+        "{rendered}"
+    );
+
+    let (status, body) = send_chunked_request(running.addr, "/over", b"123456789").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "123456789");
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_truncated_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+async fn spawn_chunked_response_upstream(raw: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                stream
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\r\n{raw}").as_bytes(),
+                    )
+                    .await
+                    .expect("write chunked response");
+            });
+        }
+    });
+
+    addr
+}
+
+#[tokio::test]
+async fn chunked_response_body_at_the_limit_is_not_truncated() {
+    let exact = spawn_chunked_response_upstream("8\r\n12345678\r\n0\r\n\r\n").await;
+    let over = spawn_chunked_response_upstream("8\r\n12345678\r\n1\r\n9\r\n0\r\n\r\n").await;
+    let yaml = |response_addr| {
+        format!(
+            "listen: 127.0.0.1:0\nupstream: http://{response_addr}\nlimits: {{ max_response_body_bytes: 8 }}\ncategories:\n  - name: inspect\n    phase: response\n    action: LOG\n    rules:\n      - name: never\n        match: {{ regex: 'never-matches-xyz', in: [response_body] }}\n"
+        )
+    };
+
+    let running = start_kunato(&yaml(exact)).await;
+    let (status, body) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "12345678");
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_response_truncated_total 0"),
+        "{rendered}"
+    );
+    running.stop().await;
+
+    let running = start_kunato(&yaml(over)).await;
+    let (status, body) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    // The body streamed past the limit keeps every byte the lookahead consumed.
+    assert_eq!(body, "123456789");
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_response_truncated_total 1"),
+        "{rendered}"
+    );
+    running.stop().await;
+}
+
 #[tokio::test]
 async fn malformed_chunked_body_is_bad_request() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
@@ -1120,6 +1242,10 @@ async fn malformed_chunked_body_is_bad_request() {
         response.starts_with("HTTP/1.1 400"),
         "unexpected response: {response}"
     );
+
+    // The 400 is a handled request, so the total must include it.
+    let rendered = running.metrics.render(0);
+    assert!(rendered.contains("kunato_requests_total 1"), "{rendered}");
 
     running.stop().await;
 }

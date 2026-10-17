@@ -203,6 +203,7 @@ async fn handles_not_modified_responses() {
     let addr = spawn_server(routes).await;
     let (settings, rules_file, main) = update_settings(dir.path(), addr.port(), 1024 * 1024);
     let state_file = rules_update::state_path(&rules_file);
+    std::fs::write(&rules_file, RULES).expect("installed rules");
     std::fs::write(&state_file, "last_success=1\netag=\"v1\"\n").expect("state");
 
     let outcome = rules_update::update_once(&main, &settings, &rules_file, &state_file)
@@ -210,9 +211,47 @@ async fn handles_not_modified_responses() {
         .expect("update succeeds");
 
     assert_eq!(outcome, UpdateOutcome::NotModified);
-    assert!(!rules_file.exists());
+    assert_eq!(
+        std::fs::read_to_string(&rules_file).expect("installed rules unchanged"),
+        RULES
+    );
     let state = std::fs::read_to_string(&state_file).expect("state written");
     assert!(!state.contains("last_success=1\n"));
+    assert!(state.contains("etag=\"v1\""));
+}
+
+/// A 304 must not bless a crash-truncated or deleted rules file: the
+/// validators are cleared and the outcome is a failure so the next attempt
+/// refetches the whole file.
+#[tokio::test]
+async fn not_modified_with_a_missing_rules_file_forces_a_refetch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut routes = rules_routes(RULES.as_bytes());
+    routes.get_mut("/rules.yaml").expect("route").etag = Some("\"v1\"".to_owned());
+    let addr = spawn_server(routes).await;
+    let (settings, rules_file, main) = update_settings(dir.path(), addr.port(), 1024 * 1024);
+    let state_file = rules_update::state_path(&rules_file);
+    std::fs::write(&state_file, "last_success=1\netag=\"v1\"\n").expect("state");
+
+    let error = rules_update::update_once(&main, &settings, &rules_file, &state_file)
+        .await
+        .expect_err("a missing rules file must fail despite the 304");
+
+    assert!(error.to_string().contains("missing or empty"), "{error}");
+    // The state kept its schedule but lost the validators, so the next
+    // attempt performs a fresh fetch and repairs the installation.
+    let state = std::fs::read_to_string(&state_file).expect("state kept");
+    assert!(state.contains("last_success=1\n"));
+    assert!(!state.contains("etag="));
+
+    let outcome = rules_update::update_once(&main, &settings, &rules_file, &state_file)
+        .await
+        .expect("refetch succeeds");
+    assert_eq!(outcome, UpdateOutcome::Updated);
+    assert_eq!(
+        std::fs::read_to_string(&rules_file).expect("rules recovered"),
+        RULES
+    );
 }
 
 #[tokio::test]

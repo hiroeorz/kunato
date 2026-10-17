@@ -154,12 +154,36 @@ pub async fn update_once(
         last_modified,
     } = fetched
     else {
-        let next = UpdateState {
-            last_success: Some(unix_now()),
-            next_due: Some(next_due(settings)),
-            ..state
+        // A 304 answer is only meaningful while the installed file still
+        // holds what the validators describe. Accepting the shortcut for a
+        // missing or empty file would leave a crash-truncated install with
+        // no rules forever on channels that never change, so the validators
+        // are cleared to force a fresh fetch on the next attempt.
+        let installed = std::fs::metadata(rules_file).is_ok_and(|meta| meta.len() > 0);
+        let next = if installed {
+            UpdateState {
+                last_success: Some(unix_now()),
+                next_due: Some(next_due(settings)),
+                ..state
+            }
+        } else {
+            warn!(
+                path = %rules_file.display(),
+                "rules file is missing or empty despite an unmodified response; validators cleared"
+            );
+            UpdateState {
+                etag: None,
+                last_modified: None,
+                ..state
+            }
         };
         write_state(&next, state_file);
+        if !installed {
+            return Err(Error::Message(format!(
+                "`{}` is missing or empty while the update server reports the rules as unmodified",
+                rules_file.display()
+            )));
+        }
         return Ok(UpdateOutcome::NotModified);
     };
 
@@ -427,19 +451,39 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    use std::io::Write;
+
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "rules.yaml".to_owned());
     let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
-    std::fs::write(&temporary, bytes).map_err(|err| {
-        Error::Message(format!("failed to write `{}`: {err}", temporary.display()))
-    })?;
-    std::fs::rename(&temporary, path).map_err(|err| {
-        let _ = std::fs::remove_file(&temporary);
-        Error::Message(format!("failed to replace `{}`: {err}", path.display()))
-    })
+    // Flush to stable storage before the rename commit and sync the directory
+    // afterwards: a crash in between must not leave an empty or truncated
+    // rules file behind on the next restart.
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        if let Ok(dir) = std::fs::File::open(parent) {
+            // Best effort; some filesystems do not support directory fsync.
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(Error::Message(format!(
+                "failed to replace `{}`: {err}",
+                path.display()
+            )))
+        }
+    }
 }
 
 fn write_state(state: &UpdateState, path: &Path) {

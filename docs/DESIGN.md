@@ -177,12 +177,16 @@ header regex). Responses already buffer only a prefix
   header rules and the upstream request see the same host on every protocol.
 - Forward upstream requests as HTTP/1.1 regardless of the downstream protocol.
 - Strip hop-by-hop headers (`Connection`, `Keep-Alive`, `TE`, `Trailer`,
-  `Transfer-Encoding`, `Upgrade`, `Proxy-*`) plus headers named by `Connection`.
+  `Transfer-Encoding`, `Upgrade`, `Proxy-*`, `Proxy-Connection`) plus headers
+  named by `Connection`.
 - Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. The
   `X-Forwarded-For` value is always overwritten with the direct peer address, so
   client-supplied values cannot spoof the source; trusted-proxy append support
   (for deployments behind a CDN or load balancer) is future work, and until it
   exists `source_ip` rules and protection budgets see the direct peer.
+- Remove legacy identity headers (`Forwarded`, `X-Real-IP`, `X-Client-IP`,
+  `X-Forwarded-Port`): clients can forge all of them, so applications behind
+  Kunato must trust the canonical `X-Forwarded-*` trio above instead.
 - WebSocket handshakes keep `Connection` and `Upgrade` (normalized to
   `Connection: Upgrade` and `Upgrade: websocket`) while all other hop-by-hop
   headers are stripped both ways.

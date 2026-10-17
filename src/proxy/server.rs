@@ -29,7 +29,7 @@ use crate::protection::{ConnectionGuard, Decision, ProtectionState, normalize_ip
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
-use crate::proxy::{BoxError, PrefixBody, ProxyBody, full_body};
+use crate::proxy::{BoxError, PrefixBody, ProxyBody, full_body, settle_body_end};
 use crate::proxy::{http3, tls};
 use crate::request_view::RequestView;
 use crate::rules::eval;
@@ -93,6 +93,12 @@ impl Context {
         let config = self.config();
         self.protection
             .try_acquire_connection(ip, &config.protection)
+    }
+
+    /// Record an answered-but-rejected request (body-read failure, early
+    /// protection hit) so `kunato_requests_total` stays consistent.
+    pub(crate) fn count_rejected_request(&self) {
+        self.metrics.requests.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -267,6 +273,9 @@ pub(crate) async fn drain_connections(connections: &mut JoinSet<()>, grace: Dura
     }
 }
 
+/// A connection-level rejection before any request was parsed. Deliberately
+/// not counted in `kunato_requests_total`, which tracks requests Kunato kept
+/// and evaluated (or answered) as requests.
 async fn reject_connection(mut stream: tokio::net::TcpStream) {
     let _ = stream.write_all(RAW_503).await;
     let _ = stream.shutdown().await;
@@ -564,7 +573,12 @@ async fn handle_request(
         Some(err) => Err(err),
         None => match read_body(body, &config).await {
             Ok(body) => process(parts, body, peer, &config, &context, upgrade).await,
-            Err(err) => Err(err),
+            Err(err) => {
+                // The failure produced a real response, so count it like other
+                // rejections to keep the request totals consistent.
+                context.count_rejected_request();
+                Err(err)
+            }
         },
     };
     let mut response = match result {
@@ -684,12 +698,17 @@ async fn read_body(
         }
     }
 
-    let truncated = overflowed
-        || (hit_limit
-            && body
-                .size_hint()
-                .exact()
-                .is_none_or(|remaining| remaining > 0));
+    let mut truncated = overflowed;
+    if hit_limit && !truncated {
+        truncated = match body.size_hint().exact() {
+            // An exact remaining size settles the boundary without reading on.
+            Some(remaining) => remaining > 0,
+            // Chunked and HTTP/2 bodies report no exact size, so a body that
+            // ends exactly at the limit needs a one-frame look-ahead to avoid
+            // being mislabeled as truncated.
+            None => settle_body_end(&mut body, Some(deadline), &mut pending).await,
+        };
+    }
     Ok(RequestPayload {
         prefix: Bytes::from(prefix),
         pending,
