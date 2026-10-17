@@ -27,6 +27,17 @@ categories:
           headers:
             User-Agent: '(?i)(semrush|ahrefs|mj12bot|dotbot|petalbot|bytespider|gptbot|ccbot|claudebot|perplexitybot)'
 
+  # Login brute-force throttle: per-source and transparent until the budget is
+  # exceeded, then BLOCK; blocked attempts also feed the ban escalation.
+  # `xmlrpc.php` is included because WordPress password guessing also travels
+  # through wp.getUsersBlogs; add your own login endpoint if it is not covered.
+  - name: login-throttle
+    action: BLOCK
+    rules:
+      - name: login-attempts
+        limit: { requests: 10, window: 60s }
+        match: { method: POST, path: '(?i)(^|/)(wp-login\.php|xmlrpc\.php|users/sign_in|admin/login|login|logon|signin|sign_in|sign-in|session)(\.(php|do|jsp|aspx|html))?/?$' }
+
   # Methods that no normal browser or application should send.
   - name: bad-methods
     action: BLOCK
@@ -1245,6 +1256,10 @@ categories:
         match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|settings\.py|local_settings\.py|composer\.(json|lock)|wp-config\.php)', in: [path] }
       - name: backup-and-dump-files
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
+      # phpinfo() pages left in the web root leak configuration and paths;
+      # generic `info.php`/`test.php` names are left alone as application files.
+      - name: phpinfo-endpoints
+        match: { regex: '(?i)^/\.?(php_?info|phpversion)(\.php)?/?$', in: [path] }
       # Rails writes its default logs here; the directory must not be served.
       - name: log-files
         match: { regex: '(?i)^/log/[^/]*\.log$', in: [path] }

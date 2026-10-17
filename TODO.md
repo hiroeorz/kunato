@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 466 rules then.
+2026-10-17; the managed set carried 468 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -99,9 +99,9 @@ often means "no signature shipped", not "impossible".
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Brute Force | 🔶 | Per-IP rate limits plus ban escalation slow it; per-rule `limit: {requests, window}` exists but the bundled set configures no login-specific limit |
-| Password Spraying | 🔶 | Same; slow, distributed spraying passes |
-| Credential Stuffing | 🔶 | Same as above |
+| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
+| Password Spraying | 🔶 | Same throttle and bans slow a single source; spraying spread across many source IPs stays below each budget and passes |
+| Credential Stuffing | 🔶 | Same as brute force; credential lists rotated across many source IPs are not detectable |
 | Account / Login Enumeration | ❌ | Not covered (response-phase error-text rules could be added locally) |
 | MFA Flooding | 🔶 | Rate limits only |
 | OTP Brute Force | 🔶 | Rate limits only |
@@ -140,7 +140,7 @@ often means "no signature shipped", not "impossible".
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, author enumeration, xmlrpc logged). Plugin CVEs are out of scope by policy |
+| WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, author enumeration, xmlrpc logged, and `wp-login.php` / `xmlrpc.php` under `login-throttle`). Plugin CVEs are out of scope by policy |
 | Joomla / Drupal and other CMS | ✅ | Many CVE-specific signatures |
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
 | PHP / Laravel Exploits | 🔶 | `laravel-debug-endpoints` (`/telescope`, `/_debugbar`), Composer file discovery, generic PHP object-injection shapes, and Horizon LOGging; Laravel/Symfony CVE signatures remain thin, and WordPress plugin CVEs are out of scope by policy (details below) |
@@ -214,7 +214,7 @@ not match the Marshal signatures.
 | Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, and rate limits in combination; no behavioral detection of iterative probing |
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
 | `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`) |
-| phpinfo-style Information Endpoints | ❌ | No rules |
+| phpinfo-style Information Endpoints | ✅ | `sensitive-files.phpinfo-endpoints` 404s `/phpinfo`, `/phpinfo.php`, `/php_info.php`, `/phpversion.php`, and `/.phpinfo.php`; generic `info.php`/`test.php` names are intentionally left alone to avoid breaking application files |
 | Swagger/OpenAPI Endpoint Discovery | ❌ | No rules |
 | Admin Page Discovery | 🔶 | `admin-interfaces` logs by default |
 | Error Message Collection | 🔶 | `response-leaks` (stack traces, SQL errors, Server version) plus `response_headers.remove`; mostly LOG by default |
@@ -272,7 +272,7 @@ not match the Marshal signatures.
 | XXE / RCE payloads | ✅ |
 | Malicious file upload | 🔶 (extension-based) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
-| Credential Stuffing / Brute Force | 🔶 (per-IP rate limits and bans) |
+| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, and bans) |
 | Bot | 🔶 (User-Agent signatures only) |
 | API Abuse | ❌ to 🔶 (GraphQL, schema, and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
@@ -283,7 +283,7 @@ not match the Marshal signatures.
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
 either direction, arbitrary re-signing), GraphQL in general, LDAP/XPath
 injection, open redirect via unlisted parameter names, CSS injection, HPP, MIME
-spoofing, phpinfo/Swagger discovery, behavioral bot detection, and the
+spoofing, Swagger discovery, behavioral bot detection, and the
 business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
 session design cannot be fixed by a WAF at all; Kunato can only assist through
 custom response-phase rules. Closing a gap usually means either a YAML rule

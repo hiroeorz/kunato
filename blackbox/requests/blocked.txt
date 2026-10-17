@@ -537,6 +537,11 @@ GET /secrets.toml
 GET /wp-config.php
 GET /wp-config.php.bak
 GET /config.php.bak
+GET /phpinfo.php
+GET /php_info.php
+GET /phpinfo
+GET /phpversion.php
+GET /.phpinfo.php
 GET /backup.sql
 GET /dump.sql
 GET /database.sql
