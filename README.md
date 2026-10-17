@@ -138,9 +138,11 @@ default 10%) Kunato:
 
 Any failure (network, checksum mismatch, invalid rules, size limit) leaves the
 current rules active; failures are logged and counted in the
-`kunato_rules_update_*` metrics. `kunato update-rules` performs a single check
-and exits, and is what the installer uses for the first download. The full field
-reference lives in
+`kunato_rules_update_*` metrics, and a rule set that needs a newer build is
+counted separately in `kunato_rules_update_incompatible_total` (see
+[Rule set format compatibility](#rule-set-format-compatibility)). `kunato
+update-rules` performs a single check and exits, and is what the installer uses
+for the first download. The full field reference lives in
 [Rule sources and updates](#rule-sources-and-updates).
 
 Local changes are never overwritten: exemptions and rule disables belong in
@@ -503,6 +505,59 @@ The SHA256 digest guards against corrupted or truncated downloads; it is
 fetched over the same TLS connection as the rules file, so it does not add
 authenticity. Detached signatures (minisign) are planned as a hardening step.
 
+### Rule set format compatibility
+
+`main` publishes the newest rule set to installs of every release, so the format
+of `dist/rules.yaml` is pinned to the newest release: the published rules use
+only the fields, match targets, actions, and phases that the newest released
+binary implements, and adding a schema construct means cutting a release rather
+than shipping it with a daily rule update. A build that meets an unknown
+construct rejects the whole candidate before writing anything (no partial
+application) and keeps its last known good rules, so an incompatible rule set
+freezes that install's updates instead of weakening it. The failure is logged
+and counted in `kunato_rules_update_incompatible_total` — alert on it, or on
+`kunato_rules_last_success_timestamp_seconds` going stale, because otherwise
+only a log reader notices that a server's rules stopped moving.
+
+`scripts/check-rules-compat.sh` is the gate. It builds the newest `v*` tag,
+validates `dist/rules.yaml` with that binary, and fails with the construct the
+release cannot read. It runs in CI and in the daily rule-update workflow, so an
+incompatible publication cannot reach `main`. Reproduce it locally with
+`KUNATO_RULES_BIN=/usr/local/bin/kunato scripts/check-rules-compat.sh`, or
+against a specific tag with `KUNATO_RULES_BASELINE=v0.2.0`. The unit tests in
+`src/config/mod.rs` cover the rest of the publication: the file matches
+`rules.example.yaml` and `dist/rules.yaml.sha256` is current.
+
+A rule that genuinely needs a new construct therefore takes a release:
+
+1. add the field, target, action, or phase to the engine and to `README.md`;
+2. cut a release (`v*` tag): new installs get that build, the compatibility gate
+   moves its baseline to it, and the construct becomes part of the released
+   format;
+3. installs that want those rules upgrade by rerunning the installer. Until they
+   do, they keep their previous rules and carry on protecting with them.
+
+A version marker inside the rules file cannot replace this, because builds that
+predate the marker reject unknown keys outright — the release tag (and the
+channel URL an install is configured with) is the only place a build can be told
+which format to expect. Supporting several releases at once would need a
+per-release channel such as `dist/v1/rules.yaml`; the repository deliberately
+keeps one channel and expects installs to follow releases.
+
+Releases publish the rule set they shipped as assets, so an install can follow
+releases instead of `main` and never meet a construct its binary does not
+implement:
+
+```yaml
+rules_update:
+  # Rules of the newest release; they change when a release is cut.
+  url: https://github.com/hiroeorz/kunato/releases/latest/download/rules.yaml
+  checksum_url: https://github.com/hiroeorz/kunato/releases/latest/download/rules.yaml.sha256
+```
+
+Pointing the URL at a specific tag (`.../download/v0.2.0/rules.yaml`) freezes the
+rules at that release instead, which trades coverage for reproducibility.
+
 ### Category fields
 
 | Field         | Description                                                                                          |
@@ -676,9 +731,10 @@ admin:
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
 BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding,
-upstream failures, configuration reloads, rules update outcomes, body
-truncation and decoding decisions (including bodies whose encoding could not be
-decoded: `kunato_request_decode_skipped_total`,
+upstream failures, configuration reloads, rules update outcomes (including
+`kunato_rules_update_incompatible_total` for rule sets that need a newer build),
+body truncation and decoding decisions (including bodies whose encoding could not
+be decoded: `kunato_request_decode_skipped_total`,
 `kunato_response_decode_skipped_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
 uptime, the time of the last successful rules update, and the time of the last

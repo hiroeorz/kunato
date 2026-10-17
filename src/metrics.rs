@@ -26,6 +26,7 @@ pub struct Metrics {
     pub reload_failure: AtomicU64,
     pub rules_update_success: AtomicU64,
     pub rules_update_failure: AtomicU64,
+    pub rules_update_incompatible: AtomicU64,
     pub rules_update_not_modified: AtomicU64,
     pub rules_last_success: AtomicU64,
     pub acme_issued: AtomicU64,
@@ -59,6 +60,7 @@ impl Metrics {
             reload_failure: AtomicU64::new(0),
             rules_update_success: AtomicU64::new(0),
             rules_update_failure: AtomicU64::new(0),
+            rules_update_incompatible: AtomicU64::new(0),
             rules_update_not_modified: AtomicU64::new(0),
             rules_last_success: AtomicU64::new(0),
             acme_issued: AtomicU64::new(0),
@@ -199,6 +201,12 @@ impl Metrics {
         );
         counter(
             &mut out,
+            "kunato_rules_update_incompatible_total",
+            "Rules updates rejected because the published rule set needs a newer build.",
+            self.rules_update_incompatible.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
             "kunato_rules_update_not_modified_total",
             "Rules update checks that found no new version.",
             self.rules_update_not_modified.load(Ordering::Relaxed),
@@ -278,6 +286,9 @@ mod tests {
         metrics.requests.fetch_add(2, Ordering::Relaxed);
         metrics.blocked.fetch_add(1, Ordering::Relaxed);
         metrics.acme_issued.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .rules_update_incompatible
+            .fetch_add(1, Ordering::Relaxed);
 
         let text = metrics.render(3);
 
@@ -286,6 +297,7 @@ mod tests {
         assert!(text.contains("kunato_blocked_total 1"));
         assert!(text.contains("kunato_acme_issued_total 1"));
         assert!(text.contains("kunato_acme_last_success_timestamp_seconds 0"));
+        assert!(text.contains("kunato_rules_update_incompatible_total 1"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));
         assert!(text.contains("kunato_active_connections 3"));
         assert!(text.contains("kunato_uptime_seconds"));

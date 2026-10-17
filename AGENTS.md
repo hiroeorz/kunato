@@ -106,6 +106,15 @@ rule-set updates.
 - Write rules in the compact style shown in `README.md`: `name` on one line and a
   flow-style `match` mapping on the next, falling back to block style only for
   larger match mappings.
+- `dist/rules.yaml` is the artifact every install with `rules_update` downloads
+  every day, and `main` publishes the newest rule set to installs of every
+  release. Rules in `rules.example.yaml` (and therefore in the generated
+  `dist/rules.yaml`) must stay inside the rule-set format of the newest release:
+  a new field, match target, action, or phase makes every installed release
+  reject the whole candidate and freeze its updates, so it needs a release
+  rather than a rule update. `scripts/check-rules-compat.sh` is the gate (it
+  builds the newest tag and validates the published file with it); see
+  `README.md`, "Rule set format compatibility".
 - `README.md` is the source of truth for the full field reference. Keep it in sync
   with any schema change.
 
@@ -122,6 +131,7 @@ cargo deny check                 # Dependency, license, advisory, and source aud
 cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
+./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,

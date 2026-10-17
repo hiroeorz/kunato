@@ -1,6 +1,11 @@
 #!/bin/sh
 # Regenerate dist/rules.yaml (categories only) from rules.example.yaml and
 # refresh dist/rules.yaml.sha256. Run after every change to the rule set.
+#
+# The published file must stay inside the rule-set format that the newest
+# release implements: installs with rules_update enabled download it directly.
+# scripts/check-rules-compat.sh is the gate; see "Rule set format
+# compatibility" in README.md.
 set -eu
 
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)

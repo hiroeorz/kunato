@@ -121,6 +121,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Check the published rules against the newest release
+        run: scripts/check-rules-compat.sh
+
       - name: Check formatting
         run: cargo fmt --check
 

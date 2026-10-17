@@ -241,6 +241,15 @@ in the new
 snapshot; any failure leaves the previous rules in place. `kunato update-rules`
 runs a single check for the installer and for manual use.
 
+Installs of every release download that same published file, so a rule the
+running build does not understand — an unknown field, match target, action, or
+phase — is rejected wholesale before anything is written, and the install keeps
+its previous rules and its old coverage. `dist/rules.yaml` therefore stays
+inside the format of the newest release: `scripts/check-rules-compat.sh` builds
+the newest `v*` tag, validates the published file with that binary, and runs in
+CI and in the daily update workflow; a new construct needs a release instead of
+a rule update. See README, "Rule set format compatibility".
+
 ## 6. Rule Engine
 
 ### Compiled model (sketch)

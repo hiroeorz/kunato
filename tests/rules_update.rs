@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -404,6 +405,129 @@ rules_update:
         existing
     );
     assert!(!state_file.exists());
+}
+
+#[tokio::test]
+async fn rejects_rule_sets_that_need_a_newer_build() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rules_file = dir.path().join("rules.yaml");
+    let main = dir.path().join("kunato.yaml");
+    let existing = "categories:
+  - name: previous
+    action: LOG
+    rules:
+      - name: old
+        match: { path: ^/old }
+";
+    std::fs::write(&rules_file, existing).expect("write previous rules");
+    let future = "categories:
+  - name: future
+    action: BLOCK
+    rules:
+      - name: future-rule
+        match: { regex: a, json_body: true }
+";
+    let addr = spawn_server(rules_routes(future.as_bytes())).await;
+    let text = format!(
+        "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: {rules_file}
+rules_update:
+  enabled: true
+  url: http://127.0.0.1:{port}/rules.yaml
+  checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  jitter_percent: 0
+",
+        rules_file = rules_file.display(),
+        port = addr.port()
+    );
+    std::fs::write(&main, &text).expect("write config");
+    let parsed = config::parse(&text).expect("parse config");
+    let state_file = rules_update::state_path(&rules_file);
+
+    let error = rules_update::update_once(&main, &parsed.rules_update, &rules_file, &state_file)
+        .await
+        .expect_err("a rule set with an unknown field must be rejected");
+
+    assert!(
+        matches!(error, kunato::error::Error::RulesNeedNewerBuild(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("json_body"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&rules_file).expect("previous rules intact"),
+        existing
+    );
+    assert!(!state_file.exists());
+}
+
+#[tokio::test]
+async fn run_counts_rule_sets_that_need_a_newer_build() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rules_file = dir.path().join("rules.yaml");
+    write_placeholder_rules(&rules_file);
+    let future = "categories:
+  - name: future
+    action: BLOCK
+    rules:
+      - name: future-rule
+        match: { regex: a, in: [json_body] }
+";
+    let addr = spawn_server(rules_routes(future.as_bytes())).await;
+    let main = dir.path().join("kunato.yaml");
+    let text = format!(
+        "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+rules_file: {rules_file}
+rules_update:
+  enabled: true
+  url: http://127.0.0.1:{port}/rules.yaml
+  checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  interval: 1s
+  jitter_percent: 0
+",
+        rules_file = rules_file.display(),
+        port = addr.port()
+    );
+    std::fs::write(&main, &text).expect("write config");
+    let compiled = config::load(&main).expect("load config");
+    let config = Arc::new(arc_swap::ArcSwap::from_pointee(compiled));
+    let metrics = Arc::new(kunato::metrics::Metrics::new());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(rules_update::run(
+        config,
+        main,
+        metrics.clone(),
+        false,
+        shutdown_rx,
+    ));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while metrics.rules_update_failure.load(Ordering::Relaxed) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the updater never attempted a download"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    shutdown_tx.send(true).expect("send shutdown");
+    let result = tokio::time::timeout(Duration::from_secs(5), task).await;
+    assert!(result.is_ok(), "rules update task must stop on shutdown");
+
+    assert!(
+        metrics.rules_update_incompatible.load(Ordering::Relaxed) >= 1,
+        "the incompatible rule set must be counted separately"
+    );
+    assert_eq!(
+        metrics.rules_update_incompatible.load(Ordering::Relaxed),
+        metrics.rules_update_failure.load(Ordering::Relaxed),
+        "every failure in this scenario is an incompatible rule set"
+    );
+    assert_eq!(metrics.rules_update_success.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        std::fs::read_to_string(&rules_file).expect("rules intact"),
+        PLACEHOLDER_RULES
+    );
 }
 
 #[tokio::test]

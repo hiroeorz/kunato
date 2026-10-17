@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer};
 
 pub mod watcher;
 
-use crate::error::Error;
+use crate::error::{Error, UNKNOWN_TARGET_ISSUE};
 use crate::rules::matcher::{
     Matcher, PayloadMatcher, StatusRange, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH,
     TARGET_QUERY, TARGET_RESPONSE_BODY,
@@ -1809,7 +1809,7 @@ fn compile_payload(
                             ));
                         }
                     }
-                    other => issues.push(format!("{context}: unknown `in` target `{other}`")),
+                    other => issues.push(format!("{context}: {UNKNOWN_TARGET_ISSUE} `{other}`")),
                 }
             }
         }

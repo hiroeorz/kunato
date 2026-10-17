@@ -99,7 +99,17 @@ pub async fn run(
             }
             Err(err) => {
                 metrics.rules_update_failure.fetch_add(1, Ordering::Relaxed);
-                error!(error = %err, "rules update failed; keeping the current rules");
+                if matches!(err, Error::RulesNeedNewerBuild(_)) {
+                    metrics
+                        .rules_update_incompatible
+                        .fetch_add(1, Ordering::Relaxed);
+                    error!(
+                        error = %err,
+                        "the published rule set needs a newer Kunato build; keeping the current rules"
+                    );
+                } else {
+                    error!(error = %err, "rules update failed; keeping the current rules");
+                }
                 false
             }
         };
@@ -163,7 +173,13 @@ pub async fn update_once(
 
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| Error::Message("rules file is not valid UTF-8".to_owned()))?;
-    let parsed = config::parse_rules(text)?;
+    // A construct this build does not implement means the published set is newer
+    // than the running binary: that needs an upgrade, which is a different
+    // remedy than a transient failure, so it gets its own error variant.
+    let parsed = config::parse_rules(text).map_err(|err| match err.unsupported_construct() {
+        Some(construct) => Error::RulesNeedNewerBuild(construct),
+        None => err,
+    })?;
     if !parsed.disabled_rules.is_empty() {
         return Err(Error::Message(
             "rules file must not contain `disabled_rules`; put them in overrides_file".to_owned(),

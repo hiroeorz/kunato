@@ -64,4 +64,6 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+            dist/rules.yaml
+            dist/rules.yaml.sha256
             scripts/install.sh
