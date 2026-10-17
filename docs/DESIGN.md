@@ -335,6 +335,14 @@ contract; response rules follow the same contract with the response view.
   `response_headers` maps a case-insensitive header name to regexes.
 - Evaluation short-circuits on the first failing condition to keep the hot path
   cheap.
+- `ALLOW` rules disable the WAF, so they are compiled in a unanimous mode: they
+  must match every path form, every value of a repeated header or cookie entry,
+  and every form of each `in` target, and their `headers`, `cookies`,
+  `response_headers`, and `regex` patterns must be anchored at both ends
+  (`^...$`); the configuration is rejected otherwise. This keeps one forged
+  value copy or an appended marker from shadowing a later `BLOCK` that the
+  copies or the surrounding request actually deserve. `path` stays flexible so
+  a start-anchored prefix can exempt a whole area.
 
 ### Security limits
 

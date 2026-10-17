@@ -620,10 +620,17 @@ values are matched raw and through up to two decode passes, so
 `application/x-www-form-urlencoded` conventions, so `+` is decoded to a space
 (`?q=union+select` matches like `?q=union%20select`); paths are additionally
 matched in normalized form (dot segments resolved, duplicate slashes merged), so
-`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. A `BLOCK` or
-`LOG` rule matches any form, while an `ALLOW` rule must match every path form:
-an allowlisted raw path such as `/public/../private` cannot shadow a `BLOCK` on
-the canonical path an upstream would route. Header values
+`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. `BLOCK` and
+`LOG` rules match any form, so an attack hidden in one representation is still
+caught. An `ALLOW` rule disables the WAF for the request, so its trust has to be
+unanimous instead: it must match every path form, every value of a repeated
+`headers` or `cookies` entry, and every form of the `in` targets, and the
+patterns of an `ALLOW` rule may only use `headers`, `cookies`, `response_headers`,
+and `regex` values that are anchored at both ends (`^...$`); the configuration is
+rejected otherwise. A forged extra copy of a header and a marker appended to the
+query or the body therefore cannot shadow a later `BLOCK`. `path` is exempt so a
+start-anchored prefix can exempt a whole area from the rules that follow. Header
+values
 are decoded with UTF-8 replacement, so a single invalid byte cannot hide a value
 from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string

@@ -1679,7 +1679,7 @@ fn compile_matcher(
     issues: &mut Vec<String>,
 ) -> Matcher {
     let mut matcher = Matcher {
-        path_match_all: action == Some(Action::Allow),
+        allow_mode: action == Some(Action::Allow),
         ..Matcher::default()
     };
     let mut has_condition = false;
@@ -1719,7 +1719,8 @@ fn compile_matcher(
         if map.is_empty() {
             issues.push(format!("{context}: `headers` must not be empty"));
         }
-        matcher.headers = compile_header_matchers(map, context, issues);
+        matcher.headers =
+            compile_header_matchers(map, context, action == Some(Action::Allow), issues);
     }
 
     if let Some(map) = &spec.cookies {
@@ -1727,7 +1728,8 @@ fn compile_matcher(
         if map.is_empty() {
             issues.push(format!("{context}: `cookies` must not be empty"));
         }
-        matcher.cookies = compile_cookie_matchers(map, context, issues);
+        matcher.cookies =
+            compile_cookie_matchers(map, context, action == Some(Action::Allow), issues);
     }
 
     if let Some(items) = &spec.status {
@@ -1749,8 +1751,12 @@ fn compile_matcher(
             if map.is_empty() {
                 issues.push(format!("{context}: `response_headers` must not be empty"));
             }
-            matcher.response_headers =
-                compile_header_matchers(map, &format!("{context}: response_headers"), issues);
+            matcher.response_headers = compile_header_matchers(
+                map,
+                &format!("{context}: response_headers"),
+                action == Some(Action::Allow),
+                issues,
+            );
         }
     }
 
@@ -1760,8 +1766,14 @@ fn compile_matcher(
             if patterns.is_empty() {
                 issues.push(format!("{context}: `regex` must not be empty"));
             }
-            matcher.payload =
-                compile_payload(patterns, spec.targets.as_deref(), phase, context, issues);
+            matcher.payload = compile_payload(
+                patterns,
+                spec.targets.as_deref(),
+                phase,
+                action,
+                context,
+                issues,
+            );
         }
         None => {
             if spec.targets.is_some() {
@@ -1783,6 +1795,7 @@ fn compile_payload(
     patterns: &[String],
     targets: Option<&[String]>,
     phase: Phase,
+    action: Option<Action>,
     context: &str,
     issues: &mut Vec<String>,
 ) -> Option<PayloadMatcher> {
@@ -1818,6 +1831,9 @@ fn compile_payload(
     }
 
     let regexes = compile_regexes(patterns, &format!("{context}: regex"), issues);
+    if action == Some(Action::Allow) {
+        require_anchored(patterns, &format!("{context}: regex"), issues);
+    }
     if target_flags == 0 || regexes.is_empty() {
         return None;
     }
@@ -1826,6 +1842,47 @@ fn compile_payload(
         regexes,
         targets: target_flags,
     })
+}
+
+/// ALLOW rules disable the WAF, so every pattern an ALLOW rule relies on must
+/// cover the whole subject (entire header or cookie value, entire query/body
+/// string). A pattern that matches anywhere inside a larger, attacker
+/// controlled part lets the marker shadow later rules once it is appended.
+fn require_anchored(patterns: &[String], context: &str, issues: &mut Vec<String>) {
+    for pattern in patterns {
+        if !is_fully_anchored(pattern) {
+            issues.push(format!(
+                "{context}: an ALLOW pattern must match the whole subject so an appended marker cannot trigger it; anchor the pattern at both ends, for example `^...$`"
+            ));
+        }
+    }
+}
+
+/// A payload pattern is fully anchored when it can only match entire target
+/// strings, leaving no position where an appended marker could satisfy it.
+/// Supports `^`/`\A` at the start and `$`/`\z` at the end, with pure inline
+/// flag groups such as `(?i)` allowed ahead of the anchor. Multiline mode (`m`)
+/// is rejected because per-line anchors reintroduce the appended marker.
+fn is_fully_anchored(pattern: &str) -> bool {
+    let mut rest = pattern;
+    while let Some(after) = rest.strip_prefix("(?") {
+        let Some(end) = after.find(')') else {
+            return false;
+        };
+        let flags = &after[..end];
+        if !flags
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+        {
+            return false;
+        }
+        if flags.bytes().any(|byte| byte == b'm') {
+            return false;
+        }
+        rest = &after[end + 1..];
+    }
+    (rest.starts_with('^') || rest.starts_with(r"\A"))
+        && (pattern.ends_with('$') || pattern.ends_with(r"\z"))
 }
 
 fn compile_regexes(patterns: &[String], context: &str, issues: &mut Vec<String>) -> Vec<Regex> {
@@ -1990,6 +2047,7 @@ fn parse_ip_net(value: &str) -> Result<IpNet, String> {
 fn compile_header_matchers(
     map: &BTreeMap<String, StringOrSeq>,
     context: &str,
+    allow: bool,
     issues: &mut Vec<String>,
 ) -> Vec<(HeaderName, Vec<Regex>)> {
     let mut matchers = Vec::new();
@@ -2008,6 +2066,13 @@ fn compile_header_matchers(
             &format!("{context}: header `{name}`"),
             issues,
         );
+        if allow {
+            require_anchored(
+                &patterns.clone().into_vec(),
+                &format!("{context}: header `{name}`"),
+                issues,
+            );
+        }
         if !regexes.is_empty() {
             matchers.push((header, regexes));
         }
@@ -2018,6 +2083,7 @@ fn compile_header_matchers(
 fn compile_cookie_matchers(
     map: &BTreeMap<String, StringOrSeq>,
     context: &str,
+    allow: bool,
     issues: &mut Vec<String>,
 ) -> Vec<(String, Vec<Regex>)> {
     let mut matchers = Vec::new();
@@ -2036,6 +2102,13 @@ fn compile_cookie_matchers(
             &format!("{context}: cookie `{name}`"),
             issues,
         );
+        if allow {
+            require_anchored(
+                &patterns.clone().into_vec(),
+                &format!("{context}: cookie `{name}`"),
+                issues,
+            );
+        }
         if !regexes.is_empty() {
             matchers.push((name.clone(), regexes));
         }
@@ -3650,5 +3723,47 @@ categories:
         let error = load_with_rules_candidate(&main, conflicting)
             .expect_err("duplicate category must fail");
         assert!(error.to_string().contains("duplicate category"), "{error}");
+    }
+
+    #[test]
+    fn allow_regex_must_be_anchored() {
+        let unanchored = "categories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: marker\n        match: { regex: tokenfree, in: [query] }\n";
+        let error = parse_with(BASE, unanchored).expect_err("unanchored ALLOW regex must fail");
+        assert!(error.to_string().contains("anchor the pattern"), "{error}");
+
+        let anchored = "categories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: marker\n        match: { regex: '^q=tokenfree$', in: [query] }\n";
+        parse_with(BASE, anchored).expect("anchored ALLOW regex is valid");
+
+        // The same unanchored pattern is fine for a rule the operator wrote to
+        // block or log.
+        let blocking = "categories:\n  - name: scanners\n    action: BLOCK\n    rules:\n      - name: marker\n        match: { regex: tokenfree, in: [query] }\n";
+        parse_with(BASE, blocking).expect("BLOCK keeps any-form regex semantics");
+    }
+
+    #[test]
+    fn allow_header_and_cookie_patterns_must_be_anchored() {
+        let unanchored = "categories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: marker\n        match: { headers: { x-marker: tokenfree } }\n";
+        let error = parse_with(BASE, unanchored).expect_err("unanchored ALLOW header must fail");
+        assert!(error.to_string().contains("header `x-marker`"), "{error}");
+
+        let anchored = "categories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: marker\n        match: { headers: { x-marker: '^tokenfree$' }, cookies: { session: '^admin$' } }\n";
+        parse_with(BASE, anchored).expect("anchored ALLOW header and cookie are valid");
+
+        // BLOCK rules keep the any-substring semantics for their patterns.
+        let blocking = "categories:\n  - name: scanners\n    action: BLOCK\n    rules:\n      - name: marker\n        match: { headers: { x-marker: tokenfree } }\n";
+        parse_with(BASE, blocking).expect("BLOCK keeps any-form header semantics");
+    }
+
+    #[test]
+    fn fully_anchored_patterns_are_recognized() {
+        assert!(is_fully_anchored("^tokenfree$"));
+        assert!(is_fully_anchored("(?i)^tokenfree$"));
+        assert!(is_fully_anchored(r"\Atokenfree\z"));
+        assert!(is_fully_anchored("^(?:a|b)$"));
+        assert!(!is_fully_anchored("^tokenfree"));
+        assert!(!is_fully_anchored("tokenfree$"));
+        assert!(!is_fully_anchored("tokenfree"));
+        assert!(!is_fully_anchored("(?m)^tokenfree$"));
+        assert!(!is_fully_anchored("(?i)^tokenfree"));
     }
 }

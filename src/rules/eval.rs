@@ -181,6 +181,37 @@ mod tests {
     }
 
     #[test]
+    fn allow_query_marker_cannot_shadow_blocks_when_appended() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: trusted-marker
+    action: ALLOW
+    rules:
+      - name: marker
+        match: {{ regex: '^q=tokenfree$', in: [query] }}
+  - name: protected
+    action: BLOCK
+    rules:
+      - name: no-secret
+        match: {{ path: ^/secret }}
+"
+        );
+
+        // The marker request itself is still trusted.
+        assert!(
+            evaluate_request(&yaml, "/secret?q=tokenfree")
+                .blocked
+                .is_none()
+        );
+
+        // Appending the marker to any other request keeps the BLOCK active.
+        for appended in ["/secret?q=tokenfree&z=1", "/secret?a=zz&q=tokenfree"] {
+            let outcome = evaluate_request(&yaml, appended);
+            assert!(outcome.blocked.is_some(), "{appended} must be blocked");
+        }
+    }
+
+    #[test]
     fn category_action_applies_to_rules() {
         let yaml = format!(
             "{BASE}categories:

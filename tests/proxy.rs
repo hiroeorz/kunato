@@ -596,6 +596,99 @@ categories:
 }
 
 #[tokio::test]
+async fn allow_marker_cannot_be_shadowed_by_duplicate_header_values() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: trusted-marker
+    action: ALLOW
+    rules:
+      - name: marker
+        match: {{ headers: {{ x-marker: '^tokenfree$' }} }}
+  - name: protected
+    action: BLOCK
+    rules:
+      - name: no-secret
+        match: {{ path: ^/secret }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    // Without the marker the BLOCK stands.
+    let (status, _) = send(running.addr, Method::GET, "/secret", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A trusted request with the marker is allowed.
+    let (status, body) = send_bytes(
+        running.addr,
+        Method::GET,
+        "/secret",
+        Vec::new(),
+        &[("x-marker", "tokenfree")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
+
+    // A second copy of the same header must agree too, so the marker cannot
+    // shadow the BLOCK by appending a forged value.
+    for extra in ["bogus", "tokenfreebogus"] {
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::GET,
+            "/secret",
+            Vec::new(),
+            &[("x-marker", "tokenfree"), ("x-marker", extra)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "extra value {extra}");
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allow_query_marker_cannot_be_appended_to_blocked_path() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: trusted-marker
+    action: ALLOW
+    rules:
+      - name: marker
+        match: {{ regex: '^q=tokenfree$', in: [query] }}
+  - name: protected
+    action: BLOCK
+    rules:
+      - name: no-secret
+        match: {{ path: ^/secret }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    // The exact marker query is trusted.
+    let (status, body) = send(running.addr, Method::GET, "/secret?q=tokenfree", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    // Appending the marker anywhere else keeps the BLOCK.
+    for appended in ["/secret?q=tokenfree&z=1", "/secret?a=zz&q=tokenfree"] {
+        let (status, _) = send(running.addr, Method::GET, appended, "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{appended}");
+    }
+
+    // Encoded forms of the marker do not pass either: the raw query must agree.
+    let (status, _) = send(running.addr, Method::GET, "/secret?q=token%66ree", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn response_header_policy_rewrites_upstream_headers() {
     let upstream = spawn_identifying_upstream().await;
     let yaml = format!(

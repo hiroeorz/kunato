@@ -42,10 +42,12 @@ pub struct Matcher {
     pub statuses: Vec<StatusRange>,
     pub response_headers: Vec<(HeaderName, Vec<Regex>)>,
     pub payload: Option<PayloadMatcher>,
-    /// ALLOW rules must agree with every path form (raw, decoded, normalized),
-    /// so an allowlisted raw path cannot shadow a BLOCK on the canonical path
-    /// that an upstream would route.
-    pub path_match_all: bool,
+    /// ALLOW rules disable the WAF, so trust has to be unanimous: every
+    /// representation of each matched target (all path forms, all values of a
+    /// repeated header or cookie, all decoded forms of a payload target) must
+    /// agree, so one copy of a marker cannot shadow a `BLOCK` on the copies
+    /// the upstream (or the client) really sent.
+    pub allow_mode: bool,
 }
 
 #[derive(Debug)]
@@ -74,11 +76,19 @@ impl Matcher {
         }
 
         for (name, regexes) in &self.response_headers {
-            let matched = response
-                .headers
-                .get_all(name)
-                .iter()
-                .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))));
+            let matched = if self.allow_mode {
+                let values: Vec<_> = response.headers.get_all(name).iter().collect();
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| regexes.iter().any(|re| re.is_match(&header_text(value))))
+            } else {
+                response
+                    .headers
+                    .get_all(name)
+                    .iter()
+                    .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))))
+            };
             if !matched {
                 return false;
             }
@@ -89,7 +99,7 @@ impl Matcher {
 
     fn matches_request(&self, view: &RequestView<'_>) -> bool {
         if !self.paths.is_empty() {
-            let matched = if self.path_match_all {
+            let matched = if self.allow_mode {
                 !view.path_forms.is_empty()
                     && view
                         .path_forms
@@ -120,23 +130,41 @@ impl Matcher {
         }
 
         for (name, regexes) in &self.headers {
-            let matched = view
-                .headers
-                .get_all(name)
-                .iter()
-                .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))));
+            let matched = if self.allow_mode {
+                // One matching copy is not enough; every copy the client sent
+                // must agree, or the rule is not the trusted request it asked
+                // to allow.
+                let values: Vec<_> = view.headers.get_all(name).iter().collect();
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| regexes.iter().any(|re| re.is_match(&header_text(value))))
+            } else {
+                view.headers
+                    .get_all(name)
+                    .iter()
+                    .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))))
+            };
             if !matched {
                 return false;
             }
         }
 
         for (name, regexes) in &self.cookies {
-            let matched = cookie_pairs(view.headers)
-                .iter()
-                .any(|(cookie_name, value)| {
-                    cookie_name.as_ref() == name.as_str()
-                        && regexes.iter().any(|re| re.is_match(value.as_ref()))
-                });
+            let values: Vec<_> = cookie_pairs(view.headers)
+                .into_iter()
+                .filter(|(cookie_name, _)| cookie_name.as_ref() == name.as_str())
+                .collect();
+            let matched = if self.allow_mode {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|(_, value)| regexes.iter().any(|re| re.is_match(value.as_ref())))
+            } else {
+                values
+                    .iter()
+                    .any(|(_, value)| regexes.iter().any(|re| re.is_match(value.as_ref())))
+            };
             if !matched {
                 return false;
             }
@@ -149,7 +177,7 @@ impl Matcher {
         let Some(payload) = &self.payload else {
             return true;
         };
-        payload.matches(view, response, self.path_match_all)
+        payload.matches(view, response, self.allow_mode)
     }
 }
 
@@ -158,10 +186,10 @@ impl PayloadMatcher {
         &self,
         view: &RequestView<'_>,
         response: Option<&ResponseView<'_>>,
-        path_match_all: bool,
+        allow_mode: bool,
     ) -> bool {
         if self.targets & TARGET_PATH != 0 {
-            let hit = if path_match_all {
+            let hit = if allow_mode {
                 !view.path_forms.is_empty() && view.path_forms.iter().all(|form| self.hits(form))
             } else {
                 view.path_forms.iter().any(|form| self.hits(form))
@@ -171,35 +199,64 @@ impl PayloadMatcher {
             }
         }
 
-        if self.targets & TARGET_QUERY != 0 && view.query_forms.iter().any(|form| self.hits(form)) {
-            return true;
+        if self.targets & TARGET_QUERY != 0 {
+            let hit = if allow_mode {
+                !view.query_forms.is_empty() && view.query_forms.iter().all(|form| self.hits(form))
+            } else {
+                view.query_forms.iter().any(|form| self.hits(form))
+            };
+            if hit {
+                return true;
+            }
         }
 
-        if self.targets & TARGET_BODY != 0
-            && ((!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body)))
-                || view
-                    .body_forms
-                    .iter()
-                    .any(|form| self.hits(&String::from_utf8_lossy(form))))
-        {
-            return true;
+        if self.targets & TARGET_BODY != 0 {
+            let hit = if allow_mode {
+                !view.body.is_empty()
+                    && self.hits(&String::from_utf8_lossy(view.body))
+                    && view
+                        .body_forms
+                        .iter()
+                        .all(|form| self.hits(&String::from_utf8_lossy(form)))
+            } else {
+                (!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body)))
+                    || view
+                        .body_forms
+                        .iter()
+                        .any(|form| self.hits(&String::from_utf8_lossy(form)))
+            };
+            if hit {
+                return true;
+            }
         }
 
-        if self.targets & TARGET_COOKIES != 0
-            && cookie_pairs(view.headers)
-                .iter()
-                .any(|(_, value)| self.hits(value.as_ref()))
-        {
-            return true;
+        if self.targets & TARGET_COOKIES != 0 {
+            let pairs = cookie_pairs(view.headers);
+            let hit = if allow_mode {
+                !pairs.is_empty() && pairs.iter().all(|(_, value)| self.hits(value.as_ref()))
+            } else {
+                pairs.iter().any(|(_, value)| self.hits(value.as_ref()))
+            };
+            if hit {
+                return true;
+            }
         }
 
-        if self.targets & TARGET_HEADERS != 0
-            && view
-                .headers
-                .values()
-                .any(|value| self.hits(&header_text(value)))
-        {
-            return true;
+        if self.targets & TARGET_HEADERS != 0 {
+            let hit = if allow_mode {
+                !view.headers.is_empty()
+                    && view
+                        .headers
+                        .values()
+                        .all(|value| self.hits(&header_text(value)))
+            } else {
+                view.headers
+                    .values()
+                    .any(|value| self.hits(&header_text(value)))
+            };
+            if hit {
+                return true;
+            }
         }
 
         if self.targets & TARGET_RESPONSE_BODY != 0
@@ -220,7 +277,7 @@ impl PayloadMatcher {
 
 #[cfg(test)]
 mod tests {
-    use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+    use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header::COOKIE};
 
     use super::*;
 
@@ -284,6 +341,121 @@ mod tests {
             ..Matcher::default()
         };
         assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn allow_mode_header_condition_requires_every_value() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            headers: vec![(
+                HeaderName::from_static("x-marker"),
+                vec![regex("^tokenfree$")],
+            )],
+            allow_mode: true,
+            ..Matcher::default()
+        };
+
+        // A repeated header must agree on every copy, so a forged extra value
+        // cannot shadow later rules for the trusted request.
+        let mut shadowed = HeaderMap::new();
+        shadowed.append("x-marker", HeaderValue::from_static("tokenfree"));
+        shadowed.append("x-marker", HeaderValue::from_static("bogus"));
+        assert!(!matcher.matches(&view(&method, &uri, &shadowed, b"")));
+
+        let mut reversed = HeaderMap::new();
+        reversed.append("x-marker", HeaderValue::from_static("bogus"));
+        reversed.append("x-marker", HeaderValue::from_static("tokenfree"));
+        assert!(!matcher.matches(&view(&method, &uri, &reversed, b"")));
+
+        let mut trusted = HeaderMap::new();
+        trusted.insert("x-marker", HeaderValue::from_static("tokenfree"));
+        assert!(matcher.matches(&view(&method, &uri, &trusted, b"")));
+
+        let missing = HeaderMap::new();
+        assert!(!matcher.matches(&view(&method, &uri, &missing, b"")));
+    }
+
+    #[test]
+    fn block_mode_header_condition_still_matches_any_value() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            headers: vec![(
+                HeaderName::from_static("x-marker"),
+                vec![regex("tokenfree")],
+            )],
+            ..Matcher::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-marker", HeaderValue::from_static("tokenfree"));
+        headers.append("x-marker", HeaderValue::from_static("bogus"));
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn allow_mode_cookie_condition_requires_every_pair() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            cookies: vec![("session".to_owned(), vec![regex("^admin$")])],
+            allow_mode: true,
+            ..Matcher::default()
+        };
+
+        let mut shadowed = HeaderMap::new();
+        shadowed.insert(
+            COOKIE,
+            HeaderValue::from_static("session=admin; session=guest"),
+        );
+        assert!(!matcher.matches(&view(&method, &uri, &shadowed, b"")));
+
+        let mut trusted = HeaderMap::new();
+        trusted.insert(
+            COOKIE,
+            HeaderValue::from_static("session=admin; theme=dark"),
+        );
+        assert!(matcher.matches(&view(&method, &uri, &trusted, b"")));
+    }
+
+    #[test]
+    fn allow_mode_query_payload_requires_forms_to_agree() {
+        let method = Method::GET;
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"^q=tokenfree$")],
+                targets: TARGET_QUERY,
+            }),
+            allow_mode: true,
+            ..Matcher::default()
+        };
+
+        let exclusive: Uri = "/?q=tokenfree".parse().expect("valid URI");
+        assert!(matcher.matches(&view(&method, &exclusive, &HeaderMap::new(), b"")));
+
+        for appended in ["/?q=tokenfree&z=1", "/?a=zz&q=tokenfree"] {
+            let uri: Uri = appended.parse().expect("valid URI");
+            assert!(
+                !matcher.matches(&view(&method, &uri, &HeaderMap::new(), b"")),
+                "appended marker must not allow {appended}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_mode_query_payload_still_matches_anywhere() {
+        let method = Method::GET;
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("tokenfree")],
+                targets: TARGET_QUERY,
+            }),
+            ..Matcher::default()
+        };
+
+        let uri: Uri = "/?a=zz&q=tokenfree".parse().expect("valid URI");
+        assert!(matcher.matches(&view(&method, &uri, &HeaderMap::new(), b"")));
     }
 
     #[test]

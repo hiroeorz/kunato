@@ -262,6 +262,7 @@ not match the Marshal signatures.
 | Obfuscated JavaScript / SQL | ✅ | Whitespace- and comment-tolerant regexes |
 | WAF Fingerprinting | ❌ | Impossible to hide entirely (the block behavior is itself a signature) |
 | Rule Bypass Payloads | ❌ | Cannot be guaranteed; the black-box suite is the ongoing control |
+| ALLOW Rule Shadowing | ✅ | Engine-level: `ALLOW` rules are compiled into unanimous matching (every path form, every value of a repeated header/cookie, every form of each `in` target) and their `headers`/`cookies`/`response_headers`/`regex` patterns must be anchored at both ends or the configuration is rejected, so a forged duplicate value or an appended marker cannot shadow a later `BLOCK` |
 
 ## Core Priority List Summary
 
