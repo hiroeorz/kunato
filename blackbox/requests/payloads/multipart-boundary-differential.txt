@@ -1,0 +1,10 @@
+--safe
+Content-Disposition: form-data; name="a"
+
+v
+--safe--
+--malicious
+Content-Disposition: form-data; name="payload"
+
+union%20select%201
+--malicious--

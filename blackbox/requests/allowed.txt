@@ -338,6 +338,12 @@ POST /api/config body="{defaults: &d 1, retry: *d}"
 GET /api/items?cursor=QmFzaWMtYmFzZTY0LWN1cnNvci0yMDI2
 GET /api/logs?from=2026-01-01&limit=100
 
+# --- Multipart near-misses: Content-Length uploads, multiple boundaries with
+#     benign content, and chunked non-form bodies must keep passing ---
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-benign.txt
+POST /api/search header="Content-Type: application/json" chunked=1 body="{\"query\":\"rust\"}"
+
 # --- Encoded and international text ---
 GET /search?q=%E5%AF%BF%E5%8F%B8
 GET /search?q=caf%C3%A9

@@ -11,6 +11,7 @@ const MAX_CONTENT_ENCODING_LAYERS: usize = 3;
 const MAX_MULTIPART_PARTS: usize = 64;
 const MAX_MULTIPART_NAME_BYTES: usize = 1024;
 const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
+const MAX_MULTIPART_BOUNDARIES: usize = 4;
 
 pub struct DecodedBody {
     pub body: Vec<u8>,
@@ -68,57 +69,90 @@ pub fn encoding_is_uninspectable(headers: &HeaderMap) -> bool {
 }
 
 pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
+    decode_body_formats(body, headers).into_iter().next()
+}
+
+/// Decoded forms derived from the declared content type. Multipart bodies
+/// yield one flattened form per declared boundary: a message may name several
+/// (Rack parses the last, most servers the first), so every interpretation has
+/// to be inspected. Content types with no usable boundary, or more than
+/// [`MAX_MULTIPART_BOUNDARIES`], are treated as uninspectable and fall back to
+/// the raw percent passes.
+fn decode_body_formats(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
     if body.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let content_type = String::from_utf8_lossy(headers.get(CONTENT_TYPE)?.as_bytes());
-    let media_type = content_type.split(';').next()?.trim().to_ascii_lowercase();
+    let Some(content_type) = headers.get(CONTENT_TYPE) else {
+        return Vec::new();
+    };
+    let content_type = String::from_utf8_lossy(content_type.as_bytes());
+    let Some(media_type) = content_type.split(';').next() else {
+        return Vec::new();
+    };
+    let media_type = media_type.trim().to_ascii_lowercase();
 
     if media_type == "application/x-www-form-urlencoded" {
-        Some(form_decode(body))
+        vec![form_decode(body)]
     } else if media_type == "application/json" || media_type.ends_with("+json") {
-        Some(json_unescape(body))
+        vec![json_unescape(body)]
     } else if media_type == "multipart/form-data" {
-        multipart_flatten(body, &multipart_boundary(&content_type)?)
+        let boundaries = multipart_boundaries(&content_type);
+        if boundaries.is_empty() || boundaries.len() > MAX_MULTIPART_BOUNDARIES {
+            return Vec::new();
+        }
+        boundaries
+            .iter()
+            .filter_map(|boundary| multipart_flatten(body, boundary))
+            .collect()
     } else {
-        None
+        Vec::new()
     }
 }
 
 /// Decoded variants of a request body for inspection: the content-type decoded
-/// form followed by up to [`MAX_PERCENT_DECODE_PASSES`] percent-encoded passes.
-/// Unknown content types still get the percent passes, because applications may
-/// decode the body regardless of the declared type. The raw body is inspected
-/// separately and is not repeated here.
+/// forms followed by up to [`MAX_PERCENT_DECODE_PASSES`] percent-encoded passes
+/// each. Unknown content types still get the percent passes, because
+/// applications may decode the body regardless of the declared type. The raw
+/// body is inspected separately and is not repeated here.
 pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
     let mut forms = Vec::new();
-    let mut current = match decode_body_format(body, headers) {
-        Some(formatted) => {
-            let current = String::from_utf8_lossy(&formatted).into_owned();
-            if current.is_empty() {
-                return forms;
-            }
-            if current.as_bytes() != body {
-                forms.push(current.as_bytes().to_vec());
-            }
-            current
+    let decoded = decode_body_formats(body, headers);
+    if decoded.is_empty() {
+        if !body.contains(&b'%') {
+            return forms;
         }
-        None => {
-            if !body.contains(&b'%') {
-                return forms;
-            }
-            String::from_utf8_lossy(body).into_owned()
+        push_percent_passes(&String::from_utf8_lossy(body), &mut forms);
+        return forms;
+    }
+    for formatted in decoded {
+        let formatted = String::from_utf8_lossy(&formatted).into_owned();
+        if formatted.is_empty() {
+            continue;
         }
-    };
+        if formatted.as_bytes() != body {
+            push_unique(&mut forms, formatted.as_bytes());
+        }
+        push_percent_passes(&formatted, &mut forms);
+    }
+    forms
+}
+
+fn push_percent_passes(current: &str, forms: &mut Vec<Vec<u8>>) {
+    let mut current = current.to_owned();
     for _ in 0..MAX_PERCENT_DECODE_PASSES {
         let next = percent_decode(&current).into_owned();
         if next == current {
             break;
         }
-        forms.push(next.as_bytes().to_vec());
+        push_unique(forms, next.as_bytes());
         current = next;
     }
-    forms
+}
+
+fn push_unique(forms: &mut Vec<Vec<u8>>, bytes: &[u8]) {
+    if !forms.iter().any(|form| form.as_slice() == bytes) {
+        forms.push(bytes.to_vec());
+    }
 }
 
 /// Percent-decoded variants of `input`, starting with the raw form, with at
@@ -312,7 +346,14 @@ fn form_decode(body: &[u8]) -> Vec<u8> {
     output
 }
 
-fn multipart_boundary(content_type: &str) -> Option<String> {
+/// Every valid `boundary` parameter of a `multipart/form-data` Content-Type,
+/// in declaration order and deduplicated. A message may declare several
+/// boundaries and different parsers pick different ones (Rack parses the last,
+/// most servers the first), so each interpretation has to be inspected.
+/// Callers treat more than [`MAX_MULTIPART_BOUNDARIES`] candidates as
+/// uninspectable.
+fn multipart_boundaries(content_type: &str) -> Vec<String> {
+    let mut boundaries = Vec::new();
     for parameter in content_type.split(';').skip(1) {
         let parameter = parameter.trim();
         let Some((name, value)) = parameter.split_once('=') else {
@@ -331,11 +372,16 @@ fn multipart_boundary(content_type: &str) -> Option<String> {
             || !value.is_ascii()
             || value.bytes().any(|byte| byte.is_ascii_whitespace())
         {
-            return None;
+            continue;
         }
-        return Some(value.to_owned());
+        if !boundaries.iter().any(|boundary| boundary == value) {
+            boundaries.push(value.to_owned());
+        }
+        if boundaries.len() > MAX_MULTIPART_BOUNDARIES {
+            break;
+        }
     }
-    None
+    boundaries
 }
 
 /// Flattens the textual parts of a `multipart/form-data` body into one document
@@ -991,6 +1037,61 @@ mod tests {
             .map(|form| std::str::from_utf8(form).expect("utf8"))
             .collect();
         assert_eq!(forms, vec!["q=%2527\n", "q=%27\n", "q='\n"]);
+    }
+
+    #[test]
+    fn multipart_multi_boundary_bodies_inspect_each_interpretation() {
+        let body = b"--safe\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--safe--\r\n--malicious\r\nContent-Disposition: form-data; name=\"payload\"\r\n\r\nunion%20select%201\r\n--malicious--\r\n";
+        let forms = decoded_body_forms(
+            body,
+            &headers(
+                CONTENT_TYPE,
+                "multipart/form-data; boundary=safe; boundary=malicious",
+            ),
+        );
+        let forms: Vec<&str> = forms
+            .iter()
+            .map(|form| std::str::from_utf8(form).expect("utf8"))
+            .collect();
+        assert!(
+            forms.iter().any(|form| form.contains("v\n")),
+            "first boundary interpretation missing: {forms:?}"
+        );
+        assert!(
+            forms.iter().any(|form| form.contains("union select")),
+            "last boundary interpretation missing: {forms:?}"
+        );
+    }
+
+    #[test]
+    fn multipart_excess_boundaries_fall_back_to_percent_passes() {
+        let body = b"payload=%75nion%20select";
+        let forms = decoded_body_forms(
+            body,
+            &headers(
+                CONTENT_TYPE,
+                "multipart/form-data; boundary=a; boundary=b; boundary=c; boundary=d; boundary=e",
+            ),
+        );
+        let forms: Vec<&str> = forms
+            .iter()
+            .map(|form| std::str::from_utf8(form).expect("utf8"))
+            .collect();
+        assert_eq!(forms, vec!["payload=union select"]);
+    }
+
+    #[test]
+    fn multipart_duplicate_boundaries_flatten_once() {
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--X--\r\n";
+        let forms = decoded_body_forms(
+            body,
+            &headers(CONTENT_TYPE, "multipart/form-data; boundary=X; boundary=X"),
+        );
+        let forms: Vec<&str> = forms
+            .iter()
+            .map(|form| std::str::from_utf8(form).expect("utf8"))
+            .collect();
+        assert_eq!(forms, vec!["v\n"]);
     }
 
     #[test]

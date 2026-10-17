@@ -34,6 +34,7 @@ struct RequestSpec {
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
     protocol: Protocol,
+    chunked: bool,
     hpack_bomb: Option<usize>,
     pad_header: Option<usize>,
 }
@@ -223,15 +224,37 @@ fn send_http1(
     }
 
     let body = request.body.as_deref().unwrap_or(&[]);
-    if !body.is_empty() {
+    if !request.chunked && !body.is_empty() {
         message.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    if request.chunked {
+        message.push_str("Transfer-Encoding: chunked\r\n");
     }
     message.push_str("\r\n");
 
     stream
         .write_all(message.as_bytes())
         .map_err(|err| format!("write: {err}"))?;
-    if !body.is_empty() {
+    if request.chunked {
+        const CHUNK_BYTES: usize = 4096;
+        let mut remaining = body;
+        while !remaining.is_empty() {
+            let (chunk, rest) = remaining.split_at(remaining.len().min(CHUNK_BYTES));
+            stream
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .map_err(|err| format!("write chunk header: {err}"))?;
+            stream
+                .write_all(chunk)
+                .map_err(|err| format!("write chunk: {err}"))?;
+            stream
+                .write_all(b"\r\n")
+                .map_err(|err| format!("write chunk terminator: {err}"))?;
+            remaining = rest;
+        }
+        stream
+            .write_all(b"0\r\n\r\n")
+            .map_err(|err| format!("write final chunk: {err}"))?;
+    } else if !body.is_empty() {
         stream
             .write_all(body)
             .map_err(|err| format!("write body: {err}"))?;
@@ -334,6 +357,7 @@ REQUEST LIST FORMAT:
     body=<value>        request body, as text
     bodyhex=<hex>       request body, as even-length hex bytes
     body_file=<path>    request body read from a file, relative to the list
+    chunked=1           send the body with Transfer-Encoding: chunked (HTTP/1.1)
     header=\"Name: value\"  arbitrary request header
     proto=http1|h2c     wire protocol; h2c is HTTP/2 cleartext with prior knowledge
     hpack_bomb=<n>      add an HPACK compression bomb expanding to n extra fields
@@ -386,6 +410,7 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
     let mut headers = Vec::new();
     let mut body = None;
     let mut protocol = Protocol::Http1;
+    let mut chunked = false;
     let mut hpack_bomb = None;
     let mut pad_header = None;
 
@@ -412,6 +437,12 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
                     }
                 }
             }
+            "chunked" => {
+                if value != "1" {
+                    return Err(format!("`chunked` must be `1`, got `{value}`"));
+                }
+                chunked = true;
+            }
             "hpack_bomb" => hpack_bomb = Some(parse_count(value, "hpack_bomb", MAX_HPACK_BOMB)?),
             "pad_header" => pad_header = Some(parse_count(value, "pad_header", MAX_PAD_HEADER)?),
             "header" => {
@@ -431,6 +462,9 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
     if hpack_bomb.is_some() && protocol != Protocol::H2c {
         return Err("`hpack_bomb` requires `proto=h2c`".to_owned());
     }
+    if chunked && protocol != Protocol::Http1 {
+        return Err("`chunked` requires the HTTP/1.1 protocol".to_owned());
+    }
 
     Ok(RequestSpec {
         method,
@@ -438,6 +472,7 @@ fn parse_request(line: &str, base: &Path) -> Result<RequestSpec, String> {
         headers,
         body,
         protocol,
+        chunked,
         hpack_bomb,
         pad_header,
     })
@@ -609,6 +644,30 @@ mod tests {
         assert_eq!(request.protocol, Protocol::H2c);
         assert_eq!(request.hpack_bomb, Some(40));
         assert_eq!(request.pad_header, Some(70000));
+    }
+
+    #[test]
+    fn parses_chunked_requests() {
+        let request =
+            parse_request("POST /upload chunked=1 body=hello", Path::new(".")).expect("parses");
+        assert!(request.chunked);
+        assert_eq!(request.protocol, Protocol::Http1);
+    }
+
+    #[test]
+    fn rejects_chunked_with_h2c() {
+        let error = parse_request("POST /upload proto=h2c chunked=1 body=x", Path::new("."))
+            .expect_err("errs");
+        assert!(error.contains("HTTP/1.1"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_invalid_chunked_values() {
+        let error = parse_request("POST /upload chunked=0", Path::new(".")).expect_err("errs");
+        assert!(
+            error.contains("`chunked` must be `1`"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

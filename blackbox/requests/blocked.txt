@@ -6,6 +6,7 @@
 #   - `body`   sets the request body
 #   - `bodyhex` sets the request body from even-length hex bytes
 #   - `body_file` reads the request body from a file relative to this list
+#   - `chunked=1` sends the body with `Transfer-Encoding: chunked` (HTTP/1.1)
 #   - `header` sets an arbitrary header using `Name: value`
 #   - `proto=h2c` sends the request over HTTP/2 cleartext with prior knowledge
 #   - `hpack_bomb=N` adds an HPACK compression bomb expanding to N extra fields
@@ -580,6 +581,19 @@ POST /api/config body="!ruby/hash:ActiveSupport::HashWithIndifferentAccess name:
 POST /api/config body="--- !ruby/struct:OpenStruct name: demo"
 POST /api/config header="Content-Type: application/json" body="{\"payload\":\"!ruby/object:Gem::Installer\"}"
 GET /?yaml=!ruby/object:Gem::Requirement
+
+# --- CVE-2026-34827 / CVE-2026-34829 (Rack): multipart parser denial of
+#     service. 34827: escape-heavy quoted name/filename parameters drive
+#     super-linear work in the part header parser. 34829: a chunked multipart
+#     upload without Content-Length parses until EOF with no size bound. ---
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-escape-flood.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" chunked=1 body_file=payloads/multipart-benign.txt
+
+# --- Multipart boundary parser differentials (CVE-2026-26961 class): when a
+#     Content-Type declares several boundaries, every interpretation must be
+#     inspected. Rack parses the last boundary, so a payload visible only to
+#     that boundary must not slip past the decoded-form rules. ---
+POST /upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-differential.txt
 
 # --- JSON Web Token attacks: unsecured (alg=none) headers, tokens with no
 #     signature, and key-lookup injection through kid/jku/x5u/x5c. Tokens are

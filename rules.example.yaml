@@ -1204,6 +1204,22 @@ categories:
       - name: key-header-injection
         match: { regex: '(ImtpZCI6Ii4u|ImtpZCI6Ii9kZXY|ImtpZCI6ImZpb|ImtpZCI6Imh0dHA|ImtpZCI6Inxp|ImtleXxpZCJ9|Ii4uLy4u|Li4vLi4v|8uLi8uLi9|VU5JT04gU0VMRUNU|Vx1MDAw|ImprdSI6|Imp3ayI6|Ing1dSI6|Ing1YyI6)', in: [query, body, cookies, headers] }
 
+  # Request signatures for the 2026-04 Rack release: multipart parser denial of
+  # service shapes with published request-level detail.
+  - name: cve-2026-04-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-34827 (Rack): escape-heavy quoted part parameters drive
+      # super-linear work in the multipart header parser. Legitimate name and
+      # filename values never carry this many backslashes.
+      - name: rack-multipart-escape-flood
+        match: { headers: { Content-Type: '(?i)^multipart/form-data' }, regex: '(?i)(name|filename)="(?:[^"\\]*\\){16,}', in: [body] }
+      # CVE-2026-34829 (Rack): multipart uploads without Content-Length parse
+      # until EOF with no size bound. Browsers never chunk form uploads, so a
+      # chunked multipart request is rejected outright.
+      - name: rack-chunked-multipart-upload
+        match: { headers: { Transfer-Encoding: '(?i)chunked', Content-Type: '(?i)^multipart/form-data' } }
+
   # Request signatures for the 2026-10 KEV intake: pre-auth RCE, deserialization,
   # and command-injection paths with published request shapes.
   - name: cve-2026-10-signatures

@@ -564,7 +564,11 @@ from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
 escapes such as `\u0075`, and `multipart/form-data` flattened to field values and
 file names), then through the same percent-decode passes; bodies whose content
-type is unknown still get the percent passes. Bodies are decompressed first when
+type is unknown still get the percent passes. A `multipart/form-data` message
+that declares several boundaries is flattened once per boundary (up to four),
+because parsers disagree on which one wins (Rack takes the last); messages that
+exceed that fall back to the percent passes on the raw body. Bodies are
+decompressed first when
 `Content-Encoding` is `gzip`, `deflate`, or `br`: all gzip members are decoded,
 and stacked encodings are decoded in reverse order (up to three layers; deeper or
 unknown encodings are inspected as received and counted in
@@ -584,6 +588,10 @@ decoding) is performed.
 | `regex`            | Signature regex(es) searched in the parts listed by `in`.                                                               |
 | `status`           | Response-phase only: status code(s) or ranges, for example `404`, `500-599`, or `5xx`.                                  |
 | `response_headers` | Response-phase only: map of response header name to regex(es); header names are case-insensitive.                       |
+
+`method` is matched against the method sent on the wire; framework method
+overrides such as Rack's `_method` parameter or `X-HTTP-Method-Override` are
+not resolved before evaluation.
 
 Response-phase rules may combine request conditions (`path`, `method`, `source_ip`,
 `headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule
