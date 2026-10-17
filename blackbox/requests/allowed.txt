@@ -292,6 +292,21 @@ GET / header="X-Forwarded-For: 203.0.113.7"
 GET / header="X-Real-IP: 203.0.113.7"
 GET / header="X-Forwarded-Proto: https"
 
+# --- JSON Web Token guards: properly signed tokens, a JWE, and benign
+#     header/claim shapes must pass next to the alg=none, missing-signature,
+#     and key-lookup rules ---
+GET / header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+GET / header="Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MiIsInJvbGUiOiJ1c2VyIn0.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+GET /api/profile header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjIwMjYtMDEifQ.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+GET /api/profile header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImtleXMvMjAyNi0wMS5wZW0ifQ.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+GET / header="Authorization: Bearer eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiI0MiJ9.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw"
+GET / header="Authorization: Bearer eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkEyNTZHQ00ifQ.d3JhcHBlZC1rZXktbWF0ZXJpYWwtMjU2.AAECAwQFBgcICQoL.Y2lwaGVydGV4dC1wYXlsb2Fk.AAECAwQFBgcICQoLDA0ODw"
+GET / header="Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwic3ViIjoiNDIifQ.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+GET / header="Cookie: session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+GET /api/me?access_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM
+POST /api/auth body="token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiJ9.aG1hYy1zaWduYXR1cmUtcGxhY2Vob2xkZXItMzItYnl0ZXM"
+POST /api/token body="{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+
 # --- Encoded and international text ---
 GET /search?q=%E5%AF%BF%E5%8F%B8
 GET /search?q=caf%C3%A9
