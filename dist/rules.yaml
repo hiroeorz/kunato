@@ -1006,6 +1006,23 @@ categories:
       - name: dom-sinks
         match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body] }
 
+  # CSS injection: style-context breakout, scriptable CSS properties, and the
+  # remote-load and attribute-selector shapes used for blind data exfiltration.
+  # Deployments that let users author CSS (theme editors) need to override this
+  # category. `behavior:`/`binding:` are not matched: they collide with plain
+  # text, and their HTC/XBL execution targets are long dead.
+  - name: css-injection
+    action: BLOCK
+    rules:
+      - name: style-tags
+        match: { regex: '(?i)<\s*/?\s*style\b', in: [query, body, headers] }
+      - name: scriptable-css
+        match: { regex: '(?i)(expression\s*\(|-moz-binding\s*:|url\s*\(\s*[\x27"]?\s*(javascript|vbscript)\s*:)', in: [query, body, headers] }
+      - name: remote-style-load
+        match: { regex: '(?i)(@import\s+[^;]{0,200}(https?:)?//|url\s*\(\s*[\x27"]?\s*(https?:)?//)', in: [query, body] }
+      - name: attribute-selector-exfil
+        match: { regex: '(?i)\[[^\]]{0,120}[*^$]=[^\]]{0,120}\]\s*\{[^}]{0,300}url\s*\(', in: [query, body] }
+
   # Open redirect: redirect-style parameters carrying absolute or
   # protocol-relative URLs. OAuth redirect_uri and payment return URLs are
   # intentionally not matched; those are registered out of band.
@@ -1267,6 +1284,17 @@ categories:
       # signed /rails/active_storage URLs, never directly.
       - name: active-storage-root
         match: { regex: '(?i)^/storage(/|$)', in: [path] }
+
+  # API discovery surfaces are logged by default. Public API documentation is
+  # common, so raise this category to BLOCK only when the docs are not meant to
+  # be reachable. GraphQL introspection follows the same policy.
+  - name: api-discovery
+    action: LOG
+    rules:
+      - name: swagger-endpoints
+        match: { regex: '(?i)^/(swagger(-ui)?(\.html|\.json|\.ya?ml)?|swagger-resources|v[23]/api-docs|api-docs(\.(json|ya?ml))?|openapi\.(json|ya?ml))(/|$)', in: [path] }
+      - name: graphql-introspection
+        match: { regex: '(?i)(__schema\b|__type\s*\()', in: [query, body] }
 
   # Common admin interfaces are logged by default. Once you have allowlisted your
   # own admin addresses in trusted-sources, raise this category to BLOCK.

