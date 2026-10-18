@@ -435,3 +435,21 @@ GET /feed.php?url=https://example.com/feed.xml
 POST /management header="Content-Type: application/json" body="{\"operation\":\"take-snapshot\",\"address\":[],\"name\":\"snapshot-2026-10-17.xml\"}"
 GET /files?name=2026/01/report.pdf
 POST /dumper/configure header="Content-Type: application/json" body="{\"filter\":\"len(requests) > 2\"}"
+
+# --- Near-misses for the 2026-10-18 method-case, JDBC, HestiaCP, pfSense,
+#     ZR.Admin, and Crafty header-XSS signatures: ordinary uppercase methods,
+#     benign datasource URLs, and plain parameter values must keep passing. ---
+GET /rest/nodes
+GET /rest/roles
+DELETE /rest/nodes/42
+POST /data-dts/jobJdbcDatasource/test header="Content-Type: application/json" body="{\"jdbcUrl\":\"jdbc:postgresql://db.internal:5432/app\",\"jdbcDriverClass\":\"org.postgresql.Driver\"}"
+POST /data-dts/jobJdbcDatasource/test header="Content-Type: application/json" body="{\"jdbcUrl\":\"jdbc:mysql://db.internal:3306/app?allowLoadLocalInfile=false&useSSL=true\",\"jdbcDriverClass\":\"com.mysql.cj.jdbc.Driver\"}"
+POST /add/cron/ header="Content-Type: application/x-www-form-urlencoded" body="ok=1&v_min=30&v_hour=3&v_day=*&v_month=*&v_wday=*&v_cmd=/usr/local/bin/backup.sh"
+POST /system_advanced_admin.php header="Content-Type: application/x-www-form-urlencoded" body="sshguard_threshold=30&sshguard_blocktime=120&sshguard_passtime=1800"
+POST /interfaces_wireless_edit.php header="Content-Type: application/x-www-form-urlencoded" body="if=ath0&mode=bss"
+POST /firewall_virtual_ip.php header="Content-Type: application/x-www-form-urlencoded" body="vhid=42&type=carp&subnet=24"
+POST /system.php header="Content-Type: application/x-www-form-urlencoded" body="timezone=Asia/Tokyo&hostname=router"
+POST /vpn_l2tp.php header="Content-Type: application/x-www-form-urlencoded" body="radius_secret=correct-horse-battery-staple&l2tp_enable=on"
+GET /system/user/list?PagerInfo.Sort=createTime%20desc&page=1&limit=20
+GET /api/v2/servers header="User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
+GET /api/v2/servers header="Referer: https://example.com/servers?page=2"

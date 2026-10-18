@@ -1394,6 +1394,40 @@ async fn oversized_request_target_is_rejected() {
 }
 
 #[tokio::test]
+async fn non_canonical_method_case_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\n");
+    let running = start_kunato(&yaml).await;
+
+    for method in ["get", "Get", "pOsT"] {
+        let mut stream = TcpStream::connect(running.addr)
+            .await
+            .expect("connect kunato");
+        let request =
+            format!("{method} / HTTP/1.1\r\nhost: kunato.test\r\nconnection: close\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "method `{method}` should be rejected: {response}"
+        );
+    }
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn tls_termination_forwards_https_proto() {
     let upstream = spawn_header_echo_upstream("x-forwarded-proto").await;
     let certified =

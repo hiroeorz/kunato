@@ -931,6 +931,11 @@ categories:
         match: { regex: '(?i)(;|\||&&|\|\||&\s+|\$\(|`)\s*\{\s*(cat|ls|id|whoami|uname|sleep|ping|echo|touch|base64|bash|sh|nc|ncat|netcat|curl|wget)\s*,', in: [query, body] }
       - name: shell-and-binaries
         match: { regex: '(?i)(/bin/(sh|bash|zsh|dash|busybox|cat|ls|id|whoami|uname|sleep|ping|env|pwd|nc)|/usr/bin/(sh|bash|dash|env|perl|python|php|base64|xxd|socat|openssl|curl|wget|nc|ncat|nslookup|dig|telnet|awk|sed|find)|cmd\.exe|powershell(\.exe)?|pwsh)', in: [query, body, path] }
+      # Bash reverse shells use the /dev/tcp pseudo-device (HestiaCP
+      # CVE-2026-111627 cron entries and countless others); the shape has no
+      # legitimate request-side use.
+      - name: bash-dev-tcp
+        match: { regex: '(?i)/dev/(tcp|udp)/[a-z0-9.-]+/\d{1,5}', in: [query, body] }
 
   # SQL injection signatures in query, body, and cookies.
   - name: sql-injection
@@ -970,6 +975,29 @@ categories:
     rules:
       - name: mongo-operators
         match: { regex: '(?i)\$(where|ne|gt|gte|lt|lte|regex|exists|nin|or|and)\b', in: [query, body] }
+
+  # JDBC connection-string abuse: attacker-supplied jdbcUrl values that turn a
+  # datasource-test or import endpoint into file read or code execution
+  # (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571, CVE-2026-30067).
+  # Benign datasource URLs (no dangerous parameters) keep passing.
+  - name: jdbc-injection
+    action: BLOCK
+    rules:
+      - name: jdbc-dangerous-parameters
+        match: { regex: '(?i)(allowloadlocalinfile|allowurlinlocalinfile|autodeserialize)\s*=\s*(true|1)\b', in: [query, body, cookies] }
+      - name: jdbc-h2-init-rce
+        match: { regex: '(?i)jdbc:(h2|hsqldb)[^"''\s]*\b(init|createalias)\s*=\s*(runscript|.{0,96}\.class)', in: [query, body, cookies] }
+
+  # Configuration-file injection: values that end up in php.ini (or the
+  # equivalent) and run attacker PHP on the next request. The pfSense CE
+  # timezone setting (CVE-2026-111222) is the prototypical shape.
+  - name: config-injection
+    action: BLOCK
+    rules:
+      - name: php-ini-directives
+        match: { regex: '(?i)(^|[\s"''=;])auto_(prepend|append)_file\s*=', in: [query, body] }
+      - name: php-url-include
+        match: { regex: '(?i)allow_url_(include|fopen)\s*=\s*(on|true|1)\b', in: [query, body] }
 
   # Server-side template injection: arithmetic probes and engine gadgets in the
   # delimiters of the common engines (Jinja/Twig, Freemarker, Velocity,

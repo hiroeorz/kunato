@@ -755,6 +755,46 @@ fn is_websocket_upgrade(request: &Request<Incoming>) -> bool {
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket"))
 }
 
+/// Standard method names are upper case on the wire. A token that differs only
+/// in case (`get`, `pOsT`) is a valid extension method to HTTP parsers, so
+/// servers and frameworks that compare methods case-sensitively can be
+/// bypassed by it (CVE-2026-111235, OpenNMS REST filters). Such tokens have no
+/// practical legitimate use, so they are rejected before rule evaluation.
+/// Custom methods that are not case variants of a standard one still pass.
+fn non_canonical_method(method: &http::Method) -> bool {
+    const STANDARD_METHODS: &[&str] = &[
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "DELETE",
+        "CONNECT",
+        "OPTIONS",
+        "TRACE",
+        "PATCH",
+        "PROPFIND",
+        "PROPPATCH",
+        "MKCOL",
+        "COPY",
+        "MOVE",
+        "LOCK",
+        "UNLOCK",
+        "REPORT",
+        "SEARCH",
+        "MKCALENDAR",
+        "ACL",
+        "PURGE",
+        "M-SEARCH",
+        "NOTIFY",
+        "SUBSCRIBE",
+        "UNSUBSCRIBE",
+    ];
+
+    let name = method.as_str();
+    let upper = name.to_ascii_uppercase();
+    name != upper && STANDARD_METHODS.contains(&upper.as_str())
+}
+
 fn header_has_token(headers: &HeaderMap, name: http::header::HeaderName, token: &str) -> bool {
     headers.get_all(name).iter().any(|value| {
         value.to_str().ok().is_some_and(|value| {
@@ -812,6 +852,13 @@ async fn process(
         .check_request(peer.ip(), &config.protection);
     if let Some(err) = protection_error(context, decision) {
         return Err(err);
+    }
+
+    if non_canonical_method(&parts.method) {
+        return Err(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "non-canonical HTTP method",
+        ));
     }
 
     let request_target = parts

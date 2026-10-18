@@ -668,7 +668,11 @@ decoding) is performed.
 
 `method` is matched against the method sent on the wire; framework method
 overrides such as Rack's `_method` parameter or `X-HTTP-Method-Override` are
-not resolved before evaluation.
+not resolved before evaluation. A request whose method is a case variant of a
+standard method (`get`, `pOsT`, ...) is rejected with `400` before rule
+evaluation, because servers that compare methods case-sensitively can be
+bypassed by variant case (OpenNMS CVE-2026-111235); custom methods that are not
+case variants keep their previous behavior.
 
 Response-phase rules may combine request conditions (`path`, `method`, `source_ip`,
 `headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule

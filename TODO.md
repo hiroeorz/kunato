@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-17; the managed set carried 474 rules then.
+2026-10-18; the managed set carried 480 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -26,7 +26,9 @@ often means "no signature shipped", not "impossible".
 | --- | --- | --- |
 | SQL Injection | ✅ | `sql-injection`: UNION, boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
 | NoSQL Injection | ✅ | `nosql-injection`: Mongo operators (`$where/$ne/$regex`, ...) |
-| OS Command Injection | ✅ | `command-injection`: shell metacharacters plus command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell` |
+| OS Command Injection | ✅ | `command-injection`: shell metacharacters plus command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627) |
+| JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
+| PHP Configuration Injection | ✅ | `config-injection.php-ini-directives` blocks `auto_prepend_file`/`auto_append_file` values and `allow_url_include=on` reaching php.ini (pfSense CE timezone CVE-2026-111222) |
 | LDAP Injection | ❌ | Only Log4Shell `jndi:ldap` strings; no generic filter-escape detection |
 | XPath Injection | ❌ | No rules |
 | XML Injection | 🔶 | XXE (`<!DOCTYPE[`/`<!ENTITY`) is generic and blocked; generic XML structure injection and SOAP deserialization are CVE-specific |
@@ -39,7 +41,7 @@ often means "no signature shipped", not "impossible".
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | Reflected XSS | ✅ | `xss`: script/iframe/object/embed, broad event-handler list, `javascript:`/`vbscript:`, `data:text/html`, DOM sinks |
-| Stored XSS | 🔶 | Input-side detection uses the same rules; output-time context escaping is the application's job. `response-leaks` ships no XSS signatures |
+| Stored XSS | 🔶 | Input-side detection uses the same rules and `xss` matches header values, so header-injection stored XSS (Crafty Controller CVE-2026-18516) is stopped at the input; output-time context escaping is the application's job. `response-leaks` ships no XSS signatures |
 | DOM Based XSS | 🔶 | `dom-sinks` (`document.cookie`, `eval(` etc.) exists but the root cause is client-side |
 | HTML Injection | 🔶 | script/iframe-like tags are blocked; generic tags (`<div>`) pass |
 | JavaScript Injection | ✅ | `javascript-uri` plus `dom-sinks` |
@@ -71,7 +73,7 @@ often means "no signature shipped", not "impossible".
 | HTTP Parameter Pollution (HPP) | ❌ | Duplicate-parameter inspection/normalization is absent |
 | Host Header Injection | 🔶 | `malformed-host-header` and `oversized-host-header` only; host-rewrite abuse depends on the application. A client-supplied `X-Forwarded-Host` is replaced with the Host header, but an `allowed_hosts` policy is not implemented (the Rack/Forwarded allowlist CVEs are CVSS 4.8, below the bundling bar) |
 | Invalid Content-Length / Transfer-Encoding | 🔶 | Rejected at the protocol layer plus CVE-specific rules; no generic rule |
-| HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed |
+| HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
 | Oversized Header / Request | 🔶 | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Request bodies are not rejected: only the first 1 MiB is inspected and the rest streams through (an explicit content-length rule is needed to reject) |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
