@@ -8,7 +8,7 @@ also run in a response phase that inspects upstream responses (status, headers,
 body prefix). Certificate rotation remains future work.
 
 Audience: contributors and AI coding agents. The YAML field reference lives in
-`README.md`; this document covers the system as a whole.
+`docs/development.md`; this document covers the system as a whole.
 
 ## 1. Goals and Non-Goals
 
@@ -254,7 +254,7 @@ inside the format of the newest release: `scripts/check-rules-compat.sh` builds
 the newest `v*` tag, validates the published file with that binary, and runs in
 CI and in the daily update workflow; a new construct needs a release instead of
 a rule update. See `docs/rule-updates.md` for the mechanism, and "Rule set
-format compatibility" in README for the policy.
+format compatibility" in `docs/development.md` for the policy.
 
 ## 6. Rule Engine
 

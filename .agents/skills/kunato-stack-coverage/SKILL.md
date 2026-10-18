@@ -1,6 +1,6 @@
 ---
 name: kunato-stack-coverage
-description: Use when hardening Kunato against a web stack's ecosystem - Ruby on Rails, Django/Python, Next.js, Node.js/npm, PHP/Laravel, Java/Spring, frontend dev servers, and AI/notebook services: researching package and framework advisories and default-configuration exposure, appending attack requests to blackbox/requests/blocked.txt, adding near-miss benign guards to blackbox/requests/allowed.txt, running the black-box test, implementing rules and engine changes until block misses and false blocks are zero, and recording the stack coverage in TODO.md. Triggers - Ruby, Rails, rubygems, Rack, Puma, Devise, Marshal, !ruby YAML, master.key, sidekiq, Django, Python, PyPI, pickle, !!python, DEBUG page, Next.js, Node.js, npm, prototype pollution, __nextjs, webpack-hmr, PHP, Composer, Laravel, Telescope, debugbar, Horizon, Java, Spring, Actuator, heapdump, Jolokia, Maven, rO0AB, Vite, Nuxt, SvelteKit, @vite, @fs, Ollama, Jupyter, Gradio, Flowise, vLLM, blocked.txt, allowed.txt, TODO.md.
+description: Use when hardening Kunato against a web stack's ecosystem - Ruby on Rails, Django/Python, Next.js, Node.js/npm, PHP/Laravel, Java/Spring, frontend dev servers, and AI/notebook services: researching package and framework advisories and default-configuration exposure, appending attack requests to blackbox/requests/blocked.txt, adding near-miss benign guards to blackbox/requests/allowed.txt, running the black-box test, implementing rules and engine changes until block misses and false blocks are zero, and recording the stack coverage in docs/attack-coverage.md. Triggers - Ruby, Rails, rubygems, Rack, Puma, Devise, Marshal, !ruby YAML, master.key, sidekiq, Django, Python, PyPI, pickle, !!python, DEBUG page, Next.js, Node.js, npm, prototype pollution, __nextjs, webpack-hmr, PHP, Composer, Laravel, Telescope, debugbar, Horizon, Java, Spring, Actuator, heapdump, Jolokia, Maven, rO0AB, Vite, Nuxt, SvelteKit, @vite, @fs, Ollama, Jupyter, Gradio, Flowise, vLLM, blocked.txt, allowed.txt, attack-coverage.md.
 ---
 
 # Kunato stack coverage workflow
@@ -10,7 +10,7 @@ platform-specific surface: package-ecosystem advisories, framework default and
 development exposure, language-internal serialization formats, and the protocol
 or parser quirks of each runtime. Run the kunato-cve-coverage steps as written —
 request-list syntax, match semantics, the black-box scripts, the counters, the
-TODO.md recording, and the final checks are identical — and only replace the
+coverage-tracker recording, and the final checks are identical — and only replace the
 enumeration and design steps with the per-stack guidance below.
 
 ## Step 1: Enumerate attack patterns
@@ -108,7 +108,7 @@ Design guidance:
     tamper-evident; do not attempt static signatures for them.
 - Regenerate `dist/rules.yaml` after rule changes and return to step 3.
 
-## Step 5: Record the coverage in TODO.md
+## Step 5: Record the coverage in `docs/attack-coverage.md`
 
 Update the row for the stack in CMS and Framework Attacks and the matching
 coverage table ("Ruby on Rails coverage", "Django, Next.js, and Node.js
@@ -250,7 +250,7 @@ left-out comments.
 ## Key files
 
 - `rules.example.yaml`, `dist/rules.yaml` (`scripts/update-dist-rules.sh`),
-  `TODO.md`
+  `docs/attack-coverage.md`
 - `blackbox/requests/blocked.txt`, `allowed.txt`, `payloads/`
 - `src/decoding.rs` (body decoding and multipart flattening),
   `src/rules/matcher.rs` (match semantics)

@@ -5,7 +5,7 @@
 # The published file must stay inside the rule-set format that the newest
 # release implements: installs with rules_update enabled download it directly.
 # scripts/check-rules-compat.sh is the gate; see "Rule set format
-# compatibility" in README.md.
+# compatibility" in docs/development.md.
 set -eu
 
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)

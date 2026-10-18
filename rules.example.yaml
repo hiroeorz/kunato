@@ -8,7 +8,7 @@
 # Check it with:
 #   kunato --validate --config rules.example.yaml
 #
-# See README.md for the full field reference.
+# See docs/development.md for the full field reference.
 
 listen: 127.0.0.1:8080
 upstream: http://127.0.0.1:3000

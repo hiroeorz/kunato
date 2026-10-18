@@ -75,6 +75,6 @@ Installs running $baseline reject the whole published rule set and keep their
 previous rules, so they stop receiving updates. Release a build that implements
 the construct (a new v* tag moves this baseline and is the supported remedy), or
 keep the published set inside the released format. See "Rule set format
-compatibility" in README.md.
+compatibility" in docs/development.md.
 EOF
 exit 1

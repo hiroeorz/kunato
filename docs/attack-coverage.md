@@ -1,4 +1,4 @@
-# Attack Coverage TODO
+# Attack coverage tracker
 
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
@@ -250,7 +250,7 @@ not match the Marshal signatures.
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | URL Encoding / Double URL Encoding | ✅ | Raw plus up to two percent-decode passes are matched uniformly |
-| Unicode Encoding | 🔶 | JSON `\u0075` is decoded, but no Unicode normalization (README documents this) |
+| Unicode Encoding | 🔶 | JSON `\u0075` is decoded, but no Unicode normalization (documented in `docs/development.md`) |
 | Overlong UTF-8 | 🔶 | No normalization; specific byte patterns (e.g. `%c0%af`) are caught by raw patterns only |
 | Case Variation | ✅ | Main rules use `(?i)` |
 | Comment Insertion | ✅ | SQL timing rules tolerate comments between function name and parenthesis |

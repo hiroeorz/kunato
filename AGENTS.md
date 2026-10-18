@@ -55,13 +55,14 @@ examples/
 scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box test runner
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
-  DESIGN.md        # Overall design
-  cve-coverage.md  # Daily CVE intake tracker (one row per reviewed candidate)
-  rule-updates.md  # Daily rule updates and binary version compatibility
+  DESIGN.md           # Overall design
+  attack-coverage.md  # Attack-coverage tracker (covered / partial / gap per attack class)
+  cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
+  development.md      # Development, deployment, and the full configuration reference
+  rule-updates.md     # Daily rule updates and binary version compatibility
 packaging/
   kunato.service   # systemd unit
 rules.example.yaml # Example configuration
-TODO.md            # Attack-coverage tracker (covered / partial / gap per attack class)
 deny.toml          # Dependency, license, and advisory policy
 ```
 
@@ -71,9 +72,10 @@ evaluation, proxying, and protection logic must not bleed into each other.
 
 ## Attack Coverage Tracking
 
-`TODO.md` tracks which attack classes the bundled rules and engine mechanisms
-cover, which are partial, and which are gaps, with the evidence (rule category
-names, mechanisms) behind every verdict. Update it whenever coverage changes:
+`docs/attack-coverage.md` tracks which attack classes the bundled rules and
+engine mechanisms cover, which are partial, and which are gaps, with the
+evidence (rule category names, mechanisms) behind every verdict. Update it
+whenever coverage changes:
 
 - new, removed, or renamed categories or rules in `rules.example.yaml` (and the
   regenerated `dist/rules.yaml`),
@@ -105,9 +107,9 @@ rule-set updates.
   `tls` block. Issued material is cached under `tls.acme.cache_dir` (default
   `/var/lib/kunato/acme`, mode 0600 files in a 0700 directory).
 - Evaluation order is document order; `enabled: false` disables a category or rule.
-- Write rules in the compact style shown in `README.md`: `name` on one line and a
-  flow-style `match` mapping on the next, falling back to block style only for
-  larger match mappings.
+- Write rules in the compact style shown in `docs/development.md`: `name` on one
+  line and a flow-style `match` mapping on the next, falling back to block style
+  only for larger match mappings.
 - `dist/rules.yaml` is the artifact every install with `rules_update` downloads
   every day, and `main` publishes the newest rule set to installs of every
   release. Rules in `rules.example.yaml` (and therefore in the generated
@@ -116,10 +118,10 @@ rule-set updates.
   reject the whole candidate and freeze its updates, so it needs a release
   rather than a rule update. `scripts/check-rules-compat.sh` is the gate (it
   builds the newest tag and validates the published file with it); see
-  `docs/rule-updates.md` for the mechanism and `README.md`, "Rule set format
-  compatibility", for the policy.
-- `README.md` is the source of truth for the full field reference. Keep it in sync
-  with any schema change.
+  `docs/rule-updates.md` for the mechanism and `docs/development.md`, "Rule set
+  format compatibility", for the policy.
+- `docs/development.md` is the source of truth for the full field reference. Keep
+  it in sync with any schema change.
 
 ## Commands
 

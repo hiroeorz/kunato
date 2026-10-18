@@ -2,10 +2,10 @@
 
 How the managed rule set travels from this repository to a running Kunato, and
 how the engine stays safe when the rule set and the installed binary do not come
-from the same version. `README.md` ("Rule set format compatibility") states the
-policy; this document is the full picture: the two update streams, the failure
-mode they can run into, the guards that prevent it, what an operator sees, and
-how a new rule construct is released.
+from the same version. `docs/development.md` ("Rule set format compatibility")
+states the policy; this document is the full picture: the two update streams,
+the failure mode they can run into, the guards that prevent it, what an operator
+sees, and how a new rule construct is released.
 
 ```text
 rules.example.yaml ──► dist/rules.yaml ──► download ──► validate ──► atomic swap ──► hot reload
@@ -160,8 +160,8 @@ the offending field, repeated every ten minutes.
 ## Releasing a new rule construct
 
 1. Add the field, target, action, or phase to the engine, its tests, and
-   `README.md`. No published rule may use it yet; the gate stays green because
-   the published set has not changed.
+   `docs/development.md`. No published rule may use it yet; the gate stays green
+   because the published set has not changed.
 2. Cut the release (`v*` tag) with `scripts/release.sh X.Y.Z`, which bumps and
    commits the `version` in `Cargo.toml` (so `kunato --version` identifies the
    release; `release.yml` fails the build when the tag and the package version
@@ -205,4 +205,4 @@ visible without reading logs.
 | Failure classification | `src/error.rs` (`unsupported_construct`, `RulesNeedNewerBuild`) |
 | Metrics | `src/metrics.rs`, served on the admin listener |
 | Publication guards for `dist/` | `src/config/mod.rs` unit tests (matches `rules.example.yaml`, checksum current) |
-| Policy summary | `README.md`, "Rule set format compatibility" |
+| Policy summary | `docs/development.md`, "Rule set format compatibility" |
