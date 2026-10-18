@@ -987,6 +987,41 @@ categories:
       - name: mongo-operators
         match: { regex: '(?i)\$(where|ne|gt|gte|lt|lte|regex|exists|nin|or|and)\b', in: [query, body] }
 
+  # LDAP filter injection: metacharacters that break out of the intended
+  # equality filter (`*)(`, `)(|(`, `|(attr=`), wildcard attribute tests, and
+  # wildcard credentials on login endpoints. Ordinary values (including the
+  # plus and percent encodings of the same shapes) keep passing.
+  - name: ldap-injection
+    action: BLOCK
+    rules:
+      - name: filter-breakout
+        match: { regex: '(?i)(\*\)\s*\(|\)\s*\(\s*(?:[&|!]|[a-z_][a-z0-9._-]{0,32}(?:=|~=|>=|<=)))', in: [query, body, cookies, headers] }
+      - name: filter-operator-chain
+        match: { regex: '(?i)[&|!]\s*\(\s*[a-z_][a-z0-9._-]{0,32}(?:=|~=|>=|<=)', in: [query, body, cookies, headers] }
+      - name: wildcard-attribute
+        match: { regex: '(?i)\(\s*(uid|user(name)?|cn|sn|givenname|displayname|mail|objectclass|userpassword|password|passwd|samaccountname|memberof|distinguishedname)(?:=|~=|>=|<=)\s*(?:%2a|\*)', in: [query, body, cookies] }
+      - name: credential-wildcard
+        match:
+          path: '(?i)(login|logon|signin|sign-in|sign_in|auth|session|sso)'
+          regex: '(?i)(^|[?&\s;])(user(name)?|uid|uname|email|log(in)?|logon)\s*=\s*[^&\s]{0,24}(?:%2a|\*)|(^|[?&\s;])(pass(word)?|pwd)\s*=\s*(?:%2a|\*)(?:[&\s;]|$)'
+          in: [query, body, cookies]
+
+  # XPath injection: predicate breakouts (`']//`, `'] | //`), path predicates
+  # after a boolean operator (`or //user[...]`), blind-inference function
+  # probes (`count(/*)`, `substring(//...)`), and quote-based boolean taunts.
+  # Numeric taunts (`or 1=1`) are also covered by the SQL injection rules.
+  - name: xpath-injection
+    action: BLOCK
+    rules:
+      - name: predicate-breakout
+        match: { regex: '(?i)(\]\s*\|\s*//|\]\s*//|\|\s*//|\b(or|and)\s+//)', in: [query, body, cookies] }
+      - name: blind-functions
+        match: { regex: '(?i)\b(count|string-length|name|local-name|substring|contains|normalize-space|translate)\s*\([^)]{0,64}(/\*|//)', in: [query, body, cookies] }
+      - name: quote-function-probe
+        match: { regex: '(?i)[\x27"]\s*(or|and)\s+(count|string-length|name|local-name|substring|contains|normalize-space|translate)\s*\(', in: [query, body, cookies] }
+      - name: string-taunt
+        match: { regex: '(?i)\b(or|and)\b\s+[\x27"][^\x27"]{0,32}[\x27"]\s*=\s*[\x27"]', in: [query, body, cookies] }
+
   # JDBC connection-string abuse: attacker-supplied jdbcUrl values that turn a
   # datasource-test or import endpoint into file read or code execution
   # (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571, CVE-2026-30067).

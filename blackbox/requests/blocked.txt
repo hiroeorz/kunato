@@ -4247,3 +4247,38 @@ GET /?q=union%2520select
 GET /?x=%253Cscript%253E
 GET /?file=..%252f..%252fetc%252fpasswd
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-traversal.txt
+
+# --- LDAP injection: filter breakout, wildcard attributes, and wildcard
+#     credentials on login endpoints. The encoded variants exercise the
+#     percent- and form-decoding passes. ---
+GET /login?username=*)(uid=*))(%7C(uid=*&password=x
+GET /login?username=*%29%28uid%3D*%29%29%28%7C%28uid%3D*&password=x
+GET /login?username=admin)(userPassword=anything&password=x
+GET /users/sign_in?email=*%29%28%7C%28uid%3D*&password=x
+GET /vpn/login?user=*%29%28cn%3D*&pass=*
+GET /directory?filter=(cn=*
+GET /directory?filter=%28objectClass%3D%2A
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=admin)(|(password=*&password=x"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=admin%29%28%7C%28password%3D%2A&password=x"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=*%29%28%26%28uid%3D*&password=x"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=*)(sAMAccountName=*))(|(sAMAccountName=*&password=x"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=*&password=*"
+POST /search header="Content-Type: application/x-www-form-urlencoded" body="filter=(&(uid=*)(sn=*"
+POST /login header="Cookie: sessionid=*)(uid=*))(|(uid=*)"
+POST /login header="X-Forwarded-User: *)(uid=*"
+
+# --- XPath injection: predicate breakout, path predicates, and
+#     blind-inference probes. ---
+GET /user?name=x%27%5D%7C%2F%2Fuser%5B1%5D
+GET /user?name=x%27%5D%2F%2Fuser%5B1%5D
+GET /user?name=x%27%5D%2F%2F*%5B1%5D
+GET /user?name=%27+or+%271%27%3D%271
+GET /user?name=%27+or+%27%27%3D%27
+GET /user?name=%27+or+//user%5Bname%3D%27admin%27%5D
+GET /user?name=%27+and+count(%2F*)+%3D+1+and+%27
+GET /user?name=%27+and+string-length(name(%2F*%5B1%5D))%3E3+and+%271%27%3D%271
+GET /user?name=%27+or+substring(%2F%2Fuser%5B1%5D%2Fname%2C1%2C1)%3D%27a
+GET /user?name=%27+or+contains(%2F%2Fuser%5B1%5D%2Fname%2C%27a%27)
+GET /user?name=%27+or+name()+%3D+%27configuration%27
+POST /api/items header="Content-Type: application/json" body="{\"id\":\"1' or '1'='1\"}"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=x' or 1=1 or ''='&password=x"

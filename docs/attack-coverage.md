@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-18; the managed set carried 480 rules then.
+2026-10-18; the managed set carried 488 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -29,8 +29,8 @@ often means "no signature shipped", not "impossible".
 | OS Command Injection | ✅ | `command-injection`: shell metacharacters plus command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627) |
 | JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
 | PHP Configuration Injection | ✅ | `config-injection.php-ini-directives` blocks `auto_prepend_file`/`auto_append_file` values and `allow_url_include=on` reaching php.ini (pfSense CE timezone CVE-2026-111222) |
-| LDAP Injection | ❌ | Only Log4Shell `jndi:ldap` strings; no generic filter-escape detection |
-| XPath Injection | ❌ | No rules |
+| LDAP Injection | ✅ | `ldap-injection`: filter breakout (`*)(`, `)(\|(`, `)(attr=`), operator chains (`\|(uid=`, `&(cn=`), wildcard attributes (`(objectClass=*`, `(userPassword=*`), and wildcard credentials on the login paths (`*` as the whole value or anywhere in a user/uid/email parameter); query/body/cookies/headers, plus and percent encodings included |
+| XPath Injection | ✅ | `xpath-injection`: predicate breakouts (`']//`, `'] \| //`, `or //user[...]`), blind-inference functions (`count(/*)`, `string-length(name(/*[1]))`, `substring(//...)`, `contains(//...)`), quote-based function probes (`or name(`), and string taunts (`or '1'='1`, `or ''='`); numeric taunts (`or 1=1`) are also covered by `sql-injection` |
 | XML Injection | 🔶 | XXE (`<!DOCTYPE[`/`<!ENTITY`) is generic and blocked; generic XML structure injection and SOAP deserialization are CVE-specific |
 | SSTI | ✅ | `ssti`: generic arithmetic probes and engine gadgets for Jinja/Twig (`{{7*7}}`, dunder access), Freemarker (`<#assign`, `?new()`), Velocity (`$class.inspect`, `#set($`), ERB/JSP (`<%=`), Thymeleaf (`*{}`), and Smarty (`{7*7}`); `${`/`%{` are covered by `cve-2019-signatures.struts-expression-injection`; the CVE-specific set is retained |
 | Expression Language Injection | 🔶 | Same: CVE-specific (Ivanti EPMM, Struts OGNL, Nexus JavaEL, ...) |
@@ -286,7 +286,7 @@ not match the Marshal signatures.
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
 either direction, arbitrary re-signing), GraphQL depth and complexity limits,
-LDAP/XPath injection, open redirect via unlisted parameter names, HPP, MIME
+open redirect via unlisted parameter names, HPP, MIME
 spoofing, behavioral bot detection, and the
 business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
 session design cannot be fixed by a WAF at all; Kunato can only assist through

@@ -453,3 +453,24 @@ POST /vpn_l2tp.php header="Content-Type: application/x-www-form-urlencoded" body
 GET /system/user/list?PagerInfo.Sort=createTime%20desc&page=1&limit=20
 GET /api/v2/servers header="User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
 GET /api/v2/servers header="Referer: https://example.com/servers?page=2"
+
+# --- LDAP and XPath near-misses: ordinary parentheses, asterisks, and
+#     boolean or equality text in search values must keep passing. ---
+GET /search?q=wildcard*
+GET /search?q=asterisk*suffix
+GET /search?q=(optional)+terms
+GET /search?q=(uid)+lookup
+GET /search?q=user+(admin)
+GET /search?q=filter+(status=active)
+GET /search?q=cn+equals+common+name
+GET /search?q=rock+%26+roll
+GET /search?q=pipe%7Cseparated+values
+GET /search?q=either+this+or+that
+GET /search?q=array%5B0%5D+and+array%5B1%5D
+GET /search?q=count(items)+over+time
+GET /search?q=substring(prefix,+0,+3)
+GET /search?q=docs%2F%2Freference
+GET /search?q=%22quoted%22+and+%22phrased%22
+GET /api/users?username=*
+GET /login/help?topic=asterisk*usage
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=tanaka&password=corr3ct-h0rse"
