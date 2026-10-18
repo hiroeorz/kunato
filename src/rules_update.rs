@@ -152,7 +152,7 @@ pub async fn update_once(
 
     let state = UpdateState::read(state_file);
     let client = build_client()?;
-    let fetched = fetch(&client, url, settings.max_bytes, &state).await?;
+    let fetched = fetch(&client, url, settings.max_bytes, &state, "rules update").await?;
     let Fetched::Body {
         bytes,
         etag,
@@ -274,6 +274,7 @@ async fn fetch(
     url: &Uri,
     max_bytes: usize,
     state: &UpdateState,
+    what: &str,
 ) -> Result<Fetched, Error> {
     let mut current = url.clone();
     let mut cross_host_redirects = 0usize;
@@ -291,12 +292,12 @@ async fn fetch(
         }
         let request = builder
             .body(Full::new(Bytes::new()))
-            .map_err(|err| Error::Message(format!("invalid rules update request: {err}")))?;
+            .map_err(|err| Error::Message(format!("{what} request is invalid: {err}")))?;
 
         let response = tokio::time::timeout(REQUEST_TIMEOUT, client.request(request))
             .await
-            .map_err(|_| Error::Message("rules update request timed out".to_owned()))?
-            .map_err(|err| Error::Message(format!("rules update request failed: {err}")))?;
+            .map_err(|_| Error::Message(format!("{what} request timed out")))?
+            .map_err(|err| Error::Message(format!("{what} request failed: {err}")))?;
 
         match response.status() {
             StatusCode::OK => {
@@ -304,10 +305,10 @@ async fn fetch(
                 let last_modified = header_string(response.headers(), LAST_MODIFIED);
                 let body = tokio::time::timeout(
                     REQUEST_TIMEOUT,
-                    read_body(response.into_body(), max_bytes),
+                    read_body(response.into_body(), max_bytes, what),
                 )
                 .await
-                .map_err(|_| Error::Message("rules update body read timed out".to_owned()))??;
+                .map_err(|_| Error::Message(format!("{what} body read timed out")))??;
                 return Ok(Fetched::Body {
                     bytes: body,
                     etag,
@@ -318,41 +319,40 @@ async fn fetch(
             status if status.is_redirection() => {
                 let Some(location) = header_string(response.headers(), LOCATION) else {
                     return Err(Error::Message(format!(
-                        "rules update redirect ({status}) without a Location header"
+                        "{what} redirect ({status}) without a Location header"
                     )));
                 };
                 let target = resolve_location(&current, &location)?;
                 if !redirect_allowed(url, &target) {
                     return Err(Error::Message(format!(
-                        "rules update redirect to `{target}` violates the transport policy"
+                        "{what} redirect to `{target}` violates the transport policy"
                     )));
                 }
                 if !same_host(url, &target) {
                     cross_host_redirects += 1;
                     if cross_host_redirects > MAX_CROSS_HOST_REDIRECTS {
                         return Err(Error::Message(format!(
-                            "rules update redirected away from the configured origin across more than {MAX_CROSS_HOST_REDIRECTS} hosts"
+                            "{what} redirected away from the configured origin across more than {MAX_CROSS_HOST_REDIRECTS} hosts"
                         )));
                     }
                     info!(
+                        what,
                         from = %current,
                         to = %target,
                         hops = cross_host_redirects,
-                        "rules update redirect moved the download to another host"
+                        "redirect moved the download to another host"
                     );
                 }
                 current = target;
             }
             status => {
-                return Err(Error::Message(format!(
-                    "rules update request returned {status}"
-                )));
+                return Err(Error::Message(format!("{what} request returned {status}")));
             }
         }
     }
-    Err(Error::Message(
-        "too many redirects while fetching rules".to_owned(),
-    ))
+    Err(Error::Message(format!(
+        "{what} exceeded the redirect limit"
+    )))
 }
 
 /// Resolve a `Location` header against the URL that produced it, supporting
@@ -422,7 +422,14 @@ fn header_string(headers: &http::HeaderMap, name: http::header::HeaderName) -> O
 }
 
 async fn fetch_checksum(client: &RulesClient, url: &Uri) -> Result<String, Error> {
-    let fetched = fetch(client, url, MAX_CHECKSUM_BYTES, &UpdateState::default()).await?;
+    let fetched = fetch(
+        client,
+        url,
+        MAX_CHECKSUM_BYTES,
+        &UpdateState::default(),
+        "checksum",
+    )
+    .await?;
     let Fetched::Body { bytes, .. } = fetched else {
         return Err(Error::Message(
             "checksum request was unexpectedly not modified".to_owned(),
@@ -457,23 +464,47 @@ fn build_client() -> Result<RulesClient, Error> {
     Ok(Client::builder(TokioExecutor::new()).build(connector))
 }
 
-async fn read_body(mut body: Incoming, max_bytes: usize) -> Result<Vec<u8>, Error> {
+async fn read_body(mut body: Incoming, max_bytes: usize, what: &str) -> Result<Vec<u8>, Error> {
     use http_body_util::BodyExt;
 
     let mut bytes = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame =
-            frame.map_err(|err| Error::Message(format!("failed to read rules body: {err}")))?;
+            frame.map_err(|err| Error::Message(format!("failed to read {what} body: {err}")))?;
         if let Some(chunk) = frame.data_ref() {
             if bytes.len() + chunk.len() > max_bytes {
                 return Err(Error::Message(format!(
-                    "rules body exceeds the {max_bytes} byte limit"
+                    "{what} body exceeds the {max_bytes} byte limit"
                 )));
             }
             bytes.extend_from_slice(chunk);
         }
     }
     Ok(bytes)
+}
+
+/// Download a small release asset (for example the installer script) with the
+/// same transport policy the rules updater uses: HTTPS with system roots,
+/// bounded redirects, and bounded size. Used by `kunato upgrade`.
+pub async fn fetch_release_asset(url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+    let uri: Uri = url
+        .parse()
+        .map_err(|err| Error::Message(format!("invalid URL `{url}`: {err}")))?;
+    let client = build_client()?;
+    match fetch(
+        &client,
+        &uri,
+        max_bytes,
+        &UpdateState::default(),
+        "release download",
+    )
+    .await?
+    {
+        Fetched::Body { bytes, .. } => Ok(bytes),
+        Fetched::NotModified => Err(Error::Message(
+            "release download was unexpectedly not modified".to_owned(),
+        )),
+    }
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

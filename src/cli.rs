@@ -53,6 +53,21 @@ pub enum Command {
 
     /// Download the rules file once and exit.
     UpdateRules,
+
+    /// Upgrade the installed binary and systemd unit from a release,
+    /// keeping the configuration, by rerunning the official installer.
+    Upgrade(UpgradeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UpgradeArgs {
+    /// Release tag to install (default: the latest release).
+    #[arg(long, value_name = "TAG")]
+    pub version: Option<String>,
+
+    /// Print what would be downloaded and run without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

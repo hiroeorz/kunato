@@ -119,7 +119,11 @@ sudo kunato validate
 ```
 
 Rerunning the installer upgrades the binary and unit while keeping the
-configuration, and `--uninstall` removes them. See
+configuration, and `--uninstall` removes them. On an installed server,
+`sudo kunato upgrade` performs the same upgrade: it downloads the installer
+published with the target release and runs it (`--version vX.Y.Z` pins a
+release, `--dry-run` prints the URL and command without changing anything).
+See
 [Managed Rules and Automatic Updates](#managed-rules-and-automatic-updates) for
 what is refreshed after installation, and [Deployment](#deployment) for installer
 details and building from source.

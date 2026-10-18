@@ -11,3 +11,4 @@ pub mod request_view;
 pub mod rules;
 pub mod rules_update;
 pub mod telemetry;
+pub mod upgrade;

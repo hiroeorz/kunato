@@ -47,6 +47,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 Ok(())
             }
             Command::UpdateRules => run_update_rules(&cli.config).await,
+            Command::Upgrade(args) => kunato::upgrade::run(args).await,
         };
     }
 

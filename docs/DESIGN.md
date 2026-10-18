@@ -480,6 +480,13 @@ Default limits:
 - Flags: `--config`, `--validate` (parse/validate and exit, for CI and manual
   checks), `--disable-protection` (turn off DoS/DDoS protection for load and
   black-box testing), `--log-level`, `--log-format`, `--version`.
+- Subcommands: `init` (write a starter configuration), `validate` (validate the
+  full configuration and exit), `update-rules` (one rules check and exit), and
+  `upgrade` (`sudo kunato upgrade` reruns the installer published with the
+  target release, keeping the configuration; `--version TAG` pins a release,
+  `--dry-run` prints what would run). The installer remains the only component
+  that writes `/usr/local/bin` and the systemd unit, so upgrades behave exactly
+  like a manual installer rerun.
 - Exit codes: `0` success, `1` configuration error, `2` usage error.
 - Signals: `SIGINT` / `SIGTERM` trigger graceful shutdown; `SIGHUP` triggers a
   reload.
