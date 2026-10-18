@@ -106,6 +106,15 @@ reachable from the internet, so wildcards and setups behind a TLS-terminating
 CDN or proxy must manage certificates manually (see [Deployment](#deployment)
 for the full option list).
 
+Upgrading an installed server (Kunato v0.3.2 and later) uses the built-in
+command, which reruns the installer published with the target release:
+
+```sh
+sudo kunato upgrade                    # upgrade to the latest release
+sudo kunato upgrade --version v0.4.0   # pin a specific release
+sudo kunato upgrade --dry-run          # print what would run
+```
+
 The service starts automatically; the first start orders the certificate in
 the background, so allow a few seconds before TLS works. Confirm it is
 running, then edit `/etc/kunato/kunato.yaml`; changes are applied without a
@@ -119,11 +128,7 @@ sudo kunato validate
 ```
 
 Rerunning the installer upgrades the binary and unit while keeping the
-configuration, and `--uninstall` removes them. On an installed server,
-`sudo kunato upgrade` performs the same upgrade: it downloads the installer
-published with the target release and runs it (`--version vX.Y.Z` pins a
-release, `--dry-run` prints the URL and command without changing anything).
-See
+configuration, and `--uninstall` removes them. See
 [Managed Rules and Automatic Updates](#managed-rules-and-automatic-updates) for
 what is refreshed after installation, and [Deployment](#deployment) for installer
 details and building from source.
