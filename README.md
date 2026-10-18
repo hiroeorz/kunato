@@ -152,9 +152,18 @@ current rules active; failures are logged and counted in the
 `kunato_rules_update_*` metrics, and a rule set that needs a newer build is
 counted separately in `kunato_rules_update_incompatible_total` (see
 [Rule set format compatibility](docs/development.md#rule-set-format-compatibility)).
-`kunato update-rules` performs a single check and exits, and is what the
-installer uses for the first download. The full field reference lives in
+The full field reference lives in
 [Rule sources and updates](docs/development.md#rule-sources-and-updates).
+
+Updates run automatically, so a manual check is normally unnecessary. To apply
+the latest rule set immediately instead of waiting for the next interval, run:
+
+```sh
+sudo kunato update-rules
+```
+
+This performs a single check and exits, and is the same command the installer
+uses for the first download.
 
 Local changes are never overwritten: exemptions and rule disables belong in
 `overrides_file` (`/etc/kunato/overrides.yaml` when configured), which is
