@@ -378,8 +378,12 @@ main() {
         return
     fi
 
-    log "enabling and starting kunato"
-    systemctl enable --now kunato
+    log "enabling kunato and (re)starting the service"
+    systemctl enable kunato
+    # restart also starts a stopped service; it always picks up the binary
+    # installed above, which a running process would otherwise keep serving
+    # from the deleted inode until the next manual restart.
+    systemctl restart kunato || true
     sleep 1
     if systemctl is-active --quiet kunato; then
         log "kunato $VERSION is running; metrics: curl http://127.0.0.1:9090/metrics"

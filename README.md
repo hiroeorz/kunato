@@ -127,8 +127,8 @@ curl -s http://127.0.0.1:9090/metrics | head
 sudo kunato validate
 ```
 
-Rerunning the installer upgrades the binary and unit while keeping the
-configuration, and `--uninstall` removes them. See
+Rerunning the installer upgrades the binary and unit, keeps the
+configuration, and restarts the service; `--uninstall` removes them. See
 [Managed Rules and Automatic Updates](#managed-rules-and-automatic-updates) for
 what is refreshed after installation, and [Deployment](#deployment) for installer
 details and building from source.
