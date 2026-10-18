@@ -52,7 +52,7 @@ jobs:
           cp scripts/install.sh "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: kunato-${{ matrix.target }}
           path: dist/*.tar.gz
