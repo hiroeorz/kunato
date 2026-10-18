@@ -474,3 +474,26 @@ GET /search?q=%22quoted%22+and+%22phrased%22
 GET /api/users?username=*
 GET /login/help?topic=asterisk*usage
 POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=tanaka&password=corr3ct-h0rse"
+
+# --- Near-misses for the 2026-10-18 Koha, Risesoft, Payload, Frappe, Agora,
+#     Znuny, Countly, Misskey, Tandoor, MobSF, Checkmk, Froxlor, Vitess, and
+#     Plane signatures: the same endpoints and parameters with ordinary values
+#     must keep passing. ---
+GET /cgi-bin/koha/reports/cat_issues_top.pl?Criteria=issues&Filter=1&Limit=10
+POST /cgi-bin/koha/tools/scheduler.pl header="Content-Type: application/x-www-form-urlencoded" body="op=cud-delete&jobid=42"
+POST /rest/storeFile header="Content-Type: application/x-www-form-urlencoded" body="fullPath=reports/2026&fileName=summary.pdf"
+GET /rest/retrieveFileStream?fullPath=reports/2026&fileName=summary.pdf
+GET /api/posts?where%5Bid%5D%5Bin%5D=1,2,3
+POST /api/method/frappe.desk.reportview.get_count header="Content-Type: application/json" body="{\"doctype\":\"User\",\"filters\":{\"name\":\"Alice%\"}}"
+GET /calendar?sortEvents=start_time%20desc
+POST /otrs/index.pl header="Content-Type: application/x-www-form-urlencoded" body="Action=AgentTicketSearch&Subaction=Search&ContentSearch=invoice"
+GET /appimages/2026/10/avatar.png
+GET /star-rating/images/star-5.png
+POST /api/fetch-rss header="Content-Type: application/json" body="{\"url\":\"https://example.com/feed.xml\"}"
+POST /api/ai-import/ header="Content-Type: application/json" body="{\"url\":\"https://ai.example.com/v1/chat/completions\"}"
+GET /download_data/?file=sample.apk
+POST /api/v1/scan header="Content-Type: application/x-www-form-urlencoded" body="scan_type=apk&file_name=sample.apk"
+GET /check_mk/index.py?reset_url=%2Fcheck_mk%2Fwelcome.py
+POST /customer_index.php header="Content-Type: application/x-www-form-urlencoded" body="theme=default"
+POST /twopcz header="Content-Type: application/x-www-form-urlencoded" body="Action=ping&dtid=123"
+POST /api/v1/workspaces/acme/projects/1/issues/1/comments/ header="Content-Type: application/json" body="{\"comment_html\":\"<a href=\\\"https://example.com\\\">docs</a>\"}"

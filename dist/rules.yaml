@@ -1093,7 +1093,7 @@ categories:
     action: BLOCK
     rules:
       - name: redirect-parameter-url
-        match: { regex: '(?i)(^|[?&"\x27\s])(redirect(_to|_url|_path)?|redir|return_to|next|continue|goto|dest(ination)?|target_url|out_url)["\x27]?\s*[:=]\s*"?((https?|ftps?)://|//)', in: [query, body, cookies] }
+        match: { regex: '(?i)(^|[?&"\x27\s])(redirect(_to|_url|_path)?|redir|return_to|reset_url|next|continue|goto|dest(ination)?|target_url|out_url)["\x27]?\s*[:=]\s*"?((https?|ftps?)://|//)', in: [query, body, cookies] }
 
   # Directory traversal and local file inclusion.
   - name: path-traversal
