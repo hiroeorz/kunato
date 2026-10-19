@@ -1466,6 +1466,13 @@ categories:
       # dunder access is what legitimate filter expressions never need.
       - name: sglang-dumper-filter-eval
         match: { path: '(?i)^/dumper/configure$', regex: '(?i)(__globals__|__builtins__|__subclasses__|__class__)', in: [body, query] }
+      # CVE-2026-110130 (Dockhand): the global auth hook skips authentication
+      # for any path ending in a static-asset extension, letting an
+      # unauthenticated PUT reach user-mutation routes such as
+      # /api/users/<id>.js. No legitimate API mutation is addressed with a
+      # static-asset suffix.
+      - name: dockhand-static-extension-auth-bypass
+        match: { method: PUT, path: '(?i)^/api/[^?]*\.(js|css|map|png|jpe?g|gif|svg|ico|woff2?)$' }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

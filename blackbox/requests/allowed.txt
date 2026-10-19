@@ -505,3 +505,17 @@ GET /check_mk/index.py?reset_url=%2Fcheck_mk%2Fwelcome.py
 POST /customer_index.php header="Content-Type: application/x-www-form-urlencoded" body="theme=default"
 POST /twopcz header="Content-Type: application/x-www-form-urlencoded" body="Action=ping&dtid=123"
 POST /api/v1/workspaces/acme/projects/1/issues/1/comments/ header="Content-Type: application/json" body="{\"comment_html\":\"<a href=\\\"https://example.com\\\">docs</a>\"}"
+
+# --- Near-misses for the 2026-10-19 Dockhand, InvoiceShelf, citrus, Skyeye,
+#     T-SQL, MOVEit, OPNsense, and command-injection signatures: the same
+#     endpoints and parameters with ordinary values must keep passing. ---
+GET /api/users/1.js
+PUT /api/users/1
+GET /api/v1/invoices?orderByField=created_at
+GET /api/list?sortBy=created_time%20desc
+GET /queryWarehousingDetails?keyword=widget
+POST /api/reports header="Content-Type: application/json" body="{\"filter\":\"status=open\"}"
+POST /human.aspx header="Content-Type: application/x-www-form-urlencoded" body="username=alice&password=s3cret"
+GET /reports/custom?name=quarterly
+GET /api/trust/ca/search?refid=abc123
+POST /api/convert header="Content-Type: application/x-www-form-urlencoded" body="source=photo.png&target=out.webp"
