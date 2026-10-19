@@ -63,7 +63,7 @@ printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v cargo >/dev/null 2>&1 || die "cargo is required"
 
-cd "$root"
+cd "$root" || die "could not enter $root"
 
 [ "$(git branch --show-current)" = "main" ] || die "releases are cut from main"
 [ -z "$(git status --porcelain)" ] || die "the working tree is not clean"

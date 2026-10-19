@@ -9,8 +9,11 @@
 # read-only filesystem (for example inside a build sandbox).
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$root"
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root" || {
+    echo "check-deny: could not enter $root" >&2
+    exit 1
+}
 
 command -v cargo >/dev/null 2>&1 || {
     echo "check-deny: cargo is required" >&2
