@@ -949,6 +949,25 @@ async fn read_body(
     })
 }
 
+fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
+    match violation {
+        crate::graphql::Violation::Incomplete => HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "graphql request body too large to inspect",
+        ),
+        crate::graphql::Violation::TooDeep { .. }
+        | crate::graphql::Violation::TooManyFields { .. }
+        | crate::graphql::Violation::TooComplex => {
+            HttpError::new(StatusCode::BAD_REQUEST, "graphql query too complex")
+        }
+        crate::graphql::Violation::Uninspectable
+        | crate::graphql::Violation::Cyclic
+        | crate::graphql::Violation::Ambiguous => {
+            HttpError::new(StatusCode::BAD_REQUEST, "graphql request rejected")
+        }
+    }
+}
+
 pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody> {
     // Rate limits and load shedding are expected under attack; logging every
     // one at warning level turns a flood into a disk-I/O amplifier. Metrics
@@ -1120,9 +1139,20 @@ async fn process(
         ));
     }
 
+    let graphql_path = config.limits.graphql.enabled && {
+        let forms = crate::decoding::percent_decode_forms(parts.uri.path());
+        forms
+            .iter()
+            .any(|form| config.limits.graphql.matches_path(form))
+            || forms
+                .last()
+                .and_then(|form| crate::decoding::normalize_path(form))
+                .is_some_and(|normalized| config.limits.graphql.matches_path(&normalized))
+    };
     let body_rules = config.has_body_target_rules();
+    let inspect_body = body_rules || graphql_path;
     let body_truncated;
-    let inspected_body: Cow<'_, [u8]> = match if body_rules {
+    let inspected_body: Cow<'_, [u8]> = match if inspect_body {
         crate::decoding::decode_body_for_inspection(
             body,
             &parts.headers,
@@ -1191,7 +1221,7 @@ async fn process(
             ));
         }
     };
-    if body_rules {
+    if inspect_body {
         let decision = context.protection.charge_inspection(
             peer.ip(),
             &config.protection,
@@ -1200,6 +1230,30 @@ async fn process(
         if let Some(err) = protection_error(context, decision) {
             return Err(err);
         }
+    }
+    if graphql_path
+        && let Some(violation) = crate::graphql::inspect(
+            parts.uri.query(),
+            &parts.headers,
+            inspected_body.as_ref(),
+            body_truncated,
+            crate::graphql::Limits {
+                max_depth: config.limits.graphql.max_depth,
+                max_fields: config.limits.graphql.max_fields,
+            },
+        )
+    {
+        context
+            .metrics
+            .graphql_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        debug!(
+            client = %peer.ip(),
+            path = %parts.uri.path(),
+            ?violation,
+            "graphql request rejected"
+        );
+        return Err(graphql_error(violation));
     }
     let view = RequestView::with_body_decoding(
         &parts.method,

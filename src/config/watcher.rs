@@ -327,6 +327,27 @@ mod tests {
     }
 
     #[test]
+    fn reload_updates_graphql_limits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nlimits: { graphql: { max_depth: 7, max_fields: 80 } }\n",
+        );
+        reload(&path, &config, &Metrics::new(), false);
+
+        let current = config.load();
+        assert_eq!(current.limits.graphql.max_depth, 7);
+        assert_eq!(current.limits.graphql.max_fields, 80);
+    }
+
+    #[test]
     fn reload_keeps_previous_configuration_on_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("rules.yaml");

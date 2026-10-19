@@ -408,6 +408,23 @@ fn zlib(data: &[u8]) -> Vec<u8> {
     encoder.finish().expect("zlib finish")
 }
 
+fn nested_query(depth: usize) -> String {
+    let mut query = String::new();
+    for _ in 0..depth {
+        query.push_str("{ a ");
+    }
+    query.push_str(&"}".repeat(depth));
+    query
+}
+
+fn json_query_body(query: &str) -> Vec<u8> {
+    format!(
+        "{{\"query\":{}}}",
+        serde_json::to_string(query).expect("encode query")
+    )
+    .into_bytes()
+}
+
 async fn send_with_headers(
     addr: SocketAddr,
     method: Method,
@@ -853,6 +870,346 @@ async fn body_rules_inspect_only_the_prefix() {
     body.extend_from_slice(b"BLOCKME");
     let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &[]).await;
     assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_depth_and_field_limits_reject_complex_queries() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body("{ viewer { name } }"),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&nested_query(21)),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut fragments = String::from("query { ...F0 }");
+    for level in 0..21 {
+        fragments.push_str(&format!(
+            " fragment F{level} on Query {{ a {{ ...F{} }} }}",
+            level + 1
+        ));
+    }
+    fragments.push_str(" fragment F21 on Query { a }");
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&fragments),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut aliases = String::from("query {");
+    for index in 0..1001 {
+        aliases.push_str(&format!(" a{index}: field"));
+    }
+    aliases.push('}');
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&aliases),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let multipart = "--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\nPNG\r\n--X--\r\n";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        multipart.as_bytes().to_vec(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert!(
+        running
+            .metrics
+            .render(0)
+            .contains("kunato_graphql_rejected_total 4")
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_parser_handles_the_maximum_configured_depth() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ graphql: {{ max_depth: 1000, max_fields: 10000 }} }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&nested_query(1000)),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_inline_fragment_recursion_is_bounded() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let mut query = String::from("{");
+    for _ in 0..15_000 {
+        query.push_str("...{");
+    }
+    query.push_str(&"}".repeat(15_001));
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&query),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limits_are_path_scoped_and_configurable() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ graphql: {{ paths: [/query] }} }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let deep = json_query_body(&nested_query(21));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/query",
+        deep.clone(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/ordinary",
+        deep.clone(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/api/gql",
+        deep.clone(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql;jsessionid=abc",
+        deep,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_applies_to_h2c_and_upgrade_handshakes() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_h2c(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        &String::from_utf8(json_query_body(&nested_query(21))).expect("json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let query = nested_query(21)
+        .replace('{', "%7B")
+        .replace('}', "%7D")
+        .replace(' ', "%20");
+    let (response, _stream) =
+        websocket_handshake(running.addr, &format!("/graphql?query={query}")).await;
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "unexpected handshake response: {response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_is_independent_of_protection() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nprotection: {{ enabled: false }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&nested_query(21)),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_accepts_a_disabled_guard() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ graphql: {{ enabled: false }} }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let deep = json_query_body(&nested_query(21));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        deep,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_decodes_compressed_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let body = gzip(&json_query_body(&nested_query(21)));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        body,
+        &[
+            ("content-type", "application/json"),
+            ("content-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_rejects_a_truncated_uninspectable_body() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ max_body_bytes: 32 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let deep = json_query_body(&nested_query(21));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        deep,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_detects_get_queries() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let query = nested_query(21)
+        .replace('{', "%7B")
+        .replace('}', "%7D")
+        .replace(' ', "%20");
+    let (status, _) = send(
+        running.addr,
+        Method::GET,
+        &format!("/graphql?query={query}"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_limit_ignores_non_graphql_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        br#"{"query":"select * from users"}"#.to_vec(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
 
     running.stop().await;
 }
@@ -1712,6 +2069,39 @@ async fn http3_requests_are_proxied_and_rule_evaluated() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_graphql_limit_rejects_deep_queries() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(upstream, &cert_path, &key_path, "categories: []").await;
+
+    let deep = String::from_utf8(json_query_body(&nested_query(21))).expect("json");
+    let (status, _, _) = send_h3(
+        running.addr,
+        certificate.clone(),
+        Method::POST,
+        "/graphql",
+        &deep,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let shallow = String::from_utf8(json_query_body("{ a }")).expect("json");
+    let (status, body, _) = send_h3(
+        running.addr,
+        certificate,
+        Method::POST,
+        "/graphql",
+        &shallow,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
 
     running.stop().await;
 }

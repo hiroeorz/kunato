@@ -1520,6 +1520,13 @@ timeouts:
 # streaming the rest. max_path_bytes bounds the whole request target (path plus
 # query string). max_concurrent_streams caps concurrent request streams per
 # HTTP/2 or QUIC connection.
+#
+# GraphQL documents sent to a GraphQL endpoint are checked against a depth and
+# expanded-field limit before forwarding. Fragment spreads are expanded, so
+# splitting a document across fragments does not evade the limits. Endpoints
+# with a path segment equal to `graphql` or `gql` (for example `/graphql`,
+# `/api/graphql`, and `/gql`) are recognized automatically; add other paths
+# here. Set enabled: false to turn the checks off.
 limits:
   max_path_bytes: 8192
   max_header_bytes: 32768
@@ -1527,6 +1534,11 @@ limits:
   max_body_bytes: 1048576
   max_response_body_bytes: 1048576
   max_concurrent_streams: 100
+  graphql:
+    enabled: true
+    max_depth: 20
+    max_fields: 1000
+    # paths: [/query]
 
 protection:
   enabled: true

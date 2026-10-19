@@ -117,7 +117,7 @@ pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
 /// to be inspected. Content types with no usable boundary, or more than
 /// [`MAX_MULTIPART_BOUNDARIES`], are treated as uninspectable and fall back to
 /// the raw percent passes.
-fn decode_body_formats(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
+pub(crate) fn decode_body_formats(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
     if body.is_empty() {
         return Vec::new();
     }

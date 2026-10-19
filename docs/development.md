@@ -613,6 +613,76 @@ cut off is counted in `kunato_response_decode_truncated_total` and inspected
 best-effort. An `ALLOW` rule that targets a body only matches when the full
 body was available, so a truncated response body cannot satisfy one.
 
+### GraphQL limits
+
+Requests to a GraphQL endpoint are checked for document depth and expanded
+field count before rule evaluation. The defaults (20 selection levels and 1000
+fields) are generous for normal clients; a generated query that legitimately
+exceeds them can raise or disable the limits:
+
+```yaml
+limits:
+  graphql:
+    enabled: true
+    max_depth: 20
+    max_fields: 1000
+    paths: [/query]
+```
+
+An endpoint is recognized when any path segment is `graphql` or `gql`
+(case-insensitive, with matrix parameters such as `;jsessionid=...` ignored),
+which covers `/graphql`, `/api/graphql`, `/v1/graphql`, and `/gql`; `paths` adds
+exact paths (case-insensitive, with trailing slashes and matrix parameters
+ignored). Path matching runs on the percent-decoded and normalized path, so
+encoded spellings and dot segments of the same endpoint are recognized. Use
+`paths: [/]` when the endpoint is served at the root of a dedicated host.
+`max_depth` must be between 1 and 1000, `max_fields` between 1 and 10000, and at
+most 16 extra paths are accepted; each path is limited to 1 KiB and must not
+contain a query string, fragment, or whitespace.
+
+The document is read from a GET `query` parameter, a form `query` field, a JSON
+object or batch array, an `application/graphql` body, or the `operations` field of
+a multipart upload. JSON bodies are parsed regardless of the declared content
+type (the usual labels are `application/json` and `+json`), so relabelling a
+query as `text/plain` does not hide it. Fragment spreads are expanded before
+both the depth and the field count are computed; fragment cycles, duplicate or
+undefined fragment definitions, and documents that exceed the parser's bounded
+node budget are rejected. Strings, block strings, comments, variable definitions, and
+argument values do not count toward the depth. A request may carry at most 256
+documents (batch entries or repeated `query` fields) and the parser accepts at
+most 20 000 selection nodes; larger requests are rejected as too complex.
+
+The shape is scored statically. Every operation in a multi-operation document is
+checked (an unused deep operation therefore also rejects the request), and
+`@skip`/`@include` branches count toward depth and fields even when their
+condition would exclude them at runtime. Both choices are deliberate: a server
+that resolves `operationName` or directive conditions differently must not be
+able to execute a document the analyzer did not bound.
+
+A multipart body that does not expose a readable `operations` document — for
+example one whose boundary is not among the supported interpretations, or one
+that carries only file parts — is rejected with `400` rather than forwarded
+uninspected, because the application's own multipart parser might still find a
+document in it.
+
+A document over either limit is answered with `400 Bad Request` and counted in
+`kunato_graphql_rejected_total`. A request that cannot be inspected at all is
+answered with `413 Payload Too Large` instead: a GraphQL body larger than
+`max_body_bytes` is rejected rather than forwarded with an uninspected
+remainder, because a second operation or a duplicate `query` field in the stream
+could carry the document the upstream executes. Raise `max_body_bytes` (up to
+8 MiB) if a GraphQL upload needs it. Encoded bodies are decoded for this check
+even when no body-targeting rule exists, and an unsupported or malformed
+encoding is rejected (`415` or `400`) as it is for body rules. The check is a
+request-shape limit under `limits`, so `protection.enabled: false` and
+`--disable-protection` do not disable it; use `limits.graphql.enabled: false`
+for that.
+
+The check covers the HTTP request that carries the document. A GraphQL
+subscription transported over a WebSocket tunnel sends its operations in frames
+after the `101` handshake; those frames are opaque to the proxy, like every other
+WebSocket payload.
+
 ### Response headers
 
 `response_headers` rewrites the headers of every response Kunato sends — upstream
@@ -650,7 +720,8 @@ update outcomes (including
 body truncation and decoding decisions (including requests rejected because
 their encoding could not be inspected: `kunato_request_decode_skipped_total`,
 plus response bodies that could not be decoded:
-`kunato_response_decode_skipped_total`), and ACME
+`kunato_response_decode_skipped_total`), GraphQL rejections
+(`kunato_graphql_rejected_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
 uptime, the time of the last successful rules update, and the time of the last
 deployed ACME certificate. Non-loopback addresses are rejected at validation
@@ -809,12 +880,17 @@ about five tokens, and the global limit is charged the same way. This ties the
 CPU cost of body rules to the rate budget instead of counting a 1 MiB request
 the same as a small one.
 
+GraphQL depth and field limits (see "GraphQL limits") also run automatically,
+independent of the YAML rule set. They are configured under `limits` rather than
+`protection`, so they stay active when rate limits and bans are disabled.
+
 IPv6 clients are tracked by the `aggregate_ipv6_prefix` prefix (default 64) rather
 than by full address, so rotating within a prefix cannot bypass rate limits, bans,
 or per-IP connection budgets. Set it to 128 to track each address separately;
 IPv4-mapped addresses (`::ffff:a.b.c.d`) are always treated as IPv4.
 
-Protection can be turned off entirely with `protection.enabled: false`, or at
+Protection rate limits and bans can be turned off entirely with
+`protection.enabled: false`, or at
 runtime with `--disable-protection`. The flag also survives configuration reloads,
 so it is a convenient way to run load or black-box tests without rate limits and
 bans interfering.

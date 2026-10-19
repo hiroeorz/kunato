@@ -30,6 +30,12 @@ const MAX_PATH_BYTES_LIMIT: usize = 64 * 1024;
 const MAX_HEADER_BYTES_LIMIT: usize = 1024 * 1024;
 const MAX_HEADERS_LIMIT: usize = 1000;
 const MAX_BODY_BYTES_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_GRAPHQL_DEPTH_LIMIT: usize = 1000;
+const MAX_GRAPHQL_FIELDS_LIMIT: usize = 10_000;
+const MAX_GRAPHQL_PATHS: usize = 16;
+const MAX_GRAPHQL_PATH_BYTES: usize = 1024;
+const DEFAULT_GRAPHQL_MAX_DEPTH: usize = 20;
+const DEFAULT_GRAPHQL_MAX_FIELDS: usize = 1000;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_HEADER_ENTRIES: usize = 64;
 const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
@@ -331,6 +337,8 @@ pub struct LimitsSpec {
     pub max_response_body_bytes: usize,
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_streams: u32,
+    #[serde(default)]
+    pub graphql: GraphqlSpec,
 }
 
 impl Default for LimitsSpec {
@@ -342,8 +350,49 @@ impl Default for LimitsSpec {
             max_body_bytes: default_max_body_bytes(),
             max_response_body_bytes: default_max_body_bytes(),
             max_concurrent_streams: default_max_concurrent_streams(),
+            graphql: GraphqlSpec::default(),
         }
     }
+}
+
+/// Limits for GraphQL documents. Requests routed to a GraphQL endpoint with a
+/// query deeper than `max_depth` selection levels or with more than
+/// `max_fields` expanded field selections are rejected before forwarding.
+/// Fragment spreads are expanded for the count, so splitting a document across
+/// fragments does not evade either limit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Extra endpoint paths, matched exactly except for a trailing slash. The
+    /// common `/graphql`, `/api/graphql`, and `/gql` shapes are recognized
+    /// without configuration.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default = "default_graphql_max_depth")]
+    pub max_depth: usize,
+    #[serde(default = "default_graphql_max_fields")]
+    pub max_fields: usize,
+}
+
+impl Default for GraphqlSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paths: Vec::new(),
+            max_depth: DEFAULT_GRAPHQL_MAX_DEPTH,
+            max_fields: DEFAULT_GRAPHQL_MAX_FIELDS,
+        }
+    }
+}
+
+fn default_graphql_max_depth() -> usize {
+    DEFAULT_GRAPHQL_MAX_DEPTH
+}
+
+fn default_graphql_max_fields() -> usize {
+    DEFAULT_GRAPHQL_MAX_FIELDS
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -584,7 +633,7 @@ impl From<&TimeoutsSpec> for Timeouts {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Limits {
     pub max_path_bytes: usize,
     pub max_header_bytes: usize,
@@ -592,6 +641,7 @@ pub struct Limits {
     pub max_body_bytes: usize,
     pub max_response_body_bytes: usize,
     pub max_concurrent_streams: u32,
+    pub graphql: Graphql,
 }
 
 impl From<&LimitsSpec> for Limits {
@@ -603,8 +653,64 @@ impl From<&LimitsSpec> for Limits {
             max_body_bytes: spec.max_body_bytes,
             max_response_body_bytes: spec.max_response_body_bytes,
             max_concurrent_streams: spec.max_concurrent_streams,
+            graphql: Graphql::from(&spec.graphql),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Graphql {
+    pub enabled: bool,
+    pub paths: Vec<String>,
+    pub max_depth: usize,
+    pub max_fields: usize,
+}
+
+impl From<&GraphqlSpec> for Graphql {
+    fn from(spec: &GraphqlSpec) -> Self {
+        Self {
+            enabled: spec.enabled,
+            paths: spec.paths.clone(),
+            max_depth: spec.max_depth,
+            max_fields: spec.max_fields,
+        }
+    }
+}
+
+impl Graphql {
+    /// True when `path` names a GraphQL endpoint. Every path segment is
+    /// compared case-insensitively so `/api/graphql`, `/v1/graphql`, and
+    /// `/gql` are recognized without configuration; `paths` adds endpoints
+    /// whose path does not contain one of those names. Matrix parameters
+    /// (`;jsessionid=...`) and trailing slashes are ignored for both forms,
+    /// mirroring the servlet and Rack routing this guard defends.
+    pub fn matches_path(&self, path: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let path = trim_path(path);
+        let plain = path_without_matrix_params(path);
+        if self.paths.iter().any(|candidate| {
+            path_without_matrix_params(trim_path(candidate)).eq_ignore_ascii_case(&plain)
+        }) {
+            return true;
+        }
+        plain.split('/').any(|segment| {
+            segment.eq_ignore_ascii_case("graphql") || segment.eq_ignore_ascii_case("gql")
+        })
+    }
+}
+
+fn trim_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() { "/" } else { trimmed }
+}
+
+fn path_without_matrix_params(path: &str) -> String {
+    path.split('/')
+        .map(|segment| segment.split(';').next().unwrap_or(segment))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Where automatically managed certificates are cached between restarts.
@@ -1319,6 +1425,44 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
     }
     if !(1..=1000).contains(&limits.max_concurrent_streams) {
         issues.push("limits.max_concurrent_streams must be between 1 and 1000".to_owned());
+    }
+    validate_graphql(&limits.graphql, issues);
+}
+
+fn validate_graphql(graphql: &GraphqlSpec, issues: &mut Vec<String>) {
+    if graphql.max_depth == 0 || graphql.max_depth > MAX_GRAPHQL_DEPTH_LIMIT {
+        issues.push(format!(
+            "limits.graphql.max_depth must be between 1 and {MAX_GRAPHQL_DEPTH_LIMIT}"
+        ));
+    }
+    if graphql.max_fields == 0 || graphql.max_fields > MAX_GRAPHQL_FIELDS_LIMIT {
+        issues.push(format!(
+            "limits.graphql.max_fields must be between 1 and {MAX_GRAPHQL_FIELDS_LIMIT}"
+        ));
+    }
+    if graphql.paths.len() > MAX_GRAPHQL_PATHS {
+        issues.push(format!(
+            "limits.graphql.paths must contain at most {MAX_GRAPHQL_PATHS} entries"
+        ));
+    }
+    for path in &graphql.paths {
+        if !path.starts_with('/') {
+            issues.push(format!(
+                "limits.graphql.paths entry `{path}` must start with `/`"
+            ));
+        } else if path.len() > MAX_GRAPHQL_PATH_BYTES {
+            issues.push(format!(
+                "limits.graphql.paths entry is longer than {MAX_GRAPHQL_PATH_BYTES} bytes"
+            ));
+        } else if path.contains('?') || path.contains('#') {
+            issues.push(format!(
+                "limits.graphql.paths entry `{path}` must not contain a query or fragment"
+            ));
+        } else if path.chars().any(char::is_whitespace) {
+            issues.push(format!(
+                "limits.graphql.paths entry `{path}` must not contain whitespace"
+            ));
+        }
     }
 }
 
@@ -3874,5 +4018,67 @@ categories:
         assert!(!is_fully_anchored(r"^tokenfree\\z"));
         assert!(!is_fully_anchored("^a(?m)$"));
         assert!(!is_fully_anchored("^a$|b"));
+    }
+
+    #[test]
+    fn graphql_limits_have_bounded_defaults() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert!(config.limits.graphql.enabled);
+        assert_eq!(config.limits.graphql.max_depth, 20);
+        assert_eq!(config.limits.graphql.max_fields, 1000);
+        assert!(config.limits.graphql.paths.is_empty());
+    }
+
+    #[test]
+    fn parses_graphql_limits_and_custom_paths() {
+        let config = parse_with(
+            BASE,
+            "limits:\n  graphql:\n    paths: [/query, /v2/exec]\n    max_depth: 8\n    max_fields: 40\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.limits.graphql.max_depth, 8);
+        assert_eq!(config.limits.graphql.max_fields, 40);
+        assert!(config.limits.graphql.matches_path("/query"));
+        assert!(config.limits.graphql.matches_path("/query;v=1"));
+        assert!(config.limits.graphql.matches_path("/v2/exec/"));
+        assert!(!config.limits.graphql.matches_path("/exec"));
+    }
+
+    #[test]
+    fn recognizes_a_root_graphql_endpoint() {
+        let config =
+            parse_with(BASE, "limits:\n  graphql:\n    paths: [/]\n").expect("valid config");
+        assert!(config.limits.graphql.matches_path("/"));
+        assert!(!config.limits.graphql.matches_path("/other"));
+    }
+
+    #[test]
+    fn recognizes_common_graphql_paths() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        let graphql = &config.limits.graphql;
+        assert!(graphql.matches_path("/graphql"));
+        assert!(graphql.matches_path("/graphql/"));
+        assert!(graphql.matches_path("/api/graphql"));
+        assert!(graphql.matches_path("/v1/GraphQL"));
+        assert!(graphql.matches_path("/gql"));
+        assert!(graphql.matches_path("/graphql;jsessionid=abc"));
+        assert!(!graphql.matches_path("/graphqlql"));
+        assert!(!graphql.matches_path("/graphql-assets"));
+        assert!(!graphql.matches_path("/"));
+    }
+
+    #[test]
+    fn rejects_invalid_graphql_limits() {
+        for (body, expected) in [
+            ("limits: { graphql: { max_depth: 0 } }\n", "max_depth"),
+            ("limits: { graphql: { max_depth: 1001 } }\n", "max_depth"),
+            ("limits: { graphql: { max_fields: 0 } }\n", "max_fields"),
+            ("limits: { graphql: { max_fields: 10001 } }\n", "max_fields"),
+            ("limits: { graphql: { paths: [query] } }\n", "must start"),
+            ("limits: { graphql: { paths: [/graphql?x=1] } }\n", "query"),
+        ] {
+            let error = parse_with(BASE, body).expect_err("invalid graphql limit must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 }

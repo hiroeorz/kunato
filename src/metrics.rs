@@ -18,6 +18,7 @@ pub struct Metrics {
     pub request_decode_skipped: AtomicU64,
     pub rate_limited: AtomicU64,
     pub rule_limited: AtomicU64,
+    pub graphql_rejected: AtomicU64,
     pub banned: AtomicU64,
     pub overloaded: AtomicU64,
     pub upstream_connect_errors: AtomicU64,
@@ -52,6 +53,7 @@ impl Metrics {
             request_decode_skipped: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             rule_limited: AtomicU64::new(0),
+            graphql_rejected: AtomicU64::new(0),
             banned: AtomicU64::new(0),
             overloaded: AtomicU64::new(0),
             upstream_connect_errors: AtomicU64::new(0),
@@ -150,6 +152,12 @@ impl Metrics {
             "kunato_rule_limited_total",
             "Requests blocked by a rule's own rate limit.",
             self.rule_limited.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_graphql_rejected_total",
+            "GraphQL requests rejected by the depth and field guard.",
+            self.graphql_rejected.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -298,6 +306,7 @@ mod tests {
         assert!(text.contains("kunato_acme_issued_total 1"));
         assert!(text.contains("kunato_acme_last_success_timestamp_seconds 0"));
         assert!(text.contains("kunato_rules_update_incompatible_total 1"));
+        assert!(text.contains("kunato_graphql_rejected_total 0"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));
         assert!(text.contains("kunato_active_connections 3"));
         assert!(text.contains("kunato_uptime_seconds"));

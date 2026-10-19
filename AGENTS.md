@@ -38,6 +38,7 @@ src/
   admin.rs         # Loopback admin listener exposing /metrics
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
+  graphql.rs       # Bounded GraphQL document analysis for the complexity limit
   request_view.rs  # Borrowed request representation for the rule engine
   config/
     mod.rs         # YAML schema, loading, validation, compilation

@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-19; the managed set carried 488 rules then.
+2026-10-20; the managed set carried 488 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -86,7 +86,7 @@ often means "no signature shipped", not "impossible".
 | REST API Injection | ✅ | Generic injection rules inspect query/body/cookies with Content-Type-aware decoding |
 | GraphQL Injection / Abuse | 🔶 | One CVE-specific case (SSRF mutation, caught by metadata rules) |
 | GraphQL Introspection Abuse | 🔶 | `api-discovery.graphql-introspection` LOGs `__schema` and `__type(...)` in query/body; raise the category to BLOCK to disable introspection. The harness cannot assert LOG behavior; `allowed.txt` pins that `__typename` queries and the logged paths stay forwarded |
-| GraphQL Query Depth / Complexity | ❌ | No rules |
+| GraphQL Query Depth / Complexity | ✅ | `limits.graphql` expands fragments and caps both selection depth (default 20) and expanded field count (default 1000) on recognized GraphQL paths; over-limit documents get `400`, and a body larger than `max_body_bytes` gets `413` rather than being forwarded with an uninspected remainder. Cycles and duplicate fragment definitions are rejected, and the parser has a bounded node budget. Verified by unit and proxy tests and `blocked.txt` (deep, fragment-chain, fragment-amplification, and alias-flood shapes). The HTTP transports are covered; GraphQL operations carried in WebSocket frames after a `101` handshake remain opaque |
 | API Parameter Tampering | ❌ | Business-logic dependent |
 | Mass Assignment | ❌ | Business-logic dependent |
 | Excessive Data Exposure Requests | 🔶 | Response-phase inspection can express it, but no bundled rules (only private keys, SQL errors, ...) |
@@ -242,7 +242,7 @@ not match the Marshal signatures.
 | Large POST Bodies | 🔶 | Only the first 1 MiB of an unencoded body is inspected and the rest streams through; encoded bodies that cannot be fully decoded are rejected. Rate/connection caps and explicit rules (e.g. content-length) are the levers |
 | ReDoS Payloads | ✅ (immunity) | Rust `regex` is linear-time (no backtracking) and load-time guards reject pathological patterns, so ReDoS cannot be induced; no detection needed |
 | High-Cost Search Floods | 🔶 | Rate and global limits are charged by inspected body size (one token per 256 KiB); regex scanning stays linear but is not otherwise capped |
-| GraphQL Complexity DoS | ❌ | Not covered |
+| GraphQL Complexity DoS | ✅ | `limits.graphql` rejects documents over the depth or expanded-field limit and rejects any GraphQL body larger than `max_body_bytes` (`413`) instead of forwarding an uninspected remainder; fragment cycles and expansion bombs are rejected, so a single request cannot force unbounded selection processing. Rate limits remain the outer bound for request volume. A GraphQL endpoint driven over a WebSocket tunnel is not covered, because tunnel frames are not inspected |
 | API Resource Exhaustion | 🔶 | Rate limits and connection caps |
 
 ## 13. Evasion and WAF Bypass
@@ -278,16 +278,15 @@ not match the Marshal signatures.
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
 | Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, and bans) |
 | Bot | 🔶 (User-Agent signatures only) |
-| API Abuse | ❌ to 🔶 (GraphQL introspection and API-docs discovery are logged; depth/complexity, schema, and business logic uncovered) |
+| API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
 | HTTP Flood | ✅ |
 
 ## Notable Gaps
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
-either direction, arbitrary re-signing), GraphQL depth and complexity limits,
-open redirect via unlisted parameter names, HPP, MIME
-spoofing, behavioral bot detection, and the
+either direction, arbitrary re-signing), open redirect via unlisted parameter
+names, HPP, MIME spoofing, behavioral bot detection, and the
 business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
 session design cannot be fixed by a WAF at all; Kunato can only assist through
 custom response-phase rules. Closing a gap usually means either a YAML rule
