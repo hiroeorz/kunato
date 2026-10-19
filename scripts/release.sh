@@ -85,7 +85,11 @@ if [ "$skip_checks" -eq 0 ]; then
     log "running fmt, clippy, deny, and tests"
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings
-    cargo deny check
+    if [ -x scripts/check-deny.sh ]; then
+        scripts/check-deny.sh
+    else
+        cargo deny check
+    fi
     cargo test
 fi
 
@@ -105,7 +109,12 @@ awk -v version="$version" '
 mv "$tmp" "$root/Cargo.toml"
 grep -q "^version = \"$version\"$" "$root/Cargo.toml" ||
     die "failed to update the package version"
-cargo metadata --format-version 1 >/dev/null
+host=$(rustc -vV | sed -n 's/^host: //p')
+[ -n "$host" ] || die "could not determine the host target"
+# Resolve only the host target and stay offline: the lockfile already pins
+# every dependency, and a plain `cargo metadata` would also resolve Android
+# and other platform-only crates, failing in a read-only cargo home.
+CARGO_NET_OFFLINE=true cargo metadata --format-version 1 --filter-platform "$host" >/dev/null
 grep -A1 '^name = "kunato"$' Cargo.lock | grep -q "^version = \"$version\"$" ||
     die "failed to update Cargo.lock"
 
