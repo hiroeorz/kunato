@@ -1511,13 +1511,15 @@ timeouts:
   upstream_connect: 5s
   upstream_response: 30s
   shutdown_grace: 10s
+  connection_idle: 60s
 
-# The body limit also bounds upload size. Raise max_body_bytes if your
-# application receives larger uploads. max_response_body_bytes bounds how much
-# of each upstream response response rules inspect before streaming the rest.
-# max_path_bytes bounds the whole request target (path plus query string).
-# max_concurrent_streams caps concurrent request streams per HTTP/2 or QUIC
-# connection, which also bounds in-flight request-body buffering.
+# The body limit also bounds upload size. Raise max_body_bytes (up to 8 MiB) if
+# your application receives larger uploads; the process-wide inspection budget
+# bounds how much memory concurrent buffering can use. max_response_body_bytes
+# bounds how much of each upstream response response rules inspect before
+# streaming the rest. max_path_bytes bounds the whole request target (path plus
+# query string). max_concurrent_streams caps concurrent request streams per
+# HTTP/2 or QUIC connection.
 limits:
   max_path_bytes: 8192
   max_header_bytes: 32768

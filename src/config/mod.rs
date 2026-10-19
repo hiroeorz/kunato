@@ -11,6 +11,7 @@ use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use ipnet::IpNet;
 use regex::{Regex, RegexBuilder};
+use regex_syntax::hir::{Hir, HirKind, Look};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
 
@@ -25,6 +26,10 @@ use crate::rules::matcher::{
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const MAX_PATTERN_BYTES: usize = 4096;
 const MAX_PATTERNS_PER_RULE: usize = 64;
+const MAX_PATH_BYTES_LIMIT: usize = 64 * 1024;
+const MAX_HEADER_BYTES_LIMIT: usize = 1024 * 1024;
+const MAX_HEADERS_LIMIT: usize = 1000;
+const MAX_BODY_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_HEADER_ENTRIES: usize = 64;
 const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
@@ -291,6 +296,8 @@ pub struct TimeoutsSpec {
     pub upstream_response: Duration,
     #[serde(default = "secs10", deserialize_with = "de_duration")]
     pub shutdown_grace: Duration,
+    #[serde(default = "secs60", deserialize_with = "de_duration")]
+    pub connection_idle: Duration,
     #[serde(default = "minutes10", deserialize_with = "de_duration")]
     pub websocket_idle: Duration,
 }
@@ -303,6 +310,7 @@ impl Default for TimeoutsSpec {
             upstream_connect: secs5(),
             upstream_response: secs30(),
             shutdown_grace: secs10(),
+            connection_idle: secs60(),
             websocket_idle: minutes10(),
         }
     }
@@ -558,6 +566,7 @@ pub struct Timeouts {
     pub upstream_connect: Duration,
     pub upstream_response: Duration,
     pub shutdown_grace: Duration,
+    pub connection_idle: Duration,
     pub websocket_idle: Duration,
 }
 
@@ -569,6 +578,7 @@ impl From<&TimeoutsSpec> for Timeouts {
             upstream_connect: spec.upstream_connect,
             upstream_response: spec.upstream_response,
             shutdown_grace: spec.shutdown_grace,
+            connection_idle: spec.connection_idle,
             websocket_idle: spec.websocket_idle,
         }
     }
@@ -830,6 +840,18 @@ impl CompiledConfig {
                     .rules
                     .iter()
                     .any(|rule| targets(&rule.matcher, TARGET_RESPONSE_BODY))
+        })
+    }
+
+    /// True when a response-phase rule inspects the *request* body. Only then
+    /// does response evaluation need the request-body decoded forms.
+    pub fn response_targets_request_body(&self) -> bool {
+        self.categories.iter().any(|category| {
+            category.phase == Phase::Response
+                && category
+                    .rules
+                    .iter()
+                    .any(|rule| targets(&rule.matcher, TARGET_BODY))
         })
     }
 }
@@ -1266,15 +1288,33 @@ fn compile_limit(
 }
 
 fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
-    for (name, value) in [
-        ("max_path_bytes", limits.max_path_bytes),
-        ("max_header_bytes", limits.max_header_bytes),
-        ("max_headers", limits.max_headers),
-        ("max_body_bytes", limits.max_body_bytes),
-        ("max_response_body_bytes", limits.max_response_body_bytes),
+    for (name, value, max) in [
+        (
+            "max_path_bytes",
+            limits.max_path_bytes,
+            MAX_PATH_BYTES_LIMIT,
+        ),
+        (
+            "max_header_bytes",
+            limits.max_header_bytes,
+            MAX_HEADER_BYTES_LIMIT,
+        ),
+        ("max_headers", limits.max_headers, MAX_HEADERS_LIMIT),
+        (
+            "max_body_bytes",
+            limits.max_body_bytes,
+            MAX_BODY_BYTES_LIMIT,
+        ),
+        (
+            "max_response_body_bytes",
+            limits.max_response_body_bytes,
+            MAX_BODY_BYTES_LIMIT,
+        ),
     ] {
         if value == 0 {
             issues.push(format!("limits.{name} must be greater than zero"));
+        } else if value > max {
+            issues.push(format!("limits.{name} must not exceed {max}"));
         }
     }
     if !(1..=1000).contains(&limits.max_concurrent_streams) {
@@ -1288,6 +1328,8 @@ fn validate_timeouts(timeouts: &TimeoutsSpec, issues: &mut Vec<String>) {
         ("body_read", timeouts.body_read),
         ("upstream_connect", timeouts.upstream_connect),
         ("upstream_response", timeouts.upstream_response),
+        ("shutdown_grace", timeouts.shutdown_grace),
+        ("connection_idle", timeouts.connection_idle),
         ("websocket_idle", timeouts.websocket_idle),
     ] {
         if value.is_zero() {
@@ -1860,29 +1902,38 @@ fn require_anchored(patterns: &[String], context: &str, issues: &mut Vec<String>
 
 /// A payload pattern is fully anchored when it can only match entire target
 /// strings, leaving no position where an appended marker could satisfy it.
-/// Supports `^`/`\A` at the start and `$`/`\z` at the end, with pure inline
-/// flag groups such as `(?i)` allowed ahead of the anchor. Multiline mode (`m`)
-/// is rejected because per-line anchors reintroduce the appended marker.
+/// The regex is parsed so the check follows the engine's semantics instead of
+/// the bytes written by the operator: a top-level `|` creates two anchors that
+/// must each be checked, `\$` is a literal dollar sign rather than an anchor,
+/// and `(?m)` turns `$` into an end-of-line assertion. Inline flags such as
+/// `(?i)` are harmless, and a non-capturing group around anchored expressions
+/// is accepted.
 fn is_fully_anchored(pattern: &str) -> bool {
-    let mut rest = pattern;
-    while let Some(after) = rest.strip_prefix("(?") {
-        let Some(end) = after.find(')') else {
-            return false;
-        };
-        let flags = &after[..end];
-        if !flags
-            .bytes()
-            .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
-        {
-            return false;
+    regex_syntax::Parser::new()
+        .parse(pattern)
+        .is_ok_and(|hir| anchored_start(&hir) && anchored_end(&hir))
+}
+
+fn anchored_start(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Capture(capture) => anchored_start(&capture.sub),
+        HirKind::Concat(parts) => parts.first().is_some_and(anchored_start),
+        HirKind::Alternation(branches) => {
+            !branches.is_empty() && branches.iter().all(anchored_start)
         }
-        if flags.bytes().any(|byte| byte == b'm') {
-            return false;
-        }
-        rest = &after[end + 1..];
+        HirKind::Look(Look::Start) => true,
+        _ => false,
     }
-    (rest.starts_with('^') || rest.starts_with(r"\A"))
-        && (pattern.ends_with('$') || pattern.ends_with(r"\z"))
+}
+
+fn anchored_end(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Capture(capture) => anchored_end(&capture.sub),
+        HirKind::Concat(parts) => parts.last().is_some_and(anchored_end),
+        HirKind::Alternation(branches) => !branches.is_empty() && branches.iter().all(anchored_end),
+        HirKind::Look(Look::End) => true,
+        _ => false,
+    }
 }
 
 fn compile_regexes(patterns: &[String], context: &str, issues: &mut Vec<String>) -> Vec<Regex> {
@@ -2218,6 +2269,7 @@ mod tests {
         assert!(config.categories.is_empty());
         assert_eq!(config.limits.max_body_bytes, 1024 * 1024);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
+        assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
     }
 
     #[test]
@@ -2607,6 +2659,30 @@ mod tests {
     fn rejects_zero_limits() {
         let error = parse_with(BASE, "limits: { max_body_bytes: 0 }\n").expect_err("must fail");
         assert!(error.to_string().contains("max_body_bytes"));
+    }
+
+    #[test]
+    fn rejects_limits_above_the_hard_caps() {
+        for (name, value) in [
+            ("max_path_bytes", MAX_PATH_BYTES_LIMIT + 1),
+            ("max_header_bytes", MAX_HEADER_BYTES_LIMIT + 1),
+            ("max_headers", MAX_HEADERS_LIMIT + 1),
+            ("max_body_bytes", MAX_BODY_BYTES_LIMIT + 1),
+            ("max_response_body_bytes", MAX_BODY_BYTES_LIMIT + 1),
+        ] {
+            let error = parse_with(BASE, &format!("limits: {{ {name}: {value} }}\n"))
+                .expect_err("limit above the hard cap must fail");
+            assert!(error.to_string().contains(name), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_shutdown_grace_and_connection_idle() {
+        for name in ["shutdown_grace", "connection_idle"] {
+            let error =
+                parse_with(BASE, &format!("timeouts: {{ {name}: 0s }}\n")).expect_err("must fail");
+            assert!(error.to_string().contains(name), "{error}");
+        }
     }
 
     #[test]
@@ -3205,6 +3281,7 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
         .expect("valid config");
         assert!(config.has_body_target_rules());
         assert!(!config.has_response_body_rules());
+        assert!(!config.response_targets_request_body());
 
         let config = parse_with(
             BASE,
@@ -3220,6 +3297,21 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
         .expect("valid config");
         assert!(!config.has_body_target_rules());
         assert!(config.has_response_body_rules());
+        assert!(!config.response_targets_request_body());
+
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: response-body
+    phase: response
+    action: BLOCK
+    rules:
+      - name: marker
+        match: { regex: marker, in: [body] }
+",
+        )
+        .expect("valid config");
+        assert!(config.response_targets_request_body());
     }
 
     #[test]
@@ -3734,6 +3826,15 @@ categories:
         let anchored = "categories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: marker\n        match: { regex: '^q=tokenfree$', in: [query] }\n";
         parse_with(BASE, anchored).expect("anchored ALLOW regex is valid");
 
+        // A top-level alternation or an escaped dollar sign only looks
+        // anchored: the first branch matches a prefix and `\$` is a literal.
+        for unsafe_pattern in ["^q=tokenfree|q=abc$", r"^cost=\$"] {
+            let yaml = format!(
+                "categories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: marker\n        match: {{ regex: '{unsafe_pattern}', in: [query] }}\n"
+            );
+            parse_with(BASE, &yaml).expect_err("partially anchored ALLOW regex must fail");
+        }
+
         // The same unanchored pattern is fine for a rule the operator wrote to
         // block or log.
         let blocking = "categories:\n  - name: scanners\n    action: BLOCK\n    rules:\n      - name: marker\n        match: { regex: tokenfree, in: [query] }\n";
@@ -3760,10 +3861,18 @@ categories:
         assert!(is_fully_anchored("(?i)^tokenfree$"));
         assert!(is_fully_anchored(r"\Atokenfree\z"));
         assert!(is_fully_anchored("^(?:a|b)$"));
+        assert!(is_fully_anchored("(?:^tokenfree$)"));
+        assert!(is_fully_anchored("^a$|^b$"));
+        assert!(is_fully_anchored("^(?:a$|b$)"));
         assert!(!is_fully_anchored("^tokenfree"));
         assert!(!is_fully_anchored("tokenfree$"));
         assert!(!is_fully_anchored("tokenfree"));
         assert!(!is_fully_anchored("(?m)^tokenfree$"));
         assert!(!is_fully_anchored("(?i)^tokenfree"));
+        assert!(!is_fully_anchored("^q=tokenfree|q=abc$"));
+        assert!(!is_fully_anchored(r"^cost=\$"));
+        assert!(!is_fully_anchored(r"^tokenfree\\z"));
+        assert!(!is_fully_anchored("^a(?m)$"));
+        assert!(!is_fully_anchored("^a$|b"));
     }
 }

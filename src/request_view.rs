@@ -16,6 +16,10 @@ pub struct RequestView<'a> {
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
     pub body_forms: Vec<Vec<u8>>,
+    /// True when the inspected body is only a prefix of the message (either
+    /// because the raw body exceeded the limit or because decoding could not
+    /// finish). ALLOW rules must not trust an incomplete body.
+    pub body_truncated: bool,
     pub source_ip: IpAddr,
 }
 
@@ -49,8 +53,14 @@ impl<'a> RequestView<'a> {
             } else {
                 Vec::new()
             },
+            body_truncated: false,
             source_ip: normalize_ip(source_ip),
         }
+    }
+
+    pub fn with_body_truncated(mut self, body_truncated: bool) -> Self {
+        self.body_truncated = body_truncated;
+        self
     }
 }
 

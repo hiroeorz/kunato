@@ -12,6 +12,14 @@ use crate::config::{Protection, RuleLimit, RuleLimitKey};
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
 const GLOBAL_WINDOW: Duration = Duration::from_secs(1);
+/// One rate-limit token covers this many inspected body bytes. A 1 MiB body
+/// therefore costs about four extra tokens on top of the admission token.
+const INSPECTION_BYTES_PER_TOKEN: f64 = 256.0 * 1024.0;
+const MAX_INSPECTION_COST: f64 = 64.0;
+
+fn inspection_cost(bytes: usize) -> f64 {
+    (bytes as f64 / INSPECTION_BYTES_PER_TOKEN).min(MAX_INSPECTION_COST)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -48,7 +56,7 @@ impl ProtectionState {
             tracked_rules: AtomicUsize::new(0),
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
-                count: 0,
+                count: 0.0,
             }),
         }
     }
@@ -62,16 +70,35 @@ impl ProtectionState {
             return Decision::Allow;
         }
 
-        if let Some(decision) = self.check_client(tracking_key(ip, config), config) {
+        if let Some(decision) = self.check_client(tracking_key(ip, config), config, 1.0) {
             return decision;
         }
 
-        self.check_global(config)
+        self.check_global(config, 1.0)
     }
 
-    /// Ban pre-check used before a request body is ingested. Consumes no rate
-    /// budget and never creates tracking state; an untracked source is not
-    /// evaluated here (the full check runs after the body was read).
+    /// Charge the source for inspecting a body of `bytes` bytes. Admission has
+    /// already paid one token, so this only bills the extra inspection work;
+    /// large bodies therefore consume the rate budget faster than small ones.
+    pub fn charge_inspection(&self, ip: IpAddr, config: &Protection, bytes: usize) -> Decision {
+        if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
+            return Decision::Allow;
+        }
+
+        let cost = inspection_cost(bytes);
+        if cost <= 0.0 {
+            return Decision::Allow;
+        }
+        if let Some(decision) = self.check_client(tracking_key(ip, config), config, cost) {
+            return decision;
+        }
+
+        self.check_global(config, cost)
+    }
+
+    /// Ban-only check for callers that need to reject a banned source without
+    /// consuming rate budget. Normal request handling uses the full admission
+    /// check, which also charges the rate budget.
     pub fn check_banned(&self, ip: IpAddr, config: &Protection) -> Option<Decision> {
         if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
             return None;
@@ -177,14 +204,21 @@ impl ProtectionState {
                 return Some(shard);
             }
             if !reserve_slot(&self.tracked_ips, config.max_tracked_ips) {
-                return None;
+                // The table is full of recently active sources. Evict the
+                // least recently seen idle entry in this shard so a new client
+                // is still tracked; active connections and live bans stay.
+                if !evict_oldest(&mut shard.entries, now) {
+                    return None;
+                }
+                shard.entries.insert(key, Entry::new(now, config.burst));
+                return Some(shard);
             }
         }
         shard.entries.insert(key, Entry::new(now, config.burst));
         Some(shard)
     }
 
-    fn check_client(&self, key: IpAddr, config: &Protection) -> Option<Decision> {
+    fn check_client(&self, key: IpAddr, config: &Protection, cost: f64) -> Option<Decision> {
         let now = Instant::now();
         let Some(mut shard) = self.client_shard(key, config, now) else {
             return Some(Decision::Overloaded {
@@ -214,8 +248,8 @@ impl ProtectionState {
             entry.last_refill = now;
         }
 
-        if entry.tokens >= 1.0 {
-            entry.tokens -= 1.0;
+        if entry.tokens >= cost {
+            entry.tokens -= cost;
             return None;
         }
 
@@ -240,23 +274,23 @@ impl ProtectionState {
             });
         }
 
-        let deficit = (1.0 - entry.tokens).max(0.001);
+        let deficit = (cost - entry.tokens).max(0.001);
         let retry_after = Duration::try_from_secs_f64(deficit / config.requests_per_second)
             .unwrap_or(Duration::MAX);
         Some(Decision::RateLimited { retry_after })
     }
 
-    fn check_global(&self, config: &Protection) -> Decision {
+    fn check_global(&self, config: &Protection, cost: f64) -> Decision {
         let now = Instant::now();
         let mut window = lock(&self.global_requests);
 
         if now.saturating_duration_since(window.started) >= GLOBAL_WINDOW {
             window.started = now;
-            window.count = 0;
+            window.count = 0.0;
         }
-        window.count = window.count.saturating_add(1);
+        window.count += cost;
 
-        if window.count as f64 > config.global_requests_per_second {
+        if window.count > config.global_requests_per_second {
             return Decision::Overloaded {
                 retry_after: GLOBAL_WINDOW,
             };
@@ -449,7 +483,7 @@ impl Entry {
 
 struct GlobalWindow {
     started: Instant,
-    count: u64,
+    count: f64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -514,6 +548,20 @@ fn evict_stale(entries: &mut HashMap<IpAddr, Entry>, now: Instant) {
     });
 }
 
+/// Remove the least recently seen entry that is neither connected nor banned.
+/// Used only when the tracking table is otherwise full, so an attacker that
+/// occupies every slot cannot deny service to new sources.
+fn evict_oldest(entries: &mut HashMap<IpAddr, Entry>, now: Instant) -> bool {
+    let candidate = entries
+        .iter()
+        .filter(|(_, entry)| {
+            entry.connections == 0 && !entry.banned_until.is_some_and(|until| until > now)
+        })
+        .min_by_key(|(_, entry)| entry.last_seen)
+        .map(|(key, _)| *key);
+    candidate.is_some_and(|key| entries.remove(&key).is_some())
+}
+
 fn reserve_slot(counter: &AtomicUsize, limit: usize) -> bool {
     counter
         .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
@@ -570,6 +618,31 @@ mod tests {
         );
         let decision = state.check_request(ip("10.0.0.1"), &config());
         assert!(matches!(decision, Decision::RateLimited { .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inspection_cost_consumes_extra_tokens() {
+        let state = ProtectionState::new();
+        let config = config();
+        assert_eq!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.charge_inspection(ip("10.0.0.1"), &config, 256 * 1024),
+            Decision::Allow
+        );
+        assert!(matches!(
+            state.charge_inspection(ip("10.0.0.1"), &config, 256 * 1024),
+            Decision::RateLimited { .. }
+        ));
+
+        let mut allowlisted = config;
+        allowlisted.allowlist = vec!["10.0.0.0/8".parse().expect("valid CIDR")];
+        assert_eq!(
+            state.charge_inspection(ip("10.0.0.2"), &allowlisted, 1024 * 1024),
+            Decision::Allow
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1012,6 +1085,34 @@ mod tests {
         tokio::time::advance(Duration::from_secs(3600)).await;
         assert!(state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
         assert_eq!(state.tracked_rules.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_tracking_evicts_the_oldest_idle_source() {
+        let state = Arc::new(ProtectionState::new());
+        let mut config = config();
+        config.max_tracked_ips = 2;
+
+        // These IPv4 addresses share one shard: 10.0.0.1, .17, and .33 all
+        // hash to shard 1, so the third admission must evict within the shard.
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(
+            state.check_request(ip("10.0.0.17"), &config),
+            Decision::Allow
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            matches!(
+                state.check_request(ip("10.0.0.33"), &config),
+                Decision::Allow
+            ),
+            "a full table must admit a new source by evicting an idle one"
+        );
+        assert_eq!(state.tracked_ips.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

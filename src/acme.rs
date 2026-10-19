@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rustls::ServerConfig;
+use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY;
@@ -245,8 +246,19 @@ impl FileCache {
         tokio::fs::create_dir_all(&self.dir).await?;
         set_dir_permissions(&self.dir).await?;
         let tmp = path.with_extension("tmp");
-        tokio::fs::write(&tmp, contents).await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).await?;
+        // `mode` only applies when the file is created; an older temp file may
+        // have wider permissions, so narrow it before writing key material.
         set_file_permissions(&tmp).await?;
+        file.write_all(contents).await?;
+        file.flush().await?;
+        drop(file);
         match tokio::fs::rename(&tmp, path).await {
             Ok(()) => Ok(()),
             Err(err) => {

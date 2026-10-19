@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
@@ -10,6 +11,7 @@ use tracing::{debug, info, warn};
 use crate::config::CompiledConfig;
 use crate::metrics::Metrics;
 use crate::proxy::forward::{self, HttpError};
+use crate::proxy::server::InspectionGuard;
 use crate::proxy::{BoxError, PrefixBody, ProxyBody, settle_body_end};
 use crate::request_view::{RequestView, ResponseView};
 use crate::rules::eval;
@@ -19,6 +21,12 @@ pub struct Buffered {
     pub prefix: Bytes,
     pub truncated: bool,
     pub body: ProxyBody,
+}
+
+/// The request body as it was evaluated, plus whether it was only a prefix.
+pub(crate) struct InspectedRequest<'a> {
+    pub body: &'a [u8],
+    pub truncated: bool,
 }
 
 pub async fn buffer_prefix(
@@ -75,13 +83,14 @@ pub async fn buffer_prefix(
     })
 }
 
-pub async fn inspect(
+pub(crate) async fn inspect(
     config: &CompiledConfig,
     metrics: &Metrics,
     request: &http::request::Parts,
-    request_body: &[u8],
+    inspected_request: InspectedRequest<'_>,
     peer: SocketAddr,
     response: Response<ProxyBody>,
+    _inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
     let buffered = match tokio::time::timeout(
         config.timeouts.upstream_response,
@@ -111,57 +120,58 @@ pub async fn inspect(
     };
 
     let decoded_prefix = if config.has_response_body_rules() {
-        crate::decoding::decode_content_encoding(
+        crate::decoding::decode_body_for_inspection(
             &buffered.prefix,
             &buffered.parts.headers,
             config.limits.max_response_body_bytes,
         )
     } else {
-        None
+        crate::decoding::DecodeOutcome::NotEncoded
     };
-    if config.has_response_body_rules()
-        && !buffered.prefix.is_empty()
-        && crate::decoding::encoding_is_uninspectable(&buffered.parts.headers)
-    {
-        metrics
-            .response_decode_skipped
-            .fetch_add(1, Ordering::Relaxed);
-        warn!(
-            status = buffered.parts.status.as_u16(),
-            "response body encoding cannot be decoded for inspection"
-        );
-    }
-    let decode_truncated = decoded_prefix
-        .as_ref()
-        .is_some_and(|decoded| decoded.truncated);
-    if decode_truncated {
-        metrics
-            .response_decode_truncated
-            .fetch_add(1, Ordering::Relaxed);
-        warn!(
-            limit = config.limits.max_response_body_bytes,
-            status = buffered.parts.status.as_u16(),
-            "decompressed response body truncated for inspection"
-        );
-    }
-    let inspected_prefix = decoded_prefix
-        .as_ref()
-        .map(|decoded| decoded.body.as_slice())
-        .unwrap_or(&buffered.prefix);
+    let mut body_truncated = buffered.truncated;
+    let inspected_prefix: Cow<'_, [u8]> = match decoded_prefix {
+        crate::decoding::DecodeOutcome::NotEncoded => Cow::Borrowed(&buffered.prefix),
+        crate::decoding::DecodeOutcome::Decoded { body, complete } => {
+            if !complete {
+                metrics
+                    .response_decode_truncated
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    limit = config.limits.max_response_body_bytes,
+                    status = buffered.parts.status.as_u16(),
+                    "decompressed response body truncated for inspection"
+                );
+                body_truncated = true;
+            }
+            Cow::Owned(body)
+        }
+        crate::decoding::DecodeOutcome::Unsupported | crate::decoding::DecodeOutcome::Malformed => {
+            metrics
+                .response_decode_skipped
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                status = buffered.parts.status.as_u16(),
+                "response body encoding cannot be inspected; inspecting the raw prefix"
+            );
+            body_truncated = true;
+            Cow::Borrowed(&buffered.prefix)
+        }
+    };
 
     let view = RequestView::with_body_decoding(
         &request.method,
         &request.uri,
         &request.headers,
-        request_body,
+        inspected_request.body,
         peer.ip(),
-        config.has_body_target_rules(),
-    );
+        config.response_targets_request_body(),
+    )
+    .with_body_truncated(inspected_request.truncated);
     let response_view = ResponseView::new(
         buffered.parts.status,
         &buffered.parts.headers,
-        inspected_prefix,
-        buffered.truncated || decode_truncated,
+        inspected_prefix.as_ref(),
+        body_truncated,
     );
     let outcome = eval::evaluate_response(config, &view, &response_view);
 

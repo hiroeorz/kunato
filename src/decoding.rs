@@ -22,58 +22,89 @@ pub struct DecodedBody {
     pub truncated: bool,
 }
 
-pub fn decode_content_encoding(
-    body: &[u8],
-    headers: &HeaderMap,
-    limit: usize,
-) -> Option<DecodedBody> {
-    if body.is_empty() || limit == 0 {
-        return None;
+/// Result of decoding a message body for inspection. Unlike
+/// [`decode_content_encoding`], this distinguishes "no encoding was declared"
+/// from an encoding that cannot be decoded, so callers can fail closed when
+/// body rules depend on seeing the decoded bytes.
+#[derive(Debug)]
+pub enum DecodeOutcome {
+    NotEncoded,
+    Decoded { body: Vec<u8>, complete: bool },
+    Unsupported,
+    Malformed,
+}
+
+pub fn decode_body_for_inspection(body: &[u8], headers: &HeaderMap, limit: usize) -> DecodeOutcome {
+    if body.is_empty() {
+        return DecodeOutcome::NotEncoded;
     }
-    let encodings = content_encodings(headers.get(CONTENT_ENCODING)?)?;
+    if limit == 0 {
+        return DecodeOutcome::Unsupported;
+    }
+    if !headers.contains_key(CONTENT_ENCODING) {
+        return DecodeOutcome::NotEncoded;
+    }
+    let Some(encodings) = header_content_encodings(headers) else {
+        return DecodeOutcome::Unsupported;
+    };
     if encodings.is_empty() {
-        return None;
+        return DecodeOutcome::NotEncoded;
     }
 
     let mut decoded: Vec<u8> = Vec::new();
     let mut first = true;
-    let mut truncated = false;
     for encoding in encodings.iter().rev() {
         let input: &[u8] = if first { body } else { &decoded };
-        let (layer, layer_truncated) = match encoding.as_str() {
+        let (layer, status) = match encoding.as_str() {
             "gzip" | "x-gzip" => read_bounded(MultiGzDecoder::new(input), limit),
             "deflate" => decode_deflate(input, limit),
             "br" => read_bounded(BrotliDecoder::new(input, DECODE_BUFFER_BYTES), limit),
             "zstd" => match ZstdDecoder::new_with_max_window_size(input, MAX_ZSTD_WINDOW_BYTES) {
                 Ok(decoder) => read_bounded(decoder, limit),
-                Err(_) => return None,
+                Err(_) => return DecodeOutcome::Malformed,
             },
-            _ => return None,
+            _ => return DecodeOutcome::Unsupported,
         };
-        if layer.is_empty() {
-            return None;
-        }
-        decoded = layer;
-        first = false;
-        if layer_truncated {
-            truncated = true;
-            break;
+        match status {
+            ReadStatus::Malformed => return DecodeOutcome::Malformed,
+            ReadStatus::Truncated => {
+                return DecodeOutcome::Decoded {
+                    body: layer,
+                    complete: false,
+                };
+            }
+            ReadStatus::Complete => {
+                decoded = layer;
+                first = false;
+            }
         }
     }
 
-    Some(DecodedBody {
+    DecodeOutcome::Decoded {
         body: decoded,
-        truncated,
-    })
+        complete: true,
+    }
+}
+
+pub fn decode_content_encoding(
+    body: &[u8],
+    headers: &HeaderMap,
+    limit: usize,
+) -> Option<DecodedBody> {
+    match decode_body_for_inspection(body, headers, limit) {
+        DecodeOutcome::Decoded { body, complete } => Some(DecodedBody {
+            body,
+            truncated: !complete,
+        }),
+        DecodeOutcome::NotEncoded | DecodeOutcome::Unsupported | DecodeOutcome::Malformed => None,
+    }
 }
 
 /// True when the message declares a `Content-Encoding` that cannot be decoded
 /// for inspection: an unknown encoding, an invalid value, or more than
 /// [`MAX_CONTENT_ENCODING_LAYERS`] layers. `identity` is not uninspectable.
 pub fn encoding_is_uninspectable(headers: &HeaderMap) -> bool {
-    headers
-        .get(CONTENT_ENCODING)
-        .is_some_and(|value| content_encodings(value).is_none())
+    headers.contains_key(CONTENT_ENCODING) && header_content_encodings(headers).is_none()
 }
 
 pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
@@ -292,35 +323,53 @@ fn content_encodings(value: &HeaderValue) -> Option<Vec<String>> {
     Some(encodings)
 }
 
-fn read_bounded(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
+/// Combine every `Content-Encoding` field in order, as HTTP semantics require:
+/// a message may carry the header more than once, and treating only the first
+/// value would let a second encoding hide an uninspected body.
+fn header_content_encodings(headers: &HeaderMap) -> Option<Vec<String>> {
+    let mut encodings = Vec::new();
+    for value in headers.get_all(CONTENT_ENCODING) {
+        encodings.extend(content_encodings(value)?);
+        if encodings.len() > MAX_CONTENT_ENCODING_LAYERS {
+            return None;
+        }
+    }
+    Some(encodings)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadStatus {
+    Complete,
+    Truncated,
+    Malformed,
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> (Vec<u8>, ReadStatus) {
     let mut output = Vec::new();
     let mut buffer = [0u8; DECODE_BUFFER_BYTES];
-    let mut truncated = false;
     while output.len() < limit {
         let want = (limit - output.len()).min(buffer.len());
         match reader.read(&mut buffer[..want]) {
-            Ok(0) => break,
+            Ok(0) => return (output, ReadStatus::Complete),
             Ok(read) => output.extend_from_slice(&buffer[..read]),
-            Err(_) => {
-                truncated = true;
-                break;
-            }
+            Err(_) => return (output, ReadStatus::Malformed),
         }
     }
 
     if limit > 0 && output.len() >= limit {
         let mut probe = [0u8; 1];
-        match reader.read(&mut probe) {
-            Ok(read) => truncated = read > 0,
-            Err(_) => truncated = true,
-        }
+        return match reader.read(&mut probe) {
+            Ok(0) => (output, ReadStatus::Complete),
+            Ok(_) => (output, ReadStatus::Truncated),
+            Err(_) => (output, ReadStatus::Malformed),
+        };
     }
-    (output, truncated)
+    (output, ReadStatus::Complete)
 }
 
-fn decode_deflate(input: &[u8], limit: usize) -> (Vec<u8>, bool) {
+fn decode_deflate(input: &[u8], limit: usize) -> (Vec<u8>, ReadStatus) {
     let decoded = read_bounded(ZlibDecoder::new(input), limit);
-    if decoded.0.is_empty() {
+    if decoded.0.is_empty() && decoded.1 == ReadStatus::Malformed {
         read_bounded(DeflateDecoder::new(input), limit)
     } else {
         decoded
@@ -947,6 +996,79 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn inspection_outcome_distinguishes_uninspectable_bodies() {
+        let payload = b"q=1 union select password";
+
+        assert!(matches!(
+            decode_body_for_inspection(payload, &HeaderMap::new(), 1024),
+            DecodeOutcome::NotEncoded
+        ));
+        assert!(matches!(
+            decode_body_for_inspection(payload, &headers(CONTENT_ENCODING, "identity"), 1024),
+            DecodeOutcome::NotEncoded
+        ));
+        assert!(matches!(
+            decode_body_for_inspection(payload, &headers(CONTENT_ENCODING, "compress"), 1024),
+            DecodeOutcome::Unsupported
+        ));
+        assert!(matches!(
+            decode_body_for_inspection(payload, &headers(CONTENT_ENCODING, "gzip"), 1024),
+            DecodeOutcome::Malformed
+        ));
+
+        let decoded =
+            decode_body_for_inspection(&gzip(payload), &headers(CONTENT_ENCODING, "gzip"), 1024);
+        assert!(matches!(
+            decoded,
+            DecodeOutcome::Decoded { complete: true, .. }
+        ));
+
+        let truncated = decode_body_for_inspection(
+            &gzip(&vec![b'a'; 4096]),
+            &headers(CONTENT_ENCODING, "gzip"),
+            64,
+        );
+        assert!(matches!(
+            truncated,
+            DecodeOutcome::Decoded {
+                complete: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn repeated_content_encoding_headers_are_combined() {
+        let payload = b"q=1 union select password";
+        let mut repeated = HeaderMap::new();
+        repeated.append(CONTENT_ENCODING, HeaderValue::from_static("identity"));
+        repeated.append(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        assert!(matches!(
+            decode_body_for_inspection(&gzip(payload), &repeated, 1024),
+            DecodeOutcome::Decoded { complete: true, .. }
+        ));
+
+        let mut unsupported = HeaderMap::new();
+        unsupported.append(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        unsupported.append(CONTENT_ENCODING, HeaderValue::from_static("compress"));
+        assert!(matches!(
+            decode_body_for_inspection(&gzip(payload), &unsupported, 1024),
+            DecodeOutcome::Unsupported
+        ));
+        assert!(encoding_is_uninspectable(&unsupported));
+    }
+
+    #[test]
+    fn truncated_compressed_stream_is_malformed_not_over_limit() {
+        let mut encoded = gzip(&vec![b'a'; 4096]);
+        encoded.truncate(encoded.len() / 2);
+        assert!(matches!(
+            decode_body_for_inspection(&encoded, &headers(CONTENT_ENCODING, "gzip"), 1024 * 1024),
+            DecodeOutcome::Malformed
+        ));
     }
 
     #[test]

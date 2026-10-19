@@ -124,7 +124,7 @@ impl Metrics {
         counter(
             &mut out,
             "kunato_request_decode_truncated_total",
-            "Decompressed request bodies truncated for inspection.",
+            "Decompressed request bodies that exceeded the inspection limit; the request was rejected.",
             self.request_decode_truncated.load(Ordering::Relaxed),
         );
         counter(
@@ -136,13 +136,13 @@ impl Metrics {
         counter(
             &mut out,
             "kunato_request_decode_skipped_total",
-            "Request bodies with an encoding that could not be decoded for inspection.",
+            "Request bodies with an encoding that could not be inspected; the request was rejected.",
             self.request_decode_skipped.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
             "kunato_rate_limited_total",
-            "Requests rejected by the per-IP rate limiter.",
+            "Requests rejected by the per-IP rate limiter, including inspection cost.",
             self.rate_limited.load(Ordering::Relaxed),
         );
         counter(
@@ -160,7 +160,7 @@ impl Metrics {
         counter(
             &mut out,
             "kunato_overloaded_total",
-            "Requests shed by the global rate guard.",
+            "Requests shed by the global rate guard or the inspection budget.",
             self.overloaded.load(Ordering::Relaxed),
         );
         counter(

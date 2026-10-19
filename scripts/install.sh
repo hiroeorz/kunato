@@ -66,7 +66,7 @@ Options:
   --help               Show this help.
 
 Environment:
-  KUNATO_BASE_URL      Override the release download base URL (for testing).
+  KUNATO_BASE_URL      Override the release download base URL (must be https://).
 EOF
 }
 
@@ -204,7 +204,7 @@ ask() {
 
 fetch_latest_version() {
     api="https://api.github.com/repos/$REPO/releases/latest"
-    tag=$(curl -fsSL "$api" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    tag=$(curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 "$api" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
     [ -n "$tag" ] || die "could not determine the latest release; pass --version"
     printf '%s' "$tag"
 }
@@ -242,15 +242,20 @@ install_release() {
         v*) ;;
         *) VERSION="v$VERSION" ;;
     esac
+    case "$VERSION" in
+        "" | *[!A-Za-z0-9._-]*) die "invalid version tag: $VERSION" ;;
+    esac
 
     tarball="kunato-$VERSION-$TARGET.tar.gz"
     workdir=$(mktemp -d)
     trap 'rm -rf "$workdir"' EXIT INT TERM
 
     log "downloading $tarball"
-    curl -fsSL --retry 3 "$BASE_URL/$VERSION/$tarball" -o "$workdir/$tarball" ||
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+        "$BASE_URL/$VERSION/$tarball" -o "$workdir/$tarball" ||
         die "failed to download $BASE_URL/$VERSION/$tarball"
-    curl -fsSL --retry 3 "$BASE_URL/$VERSION/SHA256SUMS" -o "$workdir/SHA256SUMS" ||
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+        "$BASE_URL/$VERSION/SHA256SUMS" -o "$workdir/SHA256SUMS" ||
         die "failed to download SHA256SUMS"
 
     log "verifying the checksum"
@@ -262,7 +267,7 @@ install_release() {
     )
 
     log "extracting and installing $tarball"
-    tar -xzf "$workdir/$tarball" -C "$workdir"
+    tar --no-same-owner --no-same-permissions -xzf "$workdir/$tarball" -C "$workdir"
     binary=$(find "$workdir" -maxdepth 3 -type f -name kunato -print -quit)
     [ -n "$binary" ] || die "archive does not contain the kunato binary"
     install -m 0755 "$binary" "$BIN_PATH"

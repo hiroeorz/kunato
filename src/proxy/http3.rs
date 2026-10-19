@@ -60,6 +60,9 @@ pub fn bind(
     let mut transport = quinn::TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(quinn::VarInt::from(config.limits.max_concurrent_streams));
+    if let Ok(idle) = quinn::IdleTimeout::try_from(config.timeouts.connection_idle) {
+        transport.max_idle_timeout(Some(idle));
+    }
     server_config.transport_config(Arc::new(transport));
     let endpoint =
         quinn::Endpoint::server(server_config, listen).map_err(|source| Error::Bind {
@@ -218,15 +221,19 @@ async fn handle_request(
     let config = context.config();
     let (parts, _) = request.into_parts();
     let (mut send, recv) = stream.split();
-    let mut response = match server::early_protection_error(&context, peer, &config) {
+    let mut response = match server::admission_error(&context, peer, &config) {
         Some(err) => server::rejected(peer, &err),
-        None => match read_prefix(recv, &config).await {
-            Ok(payload) => server::process_payload(parts, payload, peer, &config, &context).await,
-            Err(err) => {
-                // The failure produced a real response, so count it like other
-                // rejections to keep the request totals consistent.
-                context.count_rejected_request();
-                server::rejected(peer, &err)
+        None => match context.reserve_request_inspection(&config) {
+            Some(inspection) => match read_prefix(recv, &config).await {
+                Ok(payload) => {
+                    server::process_payload(parts, payload, peer, &config, &context, inspection)
+                        .await
+                }
+                Err(err) => server::rejected(peer, &err),
+            },
+            None => {
+                context.record_overloaded();
+                server::rejected(peer, &server::inspection_capacity_error())
             }
         },
     };

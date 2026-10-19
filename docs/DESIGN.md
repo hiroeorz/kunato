@@ -99,11 +99,13 @@ Components:
 3. **Protection** — ban check, per-IP token bucket, global RPS guard. Rate/ban
    violations produce `429` or `503` with `Retry-After`.
 4. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
-   prefix. Larger bodies stream to the upstream after rule evaluation, with a
-   truncation log and metric. Buffer only because rules may inspect `body`;
-   responses are always streamed. Encoded bodies are decompressed and
-   content-type decoded for inspection when body-targeting rules exist;
-   forwarded bytes stay unchanged.
+   prefix. Unencoded bodies larger than the limit stream to the upstream after
+   rule evaluation, with a truncation log and metric. Buffer only because rules
+   may inspect `body`; responses are always streamed. Encoded bodies are
+   decompressed and content-type decoded for inspection when body-targeting
+   rules exist; a body that cannot be fully decoded within the limit is rejected
+   (413/415/400) rather than forwarded uninspected. Forwarded bytes stay
+   unchanged.
 5. **Rule evaluation** — build a borrowed `RequestView` and evaluate the compiled
    categories/rules. Produces `Allow` (default), `Block(response)`, or `Log` +
    continuation.
@@ -128,13 +130,19 @@ Components:
 
 The first `max_body_bytes` of a request body (default 1 MiB) are buffered so
 that `in: [body]` rules always see a bounded prefix; content decoding applies to
-that prefix. When the body is larger, the remainder streams to the upstream
-uninspected: the request is logged and counted as truncated
+that prefix. For an unencoded body that is larger, the remainder streams to the
+upstream uninspected: the request is logged and counted as truncated
 (`kunato_request_truncated_total`), and the exchange runs under
-`timeouts.body_read` instead of `timeouts.upstream_response`. To reject
-oversized bodies instead, add an explicit rule (for example a `content-length`
-header regex). Responses already buffer only a prefix
-(`max_response_body_bytes`) and stream the rest.
+`timeouts.body_read` instead of `timeouts.upstream_response`. An encoded body
+that cannot be decoded completely within the limit is rejected instead
+(`413` when the decoded output exceeds the limit, `415` for an unsupported
+encoding, `400` for a malformed stream), because forwarding the compressed
+remainder would bypass every body rule. To reject oversized unencoded bodies
+instead, add an explicit rule (for example a `content-length` header regex).
+An `ALLOW` rule that targets `body` matches only when the full body was
+inspected; a truncated body never satisfies it. Responses already buffer only a
+prefix (`max_response_body_bytes`) and stream the rest; a truncated response
+body is inspected best-effort and never satisfies a body-targeting `ALLOW` rule.
 
 ### Request normalization
 
@@ -157,14 +165,17 @@ header regex). Responses already buffer only a prefix
 - Bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are
   decompressed for inspection only; forwarded bytes are never modified. All gzip
   members are decoded and stacked encodings are decoded in reverse order, up to
-  three layers; unknown or deeper encodings are inspected as received and
-  counted (`kunato_request_decode_skipped_total` /
-  `kunato_response_decode_skipped_total`). Decoding is bounded by
-  `limits.max_body_bytes` / `limits.max_response_body_bytes`, and a decoded body
-  cut off at the limit raises its own log entry and counter
-  (`kunato_request_decode_truncated_total` /
-  `kunato_response_decode_truncated_total`). zstd frames that declare a window
-  over 8 MiB are inspected as received so decoder state stays bounded.
+  three layers. When a body rule exists, unknown or deeper encodings are
+  rejected (`415`), malformed streams are rejected (`400`), and decoded output
+  over the limit is rejected (`413`); a request is never forwarded with an
+  encoded body that could not be inspected. Decoding is bounded by
+  `limits.max_body_bytes` / `limits.max_response_body_bytes`; the request
+  rejections are counted in `kunato_request_decode_truncated_total` /
+  `kunato_request_decode_skipped_total`, and a response prefix that was cut off
+  is counted in `kunato_response_decode_truncated_total` and inspected
+  best-effort. zstd frames that declare a window over 8 MiB fail the decode and
+  are rejected for requests (inspected raw for responses) so decoder state stays
+  bounded.
 - No other normalization is performed (no Unicode folding, no HTML entity
   decoding). Entity and fullwidth folding are deferred until anomaly scoring
   can absorb their false positives.
@@ -364,10 +375,13 @@ Protection is automatic and independent of the rule set. It consists of:
    concurrent connections (default 1024). Excess connections receive `503` or are
    closed.
 2. **Per-IP request rate** — token bucket with `requests_per_second` (default 20)
-   and `burst` (default 60). Exceeding it returns `429` with `Retry-After` and
-   records a violation.
-3. **Global request rate guard** — a coarse windowed counter (default 2000 rps).
-   When exceeded, new requests are shed with `503` until the window recovers.
+   and `burst` (default 60). Admission is checked before the body is buffered and
+   consumes one token. After the body is decoded, inspection is charged one extra
+   token per 256 KiB (capped at 64), so a 1 MiB body costs about five tokens.
+   Exceeding the budget returns `429` with `Retry-After` and records a violation.
+3. **Global request rate guard** — a coarse windowed counter (default 2000 rps),
+   charged with the same inspection cost. When exceeded, new requests are shed
+   with `503` until the window recovers.
 4. **Ban manager** — `violations` (default 5) within `window` (default 10 s) bans
    the source for `duration` (default 60 s). Repeat bans double the duration up to
    `max_duration` (default 1 h). Bans are held in a TTL map with a bounded size.
@@ -381,11 +395,14 @@ Protection is automatic and independent of the rule set. It consists of:
    so hot reloads keep the counters and distinct rules never share a bucket)
    and are evaluated during the request phase only.
 
-State is bounded: `max_tracked_ips` (default 100 000) caps the **total** number
-of tracked sources and rule-limit buckets across all shards. When full, stale
-entries are evicted first; if still full, untracked sources are not silently
-exempted — new connection admission is answered with an overload response and a
-rule limit that cannot be tracked applies its rule's action.
+State is bounded: `max_tracked_ips` (default 100 000) caps the tracked sources
+and, separately, the rule-limit buckets across all shards. When the source
+table is full, stale entries are evicted first; if it is still full, the least
+recently seen entry in that shard that has no active connection and no live ban
+is evicted so a new source is still tracked. Active connections and live bans are
+never evicted; if every entry is protected, new connection admission is answered
+with an overload response and a rule limit that cannot be tracked applies its
+rule's action.
 `protection.allowlist` CIDRs are exempt from rate limits and bans. IPv6 addresses
 are aggregated by `aggregate_ipv6_prefix` (default 64) for rate limits, bans, and
 per-IP connection budgets, so rotating within a prefix cannot bypass them;
@@ -427,7 +444,8 @@ reapplied after every hot reload.
 - Config reload failures never affect the running instance.
 - All memory and concurrency is bounded: body size, header size/count,
   request-target length, concurrent HTTP/2 and QUIC streams per connection,
-  regex size, per-IP state, connection count, ban table.
+  regex size, per-IP state, connection count, ban table, and a process-wide
+  inspection budget for buffered bodies.
 - Graceful shutdown: stop accepting, drain in-flight requests up to
   `shutdown_grace` (default 10 s), then exit.
 
@@ -440,10 +458,16 @@ Default timeouts:
 | `upstream_connect` | 5 s     |
 | `upstream_response`| 30 s    |
 | `shutdown_grace`   | 10 s    |
+| `connection_idle`  | 60 s    |
 | `websocket_idle`   | 10 min  |
 
-Idle HTTP/2 connections are pinged after 30 s and closed after 20 s without an
-acknowledgement, so idle clients cannot hold connection slots indefinitely.
+The first HTTP/2 request must start within `header_read`, and an HTTP/2
+connection with no request in flight is closed after `connection_idle`. HTTP/2
+connections are also pinged after 30 s and closed after 20 s without an
+acknowledgement. Together these close a TLS/ALPN client that never sends a
+preface, and a client that answers pings but never sends a request, without
+relying on the operating system's TCP keepalive. HTTP/3 uses `connection_idle`
+as the QUIC idle timeout.
 
 Default limits:
 
@@ -455,6 +479,11 @@ Default limits:
 | `max_body_bytes`          | 1 MiB   |
 | `max_response_body_bytes` | 1 MiB   |
 | `max_concurrent_streams`  | 100     |
+
+Limits above the hard caps (`max_path_bytes` 64 KiB, `max_header_bytes` 1 MiB,
+`max_headers` 1000, `max_body_bytes` / `max_response_body_bytes` 8 MiB) are
+rejected at load time, so a configuration cannot disable the bounded-resource
+invariant.
 
 ## 9. Observability
 

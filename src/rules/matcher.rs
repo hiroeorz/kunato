@@ -211,6 +211,11 @@ impl PayloadMatcher {
         }
 
         if self.targets & TARGET_BODY != 0 {
+            if allow_mode && view.body_truncated {
+                // The rest of the body has not been inspected, so an ALLOW
+                // rule must not treat the visible prefix as the whole message.
+                return false;
+            }
             let hit = if allow_mode {
                 !view.body.is_empty()
                     && self.hits(&String::from_utf8_lossy(view.body))
@@ -261,10 +266,13 @@ impl PayloadMatcher {
 
         if self.targets & TARGET_RESPONSE_BODY != 0
             && let Some(response) = response
-            && !response.body.is_empty()
-            && self.hits(&String::from_utf8_lossy(response.body))
         {
-            return true;
+            if allow_mode && response.body_truncated {
+                return false;
+            }
+            if !response.body.is_empty() && self.hits(&String::from_utf8_lossy(response.body)) {
+                return true;
+            }
         }
 
         false
@@ -392,6 +400,56 @@ mod tests {
         headers.append("x-marker", HeaderValue::from_static("tokenfree"));
         headers.append("x-marker", HeaderValue::from_static("bogus"));
         assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn allow_mode_body_requires_a_complete_body() {
+        let method = Method::POST;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("^trusted$")],
+                targets: TARGET_BODY,
+            }),
+            allow_mode: true,
+            ..Matcher::default()
+        };
+
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"trusted")));
+        assert!(
+            !matcher.matches(&view(&method, &uri, &headers, b"trusted").with_body_truncated(true))
+        );
+
+        let block = Matcher {
+            allow_mode: false,
+            ..matcher
+        };
+        assert!(
+            block.matches(&view(&method, &uri, &headers, b"trusted").with_body_truncated(true))
+        );
+    }
+
+    #[test]
+    fn allow_mode_response_body_requires_a_complete_body() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("secret")],
+                targets: TARGET_RESPONSE_BODY,
+            }),
+            allow_mode: true,
+            ..Matcher::default()
+        };
+        let request = view(&method, &uri, &headers, b"");
+
+        let complete = ResponseView::new(StatusCode::OK, &headers, b"secret", false);
+        assert!(matcher.matches_response(&request, &complete));
+
+        let truncated = ResponseView::new(StatusCode::OK, &headers, b"secret", true);
+        assert!(!matcher.matches_response(&request, &truncated));
     }
 
     #[test]

@@ -982,6 +982,41 @@ async fn compressed_request_body_is_forwarded_unchanged() {
 }
 
 #[tokio::test]
+async fn truncated_body_cannot_satisfy_an_allow_rule() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_body_bytes: 8 }}
+categories:
+  - name: trusted
+    action: ALLOW
+    rules:
+      - name: trusted-body
+        match: {{ regex: '^trusted!.*$', in: [body] }}
+  - name: deny
+    action: BLOCK
+    rules:
+      - name: deny-path
+        match: {{ path: ^/truncated-allow$ }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/truncated-allow",
+        b"trusted!this suffix was not inspected".to_vec(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn urlencoded_request_body_is_rule_evaluated() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
@@ -1596,6 +1631,49 @@ tls:
 }
 
 #[tokio::test]
+async fn tls_h2_connection_without_a_preface_is_closed_by_the_idle_watchdog() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+timeouts: {{ header_read: 2s, connection_idle: 100ms }}
+tls:
+  cert_file: {}
+  key_file: {}
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect(running.addr).await.expect("connect");
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut tls = connector
+        .connect(server_name, stream)
+        .await
+        .expect("TLS handshake");
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+
+    let mut bytes = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut bytes)).await;
+    assert!(
+        closed.is_ok(),
+        "a TLS/ALPN h2 connection that never sends a preface must not hold a slot"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn http3_requests_are_proxied_and_rule_evaluated() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2143,7 +2221,7 @@ categories:
 }
 
 #[tokio::test]
-async fn decompressed_request_truncation_is_reported() {
+async fn decompressed_request_truncation_is_rejected() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
         "listen: 127.0.0.1:0
@@ -2167,7 +2245,7 @@ categories:
         &[("content-encoding", "gzip")],
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 
     let rendered = running.metrics.render(0);
     assert!(
@@ -2176,6 +2254,76 @@ categories:
     );
     assert!(
         !rendered.contains("kunato_request_truncated_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn unsupported_request_encoding_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: signatures
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: never-matches-xyz, in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        b"compressed payload".to_vec(),
+        &[("content-encoding", "compress")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_decode_skipped_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn malformed_request_encoding_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: signatures
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: never-matches-xyz, in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        b"not a gzip stream".to_vec(),
+        &[("content-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_decode_skipped_total 1"),
         "{rendered}"
     );
 

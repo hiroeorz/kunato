@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
@@ -39,6 +40,166 @@ const RAW_503: &[u8] =
 
 const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
+/// Process-wide budget for buffers held by body inspection. A request or
+/// response reserves a worst-case share before it starts buffering, so a burst
+/// of concurrent bodies cannot grow the process without bound.
+const INSPECTION_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const REQUEST_INSPECTION_FACTOR: usize = 8;
+const RESPONSE_INSPECTION_FACTOR: usize = 3;
+
+struct InspectionBudget {
+    reserved: AtomicUsize,
+}
+
+impl InspectionBudget {
+    fn new() -> Self {
+        Self {
+            reserved: AtomicUsize::new(0),
+        }
+    }
+
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InspectionGuard> {
+        let mut current = self.reserved.load(Ordering::Relaxed);
+        loop {
+            let next = current.checked_add(bytes)?;
+            if next > INSPECTION_BUDGET_BYTES {
+                return None;
+            }
+            match self.reserved.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(InspectionGuard {
+                        budget: Arc::clone(self),
+                        bytes,
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+pub(crate) struct InspectionGuard {
+    budget: Arc<InspectionBudget>,
+    bytes: usize,
+}
+
+impl Drop for InspectionGuard {
+    fn drop(&mut self) {
+        self.budget.reserved.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+/// Request activity for one HTTP/2 connection. The idle watchdog observes it
+/// so a client that completes the handshake (or answers keep-alive pings)
+/// without ever sending a request cannot hold a connection slot forever.
+struct ConnectionActivity {
+    active: AtomicUsize,
+    requests: AtomicU64,
+    changed: watch::Sender<u64>,
+}
+
+impl ConnectionActivity {
+    fn new() -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            active: AtomicUsize::new(0),
+            requests: AtomicU64::new(0),
+            changed,
+        }
+    }
+
+    fn start(self: &Arc<Self>) -> ActiveRequest {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        let requests = self.requests.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.changed.send(requests);
+        ActiveRequest {
+            activity: Arc::clone(self),
+        }
+    }
+}
+
+struct ActiveRequest {
+    activity: Arc<ConnectionActivity>,
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        self.activity.active.fetch_sub(1, Ordering::AcqRel);
+        let requests = self.activity.requests.load(Ordering::Acquire);
+        let _ = self.activity.changed.send(requests);
+    }
+}
+
+/// Keeps a request active until its response body has been streamed, so an
+/// HTTP/2 response that outlives the service future is not mistaken for an idle
+/// connection.
+struct ActivityBody {
+    inner: ProxyBody,
+    _active: ActiveRequest,
+}
+
+impl Body for ActivityBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Resolves when an HTTP/2 connection has no request in flight and has been
+/// idle for the configured duration. The first request gets the stricter
+/// header timeout, so a TLS/ALPN client that never sends a preface is closed
+/// quickly.
+async fn connection_is_idle(
+    activity: Arc<ConnectionActivity>,
+    first_request: Duration,
+    idle: Duration,
+) {
+    let mut changed = activity.changed.subscribe();
+    loop {
+        if activity.active.load(Ordering::Acquire) == 0 {
+            let seen = *changed.borrow_and_update();
+            let timeout = if activity.requests.load(Ordering::Acquire) == 0 {
+                first_request
+            } else {
+                idle
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(timeout) => {
+                    if activity.active.load(Ordering::Acquire) == 0
+                        && *changed.borrow() == seen {
+                        return;
+                    }
+                }
+                result = changed.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                }
+            }
+        } else if changed.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 /// HTTP/2 connections are pinged after this much idle time and closed when the
 /// pings go unanswered, so idle clients cannot hold connection slots forever.
 const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -66,6 +227,7 @@ pub struct Context {
     client: Arc<ArcSwap<UpstreamClient>>,
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
+    inspection: Arc<InspectionBudget>,
     tls: TlsMode,
     scheme: &'static str,
     alt_svc: Option<HeaderValue>,
@@ -95,10 +257,34 @@ impl Context {
             .try_acquire_connection(ip, &config.protection)
     }
 
-    /// Record an answered-but-rejected request (body-read failure, early
-    /// protection hit) so `kunato_requests_total` stays consistent.
-    pub(crate) fn count_rejected_request(&self) {
-        self.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    /// Reserve the worst-case memory for inspecting one request body.
+    pub(crate) fn reserve_request_inspection(
+        &self,
+        config: &CompiledConfig,
+    ) -> Option<InspectionGuard> {
+        let bytes = config
+            .limits
+            .max_body_bytes
+            .saturating_mul(REQUEST_INSPECTION_FACTOR)
+            .max(64 * 1024);
+        self.inspection.reserve(bytes)
+    }
+
+    /// Reserve the worst-case memory for inspecting one upstream response.
+    pub(crate) fn reserve_response_inspection(
+        &self,
+        config: &CompiledConfig,
+    ) -> Option<InspectionGuard> {
+        let bytes = config
+            .limits
+            .max_response_body_bytes
+            .saturating_mul(RESPONSE_INSPECTION_FACTOR)
+            .max(64 * 1024);
+        self.inspection.reserve(bytes)
+    }
+
+    pub(crate) fn record_overloaded(&self) {
+        self.metrics.overloaded.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -168,6 +354,7 @@ impl Server {
                 client: Arc::new(ArcSwap::from_pointee(UpstreamClient::new(connect_timeout))),
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
+                inspection: Arc::new(InspectionBudget::new()),
                 tls,
                 scheme,
                 alt_svc,
@@ -491,12 +678,18 @@ async fn serve_io<I>(
     let max_headers = limits.limits.max_headers;
     let max_concurrent_streams = limits.limits.max_concurrent_streams;
     let guard_slot = Arc::new(std::sync::Mutex::new(Some(guard)));
+    let activity = (protocol == Protocol::Http2).then(|| Arc::new(ConnectionActivity::new()));
+    let watchdog_activity = activity.clone();
     let service_shutdown = shutdown.clone();
     let service = service_fn(move |request: Request<Incoming>| {
         let context = context.clone();
         let shutdown = service_shutdown.clone();
         let guard_slot = Arc::clone(&guard_slot);
-        async move { handle_request(request, peer, context, shutdown, guard_slot).await }
+        let activity = activity.clone();
+        async move {
+            let active = activity.as_ref().map(ConnectionActivity::start);
+            handle_request(request, peer, context, shutdown, guard_slot, active).await
+        }
     });
 
     match protocol {
@@ -524,6 +717,10 @@ async fn serve_io<I>(
             }
         }
         Protocol::Http2 => {
+            let Some(watchdog_activity) = watchdog_activity else {
+                debug!(client = %peer, "HTTP/2 connection has no activity tracker");
+                return;
+            };
             let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
             builder
                 .timer(TokioTimer::new())
@@ -545,6 +742,15 @@ async fn serve_io<I>(
                         debug!(client = %peer, error = %err, "connection closed during shutdown");
                     }
                 }
+                _ = connection_is_idle(
+                    watchdog_activity,
+                    header_read_timeout,
+                    limits.timeouts.connection_idle,
+                ) => {
+                    debug!(client = %peer, "closing idle HTTP/2 connection");
+                    connection.as_mut().graceful_shutdown();
+                    let _ = tokio::time::timeout(Duration::from_secs(1), connection.as_mut()).await;
+                }
             }
         }
     }
@@ -556,6 +762,7 @@ async fn handle_request(
     context: Context,
     shutdown: watch::Receiver<bool>,
     guard_slot: Arc<std::sync::Mutex<Option<ConnectionGuard>>>,
+    active: Option<ActiveRequest>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let upgrade = if is_websocket_upgrade(&request) {
         Some(Upgrade {
@@ -569,15 +776,18 @@ async fn handle_request(
 
     let config = context.config();
     let (parts, body) = request.into_parts();
-    let result = match early_protection_error(&context, peer, &config) {
+    let result = match admission_error(&context, peer, &config) {
         Some(err) => Err(err),
-        None => match read_body(body, &config).await {
-            Ok(body) => process(parts, body, peer, &config, &context, upgrade).await,
-            Err(err) => {
-                // The failure produced a real response, so count it like other
-                // rejections to keep the request totals consistent.
-                context.count_rejected_request();
-                Err(err)
+        None => match context.reserve_request_inspection(&config) {
+            Some(inspection) => match read_body(body, &config).await {
+                Ok(body) => {
+                    process(parts, body, peer, &config, &context, upgrade, inspection).await
+                }
+                Err(err) => Err(err),
+            },
+            None => {
+                context.record_overloaded();
+                Err(inspection_capacity_error())
             }
         },
     };
@@ -589,23 +799,41 @@ async fn handle_request(
     if let Some(alt_svc) = &context.alt_svc {
         response.headers_mut().insert("alt-svc", alt_svc.clone());
     }
-    Ok(response)
+    let (parts, body) = response.into_parts();
+    let body = match active {
+        Some(active) => ActivityBody {
+            inner: body,
+            _active: active,
+        }
+        .boxed(),
+        None => body,
+    };
+    Ok(Response::from_parts(parts, body))
 }
 
-/// Ban pre-check that runs before a request body is ingested. A hit is counted
-/// like a regular rejection so the request totals stay consistent.
-pub(crate) fn early_protection_error(
+/// Admission check that runs before a request body is ingested. It consumes
+/// the source's rate budget and counts the request, so a rate-limited client
+/// never causes a body buffer allocation.
+pub(crate) fn admission_error(
     context: &Context,
     peer: SocketAddr,
     config: &CompiledConfig,
 ) -> Option<HttpError> {
-    context
+    context.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    let decision = context
         .protection
-        .check_banned(peer.ip(), &config.protection)
-        .and_then(|decision| {
-            context.metrics.requests.fetch_add(1, Ordering::Relaxed);
-            protection_error(context, decision)
-        })
+        .check_request(peer.ip(), &config.protection);
+    protection_error(context, decision)
+}
+
+/// Stable error for requests that could not reserve inspection memory. The
+/// client should retry after the current inspections release their budget.
+pub(crate) fn inspection_capacity_error() -> HttpError {
+    HttpError::with_retry_after(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "inspection capacity exhausted",
+        Duration::from_secs(1),
+    )
 }
 
 /// Map a protection decision to the error response Kunato returns, recording
@@ -722,12 +950,27 @@ async fn read_body(
 }
 
 pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody> {
-    warn!(
-        client = %peer.ip(),
-        status = err.status.as_u16(),
-        reason = err.message,
-        "request rejected"
-    );
+    // Rate limits and load shedding are expected under attack; logging every
+    // one at warning level turns a flood into a disk-I/O amplifier. Metrics
+    // still count them.
+    if matches!(
+        err.status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        debug!(
+            client = %peer.ip(),
+            status = err.status.as_u16(),
+            reason = err.message,
+            "request rejected"
+        );
+    } else {
+        warn!(
+            client = %peer.ip(),
+            status = err.status.as_u16(),
+            reason = err.message,
+            "request rejected"
+        );
+    }
     forward::error_response_for(err)
 }
 
@@ -737,8 +980,9 @@ pub(crate) async fn process_payload(
     peer: SocketAddr,
     config: &CompiledConfig,
     context: &Context,
+    inspection: InspectionGuard,
 ) -> Response<ProxyBody> {
-    match process(parts, payload, peer, config, context, None).await {
+    match process(parts, payload, peer, config, context, None, inspection).await {
         Ok(response) => response,
         Err(err) => rejected(peer, &err),
     }
@@ -830,9 +1074,9 @@ async fn process(
     config: &CompiledConfig,
     context: &Context,
     upgrade: Option<Upgrade>,
+    inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
     forward::normalize_host_header(&mut parts);
-    context.metrics.requests.fetch_add(1, Ordering::Relaxed);
     let body = &payload.prefix;
     if payload.truncated {
         context
@@ -843,15 +1087,8 @@ async fn process(
             client = %peer.ip(),
             limit = config.limits.max_body_bytes,
             path = %parts.uri.path(),
-            "request body truncated for inspection; streaming the remainder"
+            "request body truncated for inspection"
         );
-    }
-
-    let decision = context
-        .protection
-        .check_request(peer.ip(), &config.protection);
-    if let Some(err) = protection_error(context, decision) {
-        return Err(err);
     }
 
     if non_canonical_method(&parts.method) {
@@ -883,51 +1120,101 @@ async fn process(
         ));
     }
 
-    let decoded_body = if config.has_body_target_rules() {
-        crate::decoding::decode_content_encoding(body, &parts.headers, config.limits.max_body_bytes)
+    let body_rules = config.has_body_target_rules();
+    let body_truncated;
+    let inspected_body: Cow<'_, [u8]> = match if body_rules {
+        crate::decoding::decode_body_for_inspection(
+            body,
+            &parts.headers,
+            config.limits.max_body_bytes,
+        )
     } else {
-        None
+        crate::decoding::DecodeOutcome::NotEncoded
+    } {
+        crate::decoding::DecodeOutcome::NotEncoded => {
+            body_truncated = payload.truncated;
+            Cow::Borrowed(body)
+        }
+        crate::decoding::DecodeOutcome::Decoded {
+            body: decoded,
+            complete,
+        } => {
+            if !complete || payload.truncated {
+                context
+                    .metrics
+                    .request_decode_truncated
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    client = %peer.ip(),
+                    limit = config.limits.max_body_bytes,
+                    path = %parts.uri.path(),
+                    decoded_complete = complete,
+                    raw_truncated = payload.truncated,
+                    "request body could not be fully decoded for inspection; rejecting"
+                );
+                return Err(HttpError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large to inspect",
+                ));
+            }
+            body_truncated = false;
+            Cow::Owned(decoded)
+        }
+        crate::decoding::DecodeOutcome::Unsupported => {
+            context
+                .metrics
+                .request_decode_skipped
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                client = %peer.ip(),
+                path = %parts.uri.path(),
+                "request body encoding cannot be inspected; rejecting"
+            );
+            return Err(HttpError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported request body encoding",
+            ));
+        }
+        crate::decoding::DecodeOutcome::Malformed => {
+            context
+                .metrics
+                .request_decode_skipped
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                client = %peer.ip(),
+                path = %parts.uri.path(),
+                "request body encoding is malformed; rejecting"
+            );
+            return Err(HttpError::new(
+                StatusCode::BAD_REQUEST,
+                "malformed request body encoding",
+            ));
+        }
     };
-    if config.has_body_target_rules()
-        && !body.is_empty()
-        && crate::decoding::encoding_is_uninspectable(&parts.headers)
-    {
-        context
-            .metrics
-            .request_decode_skipped
-            .fetch_add(1, Ordering::Relaxed);
-        warn!(
-            client = %peer.ip(),
-            path = %parts.uri.path(),
-            "request body encoding cannot be decoded for inspection"
+    if body_rules {
+        let decision = context.protection.charge_inspection(
+            peer.ip(),
+            &config.protection,
+            inspected_body.len(),
         );
+        if let Some(err) = protection_error(context, decision) {
+            return Err(err);
+        }
     }
-    if decoded_body
-        .as_ref()
-        .is_some_and(|decoded| decoded.truncated)
-    {
-        context
-            .metrics
-            .request_decode_truncated
-            .fetch_add(1, Ordering::Relaxed);
-        warn!(
-            client = %peer.ip(),
-            limit = config.limits.max_body_bytes,
-            path = %parts.uri.path(),
-            "decompressed request body truncated for inspection"
-        );
-    }
-    let inspected_body = decoded_body.map(|decoded| decoded.body);
-    let inspected_body = inspected_body.as_deref().unwrap_or(body);
     let view = RequestView::with_body_decoding(
         &parts.method,
         &parts.uri,
         &parts.headers,
-        inspected_body,
+        inspected_body.as_ref(),
         peer.ip(),
-        config.has_body_target_rules(),
-    );
+        body_rules,
+    )
+    .with_body_truncated(body_truncated);
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
+    // The rule scan is done; release the budget before waiting on the upstream.
+    // The body prefix it covered is still needed for response-phase rules, but
+    // it is a single bounded buffer.
+    drop(inspection);
 
     if !outcome.logs.is_empty() {
         context.metrics.logged.fetch_add(1, Ordering::Relaxed);
@@ -990,13 +1277,21 @@ async fn process(
                 if !config.has_response_rules() {
                     return Ok(response);
                 }
+                let Some(response_inspection) = context.reserve_response_inspection(config) else {
+                    context.record_overloaded();
+                    return Err(inspection_capacity_error());
+                };
                 crate::proxy::response::inspect(
                     config,
                     &context.metrics,
                     &parts,
-                    inspected_body,
+                    crate::proxy::response::InspectedRequest {
+                        body: inspected_body.as_ref(),
+                        truncated: body_truncated,
+                    },
                     peer,
                     response,
+                    response_inspection,
                 )
                 .await
             }
@@ -1043,13 +1338,21 @@ async fn process(
         return Ok(response);
     }
 
+    let Some(response_inspection) = context.reserve_response_inspection(config) else {
+        context.record_overloaded();
+        return Err(inspection_capacity_error());
+    };
     crate::proxy::response::inspect(
         config,
         &context.metrics,
         &parts,
-        inspected_body,
+        crate::proxy::response::InspectedRequest {
+            body: inspected_body.as_ref(),
+            truncated: body_truncated,
+        },
         peer,
         response,
+        response_inspection,
     )
     .await
 }
@@ -1109,5 +1412,72 @@ mod tests {
             .expect("detected");
         assert_eq!(protocol, Protocol::Http1);
         assert!(prefix.starts_with(b"GET /"));
+    }
+
+    #[test]
+    fn inspection_budget_reserves_and_releases_capacity() {
+        let budget = Arc::new(InspectionBudget::new());
+        let half = INSPECTION_BUDGET_BYTES / 2;
+        let first = budget.reserve(half).expect("first half fits");
+        let second = budget.reserve(half).expect("second half fits");
+        assert!(budget.reserve(1).is_none(), "budget must be exhausted");
+
+        drop(first);
+        let extra = budget.reserve(1).expect("space freed");
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), half + 1);
+        drop(extra);
+        drop(second);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_closes_a_connection_without_a_request() {
+        let activity = Arc::new(ConnectionActivity::new());
+        let watchdog = tokio::spawn(connection_is_idle(
+            Arc::clone(&activity),
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(9)).await;
+        assert!(!watchdog.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        watchdog.await.expect("watchdog task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_waits_for_an_active_request() {
+        let activity = Arc::new(ConnectionActivity::new());
+        let active = activity.start();
+        let watchdog = tokio::spawn(connection_is_idle(
+            Arc::clone(&activity),
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            !watchdog.is_finished(),
+            "active requests must not be closed"
+        );
+        drop(active);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        watchdog.await.expect("watchdog task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_uses_the_idle_timeout_after_a_request() {
+        let activity = Arc::new(ConnectionActivity::new());
+        drop(activity.start());
+        let watchdog = tokio::spawn(connection_is_idle(
+            Arc::clone(&activity),
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(19)).await;
+        assert!(!watchdog.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        watchdog.await.expect("watchdog task");
     }
 }

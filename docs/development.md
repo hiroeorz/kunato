@@ -67,6 +67,24 @@ can be expressed as an HTTP request are listed. Classes that need TLS-internal
 state, raw connection framing, or a malicious upstream are recorded as comments
 at the end of the list instead.
 
+## Dependency Audit
+
+`cargo deny check` runs the advisory, license, ban, and source policy in
+`deny.toml`. On a machine with a writable `$CARGO_HOME` this is sufficient. In a
+read-only sandbox, or when the glibc/musl target pair makes cargo-deny resolve
+platform-specific dependencies outside the cached set, run the wrapper instead:
+
+```sh
+./scripts/check-deny.sh
+```
+
+cargo-deny only passes `--filter-platform` to `cargo metadata` when exactly one
+target is configured; with two targets it resolves every platform's
+dependencies, including Android-only crates. The wrapper checks each target
+from `deny.toml` separately and points the advisory database at a temporary
+writable copy, so it does not need to write to `$CARGO_HOME`. It uses the cached
+advisory database when present and fetches it otherwise.
+
 ## Deployment
 
 The installer used in [Getting Started](../README.md#getting-started) downloads
@@ -110,6 +128,14 @@ without a deploy hook or restart; see
 
 Running the installer again upgrades the binary and unit while keeping the
 existing configuration.
+
+The installer downloads only over HTTPS (`curl --proto '=https' --proto-redir
+'=https'`), validates the version tag, and extracts the archive with
+`--no-same-owner --no-same-permissions` before installing files as root.
+`KUNATO_BASE_URL` must therefore be an `https://` URL. `kunato upgrade` reruns
+the installer published with the target release; it trusts the GitHub release
+and tag, so signing release assets and verifying them in the installer remains
+a separate hardening task.
 
 Without network access, or to build a custom binary, build from source (Rust
 1.89 or later, edition 2024):
@@ -433,7 +459,10 @@ matches take the rule's effective action (which cannot be `ALLOW`). Sources are
 tracked like the automatic per-IP limits (IPv6 aggregated by
 `protection.aggregate_ipv6_prefix`), allowlisted sources and
 `--disable-protection` are exempt, and the state is bounded by
-`protection.max_tracked_ips`.
+`protection.max_tracked_ips`. When the source table is full, stale entries are
+evicted first, then the least recently seen entry without an active connection
+or live ban in the source's shard; active connections and bans are retained, so
+occupying the table does not deny service to every new source.
 
 ### Match fields
 
@@ -454,9 +483,14 @@ unanimous instead: it must match every path form, every value of a repeated
 `headers` or `cookies` entry, and every form of the `in` targets, and the
 patterns of an `ALLOW` rule may only use `headers`, `cookies`, `response_headers`,
 and `regex` values that are anchored at both ends (`^...$`); the configuration is
-rejected otherwise. A forged extra copy of a header and a marker appended to the
+rejected otherwise. Anchor validation parses the regex rather than looking at its
+surrounding bytes, so a top-level alternation (`^a|b$`) and an escaped dollar
+(`^cost=\$`) are rejected while a grouped expression (`(?:^a$)`) is accepted. A
+forged extra copy of a header and a marker appended to the
 query or the body therefore cannot shadow a later `BLOCK`. `path` is exempt so a
-start-anchored prefix can exempt a whole area from the rules that follow. Header
+start-anchored prefix can exempt a whole area from the rules that follow. An
+`ALLOW` rule that targets `body` or `response_body` matches only when the whole
+body was available for inspection; a truncated body never satisfies it. Header
 values
 are decoded with UTF-8 replacement, so a single invalid byte cannot hide a value
 from a rule. Bodies are matched raw
@@ -469,8 +503,13 @@ because parsers disagree on which one wins (Rack takes the last); messages that
 exceed that fall back to the percent passes on the raw body. Bodies are
 decompressed first when
 `Content-Encoding` is `gzip`, `deflate`, `br`, or `zstd`: all gzip members are
-decoded, and stacked encodings are decoded in reverse order (up to three layers;
-deeper or unknown encodings are inspected as received and counted in
+decoded, repeated `Content-Encoding` fields are combined in order, and stacked
+encodings are decoded in reverse order (up to three layers).
+When a body rule exists, a body whose declared encoding cannot be decoded
+completely within `max_body_bytes` is rejected instead of forwarded: an
+over-limit decoded body returns `413`, an unsupported or over-layered encoding
+returns `415`, and a malformed stream returns `400` (counted in
+`kunato_request_decode_truncated_total` /
 `kunato_request_decode_skipped_total`). Multipart parsing is
 bounded to 64 parts with 1 KiB names and file names; malformed multipart bodies
 are inspected raw only. No other normalization (Unicode folding, HTML entity
@@ -504,9 +543,10 @@ bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are decompresse
 for matching (all gzip members, stacked encodings in reverse order up to three
 layers), and only the first `limits.max_response_body_bytes` are inspected (the
 decoded output is bounded by the same limit). Unknown or deeper encodings are
-inspected as received and counted in `kunato_response_decode_skipped_total`.
-Decoding is inspection-only: the bytes forwarded to the
-upstream and to the client are never modified.
+inspected as received and counted in `kunato_response_decode_skipped_total`; a
+truncated response body is still inspected best-effort but never satisfies a
+body-targeting `ALLOW` rule. Decoding is inspection-only: the bytes forwarded to
+the upstream and to the client are never modified.
 
 ### Timeouts and limits
 
@@ -514,22 +554,42 @@ Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
 Values must fit in the unit (no silent overflow) and must not exceed 365 days.
 Defaults:
 
-| Timeout             | Default | Limit                     | Default |
-| ------------------- | ------- | ------------------------- | ------- |
-| `header_read`       | `10s`   | `max_path_bytes`          | 8 KiB   |
-| `body_read`         | `30s`   | `max_header_bytes`        | 32 KiB  |
-| `upstream_connect`  | `5s`    | `max_headers`             | 100     |
-| `upstream_response` | `30s`   | `max_body_bytes`          | 1 MiB   |
-| `shutdown_grace`    | `10s`   | `max_response_body_bytes` | 1 MiB   |
-| `websocket_idle`    | `10m`   | `max_concurrent_streams`  | 100     |
+| Timeout             | Default |
+| ------------------- | ------- |
+| `header_read`       | `10s`   |
+| `body_read`         | `30s`   |
+| `upstream_connect`  | `5s`    |
+| `upstream_response` | `30s`   |
+| `shutdown_grace`    | `10s`   |
+| `connection_idle`   | `60s`   |
+| `websocket_idle`    | `10m`   |
+
+| Limit                     | Default |
+| ------------------------- | ------- |
+| `max_path_bytes`          | 8 KiB   |
+| `max_header_bytes`        | 32 KiB  |
+| `max_headers`             | 100     |
+| `max_body_bytes`          | 1 MiB   |
+| `max_response_body_bytes` | 1 MiB   |
+| `max_concurrent_streams`  | 100     |
 
 `max_path_bytes` bounds the whole request target (path plus query string), not
 just the path. `max_concurrent_streams` caps concurrent request streams per
-HTTP/2 connection (and per QUIC connection for HTTP/3), which also bounds how
-much request-body buffering a single connection can hold at once. HTTP/2
-connections are pinged after 30 seconds without activity and closed when the
-ping is not acknowledged within 20 seconds, so idle clients cannot hold
-connection slots forever.
+HTTP/2 connection (and per QUIC connection for HTTP/3). HTTP/2 connections are
+pinged after 30 seconds without activity and closed when the ping is not
+acknowledged within 20 seconds. In addition, the first HTTP/2 request must
+start within `header_read`, and a connection with no request in flight is closed
+after `connection_idle`; a client that completes the TLS/ALPN handshake but
+never sends a request therefore cannot hold a connection slot indefinitely.
+HTTP/3 uses the same `connection_idle` value for the QUIC idle timeout. The
+process-wide inspection budget (256 MiB, reserved from the configured body
+limits) bounds the total memory used by concurrent body buffering.
+
+Every duration must be greater than zero (`shutdown_grace: 0` would abort the
+drain immediately). Limits are validated with hard caps so the "bounded
+resources" invariant cannot be disabled by configuration: `max_path_bytes`
+64 KiB, `max_header_bytes` 1 MiB, `max_headers` 1000, and
+`max_body_bytes` / `max_response_body_bytes` 8 MiB.
 
 ```yaml
 timeouts: { header_read: 10s, body_read: 30s }
@@ -537,16 +597,21 @@ limits: { max_body_bytes: 1048576 }
 ```
 
 The first `max_body_bytes` of each request body are buffered for rule
-inspection and content decoding; larger bodies are not rejected. The buffered
-prefix is evaluated, the remainder streams to the upstream unchanged, and the
-request is counted as truncated (`kunato_request_truncated_total`) and logged at
-debug level. Rules therefore see at most the prefix; to reject oversized bodies
-outright, add an explicit rule (for example a `content-length` header regex).
+inspection and content decoding. For an unencoded body, larger bodies are not
+rejected: the buffered prefix is evaluated, the remainder streams to the
+upstream unchanged, and the request is counted as truncated
+(`kunato_request_truncated_total`) and logged at debug level. Rules therefore
+see at most the prefix; to reject oversized unencoded bodies outright, add an
+explicit rule (for example a `content-length` header regex). An encoded body
+that cannot be fully decoded within `max_body_bytes` is rejected (see above),
+because forwarding the compressed remainder would bypass every body rule.
 Request decoding is bounded by `max_body_bytes` and response decoding by
 `max_response_body_bytes`, so decompression bombs cannot exceed the configured
-buffer sizes. A decoded body cut off at the limit is counted separately
-(`kunato_request_decode_truncated_total`,
-`kunato_response_decode_truncated_total`) and logged at warning level.
+buffer sizes. A decoded request body that exceeds the limit is rejected and
+counted in `kunato_request_decode_truncated_total`; a response prefix that was
+cut off is counted in `kunato_response_decode_truncated_total` and inspected
+best-effort. An `ALLOW` rule that targets a body only matches when the full
+body was available, so a truncated response body cannot satisfy one.
 
 ### Response headers
 
@@ -578,11 +643,13 @@ admin:
 ```
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
-BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding,
-upstream failures, configuration reloads, rules update outcomes (including
+BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding
+and inspection-budget shedding, upstream failures, configuration reloads, rules
+update outcomes (including
 `kunato_rules_update_incompatible_total` for rule sets that need a newer build),
-body truncation and decoding decisions (including bodies whose encoding could not
-be decoded: `kunato_request_decode_skipped_total`,
+body truncation and decoding decisions (including requests rejected because
+their encoding could not be inspected: `kunato_request_decode_skipped_total`,
+plus response bodies that could not be decoded:
 `kunato_response_decode_skipped_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
 uptime, the time of the last successful rules update, and the time of the last
@@ -735,6 +802,13 @@ header; exceeding the global rate or connection budget returns `503 Service
 Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
 to `max_duration`. Addresses in `allowlist` bypass all protection limits.
 
+Admission consumes one token. After the body has been read and decoded, Kunato
+charges additional tokens for the inspection work: one token per 256 KiB of
+inspected body, capped at 64 tokens per request. A 1 MiB body therefore costs
+about five tokens, and the global limit is charged the same way. This ties the
+CPU cost of body rules to the rate budget instead of counting a 1 MiB request
+the same as a small one.
+
 IPv6 clients are tracked by the `aggregate_ipv6_prefix` prefix (default 64) rather
 than by full address, so rotating within a prefix cannot bypass rate limits, bans,
 or per-IP connection budgets. Set it to 128 to track each address separately;
@@ -774,5 +848,5 @@ bans interfering.
 
 This is a personal project, but issues and pull requests are welcome. Please keep
 all code, comments, and documentation in English. Before opening a pull request,
-run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo deny check`,
-and `cargo test`.
+run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo deny check`
+(or `./scripts/check-deny.sh` in a read-only environment), and `cargo test`.

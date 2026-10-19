@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-18; the managed set carried 488 rules then.
+2026-10-19; the managed set carried 488 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -238,10 +238,10 @@ not match the Marshal signatures.
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | HTTP / GET / POST Flood | ✅ | Per-IP token bucket (429), global RPS and connection budget (503), automatic ban |
-| Slow HTTP / Slowloris / Slow POST | ✅ | `header_read` 10s and `body_read` 30s timeouts plus a 32-connection per-IP cap |
-| Large POST Bodies | 🔶 | Only the first 1 MiB is inspected and the rest streams through; rate/connection caps and explicit rules (e.g. content-length) are the levers |
+| Slow HTTP / Slowloris / Slow POST | ✅ | `header_read` 10s and `body_read` 30s timeouts, a 32-connection per-IP cap, an HTTP/2 first-request deadline, and a `connection_idle` watchdog for connections with no request in flight |
+| Large POST Bodies | 🔶 | Only the first 1 MiB of an unencoded body is inspected and the rest streams through; encoded bodies that cannot be fully decoded are rejected. Rate/connection caps and explicit rules (e.g. content-length) are the levers |
 | ReDoS Payloads | ✅ (immunity) | Rust `regex` is linear-time (no backtracking) and load-time guards reject pathological patterns, so ReDoS cannot be induced; no detection needed |
-| High-Cost Search Floods | 🔶 | Rate limits only |
+| High-Cost Search Floods | 🔶 | Rate and global limits are charged by inspected body size (one token per 256 KiB); regex scanning stays linear but is not otherwise capped |
 | GraphQL Complexity DoS | ❌ | Not covered |
 | API Resource Exhaustion | 🔶 | Rate limits and connection caps |
 
@@ -257,14 +257,14 @@ not match the Marshal signatures.
 | Null Byte | ✅ | `%00` blocked |
 | Payload / Parameter Fragmentation | 🔶 | Embedded-HTTP inspection and multipart flattening exist; general fragmentation is unhandled |
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
-| Content-Encoding Compression | ✅ | gzip (all members), deflate, br, and zstd bodies are decompressed for inspection, stacked up to three layers; zstd frames with a window over 8 MiB fall back to raw |
+| Content-Encoding Compression | ✅ | gzip (all members), deflate, br, and zstd bodies are decompressed for inspection, stacked up to three layers. When a body rule exists, a body that cannot be fully decoded within the limit is rejected (413 over-limit, 415 unsupported, 400 malformed) instead of being forwarded uninspected |
 | Chunked Encoding Abuse | 🔶 | Rejected at the protocol layer (hyper) |
 | Multipart Boundary Abuse | ✅ | every declared boundary is flattened for inspection (up to four, closing the CVE-2026-26961 parser-differential class); 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule, and the Rack DoS signatures (escape-heavy part headers, chunked multipart uploads) |
 | JSON/XML Structure Evasion | 🔶 | JSON escapes are decoded; no dedicated structural detection |
 | Obfuscated JavaScript / SQL | ✅ | Whitespace- and comment-tolerant regexes |
 | WAF Fingerprinting | ❌ | Impossible to hide entirely (the block behavior is itself a signature) |
 | Rule Bypass Payloads | ❌ | Cannot be guaranteed; the black-box suite is the ongoing control |
-| ALLOW Rule Shadowing | ✅ | Engine-level: `ALLOW` rules are compiled into unanimous matching (every path form, every value of a repeated header/cookie, every form of each `in` target) and their `headers`/`cookies`/`response_headers`/`regex` patterns must be anchored at both ends or the configuration is rejected, so a forged duplicate value or an appended marker cannot shadow a later `BLOCK` |
+| ALLOW Rule Shadowing | ✅ | Engine-level: `ALLOW` rules are compiled into unanimous matching (every path form, every value of a repeated header/cookie, every form of each `in` target) and their `headers`/`cookies`/`response_headers`/`regex` patterns must be fully anchored as verified from the parsed regex (top-level alternation and escaped anchors are rejected). Body-targeting `ALLOW` rules additionally require a complete body, so a forged duplicate value, an appended marker, or a truncated body cannot shadow a later `BLOCK` |
 
 ## Core Priority List Summary
 
