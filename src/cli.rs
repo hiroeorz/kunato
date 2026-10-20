@@ -224,6 +224,18 @@ impl InitArgs {
             ));
         }
 
+        out.push_str(
+            "\n# Behavioral detection observes upstream response statuses and can flag\n\
+             # sources that probe missing paths or fail authentication repeatedly. It\n\
+             # starts in LOG mode; uncomment and raise a signal's action to BLOCK after\n\
+             # reviewing the logs.\n\
+             # protection:\n\
+             #   behavior:\n\
+             #     enabled: true\n\
+             #     enumeration: { action: LOG }\n\
+             #     auth: { action: LOG }\n",
+        );
+
         out.push_str("\nrules_update:\n");
         out.push_str("  enabled: true\n");
         out.push_str(&format!("  url: {}\n", yaml_scalar(&self.rules_url)));

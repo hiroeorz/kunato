@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -2041,6 +2042,285 @@ async fn rate_limit_returns_too_many_requests() {
 
     let (second, _) = send(running.addr, Method::GET, "/", "").await;
     assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_enumeration_flags_and_logs() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    enabled: true
+    window: 60s
+    min_requests: 1
+    enumeration: {{ enabled: true, action: LOG, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/missing-one", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        running.metrics.behavior_not_found.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 0);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_enumeration_block_bans_the_source() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    min_requests: 1
+    enumeration: {{ enabled: true, action: BLOCK, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/missing-one", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 1);
+
+    let (status, _) = send(running.addr, Method::GET, "/missing-two", "").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(running.metrics.banned.load(Ordering::Relaxed), 1);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_auth_failures_only_count_auth_paths() {
+    let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: true, action: LOG, min_failures: 2 }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_auth_failures
+            .load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        running.metrics.behavior_auth_flags.load(Ordering::Relaxed),
+        1
+    );
+
+    let (status, _) = send(running.addr, Method::POST, "/api/users", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_auth_failures
+            .load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        running.metrics.behavior_auth_flags.load(Ordering::Relaxed),
+        1
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_ignores_locally_blocked_requests() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: block-admin
+    action: BLOCK
+    rules:
+      - name: admin
+        match: {{ path: '^/admin' }}
+protection:
+  behavior:
+    min_requests: 1
+    enumeration: {{ enabled: true, action: LOG, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        running.metrics.behavior_not_found.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        0
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_is_disabled_with_protection() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  enabled: false
+  behavior:
+    min_requests: 1
+    enumeration: {{ enabled: true, action: LOG, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/missing", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        running.metrics.behavior_not_found.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        0
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_observes_http2_responses() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    min_requests: 1
+    enumeration: {{ enabled: true, action: LOG, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_h2c(running.addr, Method::GET, "/missing-h2", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        running.metrics.behavior_not_found.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_settings_hot_reload() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let enabled = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    min_requests: 1
+    enumeration: {{ enabled: true, action: LOG, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&enabled).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/missing-one", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+
+    let disabled = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    enabled: false
+"
+    );
+    running
+        .config
+        .store(Arc::new(config::parse(&disabled).expect("valid config")));
+
+    let (status, _) = send(running.addr, Method::GET, "/missing-two", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        running.metrics.behavior_not_found.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        1
+    );
 
     running.stop().await;
 }

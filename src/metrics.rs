@@ -23,6 +23,12 @@ pub struct Metrics {
     pub rule_limited: AtomicU64,
     pub graphql_rejected: AtomicU64,
     pub banned: AtomicU64,
+    pub behavior_not_found: AtomicU64,
+    pub behavior_auth_failures: AtomicU64,
+    pub behavior_enumeration_flags: AtomicU64,
+    pub behavior_auth_flags: AtomicU64,
+    pub behavior_global_auth_flags: AtomicU64,
+    pub behavior_blocked: AtomicU64,
     pub overloaded: AtomicU64,
     pub upstream_connect_errors: AtomicU64,
     pub upstream_timeouts: AtomicU64,
@@ -61,6 +67,12 @@ impl Metrics {
             rule_limited: AtomicU64::new(0),
             graphql_rejected: AtomicU64::new(0),
             banned: AtomicU64::new(0),
+            behavior_not_found: AtomicU64::new(0),
+            behavior_auth_failures: AtomicU64::new(0),
+            behavior_enumeration_flags: AtomicU64::new(0),
+            behavior_auth_flags: AtomicU64::new(0),
+            behavior_global_auth_flags: AtomicU64::new(0),
+            behavior_blocked: AtomicU64::new(0),
             overloaded: AtomicU64::new(0),
             upstream_connect_errors: AtomicU64::new(0),
             upstream_timeouts: AtomicU64::new(0),
@@ -188,6 +200,42 @@ impl Metrics {
             "kunato_banned_total",
             "Requests rejected because the client is banned.",
             self.banned.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_not_found_total",
+            "404 responses on non-static paths observed for behavioral detection.",
+            self.behavior_not_found.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_auth_failures_total",
+            "401/403 responses on authentication paths observed for behavioral detection.",
+            self.behavior_auth_failures.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_enumeration_flags_total",
+            "Sources flagged for enumeration (transitions, not every observation).",
+            self.behavior_enumeration_flags.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_auth_flags_total",
+            "Sources flagged for authentication abuse (transitions, not every observation).",
+            self.behavior_auth_flags.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_global_auth_flags_total",
+            "Global authentication-abuse windows flagged.",
+            self.behavior_global_auth_flags.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_blocked_total",
+            "Behavioral flags that applied a ban.",
+            self.behavior_blocked.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -334,6 +382,12 @@ mod tests {
         assert!(text.contains("kunato_request_body_rejected_total 0"));
         assert!(text.contains("kunato_upload_rejected_total 0"));
         assert!(text.contains("kunato_host_rejected_total 0"));
+        assert!(text.contains("kunato_behavior_not_found_total 0"));
+        assert!(text.contains("kunato_behavior_auth_failures_total 0"));
+        assert!(text.contains("kunato_behavior_enumeration_flags_total 0"));
+        assert!(text.contains("kunato_behavior_auth_flags_total 0"));
+        assert!(text.contains("kunato_behavior_global_auth_flags_total 0"));
+        assert!(text.contains("kunato_behavior_blocked_total 0"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));
         assert!(text.contains("kunato_active_connections 3"));
         assert!(text.contains("kunato_uptime_seconds"));

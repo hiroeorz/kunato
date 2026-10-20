@@ -61,6 +61,10 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 - **Guided install** — One `curl | sudo sh` command installs the static binary,
   the systemd service, the configuration, and the initial rule set on a Linux
   server.
+- **Behavioral abuse detection** — Per-source windows over upstream responses
+  flag iterative `404` probing and authentication-failure bursts, and a global
+  window records distributed authentication failures. Observation is the
+  default; `BLOCK` is opt-in per signal.
 - **DoS / DDoS detection and mitigation** — Detects abnormal request patterns and
   automatically throttles or blocks abusive sources.
 - **Simple deployment** — One binary and one YAML configuration file. No database,

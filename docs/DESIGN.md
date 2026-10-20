@@ -460,21 +460,33 @@ Protection is automatic and independent of the rule set. It consists of:
    capped by selection depth and expanded field count (`limits.graphql`). The
    check runs independently of the rule set and of `protection.enabled`, and a
    request that cannot be inspected is rejected rather than forwarded.
+8. **Behavioral detection** — after an upstream response, a per-source tumbling
+   window records the status. A source is flagged for enumeration when many
+   `404`s hit many distinct non-static paths, and for authentication abuse when
+   many `401`/`403`s hit login/token/session/MFA/SSO paths. A separate global
+   window sums authentication failures across sources for distributed attempts.
+   The per-source signals default to `LOG` and can be raised to `BLOCK`; a
+   `BLOCK` flag applies a normal ban after the current response. The global
+   signal is `LOG` only. State is inline in the tracked-source entry, and no
+   path contents are stored. See
+   [the design and operations notes](behavioral-detection.md) for the signal
+   definitions, thresholds, and limitations.
 
 State is bounded: `max_tracked_ips` (default 100 000) caps the tracked sources
-and, separately, the rule-limit buckets across all shards. When the source
-table is full, stale entries are evicted first; if it is still full, the least
-recently seen entry in that shard that has no active connection and no live ban
-is evicted so a new source is still tracked. Active connections and live bans are
-never evicted; if every entry is protected, new connection admission is answered
-with an overload response and a rule limit that cannot be tracked applies its
-rule's action.
+and, separately, the rule-limit buckets across all shards. Each tracked source
+carries a fixed-size behavior window (about 72 bytes), so behavioral detection
+does not add a per-path map. When the source table is full, stale entries are
+evicted first; if it is still full, the least recently seen entry in that shard
+that has no active connection and no live ban is evicted so a new source is
+still tracked. Active connections and live bans are never evicted; if every
+entry is protected, new connection admission is answered with an overload
+response and a rule limit that cannot be tracked applies its rule's action.
 `protection.allowlist` CIDRs are exempt from rate limits and bans. IPv6 addresses
 are aggregated by `aggregate_ipv6_prefix` (default 64) for rate limits, bans, and
 per-IP connection budgets, so rotating within a prefix cannot bypass them;
 IPv4-mapped addresses are treated as IPv4.
 
-Proposed config block:
+Configuration block:
 
 ```yaml
 protection:
@@ -492,6 +504,23 @@ protection:
     window: 10s
     duration: 60s
     max_duration: 1h
+  behavior:
+    enabled: true
+    window: 60s
+    min_requests: 30
+    enumeration:
+      enabled: true
+      action: LOG
+      not_found_ratio: 0.5
+      distinct_paths: 40
+    auth:
+      enabled: true
+      action: LOG
+      min_failures: 20
+    global_auth:
+      enabled: true
+      window: 60s
+      min_failures: 100
 ```
 
 Adaptive tightening (lowering per-IP burst under global pressure) is future work.
@@ -611,7 +640,7 @@ src/
     matcher.rs     # Request matching
     eval.rs        # Evaluation and verdicts
   protection/
-    mod.rs         # Sharded per-IP state, token bucket, bans, connection budgets
+    mod.rs         # Sharded per-IP state, token bucket, bans, connection budgets, behavior windows
   proxy/
     mod.rs
     server.rs      # TCP listener, protocol detection, and shared request processing
@@ -740,11 +769,12 @@ Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
 | M9        | HTTP/3: opt-in QUIC listener, Alt-Svc advertisement.         | HTTP/3 requests are proxied and rule-checked; Alt-Svc is sent.  |
 | M10       | WebSocket: HTTP/1.1 upgrade forwarding and tunneling.        | Handshake rules, tunnel I/O, and idle timeout tests pass.       |
 | M11       | Response inspection: response-phase categories, status/header/body matching, bounded buffering. | Response rules block/log; oversized bodies stream through after prefix inspection. |
+| M12       | Behavioral detection: per-source probing/auth-abuse signals, global auth log, opt-in bans. | Unit and integration tests pass; black-box suite unaffected. |
 
-M0 through M11 are implemented: metrics and the admin listener, the example
+M0 through M12 are implemented: metrics and the admin listener, the example
 configuration, the systemd unit, musl static builds, CI, a tag-triggered release
-workflow, optional TLS termination, HTTP/2, HTTP/3, WebSocket upgrades, and
-response-phase rules.
+workflow, optional TLS termination, HTTP/2, HTTP/3, WebSocket upgrades,
+response-phase rules, and behavioral detection.
 
 ## 16. Open Questions and Future Work
 
@@ -752,6 +782,9 @@ response-phase rules.
   automatically).
 - WebSocket over HTTP/2 and HTTP/3 (RFC 8441 / RFC 9220 extended CONNECT).
 - Pluggable tunnel payload inspection (currently upgrades are opaque).
+- Behavioral detection follow-ups (opt-in global authentication throttle or
+  challenge, `200`-only scraping signals, configurable static exclusions); see
+  [the design](behavioral-detection.md).
 - Trusted-proxy handling for `X-Forwarded-For` and client-IP rules behind a CDN
   or load balancer.
 - Multiple upstreams and load balancing.

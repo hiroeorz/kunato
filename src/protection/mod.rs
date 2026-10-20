@@ -4,10 +4,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use http::StatusCode;
 use ipnet::IpNet;
+use regex::RegexSet;
 use tokio::time::Instant;
 
-use crate::config::{Protection, RuleLimit, RuleLimitKey};
+use crate::config::{BehaviorAction, BehaviorConfig, Protection, RuleLimit, RuleLimitKey};
+use crate::decoding::{normalize_path, percent_decode_forms};
 
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
@@ -29,6 +32,46 @@ pub enum Decision {
     Overloaded { retry_after: Duration },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BehaviorSignal {
+    Enumeration,
+    AuthAbuse,
+}
+
+impl BehaviorSignal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enumeration => "enumeration",
+            Self::AuthAbuse => "auth-abuse",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BehaviorFlag {
+    pub signal: BehaviorSignal,
+    pub action: BehaviorAction,
+    pub requests: u32,
+    pub not_found: u32,
+    pub distinct_paths: u32,
+    pub auth_failures: u32,
+    pub ban: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalAuthFlag {
+    pub failures: u32,
+    pub window: Duration,
+}
+
+#[derive(Debug, Default)]
+pub struct BehaviorOutcome {
+    pub observed_not_found: bool,
+    pub observed_auth_failure: bool,
+    pub source: Option<BehaviorFlag>,
+    pub global: Option<GlobalAuthFlag>,
+}
+
 pub struct ProtectionState {
     shards: Vec<Mutex<Shard>>,
     rule_shards: Vec<Mutex<RuleShard>>,
@@ -37,6 +80,7 @@ pub struct ProtectionState {
     tracked_ips: AtomicUsize,
     tracked_rules: AtomicUsize,
     global_requests: Mutex<GlobalWindow>,
+    global_auth: Mutex<GlobalAuthWindow>,
 }
 
 impl ProtectionState {
@@ -57,6 +101,11 @@ impl ProtectionState {
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
                 count: 0.0,
+            }),
+            global_auth: Mutex::new(GlobalAuthWindow {
+                started: Instant::now(),
+                failures: 0,
+                logged: false,
             }),
         }
     }
@@ -118,6 +167,149 @@ impl ProtectionState {
             entry.violations = 0;
             entry.window_start = now;
             None
+        }
+    }
+
+    /// Observe an upstream response for the behavioral signals. The returned
+    /// outcome tells the proxy layer which counters to increment and which
+    /// flags to log. Local responses (rule blocks, errors) are never passed
+    /// here.
+    pub fn observe_response(
+        &self,
+        ip: IpAddr,
+        path: &str,
+        status: StatusCode,
+        config: &Protection,
+    ) -> BehaviorOutcome {
+        let behavior = &config.behavior;
+        if !config.enabled
+            || !behavior.enabled
+            || is_allowlisted(normalize_ip(ip), &config.allowlist)
+        {
+            return BehaviorOutcome::default();
+        }
+
+        let enumeration_enabled = behavior.enumeration.enabled;
+        let auth_enabled = behavior.auth.enabled;
+        let global_enabled = behavior.global_auth.enabled;
+        let auth_failure = (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
+            && (auth_enabled || global_enabled)
+            && auth_path_matches(&behavior.auth.paths, path);
+
+        if !enumeration_enabled && !auth_failure {
+            return BehaviorOutcome::default();
+        }
+
+        let mut outcome = BehaviorOutcome::default();
+        let now = Instant::now();
+        let key = tracking_key(ip, config);
+
+        {
+            let mut shard = lock(&self.shards[shard_index(key)]);
+            let Some(entry) = shard.entries.get_mut(&key) else {
+                drop(shard);
+                self.observe_global_auth(auth_failure, now, config, &mut outcome);
+                return outcome;
+            };
+
+            if entry.banned_until.is_some_and(|until| until > now) {
+                return outcome;
+            }
+
+            entry.last_seen = now;
+            entry.behavior.roll(now, behavior.window);
+
+            if enumeration_enabled {
+                entry.behavior.requests = entry.behavior.requests.saturating_add(1);
+                if status == StatusCode::NOT_FOUND {
+                    let normalized = normalize_path(path);
+                    let normalized = normalized.as_deref().unwrap_or(path);
+                    if !is_static_asset(normalized) {
+                        entry.behavior.not_found = entry.behavior.not_found.saturating_add(1);
+                        entry.behavior.add_path(normalized);
+                        outcome.observed_not_found = true;
+                    }
+                }
+            }
+
+            if auth_enabled && auth_failure {
+                entry.behavior.auth_failures = entry.behavior.auth_failures.saturating_add(1);
+                outcome.observed_auth_failure = true;
+            }
+
+            if enumeration_enabled
+                && entry.behavior.flags & BehaviorEntry::ENUMERATION_FLAG == 0
+                && enumeration_flagged(entry, behavior)
+            {
+                entry.behavior.flags |= BehaviorEntry::ENUMERATION_FLAG;
+                let mut flag = BehaviorFlag {
+                    signal: BehaviorSignal::Enumeration,
+                    action: behavior.enumeration.action,
+                    requests: entry.behavior.requests,
+                    not_found: entry.behavior.not_found,
+                    distinct_paths: entry.behavior.distinct_paths(),
+                    auth_failures: entry.behavior.auth_failures,
+                    ban: None,
+                };
+                if behavior.enumeration.action == BehaviorAction::Block {
+                    flag.ban = Some(apply_behavior_ban(entry, config, now));
+                    entry.behavior.reset(now);
+                }
+                outcome.source = Some(flag);
+            }
+
+            if auth_enabled
+                && auth_failure
+                && entry.behavior.flags & BehaviorEntry::AUTH_FLAG == 0
+                && entry.behavior.auth_failures >= behavior.auth.min_failures
+            {
+                entry.behavior.flags |= BehaviorEntry::AUTH_FLAG;
+                let mut flag = BehaviorFlag {
+                    signal: BehaviorSignal::AuthAbuse,
+                    action: behavior.auth.action,
+                    requests: entry.behavior.requests,
+                    not_found: entry.behavior.not_found,
+                    distinct_paths: entry.behavior.distinct_paths(),
+                    auth_failures: entry.behavior.auth_failures,
+                    ban: None,
+                };
+                if behavior.auth.action == BehaviorAction::Block {
+                    flag.ban = Some(apply_behavior_ban(entry, config, now));
+                    entry.behavior.reset(now);
+                }
+                outcome.source = Some(flag);
+            }
+        }
+
+        self.observe_global_auth(auth_failure, now, config, &mut outcome);
+        outcome
+    }
+
+    fn observe_global_auth(
+        &self,
+        auth_failure: bool,
+        now: Instant,
+        config: &Protection,
+        outcome: &mut BehaviorOutcome,
+    ) {
+        if !auth_failure || !config.behavior.global_auth.enabled {
+            return;
+        }
+
+        outcome.observed_auth_failure = true;
+        let mut window = lock(&self.global_auth);
+        if now.saturating_duration_since(window.started) >= config.behavior.global_auth.window {
+            window.started = now;
+            window.failures = 0;
+            window.logged = false;
+        }
+        window.failures = window.failures.saturating_add(1);
+        if !window.logged && window.failures >= config.behavior.global_auth.min_failures {
+            window.logged = true;
+            outcome.global = Some(GlobalAuthFlag {
+                failures: window.failures,
+                window: config.behavior.global_auth.window,
+            });
         }
     }
 
@@ -269,6 +461,7 @@ impl ProtectionState {
                 entry.ban_count,
             );
             entry.banned_until = Some(now + duration);
+            entry.behavior.reset(now);
             return Some(Decision::Banned {
                 retry_after: duration,
             });
@@ -464,6 +657,7 @@ struct Entry {
     ban_count: u32,
     connections: u32,
     last_seen: Instant,
+    behavior: BehaviorEntry,
 }
 
 impl Entry {
@@ -477,13 +671,173 @@ impl Entry {
             ban_count: 0,
             connections: 0,
             last_seen: now,
+            behavior: BehaviorEntry::new(now),
         }
     }
+}
+
+struct BehaviorEntry {
+    window_start: Instant,
+    requests: u32,
+    not_found: u32,
+    auth_failures: u32,
+    not_found_paths: [u64; 4],
+    flags: u8,
+}
+
+impl BehaviorEntry {
+    const ENUMERATION_FLAG: u8 = 1;
+    const AUTH_FLAG: u8 = 2;
+
+    fn new(now: Instant) -> Self {
+        Self {
+            window_start: now,
+            requests: 0,
+            not_found: 0,
+            auth_failures: 0,
+            not_found_paths: [0; 4],
+            flags: 0,
+        }
+    }
+
+    fn reset(&mut self, now: Instant) {
+        *self = Self::new(now);
+    }
+
+    fn roll(&mut self, now: Instant, window: Duration) {
+        if now.saturating_duration_since(self.window_start) >= window {
+            self.reset(now);
+        }
+    }
+
+    fn add_path(&mut self, path: &str) {
+        let hash = mix64(fnv1a64(path));
+        let first = (hash & 0xff) as usize;
+        let second = ((hash >> 32) & 0xff) as usize;
+        self.not_found_paths[first / 64] |= 1u64 << (first % 64);
+        self.not_found_paths[second / 64] |= 1u64 << (second % 64);
+    }
+
+    fn distinct_paths(&self) -> u32 {
+        let set_bits: u32 = self
+            .not_found_paths
+            .iter()
+            .map(|word| word.count_ones())
+            .sum();
+        if set_bits >= 256 {
+            return 256;
+        }
+        let ratio = f64::from(set_bits) / 256.0;
+        let estimate = -128.0 * (1.0 - ratio).ln();
+        estimate.round().clamp(0.0, 256.0) as u32
+    }
+}
+
+struct GlobalAuthWindow {
+    started: Instant,
+    failures: u32,
+    logged: bool,
 }
 
 struct GlobalWindow {
     started: Instant,
     count: f64,
+}
+
+fn enumeration_flagged(entry: &Entry, behavior: &BehaviorConfig) -> bool {
+    if entry.behavior.requests == 0 {
+        return false;
+    }
+    entry.behavior.requests >= behavior.min_requests
+        && f64::from(entry.behavior.not_found) / f64::from(entry.behavior.requests)
+            >= behavior.enumeration.not_found_ratio
+        && entry.behavior.distinct_paths() >= behavior.enumeration.distinct_paths
+}
+
+fn apply_behavior_ban(entry: &mut Entry, config: &Protection, now: Instant) -> Duration {
+    entry.violations = 0;
+    entry.window_start = now;
+    entry.ban_count = entry.ban_count.saturating_add(1);
+    let duration = escalated_duration(
+        config.ban.duration,
+        config.ban.max_duration,
+        entry.ban_count,
+    );
+    entry.banned_until = Some(now + duration);
+    duration
+}
+
+fn fnv1a64(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// SplitMix64 finalizer: FNV-1a has weak diffusion in the low bits for short
+/// strings, which would make the two Bloom-filter bit positions correlate.
+fn mix64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^= value >> 33;
+    value
+}
+
+fn auth_path_matches(paths: &RegexSet, path: &str) -> bool {
+    for form in percent_decode_forms(path) {
+        let normalized = normalize_path(form.as_ref());
+        let candidate = normalized.as_deref().unwrap_or(form.as_ref());
+        if paths.is_match(candidate) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_static_asset(path: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/static/",
+        "/assets/",
+        "/build/",
+        "/dist/",
+        "/_next/static/",
+        "/images/",
+        "/img/",
+        "/fonts/",
+        "/media/",
+    ];
+    const EXACT: &[&str] = &[
+        "/favicon.ico",
+        "/robots.txt",
+        "/sitemap.xml",
+        "/sitemap.xml.gz",
+        "/manifest.json",
+        "/site.webmanifest",
+    ];
+    const EXTENSIONS: &[&str] = &[
+        "css", "js", "mjs", "map", "png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico",
+        "woff", "woff2", "ttf", "otf", "eot", "mp4", "webm", "mp3", "wav", "ogg", "flac", "m4a",
+    ];
+
+    if PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+        return true;
+    }
+    if EXACT
+        .iter()
+        .any(|candidate| path.eq_ignore_ascii_case(candidate))
+    {
+        return true;
+    }
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    let Some((_, extension)) = basename.rsplit_once('.') else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    EXTENSIONS.contains(&extension.as_str())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -579,7 +933,7 @@ fn escalated_duration(base: Duration, max: Duration, ban_count: u32) -> Duration
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BanConfig;
+    use crate::config::{AuthConfig, BanConfig, EnumerationConfig, GlobalAuthConfig};
 
     fn config() -> Protection {
         Protection {
@@ -598,6 +952,7 @@ mod tests {
                 duration: Duration::from_secs(60),
                 max_duration: Duration::from_secs(600),
             },
+            behavior: BehaviorConfig::default(),
         }
     }
 
@@ -1174,5 +1529,271 @@ mod tests {
         })
         .join();
         assert_eq!(*lock(&mutex), 1);
+    }
+
+    fn auth_paths(patterns: &[&str]) -> RegexSet {
+        RegexSet::new(patterns).expect("valid auth paths")
+    }
+
+    fn behavior_config() -> BehaviorConfig {
+        BehaviorConfig {
+            enabled: true,
+            window: Duration::from_secs(60),
+            min_requests: 3,
+            enumeration: EnumerationConfig {
+                enabled: true,
+                action: BehaviorAction::Log,
+                not_found_ratio: 0.5,
+                distinct_paths: 2,
+            },
+            auth: AuthConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                min_failures: 2,
+                paths: auth_paths(&[r"^/login$"]),
+            },
+            global_auth: GlobalAuthConfig {
+                enabled: false,
+                window: Duration::from_secs(60),
+                min_failures: 2,
+            },
+        }
+    }
+
+    fn behavior_state(config: &Protection) -> ProtectionState {
+        let state = ProtectionState::new();
+        assert_eq!(state.check_request(ip("10.0.0.1"), config), Decision::Allow);
+        state
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enumeration_flags_after_all_thresholds() {
+        let mut config = config();
+        config.behavior = behavior_config();
+        let state = behavior_state(&config);
+
+        let first =
+            state.observe_response(ip("10.0.0.1"), "/missing-a", StatusCode::NOT_FOUND, &config);
+        assert!(first.source.is_none());
+        assert!(first.observed_not_found);
+        let second =
+            state.observe_response(ip("10.0.0.1"), "/missing-b", StatusCode::NOT_FOUND, &config);
+        assert!(second.source.is_none());
+        let third =
+            state.observe_response(ip("10.0.0.1"), "/missing-c", StatusCode::NOT_FOUND, &config);
+        let flag = third.source.expect("enumeration flag");
+        assert_eq!(flag.signal, BehaviorSignal::Enumeration);
+        assert_eq!(flag.action, BehaviorAction::Log);
+        assert_eq!(flag.requests, 3);
+        assert_eq!(flag.not_found, 3);
+        assert!(flag.distinct_paths >= 2);
+        assert!(flag.ban.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn normal_traffic_does_not_flag_enumeration() {
+        let mut config = config();
+        config.behavior = behavior_config();
+        let state = behavior_state(&config);
+
+        for path in ["/", "/api/items", "/api/items/1"] {
+            let outcome = state.observe_response(ip("10.0.0.1"), path, StatusCode::OK, &config);
+            assert!(outcome.source.is_none());
+            assert!(!outcome.observed_not_found);
+        }
+        let outcome = state.observe_response(
+            ip("10.0.0.1"),
+            "/api/items/2",
+            StatusCode::NOT_FOUND,
+            &config,
+        );
+        assert!(outcome.source.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn static_404s_are_excluded_from_the_numerator() {
+        let mut config = config();
+        config.behavior = behavior_config();
+        let state = behavior_state(&config);
+
+        for path in ["/app.js", "/style.css", "/favicon.ico", "/missing.png"] {
+            let outcome =
+                state.observe_response(ip("10.0.0.1"), path, StatusCode::NOT_FOUND, &config);
+            assert!(outcome.source.is_none());
+            assert!(!outcome.observed_not_found);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_failures_flag_only_on_auth_paths() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.enumeration.enabled = false;
+        behavior.auth.enabled = true;
+        behavior.auth.min_failures = 2;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+
+        let first = state.observe_response(
+            ip("10.0.0.1"),
+            "/api/users",
+            StatusCode::UNAUTHORIZED,
+            &config,
+        );
+        assert!(first.source.is_none());
+        assert!(!first.observed_auth_failure);
+
+        let second =
+            state.observe_response(ip("10.0.0.1"), "/login", StatusCode::UNAUTHORIZED, &config);
+        assert!(second.source.is_none());
+        assert!(second.observed_auth_failure);
+
+        let third =
+            state.observe_response(ip("10.0.0.1"), "/login", StatusCode::FORBIDDEN, &config);
+        let flag = third.source.expect("auth flag");
+        assert_eq!(flag.signal, BehaviorSignal::AuthAbuse);
+        assert_eq!(flag.auth_failures, 2);
+        assert!(flag.ban.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_paths_are_normalized_and_percent_decoded() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.enumeration.enabled = false;
+        behavior.auth.enabled = true;
+        behavior.auth.min_failures = 2;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+
+        let encoded = state.observe_response(
+            ip("10.0.0.1"),
+            "/%6cogin",
+            StatusCode::UNAUTHORIZED,
+            &config,
+        );
+        assert!(encoded.source.is_none());
+        assert!(encoded.observed_auth_failure);
+
+        let duplicate_slash =
+            state.observe_response(ip("10.0.0.1"), "//login", StatusCode::UNAUTHORIZED, &config);
+        assert!(duplicate_slash.source.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn global_auth_failures_aggregate_across_sources() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.enumeration.enabled = false;
+        behavior.auth.enabled = false;
+        behavior.global_auth.enabled = true;
+        behavior.global_auth.min_failures = 2;
+        config.behavior = behavior;
+        let state = ProtectionState::new();
+
+        let first =
+            state.observe_response(ip("10.0.0.1"), "/login", StatusCode::UNAUTHORIZED, &config);
+        assert!(first.global.is_none());
+        assert!(first.observed_auth_failure);
+
+        let second =
+            state.observe_response(ip("10.0.0.2"), "/login", StatusCode::UNAUTHORIZED, &config);
+        let flag = second.global.expect("global auth flag");
+        assert_eq!(flag.failures, 2);
+        assert!(second.source.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn behavior_block_applies_a_ban() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.min_requests = 1;
+        behavior.enumeration.distinct_paths = 1;
+        behavior.enumeration.not_found_ratio = 0.0;
+        behavior.enumeration.action = BehaviorAction::Block;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+
+        let outcome =
+            state.observe_response(ip("10.0.0.1"), "/missing", StatusCode::NOT_FOUND, &config);
+        let flag = outcome.source.expect("enumeration flag");
+        assert_eq!(flag.action, BehaviorAction::Block);
+        assert_eq!(flag.ban, Some(Duration::from_secs(60)));
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Banned { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn behavior_window_rollover_resets_counters() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.min_requests = 2;
+        behavior.enumeration.distinct_paths = 1;
+        behavior.enumeration.not_found_ratio = 0.5;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+
+        let first =
+            state.observe_response(ip("10.0.0.1"), "/missing", StatusCode::NOT_FOUND, &config);
+        assert!(first.source.is_none());
+        let second = state.observe_response(
+            ip("10.0.0.1"),
+            "/missing-two",
+            StatusCode::NOT_FOUND,
+            &config,
+        );
+        assert!(second.source.is_some());
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        let third = state.observe_response(
+            ip("10.0.0.1"),
+            "/other-missing",
+            StatusCode::NOT_FOUND,
+            &config,
+        );
+        assert!(third.source.is_none());
+        assert!(third.observed_not_found);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn allowlisted_and_disabled_sources_observe_nothing() {
+        let mut config = config();
+        config.behavior = behavior_config();
+        config.allowlist = vec!["10.0.0.0/8".parse().expect("allowlist")];
+        let state = ProtectionState::new();
+        let outcome =
+            state.observe_response(ip("10.0.0.1"), "/missing", StatusCode::NOT_FOUND, &config);
+        assert!(outcome.source.is_none());
+        assert!(!outcome.observed_not_found);
+
+        config.allowlist.clear();
+        config.enabled = false;
+        let outcome =
+            state.observe_response(ip("10.0.0.1"), "/missing", StatusCode::NOT_FOUND, &config);
+        assert!(outcome.source.is_none());
+        assert!(!outcome.observed_not_found);
+    }
+
+    #[test]
+    fn behavior_estimate_is_approximately_the_distinct_path_count() {
+        let mut entry = BehaviorEntry::new(Instant::now());
+        for index in 0..40 {
+            entry.add_path(&format!("/missing-{index}"));
+        }
+        let estimate = entry.distinct_paths();
+        assert!((35..=45).contains(&estimate), "estimate: {estimate}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn observing_a_missing_source_entry_is_a_no_op() {
+        let mut config = config();
+        config.behavior = behavior_config();
+        let state = ProtectionState::new();
+        let outcome =
+            state.observe_response(ip("10.0.0.1"), "/missing", StatusCode::NOT_FOUND, &config);
+        assert!(outcome.source.is_none());
     }
 }

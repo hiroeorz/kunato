@@ -20,8 +20,9 @@ Note: the engine matches `path`, `method`, `source_ip`, `headers`, `cookies`,
 `response_headers`, plus `threshold` categories and per-rule `limit`, so a ❌
 often means "no signature shipped", not "impossible". Engine checks outside that
 match language — GraphQL depth/complexity, strict body sizing,
-`limits.upload_inspection`, and the `allowed_hosts` Host/authority policy — stop
-classes no regex expresses.
+`limits.upload_inspection`, the `allowed_hosts` Host/authority policy, and the
+`protection.behavior` source/authentication signals — address classes no regex
+expresses.
 
 ## 1. Injection
 
@@ -93,7 +94,7 @@ classes no regex expresses.
 | API Parameter Tampering | ❌ | Business-logic dependent |
 | Mass Assignment | ❌ | Business-logic dependent |
 | Excessive Data Exposure Requests | 🔶 | Response-phase inspection can express it, but no bundled rules (only private keys, SQL errors, ...) |
-| API Endpoint Enumeration | 🔶 | Scanner UA blocking plus rate limits only; no behavioral detection |
+| API Endpoint Enumeration | 🔶 | Scanner UA blocking, rate limits, and behavioral `404`/distinct-path flags (LOG default; `enumeration.action: BLOCK` opt-in) |
 | API Version Abuse | ❌ | No rules |
 | Content-Type Spoofing | ❌ | No rules |
 | JSON/XML Payload Tampering | 🔶 | JSON escapes, multipart, and form-urlencoded bodies are decoded for inspection; detection depends on signatures |
@@ -104,9 +105,9 @@ classes no regex expresses.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
-| Password Spraying | 🔶 | Same throttle and bans slow a single source; spraying spread across many source IPs stays below each budget and passes |
-| Credential Stuffing | 🔶 | Same as brute force; credential lists rotated across many source IPs are not detectable |
+| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. Protection also flags per-source `401`/`403` bursts on authentication paths (`protection.behavior.auth`, LOG default, per-signal `BLOCK` opt-in) and logs global bursts for distributed attempts. The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
+| Password Spraying | 🔶 | Same throttle, bans, and per-source auth-failure flags slow a single source; the global auth-failure window (LOG only) records spraying spread across many source IPs, but automatic global mitigation is future work |
+| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs (LOG only), but cannot identify individual stolen credentials and does not mitigate globally |
 | Account / Login Enumeration | ❌ | Not covered (response-phase error-text rules could be added locally) |
 | MFA Flooding | 🔶 | Rate limits only |
 | OTP Brute Force | 🔶 | Rate limits only |
@@ -216,7 +217,7 @@ not match the Marshal signatures.
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | Vulnerability Scanner | ✅ | 20+ tools blocked by User-Agent (sqlmap, nikto, nmap, nuclei, Acunetix, ...) |
-| Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, and rate limits in combination; no behavioral detection of iterative probing |
+| Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, rate limits, and behavioral `404`/distinct-path flags (LOG default; `enumeration.action: BLOCK` opt-in); a slow prober below every threshold still passes |
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
 | `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`) |
 | phpinfo-style Information Endpoints | ✅ | `sensitive-files.phpinfo-endpoints` 404s `/phpinfo`, `/phpinfo.php`, `/php_info.php`, `/phpversion.php`, and `/.phpinfo.php`; generic `info.php`/`test.php` names are intentionally left alone to avoid breaking application files |
@@ -229,7 +230,7 @@ not match the Marshal signatures.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Malicious Bot | 🔶 | User-Agent signatures only; no behavioral analysis or JS challenge |
+| Malicious Bot | 🔶 | User-Agent signatures plus behavioral probing and authentication-abuse flags (LOG default; per-signal `BLOCK` opt-in). No JS challenge, and `200`-only scraping is not detected |
 | Scraping / Crawling Abuse | 🔶 | SEO/AI crawlers are logged; rate limits slow the rest |
 | Account Creation Bots / Login Bots | 🔶 | Rate limits and bans only |
 | Inventory Hoarding / Ticket Scalping | ❌ | Not covered |
@@ -279,8 +280,8 @@ not match the Marshal signatures.
 | XXE / RCE payloads | ✅ |
 | Malicious file upload | 🔶 (extension plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
-| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, and bans) |
-| Bot | 🔶 (User-Agent signatures only) |
+| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, and a global auth-failure log) |
+| Bot | 🔶 (User-Agent signatures plus behavioral probing/auth-failure flags; no JS challenge or 200-only scraping detection) |
 | API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
 | HTTP Flood | ✅ |
@@ -290,9 +291,15 @@ not match the Marshal signatures.
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
 either direction, arbitrary re-signing), open redirect via unlisted parameter
 names, HPP, deep upload content (polyglots beyond the inspected prefix,
-archives, nested files), behavioral bot detection, and the business-logic family
-(IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization
-gaps, and session design cannot be fixed by a WAF at all; Kunato can only assist
-through custom response-phase rules. Closing a gap usually means either a YAML
-rule (most request-shape gaps) or an engine feature (behavioral and stateful
-checks).
+archives, nested files), `200`-only scraping, distributed mitigation for
+credential stuffing, and the business-logic family (IDOR/BOLA, mass assignment,
+parameter tampering). CSRF, IDOR, authorization gaps, and session design cannot
+be fixed by a WAF at all; Kunato can only assist through custom response-phase
+rules. Closing a gap usually means either a YAML rule (most request-shape gaps)
+or an engine feature (behavioral and stateful checks).
+
+Behavioral detection (Phase 1) covers `404` probing, per-source authentication
+failure bursts, and a global authentication-failure log. It defaults to `LOG`;
+a class becomes `Covered` only when the bundled default stops the attack, not
+merely because a signal exists. See
+[the behavioral detection notes](behavioral-detection.md).

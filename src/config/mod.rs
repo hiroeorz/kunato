@@ -10,7 +10,7 @@ use http::Method;
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use ipnet::IpNet;
-use regex::{Regex, RegexBuilder};
+use regex::{Regex, RegexBuilder, RegexSet};
 use regex_syntax::hir::{Hir, HirKind, Look};
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
@@ -44,6 +44,12 @@ const MAX_RULES_UPDATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RULES_UPDATE_JITTER_PERCENT: u8 = 50;
 const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+const MAX_BEHAVIOR_WINDOW: Duration = Duration::from_secs(60 * 60);
+const MAX_BEHAVIOR_DISTINCT_PATHS: u32 = 256;
+const DEFAULT_AUTH_PATHS: &[&str] = &[
+    r"(?i)^/(wp-login\.php|xmlrpc\.php|login|logon|signin|sign_in|sign-in|session)(\.(php|do|jsp|aspx|html))?/?$",
+    r"(?i)^/(users/sign_in|admin/login|api(/v[0-9]+)?/(auth|login|token|session|oauth|mfa|otp)|oauth|saml|auth|realms|openid-connect)(/|$)",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -529,6 +535,8 @@ pub struct ProtectionSpec {
     pub aggregate_ipv6_prefix: u8,
     #[serde(default)]
     pub ban: BanSpec,
+    #[serde(default)]
+    pub behavior: BehaviorSpec,
 }
 
 impl Default for ProtectionSpec {
@@ -544,6 +552,7 @@ impl Default for ProtectionSpec {
             max_tracked_ips: default_max_tracked_ips(),
             aggregate_ipv6_prefix: default_aggregate_ipv6_prefix(),
             ban: BanSpec::default(),
+            behavior: BehaviorSpec::default(),
         }
     }
 }
@@ -568,6 +577,122 @@ impl Default for BanSpec {
             window: secs10(),
             duration: secs60(),
             max_duration: hours1(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum BehaviorAction {
+    #[default]
+    Log,
+    Block,
+}
+
+impl BehaviorAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Log => "LOG",
+            Self::Block => "BLOCK",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BehaviorSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "secs60", deserialize_with = "de_duration")]
+    pub window: Duration,
+    #[serde(default = "default_behavior_min_requests")]
+    pub min_requests: u32,
+    #[serde(default)]
+    pub enumeration: EnumerationSpec,
+    #[serde(default)]
+    pub auth: AuthSpec,
+    #[serde(default)]
+    pub global_auth: GlobalAuthSpec,
+}
+
+impl Default for BehaviorSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window: secs60(),
+            min_requests: default_behavior_min_requests(),
+            enumeration: EnumerationSpec::default(),
+            auth: AuthSpec::default(),
+            global_auth: GlobalAuthSpec::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnumerationSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: BehaviorAction,
+    #[serde(default = "default_not_found_ratio")]
+    pub not_found_ratio: f64,
+    #[serde(default = "default_distinct_paths")]
+    pub distinct_paths: u32,
+}
+
+impl Default for EnumerationSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            action: BehaviorAction::Log,
+            not_found_ratio: default_not_found_ratio(),
+            distinct_paths: default_distinct_paths(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: BehaviorAction,
+    #[serde(default = "default_auth_min_failures")]
+    pub min_failures: u32,
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+}
+
+impl Default for AuthSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            action: BehaviorAction::Log,
+            min_failures: default_auth_min_failures(),
+            paths: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalAuthSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "secs60", deserialize_with = "de_duration")]
+    pub window: Duration,
+    #[serde(default = "default_global_auth_min_failures")]
+    pub min_failures: u32,
+}
+
+impl Default for GlobalAuthSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window: secs60(),
+            min_failures: default_global_auth_min_failures(),
         }
     }
 }
@@ -602,6 +727,26 @@ fn default_aggregate_ipv6_prefix() -> u8 {
 
 fn default_ban_violations() -> u32 {
     5
+}
+
+fn default_behavior_min_requests() -> u32 {
+    30
+}
+
+fn default_not_found_ratio() -> f64 {
+    0.5
+}
+
+fn default_distinct_paths() -> u32 {
+    40
+}
+
+fn default_auth_min_failures() -> u32 {
+    20
+}
+
+fn default_global_auth_min_failures() -> u32 {
+    100
 }
 
 fn secs5() -> Duration {
@@ -900,34 +1045,73 @@ pub struct Protection {
     pub max_tracked_ips: usize,
     pub aggregate_ipv6_prefix: u8,
     pub ban: BanConfig,
+    pub behavior: BehaviorConfig,
 }
 
-impl From<&ProtectionSpec> for Protection {
-    fn from(spec: &ProtectionSpec) -> Self {
+#[derive(Debug, Clone)]
+pub struct BehaviorConfig {
+    pub enabled: bool,
+    pub window: Duration,
+    pub min_requests: u32,
+    pub enumeration: EnumerationConfig,
+    pub auth: AuthConfig,
+    pub global_auth: GlobalAuthConfig,
+}
+
+impl BehaviorConfig {
+    pub fn disabled() -> Self {
         Self {
-            enabled: spec.enabled,
-            allowlist: spec
-                .allowlist
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|value| parse_ip_net(value).ok())
-                .collect(),
-            max_connections_per_ip: spec.max_connections_per_ip,
-            max_connections: spec.max_connections,
-            requests_per_second: spec.requests_per_second,
-            burst: spec.burst,
-            global_requests_per_second: spec.global_requests_per_second,
-            max_tracked_ips: spec.max_tracked_ips,
-            aggregate_ipv6_prefix: spec.aggregate_ipv6_prefix,
-            ban: BanConfig {
-                violations: spec.ban.violations,
-                window: spec.ban.window,
-                duration: spec.ban.duration,
-                max_duration: spec.ban.max_duration,
+            enabled: false,
+            window: secs60(),
+            min_requests: default_behavior_min_requests(),
+            enumeration: EnumerationConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                not_found_ratio: default_not_found_ratio(),
+                distinct_paths: default_distinct_paths(),
+            },
+            auth: AuthConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                min_failures: default_auth_min_failures(),
+                paths: RegexSet::empty(),
+            },
+            global_auth: GlobalAuthConfig {
+                enabled: false,
+                window: secs60(),
+                min_failures: default_global_auth_min_failures(),
             },
         }
     }
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EnumerationConfig {
+    pub enabled: bool,
+    pub action: BehaviorAction,
+    pub not_found_ratio: f64,
+    pub distinct_paths: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub action: BehaviorAction,
+    pub min_failures: u32,
+    pub paths: RegexSet,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalAuthConfig {
+    pub enabled: bool,
+    pub window: Duration,
+    pub min_failures: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1265,7 +1449,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
 
     validate_limits(&spec.limits, &mut issues);
     validate_timeouts(&spec.timeouts, &mut issues);
-    validate_protection(&spec.protection, &mut issues);
+    let protection = compile_protection(&spec.protection, &mut issues);
     validate_admin(&spec.admin, &mut issues);
     validate_tls(&spec.tls, &mut issues);
     validate_http3(&spec.http3, &spec.tls, &mut issues);
@@ -1307,7 +1491,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         categories,
         timeouts: Timeouts::from(&spec.timeouts),
         limits: Limits::from(&spec.limits),
-        protection: Protection::from(&spec.protection),
+        protection,
         admin: Admin::from(&spec.admin),
         tls: spec.tls.as_ref().map(Tls::from),
         http3: Http3::from(&spec.http3),
@@ -1861,6 +2045,142 @@ fn validate_admin(spec: &AdminSpec, issues: &mut Vec<String>) {
             "admin.listen must be a loopback address, got `{}`",
             spec.listen
         ));
+    }
+}
+
+fn compile_protection(spec: &ProtectionSpec, issues: &mut Vec<String>) -> Protection {
+    validate_protection(spec, issues);
+    let behavior = compile_behavior(&spec.behavior, issues);
+    Protection {
+        enabled: spec.enabled,
+        allowlist: spec
+            .allowlist
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|value| parse_ip_net(value).ok())
+            .collect(),
+        max_connections_per_ip: spec.max_connections_per_ip,
+        max_connections: spec.max_connections,
+        requests_per_second: spec.requests_per_second,
+        burst: spec.burst,
+        global_requests_per_second: spec.global_requests_per_second,
+        max_tracked_ips: spec.max_tracked_ips,
+        aggregate_ipv6_prefix: spec.aggregate_ipv6_prefix,
+        ban: BanConfig {
+            violations: spec.ban.violations,
+            window: spec.ban.window,
+            duration: spec.ban.duration,
+            max_duration: spec.ban.max_duration,
+        },
+        behavior,
+    }
+}
+
+fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorConfig {
+    if spec.window.is_zero() || spec.window > MAX_BEHAVIOR_WINDOW {
+        issues
+            .push("protection.behavior.window must be greater than zero and at most 1h".to_owned());
+    }
+    if spec.min_requests == 0 {
+        issues.push("protection.behavior.min_requests must be greater than zero".to_owned());
+    }
+    if !spec.enumeration.not_found_ratio.is_finite()
+        || !(0.0..=1.0).contains(&spec.enumeration.not_found_ratio)
+    {
+        issues.push(
+            "protection.behavior.enumeration.not_found_ratio must be finite and between 0 and 1"
+                .to_owned(),
+        );
+    }
+    if !(1..=MAX_BEHAVIOR_DISTINCT_PATHS).contains(&spec.enumeration.distinct_paths) {
+        issues.push(format!(
+            "protection.behavior.enumeration.distinct_paths must be between 1 and {MAX_BEHAVIOR_DISTINCT_PATHS}"
+        ));
+    }
+    if spec.auth.min_failures == 0 {
+        issues.push("protection.behavior.auth.min_failures must be greater than zero".to_owned());
+    }
+    if spec.global_auth.window.is_zero() || spec.global_auth.window > MAX_BEHAVIOR_WINDOW {
+        issues.push(
+            "protection.behavior.global_auth.window must be greater than zero and at most 1h"
+                .to_owned(),
+        );
+    }
+    if spec.global_auth.min_failures == 0 {
+        issues.push(
+            "protection.behavior.global_auth.min_failures must be greater than zero".to_owned(),
+        );
+    }
+
+    let patterns: Vec<String> = match &spec.auth.paths {
+        Some(paths) => paths.clone(),
+        None => DEFAULT_AUTH_PATHS
+            .iter()
+            .map(|pattern| (*pattern).to_owned())
+            .collect(),
+    };
+    let paths = compile_auth_paths(&patterns, issues);
+
+    BehaviorConfig {
+        enabled: spec.enabled,
+        window: spec.window,
+        min_requests: spec.min_requests,
+        enumeration: EnumerationConfig {
+            enabled: spec.enumeration.enabled,
+            action: spec.enumeration.action,
+            not_found_ratio: spec.enumeration.not_found_ratio,
+            distinct_paths: spec.enumeration.distinct_paths,
+        },
+        auth: AuthConfig {
+            enabled: spec.auth.enabled,
+            action: spec.auth.action,
+            min_failures: spec.auth.min_failures,
+            paths,
+        },
+        global_auth: GlobalAuthConfig {
+            enabled: spec.global_auth.enabled,
+            window: spec.global_auth.window,
+            min_failures: spec.global_auth.min_failures,
+        },
+    }
+}
+
+fn compile_auth_paths(patterns: &[String], issues: &mut Vec<String>) -> RegexSet {
+    if patterns.len() > MAX_PATTERNS_PER_RULE {
+        issues.push(format!(
+            "protection.behavior.auth.paths: too many patterns (max {MAX_PATTERNS_PER_RULE})"
+        ));
+    }
+
+    let mut valid = Vec::new();
+    for pattern in patterns.iter().take(MAX_PATTERNS_PER_RULE) {
+        if pattern.len() > MAX_PATTERN_BYTES {
+            issues.push(format!(
+                "protection.behavior.auth.paths: pattern exceeds {MAX_PATTERN_BYTES} bytes"
+            ));
+            continue;
+        }
+        match RegexBuilder::new(pattern)
+            .size_limit(REGEX_SIZE_LIMIT)
+            .dfa_size_limit(REGEX_SIZE_LIMIT)
+            .build()
+        {
+            Ok(_) => valid.push(pattern.as_str()),
+            Err(err) => issues.push(format!(
+                "protection.behavior.auth.paths: invalid regex: {err}"
+            )),
+        }
+    }
+
+    match RegexSet::new(valid.iter().copied()) {
+        Ok(set) => set,
+        Err(err) => {
+            issues.push(format!(
+                "protection.behavior.auth.paths: invalid regex set: {err}"
+            ));
+            RegexSet::empty()
+        }
     }
 }
 
@@ -3119,6 +3439,134 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
             config.protection.ban.max_duration,
             Duration::from_secs(1800)
         );
+    }
+
+    #[test]
+    fn behavior_defaults_are_observational() {
+        let config = parse_with(BASE, "").expect("valid config");
+        let behavior = &config.protection.behavior;
+        assert!(behavior.enabled);
+        assert_eq!(behavior.window, Duration::from_secs(60));
+        assert_eq!(behavior.min_requests, 30);
+        assert!(behavior.enumeration.enabled);
+        assert_eq!(behavior.enumeration.action, BehaviorAction::Log);
+        assert_eq!(behavior.enumeration.not_found_ratio, 0.5);
+        assert_eq!(behavior.enumeration.distinct_paths, 40);
+        assert!(behavior.auth.enabled);
+        assert_eq!(behavior.auth.action, BehaviorAction::Log);
+        assert_eq!(behavior.auth.min_failures, 20);
+        assert!(behavior.auth.paths.is_match("/login"));
+        assert!(behavior.auth.paths.is_match("/api/v1/token"));
+        assert!(!behavior.auth.paths.is_match("/api/v1/users"));
+        assert!(behavior.global_auth.enabled);
+        assert_eq!(behavior.global_auth.window, Duration::from_secs(60));
+        assert_eq!(behavior.global_auth.min_failures, 100);
+    }
+
+    #[test]
+    fn parses_behavior_block() {
+        let config = parse_with(
+            BASE,
+            "protection:
+  behavior:
+    enabled: false
+    window: 30s
+    min_requests: 5
+    enumeration: { enabled: false, action: BLOCK, not_found_ratio: 0.25, distinct_paths: 10 }
+    auth: { enabled: true, action: BLOCK, min_failures: 3, paths: ['^/custom$'] }
+    global_auth: { enabled: false, window: 10s, min_failures: 50 }
+",
+        )
+        .expect("valid config");
+        let behavior = &config.protection.behavior;
+        assert!(!behavior.enabled);
+        assert_eq!(behavior.window, Duration::from_secs(30));
+        assert_eq!(behavior.min_requests, 5);
+        assert!(!behavior.enumeration.enabled);
+        assert_eq!(behavior.enumeration.action, BehaviorAction::Block);
+        assert_eq!(behavior.enumeration.not_found_ratio, 0.25);
+        assert_eq!(behavior.enumeration.distinct_paths, 10);
+        assert!(behavior.auth.enabled);
+        assert_eq!(behavior.auth.action, BehaviorAction::Block);
+        assert_eq!(behavior.auth.min_failures, 3);
+        assert!(behavior.auth.paths.is_match("/custom"));
+        assert!(!behavior.auth.paths.is_match("/login"));
+        assert!(!behavior.global_auth.enabled);
+        assert_eq!(behavior.global_auth.window, Duration::from_secs(10));
+        assert_eq!(behavior.global_auth.min_failures, 50);
+    }
+
+    #[test]
+    fn empty_auth_paths_match_nothing() {
+        let config = parse_with(BASE, "protection:\n  behavior:\n    auth: { paths: [] }\n")
+            .expect("valid config");
+        assert!(!config.protection.behavior.auth.paths.is_match("/login"));
+    }
+
+    #[test]
+    fn rejects_invalid_behavior_values() {
+        for (yaml, expected) in [
+            (
+                "protection: { behavior: { window: 0s } }\n",
+                "behavior.window",
+            ),
+            (
+                "protection: { behavior: { window: 2h } }\n",
+                "behavior.window",
+            ),
+            (
+                "protection: { behavior: { min_requests: 0 } }\n",
+                "behavior.min_requests",
+            ),
+            (
+                "protection: { behavior: { enumeration: { not_found_ratio: 1.5 } } }\n",
+                "not_found_ratio",
+            ),
+            (
+                "protection: { behavior: { enumeration: { distinct_paths: 0 } } }\n",
+                "distinct_paths",
+            ),
+            (
+                "protection: { behavior: { enumeration: { distinct_paths: 257 } } }\n",
+                "distinct_paths",
+            ),
+            (
+                "protection: { behavior: { auth: { min_failures: 0 } } }\n",
+                "auth.min_failures",
+            ),
+            (
+                "protection: { behavior: { global_auth: { window: 0s } } }\n",
+                "global_auth.window",
+            ),
+            (
+                "protection: { behavior: { global_auth: { min_failures: 0 } } }\n",
+                "global_auth.min_failures",
+            ),
+            (
+                "protection: { behavior: { auth: { paths: ['('] } } }\n",
+                "invalid regex",
+            ),
+        ] {
+            let error = parse_with(BASE, yaml).expect_err("must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "{yaml}: {error} (expected {expected})"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_behavior_fields_and_actions() {
+        let error = parse_with(BASE, "protection: { behavior: { unknown: true } }\n")
+            .expect_err("must fail");
+        assert!(error.to_string().contains("unknown"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "protection: { behavior: { enumeration: { action: DROP } } }\n",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("unknown"), "{error}");
     }
 
     #[test]

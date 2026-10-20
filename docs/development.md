@@ -841,7 +841,8 @@ admin:
 ```
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
-BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding
+BLOCK rule hits, LOG matches, rate-limit and ban decisions, behavioral
+observations and flags (`kunato_behavior_*`), global load shedding
 and inspection-budget shedding, upstream failures, configuration reloads, rules
 update outcomes (including
 `kunato_rules_update_incompatible_total` for rule sets that need a newer build),
@@ -993,6 +994,23 @@ protection:
     window: 10s
     duration: 60s
     max_duration: 1h
+  behavior:
+    enabled: true
+    window: 60s
+    min_requests: 30
+    enumeration:
+      enabled: true
+      action: LOG
+      not_found_ratio: 0.5
+      distinct_paths: 40
+    auth:
+      enabled: true
+      action: LOG
+      min_failures: 20
+    global_auth:
+      enabled: true
+      window: 60s
+      min_failures: 100
 ```
 
 The per-IP limiter uses a token bucket (`requests_per_second` refill rate, `burst`
@@ -1023,6 +1041,62 @@ runtime with `--disable-protection`. The flag also survives configuration reload
 so it is a convenient way to run load or black-box tests without rate limits and
 bans interfering.
 
+### Behavioral detection
+
+Kunato also keeps a per-source, tumbling behavior window over upstream response
+statuses. It runs after the upstream response and before response-phase rules,
+so it uses the status the application actually returned and never observes
+Kunato's own block or error responses. The default is observation only: flags
+are logged and counted, and no traffic is blocked until a signal's `action` is
+raised to `BLOCK`.
+
+- **Enumeration** counts `404` responses on non-static paths and estimates the
+  number of distinct paths in the window. A source is flagged when it meets all
+  three conditions: `min_requests`, `not_found_ratio`, and `distinct_paths`.
+  Static assets, source maps, and common crawler files are excluded from the
+  `404` count so a normal page load with a missing asset does not look like a
+  scanner.
+- **Authentication abuse** counts `401`/`403` responses on login, token,
+  session, MFA, and SSO paths. The built-in path list covers the bundled
+  `login-throttle` paths plus common API and SSO forms; replace it with
+  `auth.paths` when the application uses different endpoints. Paths are
+  normalized and percent-decoded before matching, so `//login` and `%6cogin`
+  are still recognized.
+- **Global authentication abuse** sums `401`/`403` authentication failures
+  across all sources. This is the signal for distributed spraying where each
+  source stays below the per-source threshold. It is **LOG only** in this
+  release: a global ban or throttle would let an attacker deny authentication
+  to every user.
+
+A per-source `BLOCK` flag applies a ban after the current response, using the
+same `ban.duration` and escalation as a rate-limit ban; the next request from
+that source receives `429` with `Retry-After`. The current response is forwarded
+unchanged. Any ban (behavior or rate limit) resets the source's behavior window
+so a resumed attack starts from zero.
+
+`protection.enabled: false` and `--disable-protection` disable behavioral
+detection as well. `protection.allowlist` exempts a source; an `ALLOW` rule,
+including the bundled `trusted-sources` category, does not. The state is inline
+in the existing tracked-source table and remains bounded by `max_tracked_ips`
+(about 7 MB at the default 100 000 sources).
+
+Limitations:
+
+- Behind a CDN or load balancer every client shares the proxy's source address.
+  Keep the action at `LOG` in that topology until trusted-proxy handling is
+  implemented.
+- A slow prober below every threshold is not detected. A scraper that only
+  receives `200` responses is not detected either; both remain rate-limit and
+  rule-set responsibilities.
+- Distributed enumeration is not detected; only distributed authentication
+  failures have a global signal.
+- The flag log is deduplicated per source, signal, and window. Metrics are
+  available as `kunato_behavior_not_found_total`,
+  `kunato_behavior_auth_failures_total`,
+  `kunato_behavior_enumeration_flags_total`, `kunato_behavior_auth_flags_total`,
+  `kunato_behavior_global_auth_flags_total`, and
+  `kunato_behavior_blocked_total`.
+
 ## Fault Tolerance
 
 - Invalid rule reloads never take down a running instance.
@@ -1045,6 +1119,7 @@ bans interfering.
 - [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
 - [x] HTTP/3 over QUIC (opt-in, Alt-Svc advertisement)
 - [x] Host/authority allowlist (`allowed_hosts`)
+- [x] Behavioral bot and authentication-abuse detection
 - [x] Response-phase rules (status, response headers, response body)
 - [x] curl installer and managed rule set with daily updates
 - [ ] Detached signatures (minisign) for rules updates

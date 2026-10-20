@@ -47,7 +47,7 @@ src/
     watcher.rs     # File watching and hot reload
   rules/           # Category/rule model, matcher, and evaluation engine
   proxy/           # Listener, upstream client, forwarding, TLS termination, HTTP/3, WebSocket
-  protection/      # DoS / DDoS detection, rate limiting, bans
+  protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
 dist/
@@ -60,6 +60,7 @@ tests/             # Integration tests (mock upstream, reload scenarios, rules u
 docs/
   DESIGN.md           # Overall design
   attack-coverage.md  # Attack-coverage tracker (covered / partial / gap per attack class)
+  behavioral-detection.md # Behavioral bot and authentication-abuse detection
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
@@ -124,6 +125,14 @@ rule-set updates.
   literals are accepted. An empty list or null value is invalid; omit the field
   to disable the check. `kunato init` seeds `--acme-domain` values and accepts
   `--allowed-host`; the installer passes it through.
+- `protection.behavior` enables per-source behavioral detection over upstream
+  responses: enumeration (`404` ratio and distinct paths) and authentication
+  failures (`401`/`403` on login/token/session/MFA/SSO paths), plus a global
+  authentication-failure log for distributed attempts. Per-source signals
+  default to `LOG` and accept `action: BLOCK`; the global signal is `LOG` only.
+  It is disabled by `protection.enabled: false` and `--disable-protection`, and
+  `protection.allowlist` (not an `ALLOW` rule) exempts a source. See
+  `docs/behavioral-detection.md`.
 - `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01
   challenges; it replaces `tls.cert_file`/`tls.key_file`, is validated at load
   time (no wildcards, no IPs), and is applied at startup like the rest of the

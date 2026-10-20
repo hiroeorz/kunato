@@ -26,7 +26,7 @@ use crate::acme::AcmeService;
 use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
 use crate::metrics::Metrics;
-use crate::protection::{ConnectionGuard, Decision, ProtectionState, normalize_ip};
+use crate::protection::{BehaviorSignal, ConnectionGuard, Decision, ProtectionState, normalize_ip};
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
@@ -1152,6 +1152,102 @@ fn header_has_token(headers: &HeaderMap, name: http::header::HeaderName, token: 
     })
 }
 
+fn record_behavior(
+    context: &Context,
+    peer: SocketAddr,
+    parts: &http::request::Parts,
+    status: StatusCode,
+    config: &CompiledConfig,
+) {
+    let outcome = context.protection.observe_response(
+        peer.ip(),
+        parts.uri.path(),
+        status,
+        &config.protection,
+    );
+
+    if outcome.observed_not_found {
+        context
+            .metrics
+            .behavior_not_found
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    if outcome.observed_auth_failure {
+        context
+            .metrics
+            .behavior_auth_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    if let Some(flag) = outcome.source {
+        let blocked = flag.ban.is_some();
+        let ban_seconds = flag.ban.map(|duration| duration.as_secs()).unwrap_or(0);
+        match flag.signal {
+            BehaviorSignal::Enumeration => {
+                context
+                    .metrics
+                    .behavior_enumeration_flags
+                    .fetch_add(1, Ordering::Relaxed);
+                let ratio = if flag.requests == 0 {
+                    0.0
+                } else {
+                    f64::from(flag.not_found) / f64::from(flag.requests)
+                };
+                warn!(
+                    client = %peer.ip(),
+                    signal = flag.signal.as_str(),
+                    path = %parts.uri.path(),
+                    requests = flag.requests,
+                    not_found = flag.not_found,
+                    ratio,
+                    distinct_paths = flag.distinct_paths,
+                    threshold = config.protection.behavior.enumeration.distinct_paths,
+                    action = flag.action.as_str(),
+                    blocked,
+                    ban_seconds,
+                    "behavior threshold reached"
+                );
+            }
+            BehaviorSignal::AuthAbuse => {
+                context
+                    .metrics
+                    .behavior_auth_flags
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    client = %peer.ip(),
+                    signal = flag.signal.as_str(),
+                    path = %parts.uri.path(),
+                    auth_failures = flag.auth_failures,
+                    threshold = config.protection.behavior.auth.min_failures,
+                    action = flag.action.as_str(),
+                    blocked,
+                    ban_seconds,
+                    "behavior threshold reached"
+                );
+            }
+        }
+        if blocked {
+            context
+                .metrics
+                .behavior_blocked
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    if let Some(flag) = outcome.global {
+        context
+            .metrics
+            .behavior_global_auth_flags
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            failures = flag.failures,
+            window_secs = flag.window.as_secs(),
+            threshold = config.protection.behavior.global_auth.min_failures,
+            "behavioral global authentication abuse detected"
+        );
+    }
+}
+
 fn record_upstream_error(context: &Context, err: &HttpError) {
     match err.status {
         StatusCode::GATEWAY_TIMEOUT => {
@@ -1485,6 +1581,7 @@ async fn process(
         return match result? {
             websocket::Handshake::Upgraded(response) => Ok(response),
             websocket::Handshake::Response(response) => {
+                record_behavior(context, peer, &parts, response.status(), config);
                 if !config.has_response_rules() {
                     return Ok(response);
                 }
@@ -1544,6 +1641,7 @@ async fn process(
         record_upstream_error(context, err);
     }
     let response = result?;
+    record_behavior(context, peer, &parts, response.status(), config);
 
     if !config.has_response_rules() {
         return Ok(response);
