@@ -310,6 +310,7 @@ async fn websocket_handshake(addr: SocketAddr, path: &str) -> (String, TcpStream
 struct Running {
     addr: SocketAddr,
     metrics: Arc<Metrics>,
+    config: Arc<ArcSwap<config::CompiledConfig>>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -326,7 +327,7 @@ async fn start_kunato(yaml: &str) -> Running {
     let listen = compiled.listen;
     let config = Arc::new(ArcSwap::from_pointee(compiled));
     let metrics = Arc::new(Metrics::new());
-    let server = Server::bind(listen, config, metrics.clone(), None)
+    let server = Server::bind(listen, config.clone(), metrics.clone(), None)
         .await
         .expect("bind kunato");
     let addr = server.local_addr().expect("local address");
@@ -335,6 +336,7 @@ async fn start_kunato(yaml: &str) -> Running {
     Running {
         addr,
         metrics,
+        config,
         shutdown,
         task,
     }
@@ -359,6 +361,129 @@ async fn send(addr: SocketAddr, method: Method, path: &str, body: &str) -> (Stat
         .expect("collect body")
         .to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn send_h1_with_host(
+    addr: SocketAddr,
+    method: Method,
+    uri: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (StatusCode, String) {
+    let stream = TcpStream::connect(addr).await.expect("connect kunato");
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .expect("http1 handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", host);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
+        .expect("build request");
+
+    let response = sender.send_request(request).await.expect("request");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn send_h2c_with_authority(
+    addr: SocketAddr,
+    authority: &str,
+    path: &str,
+) -> (StatusCode, String) {
+    send_h2c_request(addr, authority, None, path).await
+}
+
+async fn send_h2c_request(
+    addr: SocketAddr,
+    authority: &str,
+    host: Option<&str>,
+    path: &str,
+) -> (StatusCode, String) {
+    let stream = TcpStream::connect(addr).await.expect("connect kunato");
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+            .await
+            .expect("http2 handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut builder = Request::builder()
+        .version(Version::HTTP_2)
+        .method(Method::GET)
+        .uri(format!("http://{authority}{path}"));
+    if let Some(host) = host {
+        builder = builder.header("host", host);
+    }
+    let request = builder
+        .body(Full::new(Bytes::new()))
+        .expect("build request");
+
+    let response = sender.send_request(request).await.expect("request");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn read_status(stream: &mut TcpStream) -> StatusCode {
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("read timeout")
+            .expect("read response");
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..read]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&response);
+    let code: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .expect("status line");
+    StatusCode::from_u16(code).expect("valid status")
+}
+
+async fn send_raw_request(addr: SocketAddr, request: &str) -> StatusCode {
+    let mut stream = TcpStream::connect(addr).await.expect("connect kunato");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    read_status(&mut stream).await
+}
+
+fn config_with_allowed_hosts(upstream: SocketAddr, allowed: &str) -> String {
+    format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nallowed_hosts: {allowed}\ncategories: []\n"
+    )
 }
 
 async fn send_bytes(
@@ -528,6 +653,17 @@ async fn send_h3(
     path: &str,
     body: &str,
 ) -> (StatusCode, String, http::HeaderMap) {
+    send_h3_with_authority(addr, certificate, "localhost", method, path, body).await
+}
+
+async fn send_h3_with_authority(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    authority: &str,
+    method: Method,
+    path: &str,
+    body: &str,
+) -> (StatusCode, String, http::HeaderMap) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).expect("trust test certificate");
     let mut client_config = rustls::ClientConfig::builder()
@@ -555,7 +691,7 @@ async fn send_h3(
 
     let request = Request::builder()
         .method(method)
-        .uri(format!("https://localhost{path}"))
+        .uri(format!("https://{authority}{path}"))
         .body(())
         .expect("build request");
     let mut stream = send_request
@@ -595,6 +731,379 @@ async fn pass_through_forwards_to_upstream() {
     let (status, body) = send(running.addr, Method::GET, "/", "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_forwards_listed_and_rejects_unlisted_hosts() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let (status, body) =
+        send_h1_with_host(running.addr, Method::GET, "/", "example.com", &[], "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    let (status, body) =
+        send_h1_with_host(running.addr, Method::GET, "/", "evil.example", &[], "").await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    assert!(
+        !body.contains("example.com"),
+        "the response must not disclose the allowlist"
+    );
+
+    assert!(
+        running
+            .metrics
+            .render(0)
+            .contains("kunato_host_rejected_total 1")
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_wildcards_and_ports() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(
+        upstream,
+        "['*.example.com', 127.0.0.1]",
+    ))
+    .await;
+
+    for host in ["api.example.com", "a.b.example.com", "127.0.0.1:8080"] {
+        let (status, _) = send_h1_with_host(running.addr, Method::GET, "/", host, &[], "").await;
+        assert_eq!(status, StatusCode::OK, "host {host}");
+    }
+    for host in ["example.com", "evil.example"] {
+        let (status, _) = send_h1_with_host(running.addr, Method::GET, "/", host, &[], "").await;
+        assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "host {host}");
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn host_checking_is_disabled_without_allowed_hosts() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (status, body) =
+        send_h1_with_host(running.addr, Method::GET, "/", "evil.example", &[], "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_checks_the_http2_authority() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[allowed.example]")).await;
+
+    let (status, body) = send_h2c_with_authority(running.addr, "allowed.example", "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    let (status, _) = send_h2c_with_authority(running.addr, "evil.example", "/").await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_checks_both_http2_host_sources() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(
+        upstream,
+        "[example.com, other.example]",
+    ))
+    .await;
+
+    // Both sources are allowed even though they differ; the Host header is what
+    // the upstream receives.
+    let (status, body) =
+        send_h2c_request(running.addr, "other.example", Some("example.com"), "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    let (status, _) =
+        send_h2c_request(running.addr, "evil.example", Some("example.com"), "/").await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    let (status, _) =
+        send_h2c_request(running.addr, "example.com", Some("evil.example"), "/").await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_checks_the_http3_authority() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "allowed_hosts: [allowed.example]\n",
+    )
+    .await;
+
+    let (status, body, _) = send_h3_with_authority(
+        running.addr,
+        certificate.clone(),
+        "allowed.example",
+        Method::GET,
+        "/",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    let (status, _, _) = send_h3_with_authority(
+        running.addr,
+        certificate,
+        "evil.example",
+        Method::GET,
+        "/",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_checks_an_absolute_form_authority() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "http://evil.example/",
+        "example.com",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "http://example.com/",
+        "evil.example",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "http://example.com/",
+        "example.com",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_rejects_duplicate_host_headers() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let status = send_raw_request(
+        running.addr,
+        "GET / HTTP/1.1\r\nHost: example.com\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_rejects_a_missing_host_with_400() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let status = send_raw_request(running.addr, "GET / HTTP/1.0\r\n\r\n").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        running
+            .metrics
+            .render(0)
+            .contains("kunato_host_rejected_total 1")
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_enforces_a_configured_port() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "['example.com:8443']")).await;
+
+    let (status, _) =
+        send_h1_with_host(running.addr, Method::GET, "/", "example.com:8443", &[], "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    for host in ["example.com", "example.com:443"] {
+        let (status, _) = send_h1_with_host(running.addr, Method::GET, "/", host, &[], "").await;
+        assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "host {host}");
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_rejects_before_reading_the_body() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nallowed_hosts: [example.com]\ntimeouts: {{ body_read: 200ms }}\ncategories: []\n"
+    ))
+    .await;
+
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect kunato");
+    stream
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: evil.example\r\nContent-Length: 10\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("write request");
+    assert_eq!(
+        read_status(&mut stream).await,
+        StatusCode::MISDIRECTED_REQUEST
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_ignores_x_forwarded_host() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-host").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let (status, body) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "example.com",
+        &[("x-forwarded-host", "evil.example")],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "example.com");
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "evil.example",
+        &[("x-forwarded-host", "example.com")],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_cannot_be_bypassed_by_an_allow_rule_or_disabled_protection() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+allowed_hosts: [example.com]
+protection: {{ enabled: false }}
+categories:
+  - name: allow-all
+    action: ALLOW
+    rules:
+      - name: everything
+        match: {{ path: ^/ }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) =
+        send_h1_with_host(running.addr, Method::GET, "/", "evil.example", &[], "").await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    let (status, body) =
+        send_h1_with_host(running.addr, Method::GET, "/", "example.com", &[], "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_rejects_a_websocket_handshake_for_an_unlisted_host() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let (handshake, _stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 421"),
+        "unexpected handshake: {handshake}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_forwards_a_listed_websocket_handshake() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[kunato.test]")).await;
+
+    let (handshake, _stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn allowed_hosts_hot_reload_swaps_the_policy() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+
+    let (status, _) =
+        send_h1_with_host(running.addr, Method::GET, "/", "example.com", &[], "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.config.store(Arc::new(
+        config::parse(&config_with_allowed_hosts(upstream, "[other.example]"))
+            .expect("valid config"),
+    ));
+
+    let (status, _) =
+        send_h1_with_host(running.addr, Method::GET, "/", "example.com", &[], "").await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    let (status, _) =
+        send_h1_with_host(running.addr, Method::GET, "/", "other.example", &[], "").await;
+    assert_eq!(status, StatusCode::OK);
 
     running.stop().await;
 }

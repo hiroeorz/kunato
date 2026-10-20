@@ -102,6 +102,7 @@ configuration, and enables the service. Key options:
 | `--acme-domain DOMAIN`    | Obtain Let's Encrypt certificates automatically; repeatable.             |
 | `--acme-contact EMAIL`    | Contact email registered with the ACME account.                          |
 | `--acme-staging`          | Use the Let's Encrypt staging directory (for testing).                   |
+| `--allowed-host HOST`     | Add a Host name or IP literal to `allowed_hosts`; repeatable.            |
 | `--rules-url URL`         | Managed rule set URL (see Managed Rules and Automatic Updates).          |
 | `--no-start`              | Install and validate without enabling or starting the service.            |
 | `--allow-empty-rules`     | Start even when the initial rules download fails (blocks nothing).        |
@@ -125,6 +126,12 @@ Instead of passing certificate files, pass one or more `--acme-domain
 example.com` flags. Kunato then obtains the certificate itself and renews it
 without a deploy hook or restart; see
 [Automatic certificates](#automatic-certificates-lets-encrypt).
+
+`kunato init` also writes those domains to `allowed_hosts` (the installer
+passes them through), so a new install rejects requests with another Host
+header with `421`. Add any other name or IP clients use with `--allowed-host
+NAME`; installs that manage certificates manually can opt in the same way (see
+[Host allowlist](#host-allowlist)).
 
 Running the installer again upgrades the binary and unit while keeping the
 existing configuration.
@@ -168,6 +175,8 @@ use a different file (for example `rules.example.yaml` when running from source)
 
 - `listen` — address and port to bind.
 - `upstream` — base URL of the upstream HTTP server.
+- `allowed_hosts` — optional Host/authority allowlist; omit to disable, and list
+  every name and IP address clients use (see [Host allowlist](#host-allowlist)).
 - `categories` — ordered list of rule categories.
 - `rules_file` — optional categories-only file refreshed by the daily rules updater.
 - `overrides_file` — optional categories-only file with local exceptions,
@@ -640,6 +649,50 @@ cut off is counted in `kunato_response_decode_truncated_total` and inspected
 best-effort. An `ALLOW` rule that targets a body only matches when the full
 body was available, so a truncated response body cannot satisfy one.
 
+### Host allowlist
+
+`allowed_hosts` restricts the Host names and IP literals Kunato accepts. The
+policy is disabled when the field is absent; an explicit empty list or null
+value is invalid, so a typo cannot silently disable the check or take the site
+down:
+
+```yaml
+allowed_hosts:
+  - example.com
+  - www.example.com
+  - "*.example.com"     # any subdomain, never the apex
+  - 127.0.0.1
+  - "[::1]"
+  - internal.example.com:8443
+```
+
+The policy runs after the request head is parsed and before the request body is
+buffered or rules are evaluated. It checks the HTTP/1.1 `Host` header and the
+HTTP/2 / HTTP/3 `:authority` when the transport exposes it; when both are
+present, every source must match. Names match case-insensitively after dropping
+one trailing dot. An entry without a port matches any port; an entry with a port
+requires the request Host to carry the same port. A leading `*.` matches one or
+more subdomain labels and never the apex; an exact entry matches only that name.
+IPv4 and bracketed IPv6 literals are accepted (for example `127.0.0.1` and
+`[::1]`).
+
+A request with no Host and no `:authority`, a malformed Host or `:authority`, or
+a duplicate `Host` header is rejected with `400`. A well-formed Host or
+`:authority` that is not listed is rejected with `421`. The check is an engine
+policy: an `ALLOW` rule (including `trusted-sources`) does not bypass it, it
+stays active with `protection.enabled: false`, and a reload swaps the list
+atomically. Rejections are counted in `kunato_host_rejected_total`.
+
+`kunato init` writes every `--acme-domain` value into `allowed_hosts` so a new
+ACME install cannot lock itself out, and accepts `--allowed-host NAME` for
+additional names (the installer passes the flag through). When Kunato runs
+behind a TLS-terminating proxy, list the Host value that the proxy forwards, not
+necessarily the public name. Requests addressed to an IP need that literal in
+the list. Adding an ACME domain by hand does not update `allowed_hosts`; Kunato
+logs a warning at startup or reload when a configured ACME domain is missing
+from the list. Leaving `allowed_hosts` out (or using `--cert-file` without
+`--allowed-host`) keeps the previous behavior: any Host is accepted.
+
 ### Upload inspection
 
 Multipart file parts are checked against the type they claim to be before rule
@@ -991,6 +1044,7 @@ bans interfering.
 - [x] Optional TLS termination
 - [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
 - [x] HTTP/3 over QUIC (opt-in, Alt-Svc advertisement)
+- [x] Host/authority allowlist (`allowed_hosts`)
 - [x] Response-phase rules (status, response headers, response body)
 - [x] curl installer and managed rule set with daily updates
 - [ ] Detached signatures (minisign) for rules updates

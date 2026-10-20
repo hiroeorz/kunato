@@ -14,6 +14,7 @@ pub struct Metrics {
     pub request_truncated: AtomicU64,
     pub request_body_rejected: AtomicU64,
     pub upload_rejected: AtomicU64,
+    pub host_rejected: AtomicU64,
     pub response_decode_truncated: AtomicU64,
     pub request_decode_truncated: AtomicU64,
     pub response_decode_skipped: AtomicU64,
@@ -51,6 +52,7 @@ impl Metrics {
             request_truncated: AtomicU64::new(0),
             request_body_rejected: AtomicU64::new(0),
             upload_rejected: AtomicU64::new(0),
+            host_rejected: AtomicU64::new(0),
             response_decode_truncated: AtomicU64::new(0),
             request_decode_truncated: AtomicU64::new(0),
             response_decode_skipped: AtomicU64::new(0),
@@ -132,6 +134,12 @@ impl Metrics {
             "kunato_upload_rejected_total",
             "Multipart uploads rejected because their content is executable, script, or active markup.",
             self.upload_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_host_rejected_total",
+            "Requests rejected by the Host/authority allowlist (missing, malformed, duplicate, or unlisted).",
+            self.host_rejected.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -325,6 +333,7 @@ mod tests {
         assert!(text.contains("kunato_graphql_rejected_total 0"));
         assert!(text.contains("kunato_request_body_rejected_total 0"));
         assert!(text.contains("kunato_upload_rejected_total 0"));
+        assert!(text.contains("kunato_host_rejected_total 0"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));
         assert!(text.contains("kunato_active_connections 3"));
         assert!(text.contains("kunato_uptime_seconds"));

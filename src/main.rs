@@ -43,7 +43,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             Command::Init(args) => run_init(&args),
             Command::Validate => {
                 let config = config::load(&cli.config)?;
-                warn_body_inspection(&config);
+                warn_configuration(&config);
                 println!("configuration OK: {}", cli.config.display());
                 Ok(())
             }
@@ -53,7 +53,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     }
 
     let mut initial = config::load(&cli.config)?;
-    warn_body_inspection(&initial);
+    warn_configuration(&initial);
 
     if cli.validate {
         println!("configuration OK: {}", cli.config.display());
@@ -143,8 +143,11 @@ async fn run(cli: Cli) -> Result<(), Error> {
     Ok(())
 }
 
-fn warn_body_inspection(config: &CompiledConfig) {
+fn warn_configuration(config: &CompiledConfig) {
     if let Some(warning) = config.body_inspection_warning() {
+        warn!("{warning}");
+    }
+    if let Some(warning) = config.allowed_hosts_warning() {
         warn!("{warning}");
     }
 }
@@ -166,6 +169,12 @@ fn run_init(args: &InitArgs) -> Result<(), Error> {
     }
     std::fs::write(&args.output, text)?;
     println!("wrote {}", args.output.display());
+    if args.allowed_hosts.is_empty() && args.acme_domains.is_empty() {
+        println!(
+            "note: allowed_hosts is not set; any Host header is accepted. Add the names \
+             clients use to enable host checking."
+        );
+    }
 
     let rules_file = args.rules_file.as_path();
     if !rules_file.exists() {

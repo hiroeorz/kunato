@@ -196,8 +196,12 @@ pub fn reload(
                 .map(|category| category.rules.len())
                 .sum();
             let body_inspection_warning = new_config.body_inspection_warning();
+            let allowed_hosts_warning = new_config.allowed_hosts_warning();
             config.store(Arc::new(new_config));
             if let Some(warning) = body_inspection_warning {
+                warn!("{warning}");
+            }
+            if let Some(warning) = allowed_hosts_warning {
                 warn!("{warning}");
             }
             info!(categories, rules, "configuration reloaded");
@@ -349,6 +353,48 @@ mod tests {
         let current = config.load();
         assert_eq!(current.limits.graphql.max_depth, 7);
         assert_eq!(current.limits.graphql.max_fields, 80);
+    }
+
+    #[test]
+    fn reload_keeps_the_previous_allowed_hosts_on_an_invalid_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nallowed_hosts: [example.com]\n",
+        );
+        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        assert!(
+            config
+                .load()
+                .allowed_hosts
+                .as_ref()
+                .expect("allowed hosts")
+                .matches("example.com")
+        );
+
+        for invalid in ["allowed_hosts: []\n", "allowed_hosts:\n"] {
+            write(
+                &path,
+                &format!("listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n{invalid}"),
+            );
+            assert!(reload(&path, &config, &Metrics::new(), false).is_none());
+            assert!(
+                config
+                    .load()
+                    .allowed_hosts
+                    .as_ref()
+                    .expect("previous allowed hosts")
+                    .matches("example.com")
+            );
+        }
+
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
+        );
+        assert!(reload(&path, &config, &Metrics::new(), false).is_some());
+        assert!(config.load().allowed_hosts.is_none());
     }
 
     #[test]

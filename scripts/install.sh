@@ -26,6 +26,7 @@ TLS_KEY=""
 ACME_DOMAINS=""
 ACME_CONTACT=""
 ACME_STAGING=0
+ALLOWED_HOSTS=""
 RULES_URL="$DEFAULT_RULES_URL"
 NO_START=0
 ALLOW_EMPTY_RULES=0
@@ -56,6 +57,9 @@ Options:
   --acme-domain DOMAIN Obtain Let's Encrypt certificates automatically (repeatable).
   --acme-contact EMAIL Contact email registered with the ACME account.
   --acme-staging       Use the Let's Encrypt staging directory (for testing).
+  --allowed-host HOST  Host name or IP clients use to reach this server; added
+                       to allowed_hosts (repeatable). ACME domains are added
+                       automatically.
   --rules-url URL      Managed rule set URL (default: dist/rules.yaml on main).
   --no-start           Install and validate, but do not enable/start the service.
   --allow-empty-rules  Start kunato even when the initial rules download fails
@@ -110,6 +114,15 @@ while [ $# -gt 0 ]; do
         --acme-staging)
             ACME_STAGING=1
             shift
+            ;;
+        --allowed-host)
+            [ $# -ge 2 ] || die "--allowed-host requires a value"
+            [ -n "$2" ] || die "--allowed-host must not be empty"
+            case "$2" in
+                *[[:space:]]*) die "--allowed-host must not contain whitespace" ;;
+            esac
+            ALLOWED_HOSTS="${ALLOWED_HOSTS:+$ALLOWED_HOSTS }$2"
+            shift 2
             ;;
         --rules-url)
             [ $# -ge 2 ] || die "--rules-url requires a value"
@@ -295,7 +308,7 @@ initialize_configuration() {
             UPSTREAM=$(ask "Upstream URL (the web server Kunato protects)" "$DEFAULT_UPSTREAM")
         fi
         if [ -z "$TLS_CERT" ] && [ -z "$ACME_DOMAINS" ] && [ "$LISTEN" != "${LISTEN#*:443}" ]; then
-            answer=$(ask "Let's Encrypt domain(s) for automatic certificates, comma separated (empty to provide a certificate)" "")
+            answer=$(ask "Let's Encrypt domain(s), comma separated (also added to allowed_hosts; empty to provide a certificate)" "")
             ACME_DOMAINS=$(printf '%s' "$answer" | tr ',' ' ')
             if [ -z "$ACME_DOMAINS" ]; then
                 TLS_CERT=$(ask "TLS certificate path (empty to listen without TLS)" "")
@@ -319,9 +332,16 @@ initialize_configuration() {
         if [ -n "$TLS_CERT" ]; then
             set -- "$@" --cert-file "$TLS_DIR/cert.pem" --key-file "$TLS_DIR/key.pem"
         fi
+        # Entries may contain shell glob characters (`*.example.com`, `[::1]`).
+        # Disable pathname expansion so they reach `init` verbatim.
+        set -f
         for domain in $ACME_DOMAINS; do
             set -- "$@" --acme-domain "$domain"
         done
+        for host in $ALLOWED_HOSTS; do
+            set -- "$@" --allowed-host "$host"
+        done
+        set +f
         if [ -n "$ACME_CONTACT" ]; then
             set -- "$@" --acme-contact "$ACME_CONTACT"
         fi

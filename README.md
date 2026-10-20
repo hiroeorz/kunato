@@ -17,6 +17,10 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
 
 - **Reverse proxy** — Sits between browsers/apps and your HTTP server, forwarding
   traffic while inspecting every request.
+- **Host allowlist** — Rejects requests whose Host or `:authority` is missing,
+  malformed, or not in `allowed_hosts` with `400`/`421` before rules run. The
+  installer seeds the list from `--acme-domain`; add other names or IPs with
+  `--allowed-host`.
 - **HTTP/2, HTTP/3, and HTTP/1.1** — Accepts HTTP/2 over TLS (ALPN) and
   cleartext h2c (prior knowledge), plus optional HTTP/3 over QUIC, falling back
   to HTTP/1.1 automatically. Upstream requests are sent over HTTP/1.1.
@@ -75,15 +79,17 @@ Client ──────►  ┌───────────────�
 ```
 
 1. A request arrives at Kunato.
-2. Categories are evaluated in the order they appear in the configuration, and
+2. If `allowed_hosts` is configured, the Host / `:authority` is checked first;
+   a missing, malformed, or unlisted name is rejected with `400`/`421`.
+3. Categories are evaluated in the order they appear in the configuration, and
    rules within each category in their order.
-3. The first rule whose conditions all match is handled according to its effective
+4. The first rule whose conditions all match is handled according to its effective
    action:
    - `ALLOW` — forwards the request and stops evaluation.
    - `BLOCK` — rejects the request immediately (default: `403 Forbidden`).
    - `LOG` — records the match and continues evaluation.
-4. If no rule matches, the request is forwarded to the upstream (pass-through).
-5. Response-phase categories run on the upstream response the same way. `BLOCK`
+5. If no rule matches, the request is forwarded to the upstream (pass-through).
+6. Response-phase categories run on the upstream response the same way. `BLOCK`
    replaces the upstream response with the configured response; `ALLOW` stops
    response evaluation and passes the response through unchanged.
 
@@ -110,6 +116,12 @@ reachable from the internet, so wildcards and setups behind a TLS-terminating
 CDN or proxy must manage certificates manually (see
 [Deployment](docs/development.md#deployment) for the full option list).
 
+The `--acme-domain` names are also written to `allowed_hosts`, so requests with
+any other Host header are rejected with `421`. If clients reach Kunato through
+another name or an IP address (for example a health check), add it with
+`--allowed-host` or edit `/etc/kunato/kunato.yaml` (see
+[Host allowlist](docs/development.md#host-allowlist)).
+
 Upgrading an installed server (Kunato v0.3.2 and later) uses the built-in
 command, which reruns the installer published with the target release:
 
@@ -118,6 +130,9 @@ sudo kunato upgrade                    # upgrade to the latest release
 sudo kunato upgrade --version v0.4.0   # pin a specific release
 sudo kunato upgrade --dry-run          # print what would run
 ```
+
+Existing configurations are kept as-is, including an absent `allowed_hosts`;
+add the field to the existing file to enable host checking.
 
 The service starts automatically; the first start orders the certificate in
 the background, so allow a few seconds before TLS works. Confirm it is

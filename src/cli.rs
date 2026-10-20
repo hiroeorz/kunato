@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::allowed_hosts::AllowedHosts;
 use crate::error::Error;
 
 pub const DEFAULT_RULES_URL: &str =
@@ -105,6 +107,11 @@ pub struct InitArgs {
     #[arg(long, requires = "acme_domains")]
     pub acme_staging: bool,
 
+    /// Extra Host names or IP literals clients use to reach this server. The
+    /// ACME domains are added automatically; repeat the flag for more names.
+    #[arg(long = "allowed-host", value_name = "HOST")]
+    pub allowed_hosts: Vec<String>,
+
     /// Rules file refreshed by the daily updater.
     #[arg(long, default_value = DEFAULT_RULES_FILE, value_name = "PATH")]
     pub rules_file: PathBuf,
@@ -145,6 +152,28 @@ impl InitArgs {
             out.push_str(&format!("# listen: {}\n", yaml_scalar(&ipv6.to_string())));
         }
         out.push_str(&format!("upstream: {}\n", yaml_scalar(&self.upstream)));
+
+        let allowed_hosts = self.render_allowed_hosts()?;
+        if allowed_hosts.is_empty() {
+            out.push_str(
+                "\n# Host allowlisting is disabled. List every name and IP address clients\n\
+                 # use to reach this server to reject other Host headers with 421:\n\
+                 # allowed_hosts:\n\
+                 #   - example.com\n\
+                 #   - 127.0.0.1\n",
+            );
+        } else {
+            out.push_str(
+                "\n# Requests whose Host header is not listed here are rejected with 421 (a\n\
+                 # missing or malformed Host gets 400) before rule evaluation. ACME\n\
+                 # domains are added automatically; add every other name and IP address\n\
+                 # clients use to reach this server.\n",
+            );
+            out.push_str("allowed_hosts:\n");
+            for host in &allowed_hosts {
+                out.push_str(&format!("  - {}\n", yaml_scalar(host)));
+            }
+        }
 
         if !self.acme_domains.is_empty() {
             out.push_str(
@@ -207,6 +236,32 @@ impl InitArgs {
         out.push_str("  max_bytes: 1048576\n");
         Ok(out)
     }
+
+    fn render_allowed_hosts(&self) -> Result<Vec<String>, Error> {
+        let combined: Vec<String> = self
+            .acme_domains
+            .iter()
+            .chain(self.allowed_hosts.iter())
+            .cloned()
+            .collect();
+        if combined.is_empty() {
+            return Ok(combined);
+        }
+
+        let mut issues = Vec::new();
+        if AllowedHosts::validate(&combined, &mut issues).is_none() {
+            return Err(Error::Message(issues.join("; ")));
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut hosts = Vec::new();
+        for host in combined {
+            if seen.insert(host.trim_end_matches('.').to_ascii_lowercase()) {
+                hosts.push(host);
+            }
+        }
+        Ok(hosts)
+    }
 }
 
 fn path_str(path: &std::path::Path) -> String {
@@ -245,6 +300,7 @@ mod tests {
             acme_domains: Vec::new(),
             acme_contact: None,
             acme_staging: false,
+            allowed_hosts: Vec::new(),
             rules_file: PathBuf::from(DEFAULT_RULES_FILE),
             rules_url: DEFAULT_RULES_URL.to_owned(),
             overrides_file: Some(PathBuf::from("/etc/kunato/overrides.yaml")),
@@ -296,6 +352,86 @@ mod tests {
             .expect("acme settings");
         assert_eq!(acme.domains, vec!["example.com", "www.example.com"]);
         assert_eq!(acme.contact.as_deref(), Some("admin@example.com"));
+        let allowed = compiled.allowed_hosts.expect("allowed hosts");
+        assert!(allowed.matches("example.com"));
+        assert!(allowed.matches("www.example.com"));
+    }
+
+    #[test]
+    fn renders_allowed_hosts_from_acme_and_explicit_flags() {
+        let mut args = args();
+        args.cert_file = None;
+        args.key_file = None;
+        args.acme_domains = vec!["example.com".to_owned(), "www.example.com".to_owned()];
+        args.allowed_hosts = vec!["127.0.0.1".to_owned(), "EXAMPLE.COM".to_owned()];
+        let text = args.render().expect("render");
+        assert!(text.contains("allowed_hosts:\n"));
+
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        let allowed = compiled.allowed_hosts.expect("allowed hosts");
+        assert!(allowed.matches("example.com"));
+        assert!(allowed.matches("www.example.com"));
+        assert!(allowed.matches("127.0.0.1:8080"));
+        assert!(!allowed.matches("evil.example"));
+        assert_eq!(text.matches("allowed_hosts:\n  - example.com\n").count(), 1);
+    }
+
+    #[test]
+    fn renders_a_commented_hint_when_host_checking_is_disabled() {
+        let text = args().render().expect("render");
+        assert!(text.contains("# allowed_hosts:"));
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        assert!(compiled.allowed_hosts.is_none());
+    }
+
+    #[test]
+    fn renders_allowed_hosts_with_ports_and_ipv6() {
+        let mut args = args();
+        args.allowed_hosts = vec!["example.com:8443".to_owned(), "[::1]".to_owned()];
+        let text = args.render().expect("render");
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        let allowed = compiled.allowed_hosts.expect("allowed hosts");
+        assert!(allowed.matches("example.com:8443"));
+        assert!(allowed.matches("[::1]"));
+        assert!(!allowed.matches("example.com"));
+    }
+
+    #[test]
+    fn rejects_an_invalid_allowed_host_during_init() {
+        let mut invalid = args();
+        invalid.allowed_hosts = vec!["bad host".to_owned()];
+        let error = invalid.render().expect_err("must fail");
+        assert!(error.to_string().contains("allowed_hosts"));
+
+        // An invalid duplicate must not be masked by a valid entry during
+        // deduplication.
+        let mut duplicate = args();
+        duplicate.acme_domains = vec!["example.com".to_owned()];
+        duplicate.allowed_hosts = vec!["example.com..".to_owned()];
+        let error = duplicate.render().expect_err("must fail");
+        assert!(error.to_string().contains("allowed_hosts"));
+    }
+
+    #[test]
+    fn parses_repeated_allowed_host_flags() {
+        let cli = Cli::try_parse_from([
+            "kunato",
+            "init",
+            "--upstream",
+            "http://127.0.0.1:3000",
+            "--allowed-host",
+            "app.example.com",
+            "--allowed-host",
+            "127.0.0.1",
+        ])
+        .expect("parse");
+        let Some(Command::Init(args)) = cli.command else {
+            panic!("expected the init command");
+        };
+        assert_eq!(
+            args.allowed_hosts,
+            vec!["app.example.com".to_owned(), "127.0.0.1".to_owned()]
+        );
     }
 
     #[test]

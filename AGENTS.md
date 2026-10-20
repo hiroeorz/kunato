@@ -36,6 +36,7 @@ src/
   error.rs         # Error types
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
+  allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
@@ -115,6 +116,14 @@ rule-set updates.
   PDF, office, media, or font claim. `strict` also covers generic binary claims;
   `off` disables the check. It runs before rule evaluation, so `ALLOW` does not
   bypass it.
+- `allowed_hosts` is an optional Host/authority allowlist. When set, a missing,
+  malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority`
+  (HTTP/2 / HTTP/3) is rejected with `400`/`421` before rule evaluation, and
+  `ALLOW` rules cannot bypass it. A leading `*.` matches subdomains but not the
+  apex; an entry without a port matches any port; IPv4 and bracketed IPv6
+  literals are accepted. An empty list or null value is invalid; omit the field
+  to disable the check. `kunato init` seeds `--acme-domain` values and accepts
+  `--allowed-host`; the installer passes it through.
 - `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01
   challenges; it replaces `tls.cert_file`/`tls.key_file`, is validated at load
   time (no wildcards, no IPs), and is applied at startup like the rest of the

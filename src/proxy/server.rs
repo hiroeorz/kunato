@@ -823,21 +823,21 @@ async fn handle_request(
     };
 
     let config = context.config();
-    let (parts, body) = request.into_parts();
-    let result = match admission_error(&context, peer, &config) {
-        Some(err) => Err(err),
-        None => match context.reserve_request_inspection() {
-            Some(inspection) => match read_body(body, &config, inspection, &context).await {
-                Ok((body, inspection)) => {
-                    process(parts, body, peer, &config, &context, upgrade, inspection).await
-                }
-                Err(err) => Err(err),
-            },
-            None => {
-                context.record_overloaded();
-                Err(inspection_capacity_error())
+    let (mut parts, body) = request.into_parts();
+    let result = if let Some(err) = admission_error(&context, peer, &config) {
+        Err(err)
+    } else if let Some(err) = host_policy_error(&context, &config, &mut parts, peer) {
+        Err(err)
+    } else if let Some(inspection) = context.reserve_request_inspection() {
+        match read_body(body, &config, inspection, &context).await {
+            Ok((body, inspection)) => {
+                process(parts, body, peer, &config, &context, upgrade, inspection).await
             }
-        },
+            Err(err) => Err(err),
+        }
+    } else {
+        context.record_overloaded();
+        Err(inspection_capacity_error())
     };
     let mut response = match result {
         Ok(response) => response,
@@ -872,6 +872,34 @@ pub(crate) fn admission_error(
         .protection
         .check_request(peer.ip(), &config.protection);
     protection_error(context, decision)
+}
+
+/// Enforce the optional Host/authority allowlist before the request body is
+/// ingested. The helper also promotes `:authority` to `Host`, so callers get a
+/// normalized request head for rule evaluation and forwarding.
+pub(crate) fn host_policy_error(
+    context: &Context,
+    config: &CompiledConfig,
+    parts: &mut http::request::Parts,
+    peer: SocketAddr,
+) -> Option<HttpError> {
+    forward::normalize_host_header(parts);
+    let allowed = config.allowed_hosts.as_ref()?;
+    let Err(violation) = allowed.check(parts) else {
+        return None;
+    };
+    context
+        .metrics
+        .host_rejected
+        .fetch_add(1, Ordering::Relaxed);
+    if let Some(host) = violation.host() {
+        debug!(
+            client = %peer.ip(),
+            host = %host,
+            "request Host is not in allowed_hosts"
+        );
+    }
+    Some(HttpError::new(violation.status(), violation.message()))
 }
 
 /// Stable error for requests that could not reserve inspection memory. The
@@ -1151,7 +1179,11 @@ async fn process(
     upgrade: Option<Upgrade>,
     mut inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
-    forward::normalize_host_header(&mut parts);
+    // The request entry points enforce this before buffering the body. Repeat
+    // it here so a direct `process_payload` caller cannot skip the policy.
+    if let Some(err) = host_policy_error(context, config, &mut parts, peer) {
+        return Err(err);
+    }
     let body = &payload.prefix;
     if payload.truncated {
         context

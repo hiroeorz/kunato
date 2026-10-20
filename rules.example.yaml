@@ -13,6 +13,13 @@
 listen: 127.0.0.1:8080
 upstream: http://127.0.0.1:3000
 
+# Optional Host/authority allowlist. Uncomment and list every name and IP
+# address clients use to reach this server; other Host headers are rejected
+# with 421 before rule evaluation. `kunato init` seeds this from --acme-domain.
+# allowed_hosts:
+#   - example.com
+#   - 127.0.0.1
+
 categories:
   # Trusted clients skip the remaining request rules and the strict body-size
   # rejection. Engine limits (header/path size, GraphQL, undecodable bodies) and

@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer};
 
 pub mod watcher;
 
+use crate::allowed_hosts::AllowedHosts;
 use crate::error::{Error, UNKNOWN_TARGET_ISSUE};
 use crate::rules::matcher::{
     Matcher, PayloadMatcher, StatusRange, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH,
@@ -241,6 +242,11 @@ fn default_true() -> bool {
 pub struct ConfigSpec {
     pub listen: SocketAddr,
     pub upstream: String,
+    /// Host names and IP literals clients may use to reach this server. When
+    /// absent, host checking is disabled; an empty list or null value is
+    /// rejected.
+    #[serde(default, deserialize_with = "de_allowed_hosts")]
+    pub allowed_hosts: Option<Vec<String>>,
     #[serde(default)]
     pub categories: Vec<CategorySpec>,
     #[serde(default)]
@@ -952,6 +958,7 @@ impl Upstream {
 pub struct CompiledConfig {
     pub listen: SocketAddr,
     pub upstream: Upstream,
+    pub allowed_hosts: Option<AllowedHosts>,
     pub categories: Vec<CompiledCategory>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -1001,6 +1008,28 @@ impl CompiledConfig {
              {subject} and larger request bodies are forwarded uninspected; set `strict` to \
              reject them unless a rule allows the request",
             self.limits.max_body_bytes
+        ))
+    }
+
+    /// Warning to log when an enabled ACME domain is missing from
+    /// `allowed_hosts`, which would reject every request for that name with a
+    /// `421` even though a certificate was issued for it.
+    pub fn allowed_hosts_warning(&self) -> Option<String> {
+        let allowed = self.allowed_hosts.as_ref()?;
+        let acme = self.tls.as_ref()?.acme.as_ref()?;
+        let missing: Vec<&str> = acme
+            .domains
+            .iter()
+            .map(String::as_str)
+            .filter(|domain| !allowed.matches(domain))
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "allowed_hosts does not include the ACME domain(s) {}; requests for those names are \
+             rejected with 421. Add them to allowed_hosts.",
+            missing.join(", ")
         ))
     }
 
@@ -1240,6 +1269,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     validate_admin(&spec.admin, &mut issues);
     validate_tls(&spec.tls, &mut issues);
     validate_http3(&spec.http3, &spec.tls, &mut issues);
+    let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
     let rules_update = compile_rules_update(&spec.rules_update, &sources.rules_file, &mut issues);
@@ -1273,6 +1303,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     Ok(CompiledConfig {
         listen: spec.listen,
         upstream,
+        allowed_hosts,
         categories,
         timeouts: Timeouts::from(&spec.timeouts),
         limits: Limits::from(&spec.limits),
@@ -1285,6 +1316,14 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         overrides_file: sources.overrides_file,
         rules_update,
     })
+}
+
+fn compile_allowed_hosts(
+    spec: &Option<Vec<String>>,
+    issues: &mut Vec<String>,
+) -> Option<AllowedHosts> {
+    let entries = spec.as_ref()?;
+    AllowedHosts::validate(entries, issues)
 }
 
 fn compile_categories(
@@ -2443,6 +2482,19 @@ fn bounded_duration(duration: Duration) -> Result<Duration, String> {
     Ok(duration)
 }
 
+fn de_allowed_hosts<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<StringOrSeq>::deserialize(deserializer)?;
+    match value {
+        Some(value) => Ok(Some(value.into_vec())),
+        None => Err(D::Error::custom(
+            "allowed_hosts must not be empty; omit the field to disable host checking",
+        )),
+    }
+}
+
 fn de_opt_string_or_seq<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -2481,6 +2533,97 @@ mod tests {
         assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn parses_allowed_hosts() {
+        let config = parse_with(
+            BASE,
+            "allowed_hosts:
+  - example.com
+  - '*.example.com'
+  - 127.0.0.1
+  - '[::1]'
+  - 'example.com:8443'
+categories: []
+",
+        )
+        .expect("valid config");
+        let allowed = config.allowed_hosts.expect("allowed hosts");
+        assert!(allowed.matches("example.com"));
+        assert!(allowed.matches("Example.COM."));
+        assert!(allowed.matches("www.example.com"));
+        assert!(!allowed.matches("example.com.evil"));
+        assert!(allowed.matches("127.0.0.1:8080"));
+        assert!(allowed.matches("[::1]"));
+        assert!(allowed.matches("example.com:8443"));
+        assert!(allowed.matches("example.com:443"));
+    }
+
+    #[test]
+    fn allows_a_single_allowed_host_scalar() {
+        let config = parse_with(BASE, "allowed_hosts: example.com\n").expect("valid config");
+        let allowed = config.allowed_hosts.expect("allowed hosts");
+        assert!(allowed.matches("example.com"));
+    }
+
+    #[test]
+    fn rejects_a_null_allowed_hosts() {
+        let error = parse_with(BASE, "allowed_hosts:\n").expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"));
+        let error = parse_with(BASE, "allowed_hosts: null\n").expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn rejects_empty_and_invalid_allowed_hosts() {
+        let error = parse_with(BASE, "allowed_hosts: []\n").expect_err("must fail");
+        assert!(error.to_string().contains("must not be empty"));
+
+        let error = parse_with(BASE, "allowed_hosts: ['example.com:0']\n").expect_err("must fail");
+        assert!(error.to_string().contains("allowed_hosts"));
+
+        let error = parse_with(BASE, "allowed_hosts: ['foo bar']\n").expect_err("must fail");
+        assert!(error.to_string().contains("allowed_hosts"));
+    }
+
+    #[test]
+    fn warns_when_an_acme_domain_is_missing_from_allowed_hosts() {
+        let config = parse_with(
+            BASE,
+            "allowed_hosts: [example.com]
+tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
+",
+        )
+        .expect("valid config");
+        let warning = config.allowed_hosts_warning().expect("warning");
+        assert!(warning.contains("www.example.com"));
+        assert!(warning.contains("421"));
+    }
+
+    #[test]
+    fn wildcard_allowed_hosts_cover_acme_domains() {
+        let config = parse_with(
+            BASE,
+            "allowed_hosts: ['*.example.com', example.com]
+tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
+",
+        )
+        .expect("valid config");
+        assert!(config.allowed_hosts_warning().is_none());
+    }
+
+    #[test]
+    fn allowed_hosts_warning_is_absent_without_acme_or_a_list() {
+        let config = parse_with(
+            BASE,
+            "tls: { acme: { enabled: true, domains: [example.com] } }\n",
+        )
+        .expect("valid config");
+        assert!(config.allowed_hosts_warning().is_none());
+
+        let config = parse_with(BASE, "allowed_hosts: [example.com]\n").expect("valid config");
+        assert!(config.allowed_hosts_warning().is_none());
     }
 
     #[test]

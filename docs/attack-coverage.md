@@ -19,8 +19,9 @@ Note: the engine matches `path`, `method`, `source_ip`, `headers`, `cookies`,
 `regex` over query/body/cookies/headers/path/response_body, `status`,
 `response_headers`, plus `threshold` categories and per-rule `limit`, so a ❌
 often means "no signature shipped", not "impossible". Engine checks outside that
-match language — GraphQL depth/complexity, strict body sizing, and
-`limits.upload_inspection` — stop classes no regex expresses.
+match language — GraphQL depth/complexity, strict body sizing,
+`limits.upload_inspection`, and the `allowed_hosts` Host/authority policy — stop
+classes no regex expresses.
 
 ## 1. Injection
 
@@ -73,7 +74,7 @@ match language — GraphQL depth/complexity, strict body sizing, and
 | HTTP Request Splitting | 🔶 | `crlf-injection` plus embedded-HTTP inspection |
 | HTTP Response Splitting | 🔶 | Same (CRLF in headers is blocked) |
 | HTTP Parameter Pollution (HPP) | ❌ | Duplicate-parameter inspection/normalization is absent |
-| Host Header Injection | 🔶 | `malformed-host-header` and `oversized-host-header` only; host-rewrite abuse depends on the application. A client-supplied `X-Forwarded-Host` is replaced with the Host header, but an `allowed_hosts` policy is not implemented (the Rack/Forwarded allowlist CVEs are CVSS 4.8, below the bundling bar) |
+| Host Header Injection | 🔶 | Full enforcement when `allowed_hosts` is configured: a missing, malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority` (HTTP/2 / HTTP/3) is rejected with `400`/`421` before body buffering and rule evaluation, and `ALLOW` rules cannot bypass it. Fresh `kunato init --acme-domain` installs seed the list and accept `--allowed-host`; manual certificate/TLS-proxy installs and existing configs opt in, and an unset list leaves the previous behavior. A client-supplied `X-Forwarded-Host` is replaced with the Host header. `malformed-host-header` and `oversized-host-header` remain as defense in depth when the policy is unset (the Rack/Forwarded allowlist CVEs are CVSS 4.8, below the bundling bar) |
 | Invalid Content-Length / Transfer-Encoding | 🔶 | Rejected at the protocol layer plus CVE-specific rules; no generic rule |
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
@@ -173,7 +174,7 @@ Rails-specific attack surface beyond the CVE categories above; the rules live in
 | Ruby deserialization | ✅ | `ruby-deserialization` covers base64 Marshal (`BAh7`), encoded raw `%04%08`, and YAML `!ruby/` tags across query/body/cookies; signed wrappers (`signed_id`, GlobalID, `MessageVerifier`) are not statically detectable |
 | Multipart boundary differentials | ✅ | The engine flattens every declared boundary (up to four) and falls back to raw percent passes beyond that, closing the CVE-2026-26961 WAF-bypass class |
 | `_method` overrides | 🔶 | Method conditions match the wire method; Rack accepts only standard overrides, so `bad-methods` cannot be bypassed |
-| Host / X-Forwarded-Host | 🔶 | A client-supplied `X-Forwarded-Host` is replaced with the Host header; no `allowed_hosts` policy yet |
+| Host / X-Forwarded-Host | 🔶 | When `allowed_hosts` is configured, a client-supplied `X-Forwarded-Host` is replaced with the Host header and unlisted Host / `:authority` names are rejected with `421` before rule evaluation. Fresh ACME installs seed the list from `--acme-domain`; manual installs opt in, and an unset list keeps the previous behavior |
 | Patch-side only | ❌ | Active Storage libvips variants (CVE-2026-66066) and Rack::Static prefix exposure (CVE-2026-34785) have no stable request shape — upgrade the gems |
 | Application-side | ❌ | CSRF, strong parameters/mass assignment, authorization, and `secret_key_base` exposure cannot be fixed by the WAF |
 

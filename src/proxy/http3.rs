@@ -219,23 +219,22 @@ async fn handle_request(
     };
 
     let config = context.config();
-    let (parts, _) = request.into_parts();
+    let (mut parts, _) = request.into_parts();
     let (mut send, recv) = stream.split();
-    let mut response = match server::admission_error(&context, peer, &config) {
-        Some(err) => server::rejected(peer, &err),
-        None => match context.reserve_request_inspection() {
-            Some(inspection) => match read_prefix(recv, &config, inspection, &context).await {
-                Ok((payload, inspection)) => {
-                    server::process_payload(parts, payload, peer, &config, &context, inspection)
-                        .await
-                }
-                Err(err) => server::rejected(peer, &err),
-            },
-            None => {
-                context.record_overloaded();
-                server::rejected(peer, &server::inspection_capacity_error())
+    let mut response = if let Some(err) = server::admission_error(&context, peer, &config) {
+        server::rejected(peer, &err)
+    } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, peer) {
+        server::rejected(peer, &err)
+    } else if let Some(inspection) = context.reserve_request_inspection() {
+        match read_prefix(recv, &config, inspection, &context).await {
+            Ok((payload, inspection)) => {
+                server::process_payload(parts, payload, peer, &config, &context, inspection).await
             }
-        },
+            Err(err) => server::rejected(peer, &err),
+        }
+    } else {
+        context.record_overloaded();
+        server::rejected(peer, &server::inspection_capacity_error())
     };
     config.response_headers.apply(response.headers_mut());
     if let Err(err) = send_response(&mut send, response).await {

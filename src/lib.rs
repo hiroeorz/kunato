@@ -1,5 +1,6 @@
 pub mod acme;
 pub mod admin;
+pub mod allowed_hosts;
 pub mod cli;
 pub mod config;
 pub mod decoding;
