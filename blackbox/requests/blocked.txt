@@ -522,6 +522,15 @@ POST /upload body="filename=\"shell.dll\""
 PUT /files/shell body="filename=\"shell.war\""
 POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=\"shell.php\""
 
+# --- Upload content inspection: bytes that contradict the declared type ---
+# A safe declared type (image, PDF, media, office, font) must not carry an
+# executable, server-side script, or HTML payload. The engine rejects these
+# before rule evaluation, so no filename rule is involved.
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-php-in-jpeg.bin
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-in-pdf.bin
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-elf-in-png.bin
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-gif-php.bin
+
 # --- Sensitive files and backups ---
 GET /.env
 GET /.env.local

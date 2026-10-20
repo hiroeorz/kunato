@@ -103,12 +103,16 @@ Components:
    first: a matching ALLOW rule forwards, a matching BLOCK rule uses its
    response, and if neither decides, an over-limit body is rejected (`413`).
    `stream` mode evaluates the prefix and streams the remainder, with a
-   truncation log and metric. Buffer only because rules may inspect `body`;
-   responses are always streamed. Encoded bodies are decompressed and
-   content-type decoded for inspection when body-targeting rules exist or the
-   request targets a GraphQL endpoint; a body whose decoded output cannot be
-   completed within the limit is rejected (413/415/400) rather than forwarded
-   uninspected. Forwarded bytes stay unchanged.
+   truncation log and metric. Buffer because rules and upload inspection may
+   inspect `body`; responses are always streamed. Encoded bodies are
+   decompressed and content-type decoded for inspection when body-targeting
+   rules exist, the request targets a GraphQL endpoint, or upload inspection
+   is enabled; a body whose decoded output cannot be completed within the
+   limit is rejected (413/415/400) rather than forwarded uninspected.
+   Forwarded bytes stay unchanged. Multipart file parts are also
+   checked against their declared type and filename extension; an executable,
+   server-side script, or markup payload behind an image, PDF, office, media, or
+   font claim is rejected (`403`) before rules run.
 5. **GraphQL complexity check** — on a configured GraphQL endpoint, extract the
    document from the URL query, form, JSON, `application/graphql`, or multipart
    body and compute its depth and expanded field count. Fragment spreads are
@@ -169,6 +173,22 @@ that remainder could be the document the upstream executes. Responses already
 buffer only a prefix (`max_response_body_bytes`) and stream the rest; a
 truncated response body is inspected best-effort and never satisfies a
 body-targeting `ALLOW` rule.
+
+Multipart uploads are additionally checked against the type they claim to be.
+A file part whose declared type (or, when generic or absent, filename extension)
+claims an image, PDF, office document, media file, or font must not start with an
+executable header, a server-side script marker, or markup; a `GIF89a<?php`
+polyglot is caught by a bounded scan of the first 1 KiB. A matching part is
+rejected with `403` and counted in `kunato_upload_rejected_total`. The check is
+an engine limit: it runs before rule evaluation, so an `ALLOW` rule cannot bypass
+it. `upload_inspection: strict` also rejects executable and script content
+behind a generic `application/octet-stream` claim, and `off` disables the check.
+It shares the multipart boundary and part limits with rule inspection, so a body
+with an unsupported boundary interpretation, a malformed multipart body, a file
+part outside the inspected prefix (in `stream` mode), or content embedded deeper
+than the leading bytes is not covered. In strict body mode an over-limit upload
+is rejected with `413` unless an `ALLOW` rule decides, because the file bytes
+must be complete for inspection.
 
 ### Request normalization
 

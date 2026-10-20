@@ -15,7 +15,7 @@ const MAX_CONTENT_ENCODING_LAYERS: usize = 3;
 const MAX_MULTIPART_PARTS: usize = 64;
 const MAX_MULTIPART_NAME_BYTES: usize = 1024;
 const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
-const MAX_MULTIPART_BOUNDARIES: usize = 4;
+pub(crate) const MAX_MULTIPART_BOUNDARIES: usize = 4;
 
 pub struct DecodedBody {
     pub body: Vec<u8>,
@@ -406,13 +406,42 @@ fn form_decode(body: &[u8]) -> Vec<u8> {
     output
 }
 
+/// A part of a `multipart/form-data` body, borrowed from the request body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MultipartPart<'a> {
+    pub(crate) headers: &'a [u8],
+    pub(crate) value: &'a [u8],
+}
+
+impl MultipartPart<'_> {
+    /// The `filename` parameter of the part's `Content-Disposition`, if any.
+    /// Header bytes are decoded lossily so a single invalid byte cannot hide
+    /// the filename (and its extension) from inspection. Empty file names are
+    /// treated as absent.
+    pub(crate) fn filename(&self) -> Option<String> {
+        let headers = String::from_utf8_lossy(self.headers);
+        let disposition = header_value(&headers, "content-disposition")?;
+        disposition_filename(disposition).filter(|filename| !filename.is_empty())
+    }
+
+    /// The media type declared by the part's `Content-Type`, lowercased and
+    /// stripped of parameters. Header bytes are decoded lossily for the same
+    /// reason as [`Self::filename`].
+    pub(crate) fn declared_content_type(&self) -> Option<String> {
+        let headers = String::from_utf8_lossy(self.headers);
+        let value = header_value(&headers, "content-type")?;
+        let media_type = value.split(';').next()?.trim();
+        (!media_type.is_empty()).then(|| media_type.to_ascii_lowercase())
+    }
+}
+
 /// Every valid `boundary` parameter of a `multipart/form-data` Content-Type,
 /// in declaration order and deduplicated. A message may declare several
 /// boundaries and different parsers pick different ones (Rack parses the last,
 /// most servers the first), so each interpretation has to be inspected.
 /// Callers treat more than [`MAX_MULTIPART_BOUNDARIES`] candidates as
 /// uninspectable.
-fn multipart_boundaries(content_type: &str) -> Vec<String> {
+pub(crate) fn multipart_boundaries(content_type: &str) -> Vec<String> {
     let mut boundaries = Vec::new();
     for parameter in content_type.split(';').skip(1) {
         let parameter = parameter.trim();
@@ -444,61 +473,75 @@ fn multipart_boundaries(content_type: &str) -> Vec<String> {
     boundaries
 }
 
-/// Flattens the textual parts of a `multipart/form-data` body into one document
-/// for inspection: field values and file names joined by newlines. Binary part
-/// payloads are included verbatim; the result is bounded by the input size and
-/// the part/name limits. Malformed or oversized input yields `None`.
-fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
+/// Splits a `multipart/form-data` body into parts without copying. Parts are
+/// returned in document order; the preamble and epilogue are ignored.
+///
+/// Returns `None` when the body is malformed (no closing delimiter) or has more
+/// than [`MAX_MULTIPART_PARTS`] parts, so callers treat it as uninspectable
+/// rather than acting on a partial interpretation.
+pub(crate) fn multipart_parts<'a>(
+    body: &'a [u8],
+    boundary: &str,
+) -> Option<Vec<MultipartPart<'a>>> {
     let delimiter = format!("--{boundary}");
     let closing = format!("--{boundary}--");
-    let mut output = Vec::new();
-    let mut current: Option<Vec<u8>> = None;
-    let mut parts = 0usize;
+    let mut parts = Vec::new();
+    let mut part_start: Option<usize> = None;
+    let mut offset = 0usize;
     let mut closed = false;
 
-    for line in body.split_inclusive(|&byte| byte == b'\n') {
-        let trimmed = trim_line_end(line);
-        let is_delimiter = trimmed == delimiter.as_bytes();
-        let is_closing = trimmed == closing.as_bytes();
+    while offset < body.len() {
+        let line_end = body[offset..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(body.len(), |index| offset + index + 1);
+        let line = trim_line_end(&body[offset..line_end]);
+        let is_delimiter = line == delimiter.as_bytes();
+        let is_closing = line == closing.as_bytes();
         if is_delimiter || is_closing {
-            if let Some(part) = current.take() {
-                parts += 1;
-                if parts > MAX_MULTIPART_PARTS {
+            if let Some(start) = part_start.take() {
+                if parts.len() == MAX_MULTIPART_PARTS {
                     return None;
                 }
-                flatten_part(&part, &mut output);
+                let (headers, value) = split_part(&body[start..offset]);
+                parts.push(MultipartPart { headers, value });
             }
             if is_closing {
                 closed = true;
                 break;
             }
-            current = Some(Vec::new());
-            continue;
+            part_start = Some(line_end);
         }
-        if let Some(part) = current.as_mut() {
-            part.extend_from_slice(line);
-        }
+        offset = line_end;
     }
 
-    if !closed || output.is_empty() {
+    if closed { Some(parts) } else { None }
+}
+
+/// Flattens the parts of a `multipart/form-data` body into one document for
+/// inspection: field values and file names joined by newlines. Binary part
+/// payloads are included verbatim; the result is bounded by the input size and
+/// the part/name limits. Malformed or oversized input yields `None`.
+fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
+    let parts = multipart_parts(body, boundary)?;
+    let mut output = Vec::new();
+    for part in parts {
+        flatten_part(part, &mut output);
+    }
+    if output.is_empty() {
         None
     } else {
         Some(output)
     }
 }
 
-fn flatten_part(part: &[u8], output: &mut Vec<u8>) {
-    let (headers, value) = split_part(part);
-    let value = trim_line_end(value);
+fn flatten_part(part: MultipartPart<'_>, output: &mut Vec<u8>) {
+    let value = trim_line_end(part.value);
     if !value.is_empty() {
         output.extend_from_slice(value);
         output.push(b'\n');
     }
-    if let Ok(headers) = std::str::from_utf8(headers)
-        && let Some(disposition) = header_value(headers, "content-disposition")
-        && let Some(filename) = disposition_filename(disposition)
-        && !filename.is_empty()
-    {
+    if let Some(filename) = part.filename() {
         output.extend_from_slice(truncate_utf8(filename, MAX_MULTIPART_NAME_BYTES).as_bytes());
         output.push(b'\n');
     }
@@ -1170,6 +1213,22 @@ mod tests {
         let text = String::from_utf8(decoded).expect("valid utf8");
         assert!(text.contains("admin"));
         assert!(text.contains("../../etc/passwd"));
+    }
+
+    #[test]
+    fn multipart_parts_expose_filenames_and_declared_types() {
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"user\"\r\n\r\nadmin\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.jpg\"\r\nContent-Type: image/jpeg; charset=binary\r\n\r\nJPEGDATA\r\n--X--\r\n";
+        let parts = multipart_parts(body, "X").expect("parts");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].filename(), None);
+        assert_eq!(parts[0].declared_content_type(), None);
+        assert_eq!(parts[0].value, b"admin\r\n");
+        assert_eq!(parts[1].filename().as_deref(), Some("photo.jpg"));
+        assert_eq!(
+            parts[1].declared_content_type().as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(parts[1].value, b"JPEGDATA\r\n");
     }
 
     #[test]

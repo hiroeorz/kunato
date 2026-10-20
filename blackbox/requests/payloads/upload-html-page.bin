@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name="file"; filename="page.html"
+Content-Type: text/html
+
+<!doctype html><html><body>hello</body></html>
+--X--

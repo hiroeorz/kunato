@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-20; the managed set carried 488 rules then.
+2026-10-20; the managed set carried 489 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -18,7 +18,9 @@ Legend:
 Note: the engine matches `path`, `method`, `source_ip`, `headers`, `cookies`,
 `regex` over query/body/cookies/headers/path/response_body, `status`,
 `response_headers`, plus `threshold` categories and per-rule `limit`, so a ❌
-often means "no signature shipped", not "impossible".
+often means "no signature shipped", not "impossible". Engine checks outside that
+match language — GraphQL depth/complexity, strict body sizing, and
+`limits.upload_inspection` — stop classes no regex expresses.
 
 ## 1. Injection
 
@@ -56,10 +58,10 @@ often means "no signature shipped", not "impossible".
 | Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
 | Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
-| Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...); no MIME, magic-byte, or content inspection |
-| Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths) |
+| Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...) plus `limits.upload_inspection` (default `mismatch`), which rejects an executable or server-side script behind an image, PDF, office, media, or font claim. There is no full content or archive scan: a polyglot beyond the leading bytes or a payload inside an archive is not inspected |
+| Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths); the upload check catches a script behind a safe claim, including a `GIF89a<?php` polyglot in the first 1 KiB, but deeper polyglots and archive contents remain uninspected |
 | Double Extension | ✅ | The extension regex also matches `shell.php.jpg` (`\b` boundary) |
-| MIME Type Spoofing | ❌ | No consistency check between Content-Type and payload |
+| MIME Type Spoofing | ✅ | `limits.upload_inspection` (default `mismatch`) checks every multipart file part against its declared type or safe filename extension and rejects executable, server-side script, or HTML/XML/SVG content with `403` before rule evaluation; `strict` also covers generic `application/octet-stream` claims, `off` disables the check, and an upload over `max_body_bytes` is prefix-only under `body_inspection: stream` |
 | Null Byte Injection | ✅ | `protocol-anomalies.null-byte` (`%00`) |
 | Arbitrary File Reference / Download | 🔶 | Traversal and `sensitive-files` block known shapes; IDOR-style download abuse is undetectable in principle |
 
@@ -75,7 +77,7 @@ often means "no signature shipped", not "impossible".
 | Invalid Content-Length / Transfer-Encoding | 🔶 | Rejected at the protocol layer plus CVE-specific rules; no generic rule |
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
-| Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules or a GraphQL endpoint need inspection; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
+| Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
 | HTTP Desync | 🔶 | Same handling as smuggling |
 
@@ -239,7 +241,7 @@ not match the Marshal signatures.
 | --- | --- | --- |
 | HTTP / GET / POST Flood | ✅ | Per-IP token bucket (429), global RPS and connection budget (503), automatic ban |
 | Slow HTTP / Slowloris / Slow POST | ✅ | `header_read` 10s and `body_read` 30s timeouts, a 32-connection per-IP cap, an HTTP/2 first-request deadline, and a `connection_idle` watchdog for connections with no request in flight |
-| Large POST Bodies | ✅ | Bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body rules or a GraphQL endpoint need inspection; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body is rejected with 413. Padding past the limit therefore cannot hide a signature from the rules that are evaluated, and the limit is counted from the bytes actually read (chunked and HTTP/2 / HTTP/3 included). `limits.body_inspection: stream` restores prefix-only streaming for larger uploads, and encoded bodies that cannot be fully decoded are still rejected. Rate/connection caps remain the outer bound |
+| Large POST Bodies | ✅ | Bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body rules, a GraphQL endpoint, or upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body is rejected with 413. Padding past the limit therefore cannot hide a signature from the rules that are evaluated, and the limit is counted from the bytes actually read (chunked and HTTP/2 / HTTP/3 included). `limits.body_inspection: stream` restores prefix-only streaming for larger uploads, and encoded bodies that cannot be fully decoded are still rejected. Rate/connection caps remain the outer bound |
 | ReDoS Payloads | ✅ (immunity) | Rust `regex` is linear-time (no backtracking) and load-time guards reject pathological patterns, so ReDoS cannot be induced; no detection needed |
 | High-Cost Search Floods | 🔶 | Rate and global limits are charged by inspected body size (one token per 256 KiB); regex scanning stays linear but is not otherwise capped |
 | GraphQL Complexity DoS | ✅ | `limits.graphql` rejects documents over the depth or expanded-field limit and rejects any GraphQL body larger than `max_body_bytes` (`413`) instead of forwarding an uninspected remainder; fragment cycles and expansion bombs are rejected, so a single request cannot force unbounded selection processing. Rate limits remain the outer bound for request volume. A GraphQL endpoint driven over a WebSocket tunnel is not covered, because tunnel frames are not inspected |
@@ -274,7 +276,7 @@ not match the Marshal signatures.
 | Path Traversal / LFI / RFI | ✅ |
 | SSRF | ✅ |
 | XXE / RCE payloads | ✅ |
-| Malicious file upload | 🔶 (extension-based) |
+| Malicious file upload | 🔶 (extension plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
 | Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, and bans) |
 | Bot | 🔶 (User-Agent signatures only) |
@@ -286,8 +288,10 @@ not match the Marshal signatures.
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
 either direction, arbitrary re-signing), open redirect via unlisted parameter
-names, HPP, MIME spoofing, behavioral bot detection, and the
-business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and
-session design cannot be fixed by a WAF at all; Kunato can only assist through
-custom response-phase rules. Closing a gap usually means either a YAML rule
-(most request-shape gaps) or an engine feature (behavioral and stateful checks).
+names, HPP, deep upload content (polyglots beyond the inspected prefix,
+archives, nested files), behavioral bot detection, and the business-logic family
+(IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization
+gaps, and session design cannot be fixed by a WAF at all; Kunato can only assist
+through custom response-phase rules. Closing a gap usually means either a YAML
+rule (most request-shape gaps) or an engine feature (behavioral and stateful
+checks).

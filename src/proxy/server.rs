@@ -23,7 +23,7 @@ use tokio_rustls_acme::AcmeAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::acme::AcmeService;
-use crate::config::{BodyInspection, CompiledConfig};
+use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
 use crate::metrics::Metrics;
 use crate::protection::{ConnectionGuard, Decision, ProtectionState, normalize_ip};
@@ -1207,11 +1207,16 @@ async fn process(
     };
     let body_rules = config.has_body_target_rules();
     let inspect_body = body_rules || graphql_path;
-    if inspect_body && !body.is_empty() {
+    let inspect_uploads = config.limits.upload_inspection != UploadInspection::Off
+        && crate::upload::is_multipart(&parts.headers)
+        && !body.is_empty();
+    let encoded = parts.headers.contains_key(CONTENT_ENCODING);
+    let decode_body = inspect_body || (inspect_uploads && encoded);
+    if (decode_body || inspect_uploads) && !body.is_empty() {
         // The read path reserved only the raw prefix. Reserve the decoded-form
-        // worst case now, immediately before decoding and rule evaluation:
-        // a stalled body must not be able to hold this share of the budget.
-        let encoded = parts.headers.contains_key(CONTENT_ENCODING);
+        // worst case (or the bounded multipart-parse worst case) now,
+        // immediately before decoding and rule evaluation: a stalled body must
+        // not be able to hold this share of the budget.
         let raw_bytes = if encoded {
             config.limits.max_body_bytes
         } else {
@@ -1223,7 +1228,7 @@ async fn process(
         }
     }
     let body_truncated;
-    let inspected_body: Cow<'_, [u8]> = match if inspect_body {
+    let inspected_body: Cow<'_, [u8]> = match if decode_body {
         crate::decoding::decode_body_for_inspection(
             body,
             &parts.headers,
@@ -1293,7 +1298,7 @@ async fn process(
             ));
         }
     };
-    if inspect_body {
+    if decode_body {
         let decision = context.protection.charge_inspection(
             peer.ip(),
             &config.protection,
@@ -1302,6 +1307,30 @@ async fn process(
         if let Some(err) = protection_error(context, decision) {
             return Err(err);
         }
+    }
+    if inspect_uploads
+        && let Some(rejection) = crate::upload::inspect(
+            &parts.headers,
+            inspected_body.as_ref(),
+            config.limits.upload_inspection,
+        )
+    {
+        context
+            .metrics
+            .upload_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        debug!(
+            client = %peer.ip(),
+            path = %parts.uri.path(),
+            filename = %rejection.filename,
+            declared = rejection.declared.as_deref().unwrap_or("-"),
+            kind = rejection.kind.as_str(),
+            "upload content rejected"
+        );
+        return Err(HttpError::new(
+            StatusCode::FORBIDDEN,
+            "upload content does not match its declared type",
+        ));
     }
     if graphql_path
         && let Some(violation) = crate::graphql::inspect(
@@ -1380,7 +1409,7 @@ async fn process(
     // that was too large for complete inspection. Without one, an oversized
     // body is rejected rather than forwarded with an uninspected remainder.
     if config.limits.body_inspection == BodyInspection::Strict
-        && inspect_body
+        && (inspect_body || inspect_uploads)
         && body_truncated
         && outcome.allowed.is_none()
     {

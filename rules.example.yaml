@@ -1523,18 +1523,27 @@ timeouts:
   connection_idle: 60s
 
 # Requests whose bodies exceed max_body_bytes are evaluated on the inspected
-# prefix when body rules or a GraphQL endpoint need them (body_inspection:
-# strict). A matching ALLOW forwards the request and a matching BLOCK uses its
-# response; if neither decides, the request is rejected with 413 because the
-# uninspected remainder would otherwise bypass every body rule. Set
-# body_inspection: stream to inspect the prefix and stream the rest to the
-# upstream instead; body rules then see only the prefix and a warning is logged
-# when the configuration loads.
+# prefix when body rules, a GraphQL endpoint, or upload inspection need them
+# (body_inspection: strict). A matching ALLOW forwards the request and a
+# matching BLOCK uses its response; if neither decides, the request is rejected
+# with 413 because the uninspected remainder would otherwise bypass every body
+# rule. Set body_inspection: stream to inspect the prefix and stream the rest
+# to the upstream instead; body rules and upload inspection then see only the
+# prefix and a warning is logged when the configuration loads.
 # max_response_body_bytes bounds how much of each upstream response response
 # rules inspect before streaming the rest. max_path_bytes bounds the whole
 # request target (path plus query string). max_concurrent_streams caps
 # concurrent request streams per HTTP/2 or QUIC connection. The process-wide
 # inspection budget bounds how much memory concurrent buffering can use.
+#
+# multipart/form-data uploads are checked against their declared type and
+# filename extension before rules run: executable, server-side script, or HTML
+# markup behind an image, PDF, office, media, or font claim is rejected with
+# 403. `strict` also rejects executable and script content behind a generic
+# `application/octet-stream` claim; `off` disables the check. An upload larger
+# than max_body_bytes is rejected in strict body mode unless an ALLOW rule
+# decides, because the file content must be complete for inspection; set
+# body_inspection: stream to inspect the prefix and forward the rest.
 #
 # GraphQL documents sent to a GraphQL endpoint are checked against a depth and
 # expanded-field limit before forwarding. Fragment spreads are expanded, so
@@ -1549,6 +1558,7 @@ limits:
   max_body_bytes: 8388608
   max_response_body_bytes: 1048576
   body_inspection: strict
+  upload_inspection: mismatch
   max_concurrent_streams: 100
   graphql:
     enabled: true

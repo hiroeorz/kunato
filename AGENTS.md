@@ -39,6 +39,7 @@ src/
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
+  upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
   config/
     mod.rs         # YAML schema, loading, validation, compilation
@@ -105,9 +106,15 @@ rule-set updates.
 - `limits.max_body_bytes` defaults to 8 MiB. `limits.body_inspection: strict`
   (the default) evaluates the inspected prefix first: a matching ALLOW forwards
   the request, a matching BLOCK uses its response, and otherwise an over-limit
-  body is rejected with `413` when body rules or a GraphQL endpoint need it.
-  `stream` inspects the prefix and forwards the rest, and logs a warning while
-  body rules are configured.
+  body is rejected with `413` when body rules, a GraphQL endpoint, or upload
+  inspection need it. `stream` inspects the prefix and forwards the rest, and
+  logs a warning while body rules or upload inspection are enabled.
+- `limits.upload_inspection` defaults to `mismatch`: multipart file parts are
+  checked against their declared type (or safe filename extension) and rejected
+  with `403` when executable, script, or markup content hides behind an image,
+  PDF, office, media, or font claim. `strict` also covers generic binary claims;
+  `off` disables the check. It runs before rule evaluation, so `ALLOW` does not
+  bypass it.
 - `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01
   challenges; it replaces `tls.cert_file`/`tls.key_file`, is validated at load
   time (no wildcards, no IPs), and is applied at startup like the rest of the

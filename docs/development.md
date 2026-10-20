@@ -587,15 +587,16 @@ limits) bounds the total memory used by concurrent body buffering; requests
 reserve a baseline share and grow it as body bytes arrive, so a small request
 does not take a large body's share.
 
-`body_inspection` defaults to `strict`: when request-body rules or a GraphQL
-endpoint need the body, the buffered prefix is evaluated first. A matching
+`body_inspection` defaults to `strict`: when request-body rules, a GraphQL
+endpoint, or multipart upload inspection need the body, the buffered prefix is
+evaluated first. A matching
 ALLOW rule forwards the request, a matching BLOCK rule uses its configured
 response, and only when no rule decides is a request larger than
 `max_body_bytes` rejected with `413`. Set the policy to `stream` to inspect the
 prefix and stream the remainder instead; a warning is logged at load or reload
-when body rules are configured. Configurations written before the field existed
-are compiled with `strict`, so add `body_inspection: stream` to keep the old
-prefix-only behavior for large uploads.
+when body rules or upload inspection are enabled. Configurations written before
+the field existed are compiled with `strict`, so add `body_inspection: stream`
+to keep the old prefix-only behavior for large uploads.
 
 Every duration must be greater than zero (`shutdown_grace: 0` would abort the
 drain immediately). Limits are validated with hard caps so the "bounded
@@ -609,27 +610,28 @@ limits: { max_body_bytes: 8388608, body_inspection: strict }
 ```
 
 The first `max_body_bytes` of each request body are buffered for rule
-inspection and content decoding. With the default `body_inspection: strict`, the
-buffered prefix is evaluated before the size decision: a matching ALLOW rule
-forwards the request (the operator explicitly trusts it), a matching BLOCK rule
-uses its configured response, and if neither decides, an over-limit request is
-rejected with `413` because the uninspected remainder could carry a payload
-past every body rule. The size decision uses the bytes actually read, so a
-chunked or HTTP/2 / HTTP/3 body cannot bypass it. The over-limit request is
-counted in `kunato_request_truncated_total`; only the strict rejection is
+inspection, content decoding, and upload inspection. With the default
+`body_inspection: strict`, the buffered prefix is evaluated before the size
+decision: a matching ALLOW rule forwards the request (the operator explicitly
+trusts it), a matching BLOCK rule uses its configured response, and if neither
+decides, an over-limit request is rejected with `413` because the uninspected
+remainder could carry a payload past every body rule or an upload content check.
+The size decision uses the bytes actually read, so a chunked or HTTP/2 / HTTP/3
+body cannot bypass it. The over-limit request is counted in
+`kunato_request_truncated_total`; only the strict rejection is
 counted in `kunato_request_body_rejected_total`. A body exactly at the limit is
 accepted.
 
 With `body_inspection: stream`, the buffered prefix is evaluated, the remainder
 streams to the upstream unchanged, and the request is counted as truncated
 (`kunato_request_truncated_total`) and logged at debug level; rules then see at
-most the prefix, and a warning is logged at load or reload when body rules are
-configured. An encoded body whose decoded output cannot be completed within
-`max_body_bytes` is rejected even in strict mode, because rules cannot safely
-decide on an incomplete decoded body. In strict mode, an encoded body whose
-decoding completed but whose raw input exceeded the limit is evaluated like an
-unencoded prefix; a matching ALLOW can forward it and otherwise it is rejected
-with `413`.
+most the prefix, and a warning is logged at load or reload when body rules or
+upload inspection are enabled. An encoded body whose decoded output cannot be
+completed within `max_body_bytes` is rejected even in strict mode, because rules
+cannot safely decide on an incomplete decoded body. In strict mode, an encoded
+body whose decoding completed but whose raw input exceeded the limit is
+evaluated like an unencoded prefix; a matching ALLOW can forward it and
+otherwise it is rejected with `413`.
 Request decoding is bounded by `max_body_bytes` and response decoding by
 `max_response_body_bytes`, so decompression bombs cannot exceed the configured
 buffer sizes. A decoded request body that exceeds the limit is rejected and
@@ -637,6 +639,53 @@ counted in `kunato_request_decode_truncated_total`; a response prefix that was
 cut off is counted in `kunato_response_decode_truncated_total` and inspected
 best-effort. An `ALLOW` rule that targets a body only matches when the full
 body was available, so a truncated response body cannot satisfy one.
+
+### Upload inspection
+
+Multipart file parts are checked against the type they claim to be before rule
+evaluation. A part that carries a `filename` is a file upload; its declared
+`Content-Type` (or, when that is generic or absent, its filename extension) must
+not hide an executable, server-side script, or markup payload. The default
+`mismatch` mode rejects a part that claims an image, PDF, office document, media
+file, or font (by type, or by a safe extension such as `.jpg`, `.png`, `.pdf`, or
+`.docx`) while its content starts with:
+
+- an executable header (ELF, PE, Mach-O, a Java class, or WebAssembly);
+- a server-side script marker (`<?php`, `<?=`, `<%`, or a `#!` shebang), also
+  when that marker appears within the first 1 KiB after a valid image header (a
+  `GIF89a<?php` polyglot);
+- HTML/XML/SVG markup (a leading `<` after an optional BOM and whitespace).
+
+A declared type that is itself active (`text/html`, `image/svg+xml`,
+JavaScript) or explicitly executable (`application/x-msdownload`, ...) is
+respected: markup behind an active claim and an executable behind an executable
+claim pass. `strict` additionally rejects executable and script content even
+behind a generic or explicit executable claim, and markup unless the part
+declares an active web type; an active web part still passes its markup. `off`
+disables the check.
+
+The rejection is answered with `403` and counted in
+`kunato_upload_rejected_total`. The check is an engine limit: it runs before
+rule evaluation, so an `ALLOW` rule (including `trusted-sources`) does not
+bypass it, and it stays active with `protection.enabled: false`. It shares the
+multipart boundary and part limits with rule inspection, checks every declared
+boundary interpretation, never copies the body, and runs under the process-wide
+inspection budget.
+
+```yaml
+limits: { upload_inspection: mismatch }
+```
+
+In the default `body_inspection: strict`, a multipart upload larger than
+`max_body_bytes` is rejected with `413` unless a rule allows the request,
+because the file bytes must be complete for inspection. With
+`body_inspection: stream`, only the buffered prefix is inspected and the
+remainder is forwarded; a warning is logged at load or reload. The check does
+not cover a file part outside the inspected prefix, a body with more than four
+boundary parameters, a malformed multipart body, archives or nested files, or
+active content embedded deeper than the leading bytes and the first 1 KiB
+script scan. A part without a `filename` is a form field, not an upload, and is
+not checked.
 
 ### GraphQL limits
 

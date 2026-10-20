@@ -91,6 +91,22 @@ pub enum BodyInspection {
     Stream,
 }
 
+/// Policy for inspecting `multipart/form-data` uploads against their declared
+/// type and filename extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UploadInspection {
+    /// Do not inspect upload contents.
+    Off,
+    /// Reject executable, script, or markup content behind an image, PDF,
+    /// office, media, or font claim (or a safe filename extension).
+    #[default]
+    Mismatch,
+    /// Also reject executable and script content behind an explicitly generic
+    /// claim, and markup behind a generic claim.
+    Strict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseSpec {
@@ -349,6 +365,8 @@ pub struct LimitsSpec {
     pub max_response_body_bytes: usize,
     #[serde(default)]
     pub body_inspection: BodyInspection,
+    #[serde(default)]
+    pub upload_inspection: UploadInspection,
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_streams: u32,
     #[serde(default)]
@@ -364,6 +382,7 @@ impl Default for LimitsSpec {
             max_body_bytes: default_max_body_bytes(),
             max_response_body_bytes: default_max_response_body_bytes(),
             body_inspection: BodyInspection::default(),
+            upload_inspection: UploadInspection::default(),
             max_concurrent_streams: default_max_concurrent_streams(),
             graphql: GraphqlSpec::default(),
         }
@@ -660,6 +679,7 @@ pub struct Limits {
     pub max_body_bytes: usize,
     pub max_response_body_bytes: usize,
     pub body_inspection: BodyInspection,
+    pub upload_inspection: UploadInspection,
     pub max_concurrent_streams: u32,
     pub graphql: Graphql,
 }
@@ -673,6 +693,7 @@ impl From<&LimitsSpec> for Limits {
             max_body_bytes: spec.max_body_bytes,
             max_response_body_bytes: spec.max_response_body_bytes,
             body_inspection: spec.body_inspection,
+            upload_inspection: spec.upload_inspection,
             max_concurrent_streams: spec.max_concurrent_streams,
             graphql: Graphql::from(&spec.graphql),
         }
@@ -963,15 +984,24 @@ impl CompiledConfig {
     /// Warning to log when body rules are configured in `stream` mode, where
     /// the uninspected remainder can carry a payload past every body rule.
     pub fn body_inspection_warning(&self) -> Option<String> {
-        (self.limits.body_inspection == BodyInspection::Stream && self.has_body_target_rules())
-            .then(|| {
-                format!(
-                    "limits.body_inspection is `stream`: body rules inspect only the first {} bytes \
-                     and larger request bodies are forwarded uninspected; set `strict` to reject them \
-                     unless a rule allows the request",
-                    self.limits.max_body_bytes
-                )
-            })
+        if self.limits.body_inspection != BodyInspection::Stream {
+            return None;
+        }
+        let subject = match (
+            self.has_body_target_rules(),
+            self.limits.upload_inspection != UploadInspection::Off,
+        ) {
+            (true, true) => "body rules and multipart uploads",
+            (true, false) => "body rules",
+            (false, true) => "multipart uploads",
+            (false, false) => return None,
+        };
+        Some(format!(
+            "limits.body_inspection is `stream`: only the first {} bytes are inspected for \
+             {subject} and larger request bodies are forwarded uninspected; set `strict` to \
+             reject them unless a rule allows the request",
+            self.limits.max_body_bytes
+        ))
     }
 
     pub fn has_response_body_rules(&self) -> bool {
@@ -2448,6 +2478,7 @@ mod tests {
         assert!(config.categories.is_empty());
         assert_eq!(config.limits.max_body_bytes, 8 * 1024 * 1024);
         assert_eq!(config.limits.body_inspection, BodyInspection::Strict);
+        assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
     }
@@ -3373,10 +3404,53 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
     }
 
     #[test]
-    fn stream_mode_warns_only_when_body_rules_exist() {
+    fn parses_upload_inspection_policy() {
+        let config = parse_with(BASE, "").expect("valid config");
+        assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
+
+        let config =
+            parse_with(BASE, "limits: { upload_inspection: strict }\n").expect("valid config");
+        assert_eq!(config.limits.upload_inspection, UploadInspection::Strict);
+
+        let config =
+            parse_with(BASE, "limits: { upload_inspection: off }\n").expect("valid config");
+        assert_eq!(config.limits.upload_inspection, UploadInspection::Off);
+
+        let error = parse_with(BASE, "limits: { upload_inspection: permissive }\n")
+            .expect_err("unknown policy must fail");
+        assert!(matches!(error, Error::ConfigParse(_)));
+    }
+
+    #[test]
+    fn stream_mode_warns_for_body_rules_and_uploads() {
         let config =
             parse_with(BASE, "limits: { body_inspection: stream }\n").expect("valid config");
+        let warning = config.body_inspection_warning().expect("warning");
+        assert!(warning.contains("multipart uploads"), "{warning}");
+
+        let config = parse_with(
+            BASE,
+            "limits: { body_inspection: stream, upload_inspection: off }\n",
+        )
+        .expect("valid config");
         assert!(config.body_inspection_warning().is_none());
+
+        let config = parse_with(
+            BASE,
+            "limits: { body_inspection: stream, upload_inspection: off, max_body_bytes: 4096 }
+categories:
+  - name: sqli
+    action: BLOCK
+    rules:
+      - name: union
+        match: { regex: 'union select', in: [body] }
+",
+        )
+        .expect("valid config");
+        let warning = config.body_inspection_warning().expect("warning");
+        assert!(warning.contains("stream"), "{warning}");
+        assert!(warning.contains("4096"), "{warning}");
+        assert!(!warning.contains("uploads"), "{warning}");
 
         let config = parse_with(
             BASE,
@@ -3391,20 +3465,13 @@ categories:
         )
         .expect("valid config");
         let warning = config.body_inspection_warning().expect("warning");
-        assert!(warning.contains("stream"), "{warning}");
-        assert!(warning.contains("4096"), "{warning}");
+        assert!(
+            warning.contains("body rules and multipart uploads"),
+            "{warning}"
+        );
 
-        let config = parse_with(
-            BASE,
-            "categories:
-  - name: sqli
-    action: BLOCK
-    rules:
-      - name: union
-        match: { regex: 'union select', in: [body] }
-",
-        )
-        .expect("valid config");
+        let config =
+            parse_with(BASE, "limits: { upload_inspection: off }\n").expect("valid config");
         assert_eq!(config.limits.body_inspection, BodyInspection::Strict);
         assert!(config.body_inspection_warning().is_none());
     }

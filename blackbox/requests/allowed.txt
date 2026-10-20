@@ -364,6 +364,13 @@ POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_fil
 POST /api/upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-benign.txt
 POST /api/search header="Content-Type: application/json" chunked=1 body="{\"query\":\"rust\"}"
 
+# --- Upload content near-misses: matching bytes behind a safe type, an
+#     explicitly active type, and an executable behind a generic type (which
+#     only `upload_inspection: strict` rejects) must keep passing ---
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg.bin
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-generic-elf.bin
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-page.bin
+
 # --- Django, Next.js, and Node.js near-misses: benign look-alikes must pass ---
 GET /api/settings
 GET /api/items?cursor=Z2FzLWN1cnNvcg

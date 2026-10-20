@@ -417,6 +417,19 @@ fn nested_query(depth: usize) -> String {
     query
 }
 
+fn multipart_upload(filename: &str, content_type: &str, value: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--X\r\n");
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+    body.extend_from_slice(value);
+    body.extend_from_slice(b"\r\n--X--\r\n");
+    body
+}
+
 fn json_query_body(query: &str) -> Vec<u8> {
     format!(
         "{{\"query\":{}}}",
@@ -981,6 +994,187 @@ async fn stream_body_inspection_only_inspects_the_prefix() {
         rendered.contains("kunato_request_body_rejected_total 0"),
         "{rendered}"
     );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_rejects_spoofed_content() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = multipart_upload(
+        "photo.jpg",
+        "image/jpeg",
+        b"\xff\xd8\xff\xe0<?php system($_GET['cmd']); ?>",
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_upload_rejected_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_accepts_benign_and_explicit_uploads() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for (filename, content_type, value) in [
+        (
+            "photo.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xff\xe0JFIF".as_slice(),
+        ),
+        ("report.pdf", "application/pdf", b"%PDF-1.7\n"),
+        ("tool", "application/octet-stream", b"\x7fELF\x02\x01\x01"),
+        (
+            "page.html",
+            "text/html",
+            b"<!doctype html><script>alert(1)</script>",
+        ),
+    ] {
+        let body = multipart_upload(filename, content_type, value);
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::POST,
+            "/upload",
+            body,
+            &[("content-type", "multipart/form-data; boundary=X")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{filename} ({content_type})");
+    }
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_upload_rejected_total 0"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_strict_blocks_generic_executables() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: strict }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = multipart_upload("tool", "application/octet-stream", b"\x7fELF\x02\x01\x01");
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let body = multipart_upload(
+        "page.html",
+        "text/html",
+        b"<!doctype html><script>alert(1)</script>",
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_is_not_bypassed_by_allow_rules() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: local\n        match: {{ source_ip: 127.0.0.1/32 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = multipart_upload("photo.jpg", "image/jpeg", b"<?php echo 1;");
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_decodes_compressed_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = multipart_upload("photo.jpg", "image/jpeg", b"<?php echo 1;");
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        gzip(&body),
+        &[
+            ("content-type", "multipart/form-data; boundary=X"),
+            ("content-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_rejects_truncated_uploads_in_strict_mode() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 64 }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = multipart_upload("photo.jpg", "image/jpeg", &[b'A'; 256]);
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 
     running.stop().await;
 }
