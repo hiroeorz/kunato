@@ -79,6 +79,18 @@ impl Phase {
     }
 }
 
+/// Policy for request bodies that exceed `limits.max_body_bytes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BodyInspection {
+    /// Reject the request with `413` when request-body rules (or a GraphQL
+    /// endpoint) need to inspect a body that does not fit in the limit.
+    #[default]
+    Strict,
+    /// Inspect the prefix and stream the remainder to the upstream.
+    Stream,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseSpec {
@@ -333,8 +345,10 @@ pub struct LimitsSpec {
     pub max_headers: usize,
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
-    #[serde(default = "default_max_body_bytes")]
+    #[serde(default = "default_max_response_body_bytes")]
     pub max_response_body_bytes: usize,
+    #[serde(default)]
+    pub body_inspection: BodyInspection,
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_streams: u32,
     #[serde(default)]
@@ -348,7 +362,8 @@ impl Default for LimitsSpec {
             max_header_bytes: default_max_header_bytes(),
             max_headers: default_max_headers(),
             max_body_bytes: default_max_body_bytes(),
-            max_response_body_bytes: default_max_body_bytes(),
+            max_response_body_bytes: default_max_response_body_bytes(),
+            body_inspection: BodyInspection::default(),
             max_concurrent_streams: default_max_concurrent_streams(),
             graphql: GraphqlSpec::default(),
         }
@@ -601,6 +616,10 @@ fn default_max_headers() -> usize {
 }
 
 fn default_max_body_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+fn default_max_response_body_bytes() -> usize {
     1024 * 1024
 }
 
@@ -640,6 +659,7 @@ pub struct Limits {
     pub max_headers: usize,
     pub max_body_bytes: usize,
     pub max_response_body_bytes: usize,
+    pub body_inspection: BodyInspection,
     pub max_concurrent_streams: u32,
     pub graphql: Graphql,
 }
@@ -652,6 +672,7 @@ impl From<&LimitsSpec> for Limits {
             max_headers: spec.max_headers,
             max_body_bytes: spec.max_body_bytes,
             max_response_body_bytes: spec.max_response_body_bytes,
+            body_inspection: spec.body_inspection,
             max_concurrent_streams: spec.max_concurrent_streams,
             graphql: Graphql::from(&spec.graphql),
         }
@@ -937,6 +958,20 @@ impl CompiledConfig {
                 .iter()
                 .any(|rule| targets(&rule.matcher, TARGET_BODY))
         })
+    }
+
+    /// Warning to log when body rules are configured in `stream` mode, where
+    /// the uninspected remainder can carry a payload past every body rule.
+    pub fn body_inspection_warning(&self) -> Option<String> {
+        (self.limits.body_inspection == BodyInspection::Stream && self.has_body_target_rules())
+            .then(|| {
+                format!(
+                    "limits.body_inspection is `stream`: body rules inspect only the first {} bytes \
+                     and larger request bodies are forwarded uninspected; set `strict` to reject them \
+                     unless a rule allows the request",
+                    self.limits.max_body_bytes
+                )
+            })
     }
 
     pub fn has_response_body_rules(&self) -> bool {
@@ -2411,7 +2446,8 @@ mod tests {
     fn parses_minimal_config() {
         let config = parse_with(BASE, "categories: []\n").expect("valid config");
         assert!(config.categories.is_empty());
-        assert_eq!(config.limits.max_body_bytes, 1024 * 1024);
+        assert_eq!(config.limits.max_body_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.limits.body_inspection, BodyInspection::Strict);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
     }
@@ -3311,13 +3347,66 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
     }
 
     #[test]
-    fn default_response_body_limit_matches_request_limit() {
+    fn defaults_keep_response_inspection_smaller_than_request_inspection() {
         let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert_eq!(config.limits.max_body_bytes, 8 * 1024 * 1024);
         assert_eq!(config.limits.max_response_body_bytes, 1024 * 1024);
 
         let error =
             parse_with(BASE, "limits: { max_response_body_bytes: 0 }\n").expect_err("must fail");
         assert!(error.to_string().contains("max_response_body_bytes"));
+    }
+
+    #[test]
+    fn parses_body_inspection_policy() {
+        let config =
+            parse_with(BASE, "limits: { body_inspection: stream }\n").expect("valid config");
+        assert_eq!(config.limits.body_inspection, BodyInspection::Stream);
+
+        let error = parse_with(BASE, "limits: { body_inspection: lenient }\n")
+            .expect_err("unknown policy must fail");
+        assert!(matches!(error, Error::ConfigParse(_)));
+
+        let error = parse_with(BASE, "limits: { body_inspection: Strict }\n")
+            .expect_err("policy names are lower case");
+        assert!(matches!(error, Error::ConfigParse(_)));
+    }
+
+    #[test]
+    fn stream_mode_warns_only_when_body_rules_exist() {
+        let config =
+            parse_with(BASE, "limits: { body_inspection: stream }\n").expect("valid config");
+        assert!(config.body_inspection_warning().is_none());
+
+        let config = parse_with(
+            BASE,
+            "limits: { body_inspection: stream, max_body_bytes: 4096 }
+categories:
+  - name: sqli
+    action: BLOCK
+    rules:
+      - name: union
+        match: { regex: 'union select', in: [body] }
+",
+        )
+        .expect("valid config");
+        let warning = config.body_inspection_warning().expect("warning");
+        assert!(warning.contains("stream"), "{warning}");
+        assert!(warning.contains("4096"), "{warning}");
+
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: sqli
+    action: BLOCK
+    rules:
+      - name: union
+        match: { regex: 'union select', in: [body] }
+",
+        )
+        .expect("valid config");
+        assert_eq!(config.limits.body_inspection, BodyInspection::Strict);
+        assert!(config.body_inspection_warning().is_none());
     }
 
     #[test]

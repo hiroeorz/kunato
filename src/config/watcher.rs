@@ -195,7 +195,11 @@ pub fn reload(
                 .iter()
                 .map(|category| category.rules.len())
                 .sum();
+            let body_inspection_warning = new_config.body_inspection_warning();
             config.store(Arc::new(new_config));
+            if let Some(warning) = body_inspection_warning {
+                warn!("{warning}");
+            }
             info!(categories, rules, "configuration reloaded");
             Some(sources)
         }

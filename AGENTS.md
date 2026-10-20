@@ -102,6 +102,12 @@ rule-set updates.
   rules match upstream status, response headers, and the response body prefix
   (`limits.max_response_body_bytes`); `status`, `response_headers`, and the
   `response_body` target are rejected in request-phase categories.
+- `limits.max_body_bytes` defaults to 8 MiB. `limits.body_inspection: strict`
+  (the default) evaluates the inspected prefix first: a matching ALLOW forwards
+  the request, a matching BLOCK uses its response, and otherwise an over-limit
+  body is rejected with `413` when body rules or a GraphQL endpoint need it.
+  `stream` inspects the prefix and forwards the rest, and logs a warning while
+  body rules are configured.
 - `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01
   challenges; it replaces `tls.cert_file`/`tls.key_file`, is validated at load
   time (no wildcards, no IPs), and is applied at startup like the rest of the

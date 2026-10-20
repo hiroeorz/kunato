@@ -837,7 +837,7 @@ categories:
 }
 
 #[tokio::test]
-async fn oversized_body_is_streamed_to_upstream() {
+async fn oversized_body_without_body_rules_is_streamed() {
     let upstream = spawn_body_echo_upstream().await;
     let yaml = format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\n"
@@ -854,10 +854,115 @@ async fn oversized_body_is_streamed_to_upstream() {
 }
 
 #[tokio::test]
-async fn body_rules_inspect_only_the_prefix() {
+async fn strict_body_inspection_applies_after_rule_evaluation() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\ncategories:\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: prefix-signature\n        match: {{ regex: 'BLOCKME', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    // A matching BLOCK rule still decides, with its configured response.
+    let mut body = b"BLOCKME".to_vec();
+    body.extend_from_slice(&vec![b'x'; 64 * 1024]);
+    let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &[]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Padding the body past the limit used to hide the signature from the
+    // body rules; with no rule deciding, strict inspection rejects instead.
+    let mut body = b"AAAAAAAA".to_vec();
+    body.extend_from_slice(b"BLOCKME");
+    let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &[]).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_body_rejected_total 1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("kunato_request_truncated_total 2"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn strict_body_inspection_allows_a_matching_allow_rule() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\ncategories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: local\n        match: {{ source_ip: 127.0.0.1/32 }}\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: body-signature\n        match: {{ regex: 'BLOCKME', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        b"123456789".to_vec(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_body_rejected_total 0"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("kunato_request_truncated_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn stalled_encoded_bodies_do_not_exhaust_the_inspection_budget() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8388608 }}\ntimeouts: {{ body_read: 5s }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut stream = TcpStream::connect(running.addr)
+            .await
+            .expect("connect kunato");
+        let request = "POST /hold HTTP/1.1\r\nhost: kunato.test\r\ncontent-encoding: gzip\r\ntransfer-encoding: chunked\r\n\r\n1\r\nA\r\n";
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write held request");
+        held.push(stream);
+    }
+    for _ in 0..50 {
+        if running
+            .metrics
+            .render(0)
+            .contains("kunato_requests_total 4")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+
+    drop(held);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn stream_body_inspection_only_inspects_the_prefix() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8, body_inspection: stream }}\ncategories:\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: prefix-signature\n        match: {{ regex: 'BLOCKME', in: [body] }}\n"
     );
     let running = start_kunato(&yaml).await;
 
@@ -870,6 +975,12 @@ async fn body_rules_inspect_only_the_prefix() {
     body.extend_from_slice(b"BLOCKME");
     let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &[]).await;
     assert_eq!(status, StatusCode::OK);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_body_rejected_total 0"),
+        "{rendered}"
+    );
 
     running.stop().await;
 }
@@ -1154,7 +1265,7 @@ async fn graphql_limit_decodes_compressed_bodies() {
 async fn graphql_limit_rejects_a_truncated_uninspectable_body() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
-        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ max_body_bytes: 32 }}\n"
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ max_body_bytes: 32, body_inspection: stream }}\n"
     );
     let running = start_kunato(&yaml).await;
 
@@ -1344,7 +1455,7 @@ async fn truncated_body_cannot_satisfy_an_allow_rule() {
     let yaml = format!(
         "listen: 127.0.0.1:0
 upstream: http://{upstream}
-limits: {{ max_body_bytes: 8 }}
+limits: {{ max_body_bytes: 8, body_inspection: stream }}
 categories:
   - name: trusted
     action: ALLOW
@@ -1565,7 +1676,7 @@ async fn gzip_response_body_is_rule_evaluated() {
 }
 
 #[tokio::test]
-async fn body_at_limit_is_accepted() {
+async fn body_at_limit_is_accepted_without_body_rules() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\n"
@@ -1577,6 +1688,29 @@ async fn body_at_limit_is_accepted() {
 
     let (status, _) = send(running.addr, Method::POST, "/over", "123456789").await;
     assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn strict_body_inspection_accepts_a_body_at_the_limit() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\ncategories:\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: prefix-signature\n        match: {{ regex: 'BLOCKME', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::POST, "/exact", "12345678").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(running.addr, Method::POST, "/over", "123456789").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_body_rejected_total 1"),
+        "{rendered}"
+    );
 
     running.stop().await;
 }
@@ -1636,6 +1770,29 @@ async fn chunked_request_body_at_the_limit_is_not_truncated() {
     let rendered = running.metrics.render(0);
     assert!(
         rendered.contains("kunato_request_truncated_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn strict_body_inspection_rejects_a_chunked_body_over_the_limit() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\ncategories:\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: prefix-signature\n        match: {{ regex: 'BLOCKME', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_chunked_request(running.addr, "/exact", b"12345678").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send_chunked_request(running.addr, "/over", b"123456789").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_request_body_rejected_total 1"),
         "{rendered}"
     );
 
@@ -1917,6 +2074,32 @@ categories:
 }
 
 #[tokio::test]
+async fn strict_body_inspection_rejects_an_http2_body_over_the_limit() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_body_bytes: 8 }}
+categories:
+  - name: sig
+    action: BLOCK
+    rules:
+      - name: prefix-signature
+        match: {{ regex: 'BLOCKME', in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_h2c(running.addr, Method::POST, "/", "12345678").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send_h2c(running.addr, Method::POST, "/", "123456789").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn tls_alpn_negotiates_http2() {
     let upstream = spawn_header_echo_upstream("x-forwarded-proto").await;
     let certified =
@@ -2074,6 +2257,42 @@ async fn http3_requests_are_proxied_and_rule_evaluated() {
 }
 
 #[tokio::test]
+async fn strict_body_inspection_rejects_an_http3_body_over_the_limit() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "limits: { max_body_bytes: 8 }
+categories:
+  - name: sig
+    action: BLOCK
+    rules:
+      - name: prefix-signature
+        match: { regex: 'BLOCKME', in: [body] }
+",
+    )
+    .await;
+
+    let (status, _, _) = send_h3(
+        running.addr,
+        certificate.clone(),
+        Method::POST,
+        "/",
+        "12345678",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send_h3(running.addr, certificate, Method::POST, "/", "123456789").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn http3_graphql_limit_rejects_deep_queries() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2156,7 +2375,7 @@ async fn http3_sets_forwarded_host_and_advertises_alt_svc() {
 }
 
 #[tokio::test]
-async fn http3_oversized_body_is_streamed_to_upstream() {
+async fn http3_oversized_body_without_body_rules_is_streamed() {
     let upstream = spawn_body_echo_upstream().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let (cert_path, key_path, certificate) = write_test_certificate(&dir);
@@ -2894,7 +3113,7 @@ async fn request_prefix_at_limit_is_inspected_without_waiting_for_eof() {
     let yaml = format!(
         "listen: 127.0.0.1:0
 upstream: http://{upstream}
-limits: {{ max_body_bytes: 8 }}
+limits: {{ max_body_bytes: 8, body_inspection: stream }}
 timeouts: {{ body_read: 300ms }}
 categories:
   - name: signatures
@@ -2923,6 +3142,46 @@ categories:
     assert!(
         response.starts_with("HTTP/1.1 403"),
         "the exact-limit prefix must be evaluated: {response}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn strict_body_inspection_rejects_without_waiting_for_eof() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ max_body_bytes: 8 }}
+timeouts: {{ body_read: 300ms }}
+categories:
+  - name: signatures
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: 'NEVERMATCH', in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect kunato");
+    let request =
+        "POST /upload HTTP/1.1\r\nhost: kunato.test\r\ncontent-length: 100\r\n\r\nABCDEFGH";
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write partial body");
+    let mut response = Vec::new();
+    let read =
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response)).await;
+    assert!(read.is_ok(), "strict rejection must not wait for EOF");
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 413"),
+        "the oversized body must be rejected before the rest arrives: {response}"
     );
 
     running.stop().await;

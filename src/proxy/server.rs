@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use http::header::{CONNECTION, HeaderMap, HeaderValue, UPGRADE};
+use http::header::{CONNECTION, CONTENT_ENCODING, HeaderMap, HeaderValue, UPGRADE};
 use http::{Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
@@ -23,7 +23,7 @@ use tokio_rustls_acme::AcmeAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::acme::AcmeService;
-use crate::config::CompiledConfig;
+use crate::config::{BodyInspection, CompiledConfig};
 use crate::error::Error;
 use crate::metrics::Metrics;
 use crate::protection::{ConnectionGuard, Decision, ProtectionState, normalize_ip};
@@ -46,6 +46,11 @@ const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const INSPECTION_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const REQUEST_INSPECTION_FACTOR: usize = 8;
 const RESPONSE_INSPECTION_FACTOR: usize = 3;
+/// Requests start with this small baseline; the raw prefix grows it as body
+/// bytes arrive, and the decoded-form worst case is reserved only immediately
+/// before decoding and rule evaluation. A stalled body therefore holds its
+/// actual buffered bytes, not the whole decoding budget.
+const MIN_INSPECTION_RESERVATION: usize = 64 * 1024;
 
 struct InspectionBudget {
     reserved: AtomicUsize,
@@ -59,11 +64,20 @@ impl InspectionBudget {
     }
 
     fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InspectionGuard> {
+        self.add(bytes).then(|| InspectionGuard {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn add(&self, bytes: usize) -> bool {
         let mut current = self.reserved.load(Ordering::Relaxed);
         loop {
-            let next = current.checked_add(bytes)?;
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
             if next > INSPECTION_BUDGET_BYTES {
-                return None;
+                return false;
             }
             match self.reserved.compare_exchange_weak(
                 current,
@@ -71,12 +85,7 @@ impl InspectionBudget {
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => {
-                    return Some(InspectionGuard {
-                        budget: Arc::clone(self),
-                        bytes,
-                    });
-                }
+                Ok(_) => return true,
                 Err(actual) => current = actual,
             }
         }
@@ -88,10 +97,56 @@ pub(crate) struct InspectionGuard {
     bytes: usize,
 }
 
+impl InspectionGuard {
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn grow(&mut self, additional: usize) -> bool {
+        if additional == 0 {
+            return true;
+        }
+        if !self.budget.add(additional) {
+            return false;
+        }
+        self.bytes += additional;
+        true
+    }
+}
+
 impl Drop for InspectionGuard {
     fn drop(&mut self) {
         self.budget.reserved.fetch_sub(self.bytes, Ordering::AcqRel);
     }
+}
+
+fn request_inspection_bytes(config: &CompiledConfig, raw_bytes: usize) -> usize {
+    raw_bytes
+        .min(config.limits.max_body_bytes)
+        .saturating_mul(REQUEST_INSPECTION_FACTOR)
+        .max(MIN_INSPECTION_RESERVATION)
+}
+
+fn grow_inspection_to(inspection: &mut InspectionGuard, target: usize) -> bool {
+    if target <= inspection.bytes() {
+        return true;
+    }
+    inspection.grow(target - inspection.bytes())
+}
+
+/// Reserve the raw bytes buffered so far. This is deliberately unmultiplied:
+/// the decoded forms may not be materialized at all (for a streamed body or a
+/// request with no body rules), and reserving their worst case here would let
+/// a few slow bodies exhaust the process-wide budget.
+pub(crate) fn grow_request_inspection_raw(
+    inspection: &mut InspectionGuard,
+    config: &CompiledConfig,
+    observed_bytes: usize,
+) -> bool {
+    let target = observed_bytes
+        .min(config.limits.max_body_bytes)
+        .max(MIN_INSPECTION_RESERVATION);
+    grow_inspection_to(inspection, target)
 }
 
 /// Request activity for one HTTP/2 connection. The idle watchdog observes it
@@ -257,17 +312,10 @@ impl Context {
             .try_acquire_connection(ip, &config.protection)
     }
 
-    /// Reserve the worst-case memory for inspecting one request body.
-    pub(crate) fn reserve_request_inspection(
-        &self,
-        config: &CompiledConfig,
-    ) -> Option<InspectionGuard> {
-        let bytes = config
-            .limits
-            .max_body_bytes
-            .saturating_mul(REQUEST_INSPECTION_FACTOR)
-            .max(64 * 1024);
-        self.inspection.reserve(bytes)
+    /// Reserve the small baseline share of memory for inspecting one request
+    /// body. The raw prefix and decoded forms grow it as needed.
+    pub(crate) fn reserve_request_inspection(&self) -> Option<InspectionGuard> {
+        self.inspection.reserve(MIN_INSPECTION_RESERVATION)
     }
 
     /// Reserve the worst-case memory for inspecting one upstream response.
@@ -778,9 +826,9 @@ async fn handle_request(
     let (parts, body) = request.into_parts();
     let result = match admission_error(&context, peer, &config) {
         Some(err) => Err(err),
-        None => match context.reserve_request_inspection(&config) {
-            Some(inspection) => match read_body(body, &config).await {
-                Ok(body) => {
+        None => match context.reserve_request_inspection() {
+            Some(inspection) => match read_body(body, &config, inspection, &context).await {
+                Ok((body, inspection)) => {
                     process(parts, body, peer, &config, &context, upgrade, inspection).await
                 }
                 Err(err) => Err(err),
@@ -880,7 +928,9 @@ pub(crate) struct RequestPayload {
 async fn read_body(
     mut body: Incoming,
     config: &CompiledConfig,
-) -> Result<RequestPayload, HttpError> {
+    mut inspection: InspectionGuard,
+    context: &Context,
+) -> Result<(RequestPayload, InspectionGuard), HttpError> {
     let limit = config.limits.max_body_bytes;
     let deadline = tokio::time::Instant::now() + config.timeouts.body_read;
     let mut prefix: Vec<u8> = Vec::new();
@@ -908,6 +958,11 @@ async fn read_body(
 
         match frame.into_data() {
             Ok(data) => {
+                let observed = prefix.len().saturating_add(data.len());
+                if !grow_request_inspection_raw(&mut inspection, config, observed) {
+                    context.record_overloaded();
+                    return Err(inspection_capacity_error());
+                }
                 let room = limit.saturating_sub(prefix.len());
                 if data.len() >= room {
                     let take = room.min(data.len());
@@ -937,7 +992,7 @@ async fn read_body(
             None => settle_body_end(&mut body, Some(deadline), &mut pending).await,
         };
     }
-    Ok(RequestPayload {
+    let payload = RequestPayload {
         prefix: Bytes::from(prefix),
         pending,
         rest: if hit_limit {
@@ -946,7 +1001,8 @@ async fn read_body(
             None
         },
         truncated,
-    })
+    };
+    Ok((payload, inspection))
 }
 
 fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
@@ -1093,7 +1149,7 @@ async fn process(
     config: &CompiledConfig,
     context: &Context,
     upgrade: Option<Upgrade>,
-    inspection: InspectionGuard,
+    mut inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
     forward::normalize_host_header(&mut parts);
     let body = &payload.prefix;
@@ -1151,6 +1207,21 @@ async fn process(
     };
     let body_rules = config.has_body_target_rules();
     let inspect_body = body_rules || graphql_path;
+    if inspect_body && !body.is_empty() {
+        // The read path reserved only the raw prefix. Reserve the decoded-form
+        // worst case now, immediately before decoding and rule evaluation:
+        // a stalled body must not be able to hold this share of the budget.
+        let encoded = parts.headers.contains_key(CONTENT_ENCODING);
+        let raw_bytes = if encoded {
+            config.limits.max_body_bytes
+        } else {
+            body.len()
+        };
+        if !grow_inspection_to(&mut inspection, request_inspection_bytes(config, raw_bytes)) {
+            context.record_overloaded();
+            return Err(inspection_capacity_error());
+        }
+    }
     let body_truncated;
     let inspected_body: Cow<'_, [u8]> = match if inspect_body {
         crate::decoding::decode_body_for_inspection(
@@ -1169,7 +1240,8 @@ async fn process(
             body: decoded,
             complete,
         } => {
-            if !complete || payload.truncated {
+            let strict = config.limits.body_inspection == BodyInspection::Strict;
+            if !complete || (payload.truncated && !strict) {
                 context
                     .metrics
                     .request_decode_truncated
@@ -1187,7 +1259,7 @@ async fn process(
                     "request body too large to inspect",
                 ));
             }
-            body_truncated = false;
+            body_truncated = payload.truncated;
             Cow::Owned(decoded)
         }
         crate::decoding::DecodeOutcome::Unsupported => {
@@ -1302,6 +1374,30 @@ async fn process(
             "request blocked"
         );
         return Ok(forward::block_response(&blocked.response));
+    }
+
+    // A matching ALLOW rule explicitly trusts the request, including a body
+    // that was too large for complete inspection. Without one, an oversized
+    // body is rejected rather than forwarded with an uninspected remainder.
+    if config.limits.body_inspection == BodyInspection::Strict
+        && inspect_body
+        && body_truncated
+        && outcome.allowed.is_none()
+    {
+        context
+            .metrics
+            .request_body_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        debug!(
+            client = %peer.ip(),
+            limit = config.limits.max_body_bytes,
+            path = %parts.uri.path(),
+            "request body exceeds the inspection limit; rejecting"
+        );
+        return Err(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body exceeds the inspection limit",
+        ));
     }
 
     drop(view);
@@ -1481,6 +1577,22 @@ mod tests {
         assert_eq!(budget.reserved.load(Ordering::Relaxed), half + 1);
         drop(extra);
         drop(second);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn inspection_guard_grows_and_releases_its_reservation() {
+        let budget = Arc::new(InspectionBudget::new());
+        let mut guard = budget.reserve(64 * 1024).expect("baseline fits");
+        let half = INSPECTION_BUDGET_BYTES / 2;
+        assert!(guard.grow(half - 64 * 1024));
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), half);
+        assert!(
+            !guard.grow(INSPECTION_BUDGET_BYTES),
+            "growth must not exceed the budget"
+        );
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), half);
+        drop(guard);
         assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
     }
 

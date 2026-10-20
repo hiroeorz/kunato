@@ -19,7 +19,7 @@ use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::protection::ConnectionGuard;
 use crate::proxy::forward::HttpError;
-use crate::proxy::server::{self, Context, RequestPayload};
+use crate::proxy::server::{self, Context, InspectionGuard, RequestPayload};
 use crate::proxy::tls;
 use crate::proxy::{ProxyBody, settle_body_end};
 
@@ -223,9 +223,9 @@ async fn handle_request(
     let (mut send, recv) = stream.split();
     let mut response = match server::admission_error(&context, peer, &config) {
         Some(err) => server::rejected(peer, &err),
-        None => match context.reserve_request_inspection(&config) {
-            Some(inspection) => match read_prefix(recv, &config).await {
-                Ok(payload) => {
+        None => match context.reserve_request_inspection() {
+            Some(inspection) => match read_prefix(recv, &config, inspection, &context).await {
+                Ok((payload, inspection)) => {
                     server::process_payload(parts, payload, peer, &config, &context, inspection)
                         .await
                 }
@@ -288,11 +288,14 @@ impl Body for RequestBody {
 
 /// Buffer a bounded prefix of the request body and keep the receive half for
 /// the remainder, mirroring the TCP path's body policy: bodies larger than
-/// `limits.max_body_bytes` are inspected by prefix and the rest is streamed.
+/// `limits.max_body_bytes` are rejected by strict mode or streamed by `stream`
+/// mode after the prefix is inspected.
 async fn read_prefix(
     mut recv: RequestStream<h3_quinn::RecvStream, Bytes>,
     config: &CompiledConfig,
-) -> Result<RequestPayload, HttpError> {
+    mut inspection: InspectionGuard,
+    context: &Context,
+) -> Result<(RequestPayload, InspectionGuard), HttpError> {
     let limit = config.limits.max_body_bytes;
     let deadline = tokio::time::Instant::now() + config.timeouts.body_read;
     let mut prefix: Vec<u8> = Vec::new();
@@ -318,6 +321,11 @@ async fn read_prefix(
         };
 
         let chunk = chunk.copy_to_bytes(chunk.remaining());
+        let observed = prefix.len().saturating_add(chunk.len());
+        if !server::grow_request_inspection_raw(&mut inspection, config, observed) {
+            context.record_overloaded();
+            return Err(server::inspection_capacity_error());
+        }
         let room = limit.saturating_sub(prefix.len());
         if chunk.len() >= room {
             let take = room.min(chunk.len());
@@ -343,12 +351,13 @@ async fn read_prefix(
         }
         rest = Some(tail.boxed());
     }
-    Ok(RequestPayload {
+    let payload = RequestPayload {
         prefix: Bytes::from(prefix),
         pending,
         rest,
         truncated,
-    })
+    };
+    Ok((payload, inspection))
 }
 
 async fn send_response(

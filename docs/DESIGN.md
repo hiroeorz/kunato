@@ -99,12 +99,15 @@ Components:
 3. **Protection** — ban check, per-IP token bucket, global RPS guard. Rate/ban
    violations produce `429` or `503` with `Retry-After`.
 4. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
-   prefix. Unencoded bodies larger than the limit stream to the upstream after
-   rule evaluation, with a truncation log and metric. Buffer only because rules
-   may inspect `body`; responses are always streamed. Encoded bodies are
-   decompressed and content-type decoded for inspection when body-targeting
-   rules exist or the request targets a GraphQL endpoint; a body that cannot be
-   fully decoded within the limit is rejected (413/415/400) rather than forwarded
+   prefix. With the default `body_inspection: strict`, the prefix is evaluated
+   first: a matching ALLOW rule forwards, a matching BLOCK rule uses its
+   response, and if neither decides, an over-limit body is rejected (`413`).
+   `stream` mode evaluates the prefix and streams the remainder, with a
+   truncation log and metric. Buffer only because rules may inspect `body`;
+   responses are always streamed. Encoded bodies are decompressed and
+   content-type decoded for inspection when body-targeting rules exist or the
+   request targets a GraphQL endpoint; a body whose decoded output cannot be
+   completed within the limit is rejected (413/415/400) rather than forwarded
    uninspected. Forwarded bytes stay unchanged.
 5. **GraphQL complexity check** — on a configured GraphQL endpoint, extract the
    document from the URL query, form, JSON, `application/graphql`, or multipart
@@ -135,25 +138,37 @@ Components:
 
 ### Body policy
 
-The first `max_body_bytes` of a request body (default 1 MiB) are buffered so
+The first `max_body_bytes` of a request body (default 8 MiB) are buffered so
 that `in: [body]` rules always see a bounded prefix; content decoding applies to
-that prefix. For an unencoded body that is larger, the remainder streams to the
-upstream uninspected: the request is logged and counted as truncated
-(`kunato_request_truncated_total`), and the exchange runs under
-`timeouts.body_read` instead of `timeouts.upstream_response`. An encoded body
-that cannot be decoded completely within the limit is rejected instead
-(`413` when the decoded output exceeds the limit, `415` for an unsupported
-encoding, `400` for a malformed stream), because forwarding the compressed
-remainder would bypass every body rule. To reject oversized unencoded bodies
-instead, add an explicit rule (for example a `content-length` header regex).
-An `ALLOW` rule that targets `body` matches only when the full body was
-inspected; a truncated body never satisfies it. On a GraphQL endpoint a body
-larger than `max_body_bytes` is rejected (`413`) instead of being forwarded with
-an uninspected remainder, because a second operation or duplicate `query` field
-in that remainder could be the document the upstream executes. Responses already
-buffer only a prefix (`max_response_body_bytes`) and stream the rest; a truncated
-response body is inspected best-effort and never satisfies a body-targeting
-`ALLOW` rule.
+that prefix. With the default `body_inspection: strict`, the buffered prefix is
+evaluated before the size decision. A matching ALLOW rule forwards the request,
+a matching BLOCK rule uses its configured response, and if neither decides, an
+over-limit body is rejected with `413` because the uninspected remainder could
+carry a payload past every body rule. The size decision uses the bytes actually
+read, so chunked and HTTP/2 / HTTP/3 bodies are covered alike; the request is
+counted as truncated (`kunato_request_truncated_total`), and only the strict
+rejection is counted in `kunato_request_body_rejected_total`. A body exactly at the limit
+is accepted.
+
+With `body_inspection: stream`, the remainder streams to the upstream
+uninspected: the prefix is evaluated, the request is logged and counted as
+truncated, and the exchange runs under `timeouts.body_read` instead of
+`timeouts.upstream_response`. Body rules then see only the prefix, and a warning
+is logged at load or reload while body rules are configured. Regardless of the
+policy, an encoded body whose decoded output cannot be completed within the
+limit is rejected (`413` when the decoded output exceeds the limit, `415` for an
+unsupported encoding, `400` for a malformed stream), because rules cannot safely
+decide on an incomplete decoded body. In strict mode, an encoded body whose
+decoding completed but whose raw input exceeded the limit is evaluated like an
+unencoded prefix. An `ALLOW` rule that targets `body` itself matches only when
+the full body was inspected; a truncated body never satisfies it, but a path or
+header ALLOW can still exempt the request. On a GraphQL endpoint a body larger
+than `max_body_bytes` is rejected (`413`) instead of being forwarded with an
+uninspected remainder, because a second operation or duplicate `query` field in
+that remainder could be the document the upstream executes. Responses already
+buffer only a prefix (`max_response_body_bytes`) and stream the rest; a
+truncated response body is inspected best-effort and never satisfies a
+body-targeting `ALLOW` rule.
 
 ### Request normalization
 
@@ -374,8 +389,11 @@ contract; response rules follow the same contract with the response view.
 - `response.body` is capped at 8 KiB at load time.
 - Buffered response bodies are capped at `limits.max_response_body_bytes`; only
   the prefix is evaluated, and the remainder streams through uninspected.
-  Request bodies are buffered up to `limits.max_body_bytes`; the remainder
-  streams to the upstream uninspected and is logged as truncated.
+  Request bodies are buffered up to `limits.max_body_bytes`; bodies that exceed
+  it are evaluated on the prefix, and if no ALLOW or BLOCK rule decides they
+  are rejected with `413` (`body_inspection: strict`, the default). In `stream`
+  mode the remainder streams to the upstream uninspected and is logged as
+  truncated.
 - GraphQL documents are parsed with a bounded node budget, a per-document
   nesting guard, and an inline-fragment recursion cap, so neither deep fields nor
   a chain of `...{` can exhaust the analyzer or the worker stack; fragment
@@ -495,7 +513,7 @@ Default limits:
 | `max_path_bytes`          | 8 KiB   |
 | `max_header_bytes`        | 32 KiB  |
 | `max_headers`             | 100     |
-| `max_body_bytes`          | 1 MiB   |
+| `max_body_bytes`          | 8 MiB   |
 | `max_response_body_bytes` | 1 MiB   |
 | `max_concurrent_streams`  | 100     |
 

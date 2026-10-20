@@ -14,8 +14,10 @@ listen: 127.0.0.1:8080
 upstream: http://127.0.0.1:3000
 
 categories:
-  # Trusted clients bypass all remaining inspection. Add your own ranges (VPN,
-  # office network, monitoring) here.
+  # Trusted clients skip the remaining request rules and the strict body-size
+  # rejection. Engine limits (header/path size, GraphQL, undecodable bodies) and
+  # response-phase rules still apply. Add your own ranges (VPN, office network,
+  # monitoring) here.
   - name: trusted-sources
     action: ALLOW
     rules:
@@ -1520,13 +1522,19 @@ timeouts:
   shutdown_grace: 10s
   connection_idle: 60s
 
-# The body limit also bounds upload size. Raise max_body_bytes (up to 8 MiB) if
-# your application receives larger uploads; the process-wide inspection budget
-# bounds how much memory concurrent buffering can use. max_response_body_bytes
-# bounds how much of each upstream response response rules inspect before
-# streaming the rest. max_path_bytes bounds the whole request target (path plus
-# query string). max_concurrent_streams caps concurrent request streams per
-# HTTP/2 or QUIC connection.
+# Requests whose bodies exceed max_body_bytes are evaluated on the inspected
+# prefix when body rules or a GraphQL endpoint need them (body_inspection:
+# strict). A matching ALLOW forwards the request and a matching BLOCK uses its
+# response; if neither decides, the request is rejected with 413 because the
+# uninspected remainder would otherwise bypass every body rule. Set
+# body_inspection: stream to inspect the prefix and stream the rest to the
+# upstream instead; body rules then see only the prefix and a warning is logged
+# when the configuration loads.
+# max_response_body_bytes bounds how much of each upstream response response
+# rules inspect before streaming the rest. max_path_bytes bounds the whole
+# request target (path plus query string). max_concurrent_streams caps
+# concurrent request streams per HTTP/2 or QUIC connection. The process-wide
+# inspection budget bounds how much memory concurrent buffering can use.
 #
 # GraphQL documents sent to a GraphQL endpoint are checked against a depth and
 # expanded-field limit before forwarding. Fragment spreads are expanded, so
@@ -1538,8 +1546,9 @@ limits:
   max_path_bytes: 8192
   max_header_bytes: 32768
   max_headers: 100
-  max_body_bytes: 1048576
+  max_body_bytes: 8388608
   max_response_body_bytes: 1048576
+  body_inspection: strict
   max_concurrent_streams: 100
   graphql:
     enabled: true

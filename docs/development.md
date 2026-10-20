@@ -569,7 +569,7 @@ Defaults:
 | `max_path_bytes`          | 8 KiB   |
 | `max_header_bytes`        | 32 KiB  |
 | `max_headers`             | 100     |
-| `max_body_bytes`          | 1 MiB   |
+| `max_body_bytes`          | 8 MiB   |
 | `max_response_body_bytes` | 1 MiB   |
 | `max_concurrent_streams`  | 100     |
 
@@ -583,7 +583,19 @@ after `connection_idle`; a client that completes the TLS/ALPN handshake but
 never sends a request therefore cannot hold a connection slot indefinitely.
 HTTP/3 uses the same `connection_idle` value for the QUIC idle timeout. The
 process-wide inspection budget (256 MiB, reserved from the configured body
-limits) bounds the total memory used by concurrent body buffering.
+limits) bounds the total memory used by concurrent body buffering; requests
+reserve a baseline share and grow it as body bytes arrive, so a small request
+does not take a large body's share.
+
+`body_inspection` defaults to `strict`: when request-body rules or a GraphQL
+endpoint need the body, the buffered prefix is evaluated first. A matching
+ALLOW rule forwards the request, a matching BLOCK rule uses its configured
+response, and only when no rule decides is a request larger than
+`max_body_bytes` rejected with `413`. Set the policy to `stream` to inspect the
+prefix and stream the remainder instead; a warning is logged at load or reload
+when body rules are configured. Configurations written before the field existed
+are compiled with `strict`, so add `body_inspection: stream` to keep the old
+prefix-only behavior for large uploads.
 
 Every duration must be greater than zero (`shutdown_grace: 0` would abort the
 drain immediately). Limits are validated with hard caps so the "bounded
@@ -593,18 +605,31 @@ resources" invariant cannot be disabled by configuration: `max_path_bytes`
 
 ```yaml
 timeouts: { header_read: 10s, body_read: 30s }
-limits: { max_body_bytes: 1048576 }
+limits: { max_body_bytes: 8388608, body_inspection: strict }
 ```
 
 The first `max_body_bytes` of each request body are buffered for rule
-inspection and content decoding. For an unencoded body, larger bodies are not
-rejected: the buffered prefix is evaluated, the remainder streams to the
-upstream unchanged, and the request is counted as truncated
-(`kunato_request_truncated_total`) and logged at debug level. Rules therefore
-see at most the prefix; to reject oversized unencoded bodies outright, add an
-explicit rule (for example a `content-length` header regex). An encoded body
-that cannot be fully decoded within `max_body_bytes` is rejected (see above),
-because forwarding the compressed remainder would bypass every body rule.
+inspection and content decoding. With the default `body_inspection: strict`, the
+buffered prefix is evaluated before the size decision: a matching ALLOW rule
+forwards the request (the operator explicitly trusts it), a matching BLOCK rule
+uses its configured response, and if neither decides, an over-limit request is
+rejected with `413` because the uninspected remainder could carry a payload
+past every body rule. The size decision uses the bytes actually read, so a
+chunked or HTTP/2 / HTTP/3 body cannot bypass it. The over-limit request is
+counted in `kunato_request_truncated_total`; only the strict rejection is
+counted in `kunato_request_body_rejected_total`. A body exactly at the limit is
+accepted.
+
+With `body_inspection: stream`, the buffered prefix is evaluated, the remainder
+streams to the upstream unchanged, and the request is counted as truncated
+(`kunato_request_truncated_total`) and logged at debug level; rules then see at
+most the prefix, and a warning is logged at load or reload when body rules are
+configured. An encoded body whose decoded output cannot be completed within
+`max_body_bytes` is rejected even in strict mode, because rules cannot safely
+decide on an incomplete decoded body. In strict mode, an encoded body whose
+decoding completed but whose raw input exceeded the limit is evaluated like an
+unencoded prefix; a matching ALLOW can forward it and otherwise it is rejected
+with `413`.
 Request decoding is bounded by `max_body_bytes` and response decoding by
 `max_response_body_bytes`, so decompression bombs cannot exceed the configured
 buffer sizes. A decoded request body that exceeds the limit is rejected and
@@ -670,10 +695,11 @@ A document over either limit is answered with `400 Bad Request` and counted in
 answered with `413 Payload Too Large` instead: a GraphQL body larger than
 `max_body_bytes` is rejected rather than forwarded with an uninspected
 remainder, because a second operation or a duplicate `query` field in the stream
-could carry the document the upstream executes. Raise `max_body_bytes` (up to
-8 MiB) if a GraphQL upload needs it. Encoded bodies are decoded for this check
-even when no body-targeting rule exists, and an unsupported or malformed
-encoding is rejected (`415` or `400`) as it is for body rules. The check is a
+could carry the document the upstream executes. `max_body_bytes` defaults to
+the 8 MiB hard cap, so a larger GraphQL document cannot be accepted. Encoded
+bodies are decoded for this check even when no body-targeting rule exists, and
+an unsupported or malformed encoding is rejected (`415` or `400`) as it is for
+body rules. The check is a
 request-shape limit under `limits`, so `protection.enabled: false` and
 `--disable-protection` do not disable it; use `limits.graphql.enabled: false`
 for that.
@@ -717,11 +743,11 @@ BLOCK rule hits, LOG matches, rate-limit and ban decisions, global load shedding
 and inspection-budget shedding, upstream failures, configuration reloads, rules
 update outcomes (including
 `kunato_rules_update_incompatible_total` for rule sets that need a newer build),
-body truncation and decoding decisions (including requests rejected because
-their encoding could not be inspected: `kunato_request_decode_skipped_total`,
-plus response bodies that could not be decoded:
-`kunato_response_decode_skipped_total`), GraphQL rejections
-(`kunato_graphql_rejected_total`), and ACME
+body truncation and decoding decisions (over-limit bodies rejected by strict
+inspection: `kunato_request_body_rejected_total`; request encodings that could
+not be inspected: `kunato_request_decode_skipped_total`; and response bodies
+that could not be decoded: `kunato_response_decode_skipped_total`), GraphQL
+rejections (`kunato_graphql_rejected_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
 uptime, the time of the last successful rules update, and the time of the last
 deployed ACME certificate. Non-loopback addresses are rejected at validation

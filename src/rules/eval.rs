@@ -22,6 +22,10 @@ pub struct Blocked {
 #[derive(Debug, Default)]
 pub struct EvalOutcome {
     pub blocked: Option<Blocked>,
+    /// The ALLOW rule that stopped evaluation, if any. Callers need this to
+    /// distinguish "no rule matched" from "a rule explicitly trusted the
+    /// request" when a body could not be inspected completely.
+    pub allowed: Option<MatchRecord>,
     pub logs: Vec<MatchRecord>,
 }
 
@@ -118,7 +122,15 @@ fn evaluate_phase(
             };
 
             match action {
-                Action::Allow => return outcome,
+                Action::Allow => {
+                    outcome.allowed = Some(MatchRecord {
+                        category: category.name.clone(),
+                        rule: rule.name.clone(),
+                        action,
+                        phase,
+                    });
+                    return outcome;
+                }
                 Action::Block => {
                     let response = rule
                         .response
@@ -261,6 +273,7 @@ mod tests {
         );
         let outcome = evaluate_request(&yaml, "/anything");
         assert!(outcome.blocked.is_none());
+        assert!(outcome.allowed.is_some());
     }
 
     #[test]
@@ -485,9 +498,11 @@ mod tests {
         );
         let outcome = evaluate_response_for(&yaml, StatusCode::OK, b"fine");
         assert!(outcome.blocked.is_none());
+        assert!(outcome.allowed.is_some());
 
         let outcome = evaluate_response_for(&yaml, StatusCode::CREATED, b"fine");
         assert!(outcome.blocked.is_some());
+        assert!(outcome.allowed.is_none());
     }
 
     #[test]
@@ -509,8 +524,10 @@ mod tests {
         );
         let outcome = evaluate_request(&yaml, "/");
         assert!(outcome.blocked.is_none());
+        assert!(outcome.allowed.is_some());
 
         let outcome = evaluate_response_for(&yaml, StatusCode::OK, b"secret");
         assert!(outcome.blocked.is_some());
+        assert!(outcome.allowed.is_none());
     }
 }

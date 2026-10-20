@@ -42,7 +42,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
         return match command {
             Command::Init(args) => run_init(&args),
             Command::Validate => {
-                config::load(&cli.config)?;
+                let config = config::load(&cli.config)?;
+                warn_body_inspection(&config);
                 println!("configuration OK: {}", cli.config.display());
                 Ok(())
             }
@@ -52,6 +53,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     }
 
     let mut initial = config::load(&cli.config)?;
+    warn_body_inspection(&initial);
 
     if cli.validate {
         println!("configuration OK: {}", cli.config.display());
@@ -139,6 +141,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+fn warn_body_inspection(config: &CompiledConfig) {
+    if let Some(warning) = config.body_inspection_warning() {
+        warn!("{warning}");
+    }
 }
 
 fn run_init(args: &InitArgs) -> Result<(), Error> {
