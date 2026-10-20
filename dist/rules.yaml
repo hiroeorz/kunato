@@ -3,8 +3,10 @@
 # Downloaded daily by installs with rules_update enabled and verified by sha256.
 
 categories:
-  # Trusted clients bypass all remaining inspection. Add your own ranges (VPN,
-  # office network, monitoring) here.
+  # Trusted clients skip the remaining request rules and the strict body-size
+  # rejection. Engine limits (header/path size, GraphQL, undecodable bodies) and
+  # response-phase rules still apply. Add your own ranges (VPN, office network,
+  # monitoring) here.
   - name: trusted-sources
     action: ALLOW
     rules:
