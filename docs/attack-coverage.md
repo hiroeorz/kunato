@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-20; the managed set carried 489 rules then.
+2026-10-21; the managed set carried 491 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -149,7 +149,7 @@ expresses.
 | WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, author enumeration, xmlrpc logged, and `wp-login.php` / `xmlrpc.php` under `login-throttle`). Plugin CVEs are out of scope by policy |
 | Joomla / Drupal and other CMS | ✅ | Many CVE-specific signatures |
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
-| PHP / Laravel Exploits | 🔶 | `laravel-debug-endpoints` (`/telescope`, `/_debugbar`), Composer file discovery, generic PHP object-injection shapes, and Horizon LOGging; Laravel/Symfony CVE signatures remain thin, and WordPress plugin CVEs are out of scope by policy (details below) |
+| PHP / Laravel Exploits | 🔶 | `laravel-debug-endpoints` (`/telescope`, `/_debugbar`), Composer file discovery, generic PHP object-injection shapes, and Horizon LOGging; Laravel/Symfony CVE signatures remain thin, and WordPress plugin CVEs are out of scope by policy (details below); PHP engine memory-corruption shapes are covered in the php2shell subsection below |
 | Java / .NET Exploits | ✅ | Struts/Spring/Log4j and the framework CVE signatures, plus the Spring Actuator sensitive-path rules and generic Java deserialization shapes |
 | Vite / Nuxt Frontend Exposure | ✅ | `vite-dev-endpoints` blocks `/@fs/`, `/@vite/`, `/@id/`, `/__vite_ping`, and `/__nuxt_devtools__`; production `/_nuxt` assets and `@user` profile paths are pinned as allowed |
 | AI / LLM Service Exposure | 🔶 | `ai-service-management` blocks Ollama model management and Jupyter kernel/terminal endpoints; Gradio/Flowise/vLLM CVEs have no stable request shapes, while pickle, traversal, and SSRF classes are covered generically |
@@ -212,6 +212,21 @@ not match the Marshal signatures.
 | AI/LLM CVE shapes | 🔶 | Gradio (FileExplorer traversal, `proxy_url` SSRF), vLLM, and Flowise (sandbox escapes, OAuth token leaks) advisories have no stable request signatures; generic pickle, traversal, and SSRF layers apply |
 | PHP and Maven ecosystems | 🔶 | Packagist, FriendsOfPHP, and the `composer`/`maven` advisories are refreshed daily; individual CVEs are bundled only with a stable request shape |
 
+### PHP engine memory corruption (php2shell)
+
+CVE-2026-109618 and CVE-2026-109619 are OOM-fatal memory-corruption bugs in
+the PHP engine, exploited across two requests that the same worker handles.
+The request shapes live in `cve-2026-10-signatures`; the disclosure response
+is handled by `response-leaks`.
+
+| Area | Status | Evidence / notes |
+| --- | --- | --- |
+| OOM amplifier (multipart empty uploads) | 🔶 | `cve-2026-10-signatures.php2shell-nested-empty-upload` rejects a multipart part whose empty upload (`filename=""`) uses three or more nested name levels, the shape that multiplies the `$_FILES` hierarchy below `post_max_size`; parameter order is matched both ways, the existing 32-part `multipart-part-flood` covers count-based amplification, and compressed bodies are decoded before matching. Depth and count thresholds are heuristic, so a tuned body can still reach the fatal |
+| `post_max_size` bypass (chunked / compressed) | ✅ | Chunked multipart is rejected by `rack-chunked-multipart-upload`; a compressed multipart body is decoded and inspected (the bundled gzip request is blocked by the php2shell rule), and an undecodable body with body rules is rejected rather than forwarded |
+| Upload-progress stale-state consumption | ❌ | The final request (a multipart form with `PHP_SESSION_UPLOAD_PROGRESS` and no file part) is indistinguishable from a legitimate upload-progress form; no bundled signature |
+| Worker-memory disclosure via `PHPSESSID` | ✅ | `response-leaks.php2shell-session-cookie-leak` BLOCKs a `Set-Cookie` whose `PHPSESSID` value exceeds 400 characters (a PHP session id is at most 256 before encoding); response rules are outside the black-box harness, so no request-line test pins it |
+| RCE after the stale-state step | ❌ | The corruption happens inside the PHP process after the fatal; a WAF cannot see the heap, so patching PHP is the only complete fix |
+
 ## 10. Reconnaissance
 
 | Attack | Status | Evidence / notes |
@@ -263,7 +278,7 @@ not match the Marshal signatures.
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
 | Content-Encoding Compression | ✅ | gzip (all members), deflate, br, and zstd bodies are decompressed for inspection, stacked up to three layers. When a body rule exists, a body that cannot be fully decoded within the limit is rejected (413 over-limit, 415 unsupported, 400 malformed) instead of being forwarded uninspected |
 | Chunked Encoding Abuse | 🔶 | Rejected at the protocol layer (hyper) |
-| Multipart Boundary Abuse | ✅ | every declared boundary is flattened for inspection (up to four, closing the CVE-2026-26961 parser-differential class); 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule, and the Rack DoS signatures (escape-heavy part headers, chunked multipart uploads) |
+| Multipart Boundary Abuse | ✅ | every declared boundary is flattened for inspection (up to four, closing the CVE-2026-26961 parser-differential class); 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule, and the Rack DoS signatures (escape-heavy part headers, chunked multipart uploads), plus `cve-2026-10-signatures.php2shell-nested-empty-upload` for empty uploads with deeply nested field names |
 | JSON/XML Structure Evasion | 🔶 | JSON escapes are decoded; no dedicated structural detection |
 | Obfuscated JavaScript / SQL | ✅ | Whitespace- and comment-tolerant regexes |
 | WAF Fingerprinting | ❌ | Impossible to hide entirely (the block behavior is itself a signature) |
@@ -297,6 +312,12 @@ parameter tampering). CSRF, IDOR, authorization gaps, and session design cannot
 be fixed by a WAF at all; Kunato can only assist through custom response-phase
 rules. Closing a gap usually means either a YAML rule (most request-shape gaps)
 or an engine feature (behavioral and stateful checks).
+
+PHP2Shell (CVE-2026-109618 / CVE-2026-109619) stays Partial: the bundled rules
+stop the published multipart OOM amplifier and the leaked `PHPSESSID` response,
+but the stale-state consumption request is indistinguishable from a legitimate
+upload-progress form and the heap corruption itself is below the WAF. Patching
+PHP is the only complete fix.
 
 Behavioral detection (Phase 1) covers `404` probing, per-source authentication
 failure bursts, and a global authentication-failure log. It defaults to `LOG`;

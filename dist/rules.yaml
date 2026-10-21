@@ -1412,6 +1412,13 @@ categories:
       # :constructor:constructor.
       - name: react-rsc-flight-deserialization
         match: { regex: '(?i)(__proto__:then|\$\d+:constructor:constructor|"status"\s*:\s*"resolved_model")', in: [body] }
+      # CVE-2026-109618 / CVE-2026-109619 (PHP, "php2shell"): the OOM-fatal
+      # that leaves the dangling worker state is forced by multipart empty
+      # uploads whose nested field names multiply the $_FILES hierarchy PHP
+      # builds before the application runs. Browsers send empty file inputs
+      # without brackets, and nested file arrays at two levels keep passing.
+      - name: php2shell-nested-empty-upload
+        match: { headers: { Content-Type: '(?i)^multipart/form-data' }, regex: '(?i)content-disposition:[^\r\n]{0,200}(?:name="[^"]*(?:\[[^\]"\r\n]{1,64}\]){3,}"[^\r\n]{0,160}filename=""|filename=""[^\r\n]{0,160}name="[^"]*(?:\[[^\]"\r\n]{1,64}\]){3,}")', in: [body] }
       # CVE-2025-26399 (SolarWinds Web Help Desk): unauthenticated Java
       # deserialization through the AjaxProxy WebObjects action.
       - name: solarwinds-whd-ajaxproxy
@@ -1500,6 +1507,13 @@ categories:
       - name: django-debug-page
         action: BLOCK
         match: { regex: '(?i)(debug\s*=\s*true\s*</code>\s*in your django settings|you\x27re seeing this error because you have)' }
+      # CVE-2026-109618 (PHP, "php2shell"): the memory-disclosure path
+      # URL-encodes a dangling session string into the response cookie. A PHP
+      # session id is at most 256 characters before encoding, so an oversized
+      # PHPSESSID value is leaked worker memory.
+      - name: php2shell-session-cookie-leak
+        action: BLOCK
+        match: { response_headers: { Set-Cookie: '(?i)(?:^|;\s*)PHPSESSID=[^;\s]{400,}' } }
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
 

@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; filename=""; name="files[a][b][c][d]"
+Content-Type: application/octet-stream
+
+
+--X--

@@ -526,3 +526,11 @@ POST /human.aspx header="Content-Type: application/x-www-form-urlencoded" body="
 GET /reports/custom?name=quarterly
 GET /api/trust/ca/search?refid=abc123
 POST /api/convert header="Content-Type: application/x-www-form-urlencoded" body="source=photo.png&target=out.webp"
+
+# --- Near-misses for the php2shell multipart amplifier: a browser's empty
+#     file input, array uploads, nested text fields, and a legitimate
+#     upload-progress upload must keep passing ---
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-empty-input.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-nested-array.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-nested-text.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-progress.txt

@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name="photos[album][raw]"; filename="a.jpg"
+Content-Type: image/jpeg
+
+ÿØÿàjpeg
+--X--

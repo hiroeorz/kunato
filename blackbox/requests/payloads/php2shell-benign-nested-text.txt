@@ -1,0 +1,5 @@
+--X
+Content-Disposition: form-data; name="settings[theme][colors][primary]"
+
+#336699
+--X--

