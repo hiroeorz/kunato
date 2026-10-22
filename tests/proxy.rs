@@ -55,6 +55,50 @@ async fn spawn_header_echo_upstream(header: &'static str) -> SocketAddr {
     addr
 }
 
+const SESSION_SET_COOKIES: [&str; 2] = [
+    "session_id=opaque%2Bvalue%3D--signature; Path=/; HttpOnly; Secure; SameSite=Lax",
+    "_goodify_space_session=encrypted%2Fvalue%3D; Path=/; Expires=Thu, 22 Oct 2026 12:00:00 GMT; HttpOnly; Secure",
+];
+
+async fn spawn_cookie_echo_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    assert_eq!(request.version(), Version::HTTP_11);
+                    let cookies = request
+                        .headers()
+                        .get_all("cookie")
+                        .iter()
+                        .map(|value| value.as_bytes())
+                        .collect::<Vec<_>>()
+                        .join(b"\n".as_slice());
+                    let mut response = Response::new(Full::new(Bytes::from(cookies)));
+                    for cookie in SESSION_SET_COOKIES {
+                        response
+                            .headers_mut()
+                            .append("set-cookie", HeaderValue::from_static(cookie));
+                    }
+                    Ok::<_, Infallible>(response)
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -416,6 +460,17 @@ async fn send_h2c_request(
     host: Option<&str>,
     path: &str,
 ) -> (StatusCode, String) {
+    let (status, body, _) = send_h2c_with_headers(addr, authority, host, path, &[]).await;
+    (status, body)
+}
+
+async fn send_h2c_with_headers(
+    addr: SocketAddr,
+    authority: &str,
+    host: Option<&str>,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, http::HeaderMap) {
     let stream = TcpStream::connect(addr).await.expect("connect kunato");
     let (mut sender, connection) =
         hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
@@ -432,19 +487,27 @@ async fn send_h2c_request(
     if let Some(host) = host {
         builder = builder.header("host", host);
     }
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
     let request = builder
         .body(Full::new(Bytes::new()))
         .expect("build request");
 
     let response = sender.send_request(request).await.expect("request");
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = response
         .into_body()
         .collect()
         .await
         .expect("collect body")
         .to_bytes();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        String::from_utf8_lossy(&bytes).into_owned(),
+        headers,
+    )
 }
 
 async fn read_status(stream: &mut TcpStream) -> StatusCode {
@@ -665,6 +728,20 @@ async fn send_h3_with_authority(
     path: &str,
     body: &str,
 ) -> (StatusCode, String, http::HeaderMap) {
+    let request = Request::builder()
+        .method(method)
+        .uri(format!("https://{authority}{path}"))
+        .body(())
+        .expect("build request");
+    send_h3_request(addr, certificate, request, body).await
+}
+
+async fn send_h3_request(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    request: Request<()>,
+    body: &str,
+) -> (StatusCode, String, http::HeaderMap) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).expect("trust test certificate");
     let mut client_config = rustls::ClientConfig::builder()
@@ -690,11 +767,6 @@ async fn send_h3_with_authority(
             .expect("HTTP/3 handshake");
     let _connection_task = tokio::spawn(async move { h3_connection.wait_idle().await });
 
-    let request = Request::builder()
-        .method(method)
-        .uri(format!("https://{authority}{path}"))
-        .body(())
-        .expect("build request");
     let mut stream = send_request
         .send_request(request)
         .await
@@ -732,6 +804,141 @@ async fn pass_through_forwards_to_upstream() {
     let (status, body) = send(running.addr, Method::GET, "/", "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http1_cookie_fields_are_coalesced() {
+    let upstream = spawn_cookie_echo_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    for cookies in [
+        vec![],
+        vec![("cookie", "session_id=opaque%2Bvalue%3D--signature")],
+        vec![
+            ("cookie", "session_id=opaque%2Bvalue%3D--signature"),
+            ("cookie", "_goodify_space_session=encrypted%2Fvalue%3D"),
+        ],
+    ] {
+        let (status, body) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            "/account",
+            "kunato.test",
+            &cookies,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let expected = match cookies.len() {
+            0 => "",
+            1 => "session_id=opaque%2Bvalue%3D--signature",
+            _ => {
+                "session_id=opaque%2Bvalue%3D--signature; _goodify_space_session=encrypted%2Fvalue%3D"
+            }
+        };
+        assert_eq!(body, expected);
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_cookie_fields_are_coalesced_and_set_cookie_fields_stay_separate() {
+    let upstream = spawn_cookie_echo_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (status, body, headers) = send_h2c_with_headers(
+        running.addr,
+        "kunato.test",
+        None,
+        "/account",
+        &[
+            ("cookie", "session_id=opaque%2Bvalue%3D--signature"),
+            ("cookie", "_goodify_space_session=encrypted%2Fvalue%3D"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        "session_id=opaque%2Bvalue%3D--signature; _goodify_space_session=encrypted%2Fvalue%3D"
+    );
+    let cookies: Vec<_> = headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().expect("ASCII cookie"))
+        .collect();
+    assert_eq!(cookies, SESSION_SET_COOKIES);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_cookie_fields_are_coalesced_and_set_cookie_fields_stay_separate() {
+    let upstream = spawn_cookie_echo_upstream().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(upstream, &cert_path, &key_path, "categories: []").await;
+
+    let request = Request::builder()
+        .uri("https://localhost/account")
+        .header("cookie", "session_id=opaque%2Bvalue%3D--signature")
+        .header("cookie", "_goodify_space_session=encrypted%2Fvalue%3D")
+        .body(())
+        .expect("build request");
+    let (status, body, headers) = send_h3_request(running.addr, certificate, request, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        "session_id=opaque%2Bvalue%3D--signature; _goodify_space_session=encrypted%2Fvalue%3D"
+    );
+    let cookies: Vec<_> = headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().expect("ASCII cookie"))
+        .collect();
+    assert_eq!(cookies, SESSION_SET_COOKIES);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_handshake_cookie_fields_are_coalesced() {
+    let upstream = spawn_cookie_echo_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (status, body) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/ws",
+        "kunato.test",
+        &[
+            ("connection", "upgrade"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ("sec-websocket-version", "13"),
+            ("cookie", "session_id=opaque%2Bvalue%3D--signature"),
+            ("cookie", "_goodify_space_session=encrypted%2Fvalue%3D"),
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        "session_id=opaque%2Bvalue%3D--signature; _goodify_space_session=encrypted%2Fvalue%3D"
+    );
 
     running.stop().await;
 }

@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-21; the managed set carried 491 rules then.
+2026-10-22; the managed set carried 491 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -82,6 +82,15 @@ expresses.
 | Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
 | HTTP Desync | 🔶 | Same handling as smuggling |
+
+Protocol compatibility: before HTTP/1.1 forwarding, split request `Cookie`
+fields are joined with `; ` in field order without decoding their bytes
+(RFC 9113, section 8.2.3). This covers HTTP/2, HTTP/3, and HTTP/1.1 WebSocket
+handshakes and prevents upstream parsers from comma-joining or dropping session
+cookies. Rule evaluation retains the original fields, and response `Set-Cookie`
+fields remain separate. Proxy regression tests cover both directions. This is
+a forwarding correction, not a new cookie-tampering detection mechanism; the
+attack verdicts below are unchanged.
 
 ## 5. API Attacks
 

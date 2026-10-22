@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use http::header::{CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue};
+use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderName, HeaderValue};
 use http::{Request, Response, StatusCode, Version};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -92,6 +92,7 @@ pub async fn forward_request(
     *request.uri_mut() = uri;
     *request.version_mut() = Version::HTTP_11;
     copy_forward_headers(&parts.headers, request.headers_mut());
+    coalesce_cookie_headers(request.headers_mut())?;
     if let Some(host) = parts.headers.get(HOST).cloned() {
         request.headers_mut().insert(HOST, host);
     }
@@ -206,6 +207,28 @@ fn copy_forward_headers(source: &HeaderMap, target: &mut HeaderMap) {
     }
 }
 
+/// Join split Cookie fields before HTTP/1.1 forwarding (RFC 9113, section 8.2.3).
+pub(crate) fn coalesce_cookie_headers(headers: &mut HeaderMap) -> Result<(), HttpError> {
+    if headers.get_all(COOKIE).iter().nth(1).is_none() {
+        return Ok(());
+    }
+
+    let mut joined = Vec::new();
+    let mut sensitive = false;
+    for (index, value) in headers.get_all(COOKIE).iter().enumerate() {
+        if index != 0 {
+            joined.extend_from_slice(b"; ");
+        }
+        joined.extend_from_slice(value.as_bytes());
+        sensitive |= value.is_sensitive();
+    }
+    let mut value = HeaderValue::from_bytes(&joined)
+        .map_err(|_| HttpError::new(StatusCode::BAD_REQUEST, "invalid cookie header"))?;
+    value.set_sensitive(sensitive);
+    headers.insert(COOKIE, value);
+    Ok(())
+}
+
 fn connection_tokens(headers: &HeaderMap) -> Vec<HeaderName> {
     let mut tokens = Vec::new();
     for value in headers.get_all(CONNECTION) {
@@ -239,6 +262,65 @@ pub(crate) fn is_hop_by_hop(name: &HeaderName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_coalescing_preserves_missing_and_single_fields() {
+        for value in [None, Some("session_id=opaque%2Bvalue%3D--signature")] {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = value {
+                let mut value = HeaderValue::from_static(value);
+                value.set_sensitive(true);
+                headers.insert(COOKIE, value);
+            }
+            let original = headers.clone();
+
+            coalesce_cookie_headers(&mut headers).expect("valid cookies");
+
+            assert_eq!(headers, original);
+            if let Some(value) = headers.get(COOKIE) {
+                assert!(value.is_sensitive());
+            }
+        }
+    }
+
+    #[test]
+    fn cookie_coalescing_preserves_bytes_order_and_sensitivity() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            COOKIE,
+            HeaderValue::from_static("session_id=opaque%2Bvalue%3D--signature"),
+        );
+        let mut binary = HeaderValue::from_bytes(b"locale=\xff").expect("valid header");
+        binary.set_sensitive(true);
+        headers.append(COOKIE, binary);
+        headers.append(COOKIE, HeaderValue::from_static("session_id=second"));
+        headers.append("x-test", HeaderValue::from_static("first"));
+        headers.append("x-test", HeaderValue::from_static("second"));
+
+        coalesce_cookie_headers(&mut headers).expect("valid cookies");
+
+        assert_eq!(headers.get_all(COOKIE).iter().count(), 1);
+        assert_eq!(
+            headers.get(COOKIE).expect("cookie").as_bytes(),
+            b"session_id=opaque%2Bvalue%3D--signature; locale=\xff; session_id=second"
+        );
+        assert!(headers.get(COOKIE).expect("cookie").is_sensitive());
+        let other: Vec<_> = headers.get_all("x-test").iter().collect();
+        assert_eq!(other, ["first", "second"]);
+    }
+
+    #[test]
+    fn cookie_coalescing_preserves_empty_fields() {
+        let mut headers = HeaderMap::new();
+        for value in ["", "locale=en", ""] {
+            headers.append(COOKIE, HeaderValue::from_static(value));
+        }
+
+        coalesce_cookie_headers(&mut headers).expect("valid cookies");
+
+        assert_eq!(headers.get_all(COOKIE).iter().count(), 1);
+        assert_eq!(headers.get(COOKIE).expect("cookie"), "; locale=en; ");
+    }
 
     #[test]
     fn ipv4_mapped_peers_are_normalized_in_forwarded_headers() {

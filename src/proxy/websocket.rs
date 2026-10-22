@@ -105,6 +105,7 @@ pub(crate) async fn forward_handshake(
     *request.method_mut() = parts.method.clone();
     *request.uri_mut() = uri;
     copy_handshake_request_headers(&parts.headers, request.headers_mut());
+    forward::coalesce_cookie_headers(request.headers_mut())?;
     forward::set_forwarded_headers(
         request.headers_mut(),
         &parts.headers,

@@ -877,6 +877,12 @@ accepted, and requests are forwarded to the upstream over HTTP/1.1. Static
 certificates are read once at startup; rotate them by replacing the files and
 restarting, or use `tls.acme` below.
 
+Before forwarding over HTTP/1.1, Kunato joins multiple request `Cookie` fields
+with `; `, preserving their order and bytes. This includes split HTTP/2 and
+HTTP/3 cookies and HTTP/1.1 WebSocket handshakes, so upstream session parsers
+receive one cookie field. Rule evaluation uses the original request headers.
+Response `Set-Cookie` fields remain separate.
+
 #### Automatic certificates (Let's Encrypt)
 
 Kunato can obtain and renew certificates automatically through the ACME
