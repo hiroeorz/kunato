@@ -30,7 +30,7 @@ use crate::protection::{BehaviorSignal, ConnectionGuard, Decision, ProtectionSta
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
-use crate::proxy::{BoxError, PrefixBody, ProxyBody, full_body, settle_body_end};
+use crate::proxy::{BoxError, PrefixBody, ProxyBody, full_body, settle_body_end, with_bytes_guard};
 use crate::proxy::{http3, tls};
 use crate::request_view::RequestView;
 use crate::rules::eval;
@@ -323,11 +323,15 @@ impl Context {
         &self,
         config: &CompiledConfig,
     ) -> Option<InspectionGuard> {
-        let bytes = config
-            .limits
-            .max_response_body_bytes
-            .saturating_mul(RESPONSE_INSPECTION_FACTOR)
-            .max(64 * 1024);
+        let bytes = if config.has_response_body_rules() {
+            config
+                .limits
+                .max_response_body_bytes
+                .saturating_mul(RESPONSE_INSPECTION_FACTOR)
+                .max(MIN_INSPECTION_RESERVATION)
+        } else {
+            0
+        };
         self.inspection.reserve(bytes)
     }
 
@@ -828,6 +832,8 @@ async fn handle_request(
         Err(err)
     } else if let Some(err) = host_policy_error(&context, &config, &mut parts, peer) {
         Err(err)
+    } else if let Some(err) = request_head_error(&config, &parts) {
+        Err(err)
     } else if let Some(inspection) = context.reserve_request_inspection() {
         match read_body(body, &config, inspection, &context).await {
             Ok((body, inspection)) => {
@@ -900,6 +906,42 @@ pub(crate) fn host_policy_error(
         );
     }
     Some(HttpError::new(violation.status(), violation.message()))
+}
+
+/// Reject invalid request heads before allocating or reading a body.
+pub(crate) fn request_head_error(
+    config: &CompiledConfig,
+    parts: &http::request::Parts,
+) -> Option<HttpError> {
+    if non_canonical_method(&parts.method) {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "non-canonical HTTP method",
+        ));
+    }
+
+    let request_target = parts
+        .uri
+        .path_and_query()
+        .map_or(0, |target| target.as_str().len());
+    if request_target > config.limits.max_path_bytes {
+        return Some(HttpError::new(StatusCode::URI_TOO_LONG, "URI too long"));
+    }
+
+    let header_bytes: usize = parts
+        .headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.as_bytes().len())
+        .sum();
+    if parts.headers.len() > config.limits.max_headers
+        || header_bytes > config.limits.max_header_bytes
+    {
+        return Some(HttpError::new(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "request headers too large",
+        ));
+    }
+    None
 }
 
 /// Stable error for requests that could not reserve inspection memory. The
@@ -1280,6 +1322,9 @@ async fn process(
     if let Some(err) = host_policy_error(context, config, &mut parts, peer) {
         return Err(err);
     }
+    if let Some(err) = request_head_error(config, &parts) {
+        return Err(err);
+    }
     let body = &payload.prefix;
     if payload.truncated {
         context
@@ -1292,35 +1337,6 @@ async fn process(
             path = %parts.uri.path(),
             "request body truncated for inspection"
         );
-    }
-
-    if non_canonical_method(&parts.method) {
-        return Err(HttpError::new(
-            StatusCode::BAD_REQUEST,
-            "non-canonical HTTP method",
-        ));
-    }
-
-    let request_target = parts
-        .uri
-        .path_and_query()
-        .map_or(0, |target| target.as_str().len());
-    if request_target > config.limits.max_path_bytes {
-        return Err(HttpError::new(StatusCode::URI_TOO_LONG, "URI too long"));
-    }
-
-    let header_bytes: usize = parts
-        .headers
-        .iter()
-        .map(|(name, value)| name.as_str().len() + value.as_bytes().len())
-        .sum();
-    if parts.headers.len() > config.limits.max_headers
-        || header_bytes > config.limits.max_header_bytes
-    {
-        return Err(HttpError::new(
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "request headers too large",
-        ));
     }
 
     let graphql_path = config.limits.graphql.enabled && {
@@ -1494,10 +1510,6 @@ async fn process(
     )
     .with_body_truncated(body_truncated);
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
-    // The rule scan is done; release the budget before waiting on the upstream.
-    // The body prefix it covered is still needed for response-phase rules, but
-    // it is a single bounded buffer.
-    drop(inspection);
 
     if !outcome.logs.is_empty() {
         context.metrics.logged.fetch_add(1, Ordering::Relaxed);
@@ -1558,6 +1570,10 @@ async fn process(
     }
 
     drop(view);
+    // The request context retains its prefix across the upstream exchange.
+    // Share the reservation with the outbound body, which can also outlive an
+    // early upstream response while the client connection finishes sending it.
+    let inspection = Arc::new(inspection);
 
     if let Some(upgrade) = upgrade {
         if payload.rest.is_some() {
@@ -1569,7 +1585,10 @@ async fn process(
         let result = websocket::forward_handshake(
             config,
             &parts,
-            payload.prefix.clone(),
+            full_body(with_bytes_guard(
+                payload.prefix.clone(),
+                Arc::clone(&inspection),
+            )),
             context.scheme,
             peer,
             upgrade,
@@ -1608,7 +1627,9 @@ async fn process(
 
     let (outbound_body, exchange_timeout) = match payload.rest {
         Some(rest) => {
-            let body = PrefixBody::new(payload.prefix.clone(), payload.pending, rest).boxed();
+            let body = PrefixBody::new(payload.prefix.clone(), payload.pending, rest)
+                .with_guard(Arc::clone(&inspection))
+                .boxed();
             (body, config.timeouts.body_read)
         }
         None if !payload.pending.is_empty() => (
@@ -1617,11 +1638,15 @@ async fn process(
                 payload.pending,
                 full_body(Bytes::new()),
             )
+            .with_guard(Arc::clone(&inspection))
             .boxed(),
             config.timeouts.upstream_response,
         ),
         None => (
-            full_body(payload.prefix.clone()),
+            full_body(with_bytes_guard(
+                payload.prefix.clone(),
+                Arc::clone(&inspection),
+            )),
             config.timeouts.upstream_response,
         ),
     };
@@ -1753,6 +1778,225 @@ mod tests {
         assert_eq!(budget.reserved.load(Ordering::Relaxed), half);
         drop(guard);
         assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn outbound_body_keeps_a_shared_inspection_reservation() {
+        let budget = Arc::new(InspectionBudget::new());
+        let inspection = Arc::new(budget.reserve(INSPECTION_BUDGET_BYTES).expect("fits"));
+        let body = full_body(with_bytes_guard(
+            Bytes::from_static(b"retained prefix"),
+            Arc::clone(&inspection),
+        ));
+
+        drop(inspection);
+        assert!(
+            budget.reserve(1).is_none(),
+            "outbound body still owns its prefix"
+        );
+        drop(body);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn prefix_reservation_follows_emitted_frames_instead_of_the_stream_tail() {
+        let budget = Arc::new(InspectionBudget::new());
+        let inspection = Arc::new(budget.reserve(INSPECTION_BUDGET_BYTES).expect("fits"));
+        let tail = http_body_util::StreamBody::new(futures_util::stream::pending::<
+            Result<Frame<Bytes>, BoxError>,
+        >())
+        .boxed();
+        let mut body = PrefixBody::new(
+            Bytes::from_static(b"prefix"),
+            vec![Frame::data(Bytes::from_static(b"pending"))],
+            tail,
+        )
+        .with_guard(inspection);
+        let first = body
+            .frame()
+            .await
+            .expect("prefix frame")
+            .expect("prefix")
+            .into_data()
+            .expect("data");
+        let slice = first.slice(..1);
+        let second = body
+            .frame()
+            .await
+            .expect("pending frame")
+            .expect("pending")
+            .into_data()
+            .expect("data");
+        drop(first);
+        drop(second);
+        assert!(
+            budget.reserve(1).is_none(),
+            "an emitted slice still owns the buffer"
+        );
+        drop(slice);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
+        assert!(!body.is_end_stream(), "the streaming tail remains open");
+    }
+
+    async fn test_request_status(addr: SocketAddr, path: &str) -> StatusCode {
+        let client: hyper_util::client::legacy::Client<
+            hyper_util::client::legacy::connect::HttpConnector,
+            http_body_util::Full<Bytes>,
+        > = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build_http();
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("http://{addr}{path}"))
+            .body(http_body_util::Full::new(Bytes::from_static(b"payload")))
+            .expect("request");
+        let response = tokio::time::timeout(Duration::from_secs(3), client.request(request))
+            .await
+            .expect("response timeout")
+            .expect("response");
+        let status = response.status();
+        response.into_body().collect().await.expect("body");
+        status
+    }
+
+    #[tokio::test]
+    async fn request_reservations_cover_upstream_waits_and_release_afterwards() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("upstream");
+        let upstream = listener.local_addr().expect("address");
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let upstream_arrived = Arc::clone(&arrived);
+        let upstream_release = Arc::clone(&release);
+        let upstream_task = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let arrived = Arc::clone(&upstream_arrived);
+                let release = Arc::clone(&upstream_release);
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let arrived = Arc::clone(&arrived);
+                        let release = Arc::clone(&release);
+                        async move {
+                            let hold = request.uri().path() == "/hold";
+                            request.into_body().collect().await.expect("request body");
+                            if hold {
+                                arrived.notify_one();
+                                release.notified().await;
+                            }
+                            Ok::<_, Infallible>(Response::new(full_body("ok")))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let config = Arc::new(ArcSwap::from_pointee(
+            crate::config::parse(&format!(
+                "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+            ))
+            .expect("config"),
+        ));
+        let server = Server::bind(
+            "127.0.0.1:0".parse().expect("listen"),
+            config,
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("server");
+        let addr = server.local_addr().expect("address");
+        let budget = Arc::clone(&server.context.inspection);
+        let _occupied = budget
+            .reserve(INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION)
+            .expect("leave one request slot");
+        let (shutdown, receiver) = watch::channel(false);
+        let server_task = tokio::spawn(server.run(receiver));
+        let first = tokio::spawn(test_request_status(addr, "/hold"));
+        tokio::time::timeout(Duration::from_secs(3), arrived.notified())
+            .await
+            .expect("upstream reached");
+
+        assert_eq!(
+            budget.reserved.load(Ordering::Relaxed),
+            INSPECTION_BUDGET_BYTES
+        );
+        assert_eq!(
+            test_request_status(addr, "/probe").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        release.notify_one();
+        assert_eq!(first.await.expect("first task"), StatusCode::OK);
+        assert_eq!(test_request_status(addr, "/probe").await, StatusCode::OK);
+        assert_eq!(
+            budget.reserved.load(Ordering::Relaxed),
+            INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION
+        );
+
+        shutdown.send(true).expect("shutdown");
+        server_task.await.expect("server task");
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn response_prefix_keeps_its_inspection_reservation() {
+        let config = Arc::new(ArcSwap::from_pointee(
+            crate::config::parse(
+                "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+limits: { max_response_body_bytes: 2 }
+categories:
+  - name: response-signatures
+    phase: response
+    action: BLOCK
+    rules:
+      - name: unmatched
+        match: { regex: NEVER, in: [response_body] }
+",
+            )
+            .expect("config"),
+        ));
+        let server = Server::bind(
+            "127.0.0.1:0".parse().expect("listen"),
+            Arc::clone(&config),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("server");
+        let config = config.load_full();
+        let budget = Arc::clone(&server.context.inspection);
+        let _occupied = budget
+            .reserve(INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION)
+            .expect("leave response slot");
+        let inspection = server
+            .context
+            .reserve_response_inspection(&config)
+            .expect("response reservation");
+        let (parts, _) = Request::new(()).into_parts();
+        let response = crate::proxy::response::inspect(
+            &config,
+            &server.context.metrics,
+            &parts,
+            crate::proxy::response::InspectedRequest {
+                body: b"",
+                truncated: false,
+            },
+            "127.0.0.1:1234".parse().expect("peer"),
+            Response::new(full_body("ok")),
+            inspection,
+        )
+        .await
+        .expect("inspected response");
+
+        assert!(
+            budget.reserve(1).is_none(),
+            "response prefix remains buffered"
+        );
+        drop(response);
+        assert_eq!(
+            budget.reserved.load(Ordering::Relaxed),
+            INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION
+        );
     }
 
     #[tokio::test(start_paused = true)]

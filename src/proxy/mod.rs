@@ -7,6 +7,7 @@ pub mod tls;
 pub mod websocket;
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
@@ -64,6 +65,31 @@ pub fn full_body(data: impl Into<Bytes>) -> ProxyBody {
         .boxed()
 }
 
+/// Follow a buffered allocation through body frames, clones, and slices.
+pub(crate) fn with_bytes_guard<G>(bytes: Bytes, guard: Arc<G>) -> Bytes
+where
+    G: Send + Sync + 'static,
+{
+    if bytes.is_empty() {
+        return bytes;
+    }
+    Bytes::from_owner(GuardedBytes {
+        bytes,
+        _guard: guard,
+    })
+}
+
+struct GuardedBytes<G> {
+    bytes: Bytes,
+    _guard: Arc<G>,
+}
+
+impl<G> AsRef<[u8]> for GuardedBytes<G> {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// A body that emits a buffered prefix, then any pending frames, then streams
 /// the remainder. Used on both the request and response paths when only a
 /// bounded prefix was consumed for inspection.
@@ -80,6 +106,16 @@ impl PrefixBody {
             pending,
             rest,
         }
+    }
+
+    pub(crate) fn with_guard<G: Send + Sync + 'static>(mut self, guard: Arc<G>) -> Self {
+        self.prefix = with_bytes_guard(self.prefix, Arc::clone(&guard));
+        self.pending = self
+            .pending
+            .into_iter()
+            .map(|frame| frame.map_data(|bytes| with_bytes_guard(bytes, Arc::clone(&guard))))
+            .collect();
+        self
     }
 }
 

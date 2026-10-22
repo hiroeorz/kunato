@@ -7,7 +7,7 @@ use bytes::{Buf, Bytes};
 use h3::error::{Code, StreamError};
 use h3::server::{RequestResolver, RequestStream};
 use http::header::HeaderValue;
-use http::{Response, StatusCode};
+use http::{Method, Response, StatusCode};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame};
 use tokio::sync::watch;
@@ -219,11 +219,14 @@ async fn handle_request(
     };
 
     let config = context.config();
+    let head_request = request.method() == Method::HEAD;
     let (mut parts, _) = request.into_parts();
     let (mut send, recv) = stream.split();
     let mut response = if let Some(err) = server::admission_error(&context, peer, &config) {
         server::rejected(peer, &err)
     } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, peer) {
+        server::rejected(peer, &err)
+    } else if let Some(err) = server::request_head_error(&config, &parts) {
         server::rejected(peer, &err)
     } else if let Some(inspection) = context.reserve_request_inspection() {
         match read_prefix(recv, &config, inspection, &context).await {
@@ -237,7 +240,7 @@ async fn handle_request(
         server::rejected(peer, &server::inspection_capacity_error())
     };
     config.response_headers.apply(response.headers_mut());
-    if let Err(err) = send_response(&mut send, response).await {
+    if let Err(err) = send_response(&mut send, response, head_request).await {
         debug!(client = %peer, error = %err, "failed to send HTTP/3 response");
     }
 }
@@ -362,12 +365,17 @@ async fn read_prefix(
 async fn send_response(
     stream: &mut RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
     response: Response<ProxyBody>,
+    head_request: bool,
 ) -> Result<(), StreamError> {
     let (parts, mut body) = response.into_parts();
     let mut head = Response::new(());
     *head.status_mut() = parts.status;
     *head.headers_mut() = parts.headers;
     stream.send_response(head).await?;
+
+    if head_request {
+        return stream.finish().await;
+    }
 
     while let Some(frame) = body.frame().await {
         match frame {

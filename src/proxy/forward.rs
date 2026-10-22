@@ -186,18 +186,12 @@ pub(crate) fn convert_response(response: Response<Incoming>) -> Response<ProxyBo
     *response.status_mut() = parts.status;
     *response.version_mut() = parts.version;
 
-    let connection_tokens = connection_tokens(&parts.headers);
-    for (name, value) in &parts.headers {
-        if is_hop_by_hop(name) || connection_tokens.contains(name) {
-            continue;
-        }
-        response.headers_mut().append(name, value.clone());
-    }
+    copy_forward_headers(&parts.headers, response.headers_mut());
 
     response
 }
 
-fn copy_forward_headers(source: &HeaderMap, target: &mut HeaderMap) {
+pub(crate) fn copy_forward_headers(source: &HeaderMap, target: &mut HeaderMap) {
     let connection_tokens = connection_tokens(source);
     for (name, value) in source {
         if is_hop_by_hop(name) || connection_tokens.contains(name) {

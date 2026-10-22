@@ -557,6 +557,12 @@ truncated response body is still inspected best-effort but never satisfies a
 body-targeting `ALLOW` rule. Decoding is inspection-only: the bytes forwarded to
 the upstream and to the client are never modified.
 
+When response-phase rules do not target `response_body`, they run as soon as
+the upstream headers arrive, without buffering or waiting for response content.
+Status/header rules and their LOG, ALLOW, and BLOCK actions therefore work with
+streaming responses. If any response rule targets the body, prefix inspection
+still precedes evaluation and preserves document order.
+
 ### Timeouts and limits
 
 Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
@@ -583,7 +589,10 @@ Defaults:
 | `max_concurrent_streams`  | 100     |
 
 `max_path_bytes` bounds the whole request target (path plus query string), not
-just the path. `max_concurrent_streams` caps concurrent request streams per
+just the path. Request-target length, header size/count, and method-case checks
+run before inspection memory is reserved or the body is read on all transports,
+including WebSocket handshakes. An invalid head is rejected even if its declared
+body never arrives. `max_concurrent_streams` caps concurrent request streams per
 HTTP/2 connection (and per QUIC connection for HTTP/3). HTTP/2 connections are
 pinged after 30 seconds without activity and closed when the ping is not
 acknowledged within 20 seconds. In addition, the first HTTP/2 request must
@@ -594,7 +603,11 @@ HTTP/3 uses the same `connection_idle` value for the QUIC idle timeout. The
 process-wide inspection budget (256 MiB, reserved from the configured body
 limits) bounds the total memory used by concurrent body buffering; requests
 reserve a baseline share and grow it as body bytes arrive, so a small request
-does not take a large body's share.
+does not take a large body's share. Reservations remain held while a request
+context retains its body during an upstream exchange, and follow buffered
+request/response bytes through replay, clones, and slices. Response-prefix
+reservations are released when those bytes are released, even if an unbuffered
+streaming tail remains open. Exhausted capacity returns `503` with `Retry-After`.
 
 `body_inspection` defaults to `strict`: when request-body rules, a GraphQL
 endpoint, or multipart upload inspection need the body, the buffered prefix is
@@ -949,7 +962,8 @@ under normal deployments both share one port. TCP responses then carry an
 `Alt-Svc: h3=":<port>"; ma=86400` header so clients can discover HTTP/3.
 
 HTTP/3 requests pass through the same protection, limits, and rule evaluation
-as TCP requests. Settings are applied at startup (like TLS); changing or
+as TCP requests. HEAD responses carry no content, including Kunato-generated
+block and error responses. Settings are applied at startup (like TLS); changing or
 disabling them requires a restart. If the UDP socket cannot be bound, Kunato
 logs a warning and keeps serving over TCP.
 
@@ -960,6 +974,10 @@ upstream. The handshake request is evaluated by the same protection budgets and
 rules as any other request, and is blocked like one; when the upstream answers
 `101 Switching Protocols`, Kunato opens a bidirectional tunnel between client
 and upstream.
+
+Handshake headers use the same hop-by-hop filtering as ordinary HTTP in both
+directions: fields named by `Connection` are removed, then `Connection: upgrade`
+and `Upgrade: websocket` are rebuilt for the forwarded handshake.
 
 The tunnel itself is opaque: payload bytes are not inspected and
 `max_body_bytes` does not apply. Tunnels with no traffic in either direction

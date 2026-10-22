@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
@@ -20,7 +21,7 @@ pub struct Buffered {
     pub parts: http::response::Parts,
     pub prefix: Bytes,
     pub truncated: bool,
-    pub body: ProxyBody,
+    pub body: PrefixBody,
 }
 
 /// The request body as it was evaluated, plus whether it was only a prefix.
@@ -73,7 +74,7 @@ pub async fn buffer_prefix(
     }
 
     let prefix = Bytes::from(prefix);
-    let body = PrefixBody::new(prefix.clone(), pending, body).boxed();
+    let body = PrefixBody::new(prefix.clone(), pending, body);
 
     Ok(Buffered {
         parts,
@@ -90,33 +91,43 @@ pub(crate) async fn inspect(
     inspected_request: InspectedRequest<'_>,
     peer: SocketAddr,
     response: Response<ProxyBody>,
-    _inspection: InspectionGuard,
+    inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
-    let buffered = match tokio::time::timeout(
-        config.timeouts.upstream_response,
-        buffer_prefix(response, config.limits.max_response_body_bytes),
-    )
-    .await
-    {
-        Err(_) => {
-            metrics.upstream_timeouts.fetch_add(1, Ordering::Relaxed);
-            debug!(
-                timeout = ?config.timeouts.upstream_response,
-                "timed out buffering upstream response for inspection"
-            );
-            return Err(HttpError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream response timed out",
-            ));
+    let buffered = if !config.has_response_body_rules() {
+        let (parts, body) = response.into_parts();
+        Buffered {
+            parts,
+            prefix: Bytes::new(),
+            truncated: false,
+            body: PrefixBody::new(Bytes::new(), Vec::new(), body),
         }
-        Ok(Err(err)) => {
-            debug!(error = %err, "failed to buffer upstream response for inspection");
-            return Err(HttpError::new(
-                StatusCode::BAD_GATEWAY,
-                "upstream response failed",
-            ));
+    } else {
+        match tokio::time::timeout(
+            config.timeouts.upstream_response,
+            buffer_prefix(response, config.limits.max_response_body_bytes),
+        )
+        .await
+        {
+            Err(_) => {
+                metrics.upstream_timeouts.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    timeout = ?config.timeouts.upstream_response,
+                    "timed out buffering upstream response for inspection"
+                );
+                return Err(HttpError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream response timed out",
+                ));
+            }
+            Ok(Err(err)) => {
+                debug!(error = %err, "failed to buffer upstream response for inspection");
+                return Err(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream response failed",
+                ));
+            }
+            Ok(Ok(buffered)) => buffered,
         }
-        Ok(Ok(buffered)) => buffered,
     };
 
     let decoded_prefix = if config.has_response_body_rules() {
@@ -213,5 +224,8 @@ pub(crate) async fn inspect(
         );
     }
 
-    Ok(Response::from_parts(buffered.parts, buffered.body))
+    Ok(Response::from_parts(
+        buffered.parts,
+        buffered.body.with_guard(Arc::new(inspection)).boxed(),
+    ))
 }

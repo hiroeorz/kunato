@@ -79,7 +79,7 @@ expresses.
 | Invalid Content-Length / Transfer-Encoding | 🔶 | Rejected at the protocol layer plus CVE-specific rules; no generic rule |
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
-| Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
+| Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Head limits are enforced before body ingestion and inspection-memory reservation on HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes, including when a declared body never arrives. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
 | HTTP Desync | 🔶 | Same handling as smuggling |
 
@@ -91,6 +91,16 @@ cookies. Rule evaluation retains the original fields, and response `Set-Cookie`
 fields remain separate. Proxy regression tests cover both directions. This is
 a forwarding correction, not a new cookie-tampering detection mechanism; the
 attack verdicts below are unchanged.
+
+Proxy resource and compatibility guards: the 256 MiB inspection budget remains
+reserved while request contexts wait on the upstream and while buffered bytes
+are retained in replayed request/response frames, clones, or slices. Capacity
+pressure returns `503`; a slow upstream cannot detach retained prefixes from the
+budget. Status/header-only response rules do not buffer bodies, preserving
+streaming behavior. WebSocket handshakes strip all Connection-nominated fields
+in both directions before rebuilding upgrade headers, and HTTP/3 HEAD responses
+suppress content for rule blocks and generated errors. Unit and proxy regression
+tests exercise these paths without adding attack signatures or changing verdicts.
 
 ## 5. API Attacks
 

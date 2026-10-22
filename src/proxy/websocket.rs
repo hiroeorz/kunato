@@ -6,9 +6,8 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http::header::{CONNECTION, Entry, HeaderMap, HeaderValue, UPGRADE};
+use http::header::{CONNECTION, HeaderMap, HeaderValue, UPGRADE};
 use http::{Request, Response, StatusCode, Uri};
-use http_body_util::Full;
 use hyper::client::conn::http1;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
@@ -39,7 +38,7 @@ pub(crate) enum Handshake {
 pub(crate) async fn forward_handshake(
     config: &CompiledConfig,
     parts: &http::request::Parts,
-    body: Bytes,
+    body: ProxyBody,
     scheme: &'static str,
     peer: SocketAddr,
     upgrade: Upgrade,
@@ -101,10 +100,10 @@ pub(crate) async fn forward_handshake(
         debug!(error = %err, "invalid request target");
         HttpError::new(StatusCode::BAD_GATEWAY, "invalid upstream URI")
     })?;
-    let mut request = Request::new(Full::new(body));
+    let mut request = Request::new(body);
     *request.method_mut() = parts.method.clone();
     *request.uri_mut() = uri;
-    copy_handshake_request_headers(&parts.headers, request.headers_mut());
+    copy_handshake_headers(&parts.headers, request.headers_mut());
     forward::coalesce_cookie_headers(request.headers_mut())?;
     forward::set_forwarded_headers(
         request.headers_mut(),
@@ -143,7 +142,7 @@ pub(crate) async fn forward_handshake(
     let upstream_upgrade = hyper::upgrade::on(&mut response);
     let mut handshake = Response::new(full_body(Bytes::new()));
     *handshake.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-    copy_handshake_response_headers(response.headers(), handshake.headers_mut());
+    copy_handshake_headers(response.headers(), handshake.headers_mut());
 
     let guard = upgrade
         .guard_slot
@@ -161,35 +160,10 @@ pub(crate) async fn forward_handshake(
     Ok(Handshake::Upgraded(handshake))
 }
 
-fn copy_handshake_request_headers(source: &HeaderMap, target: &mut HeaderMap) {
-    for (name, value) in source {
-        if forward::is_hop_by_hop(name) && name != CONNECTION && name != UPGRADE {
-            continue;
-        }
-        if name == CONNECTION {
-            continue;
-        }
-        target.append(name, value.clone());
-    }
+fn copy_handshake_headers(source: &HeaderMap, target: &mut HeaderMap) {
+    forward::copy_forward_headers(source, target);
     target.insert(CONNECTION, HeaderValue::from_static("upgrade"));
-    if let Entry::Vacant(entry) = target.entry(UPGRADE) {
-        entry.insert(HeaderValue::from_static("websocket"));
-    }
-}
-
-fn copy_handshake_response_headers(source: &HeaderMap, target: &mut HeaderMap) {
-    for (name, value) in source {
-        if forward::is_hop_by_hop(name) && name != CONNECTION && name != UPGRADE {
-            continue;
-        }
-        target.append(name, value.clone());
-    }
-    if let Entry::Vacant(entry) = target.entry(CONNECTION) {
-        entry.insert(HeaderValue::from_static("upgrade"));
-    }
-    if let Entry::Vacant(entry) = target.entry(UPGRADE) {
-        entry.insert(HeaderValue::from_static("websocket"));
-    }
+    target.insert(UPGRADE, HeaderValue::from_static("websocket"));
 }
 
 async fn tunnel(

@@ -273,15 +273,23 @@ async fn spawn_upgrade_upstream() -> SocketAddr {
                         .headers()
                         .get("x-forwarded-host")
                         .is_some_and(|value| value.as_bytes() == b"kunato.test");
-                    if !forwarded_for || !forwarded_host {
+                    if !forwarded_for
+                        || !forwarded_host
+                        || request.headers().contains_key("x-client-hop")
+                    {
                         return Ok(upstream_error(StatusCode::BAD_REQUEST));
                     }
 
                     let mut response = Response::new(Full::new(Bytes::new()));
                     *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-                    response
-                        .headers_mut()
-                        .insert("connection", HeaderValue::from_static("upgrade"));
+                    response.headers_mut().insert(
+                        "connection",
+                        HeaderValue::from_static("upgrade, x-upstream-hop"),
+                    );
+                    response.headers_mut().insert(
+                        "x-upstream-hop",
+                        HeaderValue::from_static("connection-local-value"),
+                    );
                     response
                         .headers_mut()
                         .insert("upgrade", HeaderValue::from_static("websocket"));
@@ -332,10 +340,22 @@ fn upstream_error(status: StatusCode) -> Response<Full<Bytes>> {
 }
 
 async fn websocket_handshake(addr: SocketAddr, path: &str) -> (String, TcpStream) {
+    websocket_handshake_with_headers(addr, path, &[]).await
+}
+
+async fn websocket_handshake_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (String, TcpStream) {
     let mut stream = TcpStream::connect(addr).await.expect("connect kunato");
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nhost: kunato.test\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n"
+    let mut request = format!(
+        "GET {path} HTTP/1.1\r\nhost: kunato.test\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n"
     );
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -742,6 +762,16 @@ async fn send_h3_request(
     request: Request<()>,
     body: &str,
 ) -> (StatusCode, String, http::HeaderMap) {
+    send_h3_request_inner(addr, certificate, request, body, true).await
+}
+
+async fn send_h3_request_inner(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    request: Request<()>,
+    body: &str,
+    finish_body: bool,
+) -> (StatusCode, String, http::HeaderMap) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).expect("trust test certificate");
     let mut client_config = rustls::ClientConfig::builder()
@@ -777,7 +807,9 @@ async fn send_h3_request(
             .await
             .expect("send body");
     }
-    stream.finish().await.expect("finish request");
+    if finish_body {
+        stream.finish().await.expect("finish request");
+    }
 
     let response = stream.recv_response().await.expect("response");
     let status = response.status();
@@ -4414,5 +4446,284 @@ async fn http2_authority_is_forwarded_as_host() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, running.addr.to_string());
 
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn header_only_response_rules_do_not_buffer_streams() {
+    let upstream = spawn_stalling_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+timeouts: {{ upstream_response: 100ms }}
+categories:
+  - name: response-log
+    phase: response
+    action: LOG
+    rules:
+      - name: successful-response
+        match: {{ status: 200 }}
+  - name: response-errors
+    phase: response
+    action: BLOCK
+    response: {{ status: 451 }}
+    rules:
+      - name: error-status
+        match: {{ status: [500-599] }}
+"
+    );
+    assert!(
+        !config::parse(&yaml)
+            .expect("config")
+            .has_response_body_rules()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_with_headers(running.addr, Method::GET, "/events", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(running.metrics.response_logged.load(Ordering::Relaxed), 1);
+    assert_eq!(running.metrics.upstream_timeouts.load(Ordering::Relaxed), 0);
+
+    let blocked = yaml.replace("status: [500-599]", "status: 200");
+    running
+        .config
+        .store(Arc::new(config::parse(&blocked).expect("blocked config")));
+    let (status, _) = send(running.addr, Method::GET, "/events", "").await;
+    assert_eq!(status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+    assert_eq!(running.metrics.response_blocked.load(Ordering::Relaxed), 1);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_strips_connection_options_in_both_directions() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+    let (headers, mut stream) = websocket_handshake_with_headers(
+        running.addr,
+        "/ws",
+        &[
+            ("connection", "x-client-hop"),
+            ("x-client-hop", "private-value"),
+        ],
+    )
+    .await;
+    assert!(headers.starts_with("HTTP/1.1 101"), "{headers}");
+    let lower = headers.to_ascii_lowercase();
+    assert!(lower.contains("connection: upgrade\r\n"), "{headers}");
+    assert!(lower.contains("upgrade: websocket\r\n"), "{headers}");
+    assert!(!lower.contains("x-upstream-hop"), "{headers}");
+    assert!(!lower.contains("connection-local-value"), "{headers}");
+
+    stream.write_all(b"hello").await.expect("write tunnel");
+    let mut echoed = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut echoed))
+        .await
+        .expect("echo timeout")
+        .expect("read echo");
+    assert_eq!(&echoed, b"hello");
+    drop(stream);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_head_blocks_and_errors_have_no_content() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert, key, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert,
+        &key,
+        "allowed_hosts: [localhost]
+categories:
+  - name: denied
+    action: BLOCK
+    rules:
+      - name: private
+        match: { path: '^/private$' }",
+    )
+    .await;
+
+    let (status, body, _) = send_h3(
+        running.addr,
+        certificate.clone(),
+        Method::GET,
+        "/private",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body, "Forbidden");
+    let (status, body, _) = send_h3(
+        running.addr,
+        certificate.clone(),
+        Method::HEAD,
+        "/private",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.is_empty(), "HEAD block content: {body}");
+
+    let (status, body, _) = send_h3_with_authority(
+        running.addr,
+        certificate,
+        "unlisted.example",
+        Method::HEAD,
+        "/",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    assert!(body.is_empty(), "HEAD error content: {body}");
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_head_response_rules_have_no_content() {
+    let upstream = spawn_upstream(StatusCode::INTERNAL_SERVER_ERROR, "upstream error").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert, key, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert,
+        &key,
+        "categories:
+  - name: response-errors
+    phase: response
+    action: BLOCK
+    response: { status: 451, body: denied }
+    rules:
+      - name: server-error
+        match: { status: [500-599] }",
+    )
+    .await;
+    for method in [Method::GET, Method::HEAD] {
+        let (status, body, _) =
+            send_h3(running.addr, certificate.clone(), method.clone(), "/", "").await;
+        assert_eq!(status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        assert_eq!(body, if method == Method::HEAD { "" } else { "denied" });
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http1_rejects_request_heads_before_reading_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ntimeouts: {{ body_read: 10s }}\ncategories: []\n"
+    )).await;
+    let long_path = format!("/{}", "a".repeat(8192));
+    let padding = "a".repeat(40 * 1024);
+    for (request, expected) in [
+        (
+            format!("POST {long_path} HTTP/1.1\r\nHost: kunato.test\r\nContent-Length: 10\r\n\r\n"),
+            StatusCode::URI_TOO_LONG,
+        ),
+        (
+            format!(
+                "POST / HTTP/1.1\r\nHost: kunato.test\r\nX-Pad: {padding}\r\nContent-Length: 10\r\n\r\n"
+            ),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+        ),
+        (
+            "pOsT / HTTP/1.1\r\nHost: kunato.test\r\nContent-Length: 10\r\n\r\n".to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!(
+                "GET /ws HTTP/1.1\r\nHost: kunato.test\r\nConnection: upgrade\r\nUpgrade: websocket\r\nX-Pad: {padding}\r\nContent-Length: 10\r\n\r\n"
+            ),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+        ),
+    ] {
+        let mut stream = TcpStream::connect(running.addr).await.expect("connect");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("send head");
+        let status = tokio::time::timeout(Duration::from_secs(2), read_status(&mut stream))
+            .await
+            .expect("head rejection must not await a body");
+        assert_eq!(status, expected);
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_rejects_request_heads_before_reading_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_path_bytes: 8, max_headers: 3 }}\ntimeouts: {{ body_read: 10s }}\ncategories: []\n"
+    )).await;
+    for (path, extra_headers, expected) in [
+        ("/longpath", false, StatusCode::URI_TOO_LONG),
+        ("/", true, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE),
+    ] {
+        let stream = TcpStream::connect(running.addr).await.expect("connect");
+        let (mut sender, connection) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .expect("HTTP/2 handshake");
+        let task = tokio::spawn(connection);
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://kunato.test{path}"))
+            .header("content-length", "10");
+        if extra_headers {
+            for name in ["x-one", "x-two", "x-three"] {
+                builder = builder.header(name, "value");
+            }
+        }
+        let body = http_body_util::StreamBody::new(futures_util::stream::pending::<
+            Result<hyper::body::Frame<Bytes>, Infallible>,
+        >());
+        let request = builder.body(body).expect("request");
+        let response = tokio::time::timeout(Duration::from_secs(2), sender.send_request(request))
+            .await
+            .expect("head rejection must not await a body")
+            .expect("response");
+        assert_eq!(response.status(), expected);
+        response.into_body().collect().await.expect("error body");
+        task.abort();
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_rejects_request_heads_before_reading_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert, key, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream, &cert, &key,
+        "limits: { max_path_bytes: 8, max_headers: 3 }\ntimeouts: { body_read: 10s }\ncategories: []",
+    ).await;
+    for (path, extra_headers, expected) in [
+        ("/longpath", false, StatusCode::URI_TOO_LONG),
+        ("/", true, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE),
+    ] {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(format!("https://localhost{path}"))
+            .header("content-length", "10");
+        if extra_headers {
+            for name in ["x-one", "x-two", "x-three"] {
+                builder = builder.header(name, "value");
+            }
+        }
+        let request = builder.body(()).expect("request");
+        let (status, _, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_h3_request_inner(running.addr, certificate.clone(), request, "", false),
+        )
+        .await
+        .expect("head rejection must not await a body");
+        assert_eq!(status, expected);
+    }
     running.stop().await;
 }
