@@ -1350,12 +1350,25 @@ async fn process(
                 .is_some_and(|normalized| config.limits.graphql.matches_path(&normalized))
     };
     let body_rules = config.has_body_target_rules();
+    let php_profile = config.php.matches(&parts);
+    let form_body = crate::form::is_form(&parts.headers);
+    let inspect_form = form_body && (config.limits.form.enabled || php_profile);
+    if php_profile && config.php.block_multipart && crate::upload::is_multipart(&parts.headers) {
+        context
+            .metrics
+            .php_request_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        return Err(HttpError::new(
+            StatusCode::FORBIDDEN,
+            "multipart is disabled by the PHP profile",
+        ));
+    }
     let inspect_body = body_rules || graphql_path;
     let inspect_uploads = config.limits.upload_inspection != UploadInspection::Off
         && crate::upload::is_multipart(&parts.headers)
         && !body.is_empty();
     let encoded = parts.headers.contains_key(CONTENT_ENCODING);
-    let decode_body = inspect_body || (inspect_uploads && encoded);
+    let decode_body = inspect_body || ((inspect_uploads || inspect_form) && encoded);
     if (decode_body || inspect_uploads) && !body.is_empty() {
         // The read path reserved only the raw prefix. Reserve the decoded-form
         // worst case (or the bounded multipart-parse worst case) now,
@@ -1450,6 +1463,39 @@ async fn process(
         );
         if let Some(err) = protection_error(context, decision) {
             return Err(err);
+        }
+    }
+    if inspect_form {
+        let disabled_fields = if php_profile && config.php.block_upload_progress {
+            config.php.upload_progress_names.as_slice()
+        } else {
+            &[]
+        };
+        if let Err(violation) = crate::form::inspect(
+            &parts.headers,
+            inspected_body.as_ref(),
+            body_truncated,
+            &config.limits.form,
+            disabled_fields,
+        ) {
+            use crate::form::Violation;
+            let status = match violation {
+                Violation::Malformed => StatusCode::BAD_REQUEST,
+                Violation::DisabledField => StatusCode::FORBIDDEN,
+                _ => StatusCode::PAYLOAD_TOO_LARGE,
+            };
+            context
+                .metrics
+                .form_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            if violation == Violation::DisabledField {
+                context
+                    .metrics
+                    .php_request_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            debug!(client = %peer.ip(), path = %parts.uri.path(), ?violation, "form request rejected");
+            return Err(HttpError::new(status, violation.message()));
         }
     }
     if inspect_uploads
@@ -1601,7 +1647,7 @@ async fn process(
             websocket::Handshake::Upgraded(response) => Ok(response),
             websocket::Handshake::Response(response) => {
                 record_behavior(context, peer, &parts, response.status(), config);
-                if !config.has_response_rules() {
+                if !config.has_response_rules() && !php_profile {
                     return Ok(response);
                 }
                 let Some(response_inspection) = context.reserve_response_inspection(config) else {
@@ -1668,7 +1714,7 @@ async fn process(
     let response = result?;
     record_behavior(context, peer, &parts, response.status(), config);
 
-    if !config.has_response_rules() {
+    if !config.has_response_rules() && !php_profile {
         return Ok(response);
     }
 

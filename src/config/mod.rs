@@ -275,6 +275,8 @@ pub struct ConfigSpec {
     pub http3: Http3Spec,
     #[serde(default)]
     pub response_headers: ResponseHeadersSpec,
+    #[serde(default)]
+    pub php: PhpSpec,
 }
 
 /// A categories-only YAML document, used for `rules_file` and `overrides_file`.
@@ -383,6 +385,8 @@ pub struct LimitsSpec {
     pub max_concurrent_streams: u32,
     #[serde(default)]
     pub graphql: GraphqlSpec,
+    #[serde(default)]
+    pub form: FormLimits,
 }
 
 impl Default for LimitsSpec {
@@ -397,8 +401,84 @@ impl Default for LimitsSpec {
             upload_inspection: UploadInspection::default(),
             max_concurrent_streams: default_max_concurrent_streams(),
             graphql: GraphqlSpec::default(),
+            form: FormLimits::default(),
         }
     }
+}
+
+/// Origin-facing form resource limits, independent of rule actions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FormLimits {
+    pub enabled: bool,
+    pub max_parts: usize,
+    pub max_headers_per_part: usize,
+    pub max_part_header_bytes: usize,
+    pub max_field_name_bytes: usize,
+    pub max_nesting_depth: usize,
+    pub max_fields: usize,
+    pub max_empty_files: usize,
+    pub max_complexity: usize,
+}
+
+impl Default for FormLimits {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_parts: 64,
+            max_headers_per_part: 16,
+            max_part_header_bytes: 8192,
+            max_field_name_bytes: 1024,
+            max_nesting_depth: 16,
+            max_fields: 1000,
+            max_empty_files: 16,
+            max_complexity: 4096,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PhpSpec {
+    pub enabled: bool,
+    #[serde(deserialize_with = "de_allowed_hosts")]
+    pub hosts: Option<Vec<String>>,
+    pub paths: Vec<String>,
+    pub block_multipart: bool,
+    pub block_upload_progress: bool,
+    pub upload_progress_names: Vec<String>,
+    pub session_cookies: Vec<String>,
+    pub max_session_id_bytes: usize,
+    pub session_id_pattern: String,
+}
+
+impl Default for PhpSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hosts: None,
+            paths: Vec::new(),
+            block_multipart: false,
+            block_upload_progress: true,
+            upload_progress_names: vec!["PHP_SESSION_UPLOAD_PROGRESS".to_owned()],
+            session_cookies: vec!["PHPSESSID".to_owned()],
+            max_session_id_bytes: 256,
+            session_id_pattern: "^[A-Za-z0-9,-]+$".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Php {
+    pub enabled: bool,
+    pub hosts: Option<AllowedHosts>,
+    pub paths: Vec<String>,
+    pub block_multipart: bool,
+    pub block_upload_progress: bool,
+    pub upload_progress_names: Vec<String>,
+    pub session_cookies: Vec<String>,
+    pub max_session_id_bytes: usize,
+    pub session_id_pattern: Regex,
 }
 
 /// Limits for GraphQL documents. Requests routed to a GraphQL endpoint with a
@@ -833,6 +913,7 @@ pub struct Limits {
     pub upload_inspection: UploadInspection,
     pub max_concurrent_streams: u32,
     pub graphql: Graphql,
+    pub form: FormLimits,
 }
 
 impl From<&LimitsSpec> for Limits {
@@ -847,6 +928,7 @@ impl From<&LimitsSpec> for Limits {
             upload_inspection: spec.upload_inspection,
             max_concurrent_streams: spec.max_concurrent_streams,
             graphql: Graphql::from(&spec.graphql),
+            form: spec.form.clone(),
         }
     }
 }
@@ -1151,6 +1233,7 @@ pub struct CompiledConfig {
     pub tls: Option<Tls>,
     pub http3: Http3,
     pub response_headers: ResponseHeaders,
+    pub php: Php,
     pub rules_file: Option<PathBuf>,
     pub overrides_file: Option<PathBuf>,
     pub rules_update: RulesUpdate,
@@ -1189,8 +1272,9 @@ impl CompiledConfig {
         };
         Some(format!(
             "limits.body_inspection is `stream`: only the first {} bytes are inspected for \
-             {subject} and larger request bodies are forwarded uninspected; set `strict` to \
-             reject them unless a rule allows the request",
+             {subject} and larger request bodies may be forwarded uninspected; set `strict` to \
+             reject them unless a rule allows the request. Enabled form limits and PHP profiles \
+             still reject forms that cannot be inspected completely",
             self.limits.max_body_bytes
         ))
     }
@@ -1455,6 +1539,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     validate_http3(&spec.http3, &spec.tls, &mut issues);
     let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
+    let php = compile_php(&spec.php, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
     let rules_update = compile_rules_update(&spec.rules_update, &sources.rules_file, &mut issues);
 
@@ -1483,6 +1568,9 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     let Some(upstream) = upstream else {
         return Err(vec!["invalid upstream configuration".to_owned()]);
     };
+    let Some(php) = php else {
+        return Err(vec!["invalid PHP profile".to_owned()]);
+    };
 
     Ok(CompiledConfig {
         listen: spec.listen,
@@ -1496,6 +1584,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         tls: spec.tls.as_ref().map(Tls::from),
         http3: Http3::from(&spec.http3),
         response_headers,
+        php,
         rules_file: sources.rules_file,
         overrides_file: sources.overrides_file,
         rules_update,
@@ -1715,6 +1804,123 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
         issues.push("limits.max_concurrent_streams must be between 1 and 1000".to_owned());
     }
     validate_graphql(&limits.graphql, issues);
+    for (name, value, max) in [
+        ("max_parts", limits.form.max_parts, 64),
+        (
+            "max_headers_per_part",
+            limits.form.max_headers_per_part,
+            128,
+        ),
+        (
+            "max_part_header_bytes",
+            limits.form.max_part_header_bytes,
+            64 * 1024,
+        ),
+        (
+            "max_field_name_bytes",
+            limits.form.max_field_name_bytes,
+            4096,
+        ),
+        ("max_nesting_depth", limits.form.max_nesting_depth, 64),
+        ("max_fields", limits.form.max_fields, 10_000),
+        ("max_empty_files", limits.form.max_empty_files, 64),
+        ("max_complexity", limits.form.max_complexity, 100_000),
+    ] {
+        if value == 0 || value > max {
+            issues.push(format!("limits.form.{name} must be between 1 and {max}"));
+        }
+    }
+}
+
+fn compile_php(spec: &PhpSpec, issues: &mut Vec<String>) -> Option<Php> {
+    if spec.enabled && spec.hosts.is_none() && spec.paths.is_empty() {
+        issues.push(
+            "php.enabled requires hosts or paths; use paths: [/] to explicitly cover every path"
+                .to_owned(),
+        );
+    }
+    let hosts = spec.hosts.as_ref().and_then(|entries| {
+        let mut errors = Vec::new();
+        let hosts = AllowedHosts::validate(entries, &mut errors);
+        issues.extend(
+            errors
+                .into_iter()
+                .map(|error| format!("php.hosts: {error}")),
+        );
+        hosts
+    });
+    if spec.paths.len() > 16 {
+        issues.push("php.paths must contain at most 16 entries".to_owned());
+    }
+    for path in &spec.paths {
+        if !path.starts_with('/')
+            || path.len() > 1024
+            || path.contains(['?', '#', '%'])
+            || path.chars().any(char::is_whitespace)
+            || crate::decoding::normalize_path(path).is_some_and(|normalized| normalized != *path)
+        {
+            issues.push(format!("php.paths entry `{path}` must be a normalized absolute path without query, fragment, encoding, or whitespace"));
+        }
+    }
+    for (name, entries) in [
+        ("upload_progress_names", &spec.upload_progress_names),
+        ("session_cookies", &spec.session_cookies),
+    ] {
+        if entries.is_empty() || entries.len() > 16 {
+            issues.push(format!("php.{name} must contain between 1 and 16 names"));
+        }
+        for entry in entries {
+            if entry.len() > 128
+                || entry.is_empty()
+                || !entry
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+            {
+                issues.push(format!("php.{name} entries must be 1..128 ASCII letters, digits, underscores, hyphens, or dots"));
+            }
+        }
+    }
+    if !(1..=4096).contains(&spec.max_session_id_bytes) {
+        issues.push("php.max_session_id_bytes must be between 1 and 4096".to_owned());
+    }
+    if spec.session_id_pattern.len() > MAX_PATTERN_BYTES
+        || !is_fully_anchored(&spec.session_id_pattern)
+    {
+        issues.push(
+            "php.session_id_pattern must be fully anchored and at most 4096 bytes".to_owned(),
+        );
+    }
+    let session_id_pattern = match RegexBuilder::new(&spec.session_id_pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .build()
+    {
+        Ok(regex) => regex,
+        Err(error) => {
+            issues.push(format!("php.session_id_pattern: {error}"));
+            return None;
+        }
+    };
+    Some(Php {
+        enabled: spec.enabled,
+        hosts,
+        paths: spec
+            .paths
+            .iter()
+            .map(|path| {
+                if path == "/" {
+                    path.clone()
+                } else {
+                    path.trim_end_matches('/').to_owned()
+                }
+            })
+            .collect(),
+        block_multipart: spec.block_multipart,
+        block_upload_progress: spec.block_upload_progress,
+        upload_progress_names: spec.upload_progress_names.clone(),
+        session_cookies: spec.session_cookies.clone(),
+        max_session_id_bytes: spec.max_session_id_bytes,
+        session_id_pattern,
+    })
 }
 
 fn validate_graphql(graphql: &GraphqlSpec, issues: &mut Vec<String>) {
@@ -4827,5 +5033,74 @@ categories:
             let error = parse_with(BASE, body).expect_err("invalid graphql limit must fail");
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn form_limits_default_to_bounded_origin_facing_inspection() {
+        let config = parse(BASE).expect("config");
+        assert!(config.limits.form.enabled);
+        assert_eq!(config.limits.form.max_parts, 64);
+        assert_eq!(config.limits.form.max_headers_per_part, 16);
+        assert_eq!(config.limits.form.max_part_header_bytes, 8192);
+        assert_eq!(config.limits.form.max_nesting_depth, 16);
+        assert!(!config.php.enabled);
+        let config = parse_with(BASE, "limits: { form: { enabled: false, max_parts: 8 } }\n")
+            .expect("config");
+        assert!(!config.limits.form.enabled);
+        assert_eq!(config.limits.form.max_parts, 8);
+    }
+
+    #[test]
+    fn rejects_unbounded_form_resource_settings() {
+        for (name, max) in [
+            ("max_parts", 64),
+            ("max_headers_per_part", 128),
+            ("max_part_header_bytes", 65536),
+            ("max_field_name_bytes", 4096),
+            ("max_nesting_depth", 64),
+            ("max_fields", 10000),
+            ("max_empty_files", 64),
+            ("max_complexity", 100000),
+        ] {
+            for value in [0, max + 1] {
+                let error = parse_with(
+                    BASE,
+                    &format!("limits: {{ form: {{ {name}: {value} }} }}\n"),
+                )
+                .expect_err("invalid");
+                assert!(
+                    error.to_string().contains(&format!("limits.form.{name}")),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn php_profile_requires_an_explicit_scope_and_valid_session_policy() {
+        for (body, expected) in [
+            ("enabled: true", "requires hosts or paths"),
+            ("hosts: []", "must not be empty"),
+            ("hosts: [bad/host]", "php.hosts"),
+            ("paths: [relative]", "absolute path"),
+            ("paths: ['/x/../php']", "normalized"),
+            ("paths: ['/%70hp']", "encoding"),
+            ("session_cookies: []", "session_cookies"),
+            (
+                "upload_progress_names: ['bad name']",
+                "upload_progress_names",
+            ),
+            ("max_session_id_bytes: 0", "max_session_id_bytes"),
+            ("max_session_id_bytes: 4097", "max_session_id_bytes"),
+            ("session_id_pattern: 'unanchored'", "fully anchored"),
+            ("session_id_pattern: '^[$'", "session_id_pattern"),
+        ] {
+            let error = parse_with(BASE, &format!("php: {{ {body} }}\n")).expect_err("invalid");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let config = parse_with(BASE, "php: { enabled: true, paths: [/], session_cookies: [SID], upload_progress_names: [PROGRESS] }\n").expect("valid");
+        assert!(config.php.enabled);
+        assert_eq!(config.php.session_cookies, ["SID"]);
+        assert_eq!(config.php.upload_progress_names, ["PROGRESS"]);
     }
 }

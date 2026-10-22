@@ -1,0 +1,7 @@
+--X
+Content-Disposition: form-data; name="files[a][b][c]"; filename="note.txt"
+Content-Type: text/plain
+
+hello
+--X--
+

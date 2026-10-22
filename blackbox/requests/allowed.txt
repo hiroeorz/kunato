@@ -534,3 +534,9 @@ POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_fil
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-nested-array.txt
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-nested-text.txt
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-progress.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-unquoted.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-single-quotes.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-spaced-value.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-nonempty-deep.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-benign-part-headers.txt
+POST /api/submit header="Content-Type: application/x-www-form-urlencoded" body="user[name]=Alice&items[0][label]=note"

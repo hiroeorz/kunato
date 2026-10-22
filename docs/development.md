@@ -565,6 +565,116 @@ still precedes evaluation and preserves document order.
 
 ### Timeouts and limits
 
+#### Form structure limits
+
+`limits.form` is enabled by default and validates decoded `multipart/form-data`
+and `application/x-www-form-urlencoded` bodies before rule evaluation. It does
+not depend on automatic protection, upload content inspection, or a body rule.
+`ALLOW` cannot bypass it. An incomplete form is rejected with `413`, including
+in `body_inspection: stream` mode; malformed or ambiguous metadata gets `400`.
+Resource-limit violations get `413`. Limits apply to actual received/decoded
+bytes over HTTP/1.1 (including chunked), HTTP/2, HTTP/3, and WebSocket handshakes,
+not the declared Content-Length. Forwarded bytes are never rewritten.
+
+| Field under `limits.form` | Default | Valid range |
+| --- | --- | --- |
+| `enabled` | `true` | boolean |
+| `max_parts` | 64 | 1..64 |
+| `max_headers_per_part` | 16 | 1..128 |
+| `max_part_header_bytes` | 8192 | 1..65536 |
+| `max_field_name_bytes` | 1024 | 1..4096 |
+| `max_nesting_depth` | 16 | 1..64 |
+| `max_fields` | 1000 | 1..10000 |
+| `max_empty_files` | 16 | 1..64 |
+| `max_complexity` | 4096 | 1..100000 |
+
+Each multipart interpretation is checked independently (at most four declared
+boundaries). Missing boundaries, missing closing delimiters, folded part
+headers, competing Content-Type fields, duplicate disposition/name/filename
+metadata, more than 64 disposition parameters, and competing `filename`/`filename*` parameters are rejected rather
+than silently skipped. Ordinary quoted, single-quoted, and unquoted parameters,
+empty browser file controls, and valid nested uploads remain supported. The
+name-byte limit also applies to filenames. URL-encoded names are decoded once
+(including `+` as space) before checking their length and nesting; duplicate
+fields count independently. Values do not contribute fake field names.
+
+Complexity charges one unit per MIME header/disposition parameter and `(nesting + 1)` per field,
+multiplied by six for file metadata. This approximates PHP's repeated `$_FILES`
+hierarchies; it is a bounded heuristic, not an allocator model or guarantee
+against origin OOM. Defaults should be tuned against legitimate forms.
+
+To deliberately stream forms larger than `max_body_bytes`, set
+`limits.form.enabled: false` as well as `body_inspection: stream`. The remaining
+upload and signature checks then inspect only the prefix. A matching PHP
+profile always enforces the configured form limits, even when the global form
+guard is disabled. Disabling the guard is a security tradeoff, not a mitigation.
+The inspection decoder's own part/name work limits are not a substitute for
+this origin-facing policy.
+
+#### Optional PHP profile
+
+The top-level `php` profile is disabled by default. Enabling it requires an
+explicit `hosts` or `paths` scope; use `paths: [/]` to cover the whole upstream.
+When both are present they are ANDed. Hosts use the same normalized allowlist
+syntax as `allowed_hosts`; paths are normalized absolute prefixes matched at
+segment boundaries, including decoded request-path interpretations. Scope is
+based on routing, not a `.php` suffix. Use `allowed_hosts` as well when a
+host-scoped upstream would otherwise serve the same application for arbitrary
+Host values; host scoping cannot infer the upstream's default virtual host.
+
+```yaml
+php:
+  enabled: true
+  hosts: [php.example.com]
+  paths: [/]
+  block_multipart: false
+  block_upload_progress: true
+  upload_progress_names: [PHP_SESSION_UPLOAD_PROGRESS]
+  session_cookies: [PHPSESSID, CUSTOMSID]
+  max_session_id_bytes: 256
+  session_id_pattern: '^[A-Za-z0-9,-]+$'
+```
+
+| Field | Default / meaning |
+| --- | --- |
+| `enabled` | `false`; opt in explicitly |
+| `hosts` | omitted; optional nonempty host allowlist |
+| `paths` | `[]`; up to 16 normalized prefixes, each at most 1024 bytes; `/` matches every path |
+| `block_multipart` | `false`; reject multipart with `403` when the application does not use it |
+| `block_upload_progress` | `true`; reject configured multipart progress field names with `403` |
+| `upload_progress_names` | `[PHP_SESSION_UPLOAD_PROGRESS]`; 1..16 exact, case-sensitive field names |
+| `session_cookies` | `[PHPSESSID]`; 1..16 exact, case-sensitive response cookie names |
+| `max_session_id_bytes` | 256; 1..4096 decoded bytes |
+| `session_id_pattern` | `^[A-Za-z0-9,-]+$`; compiled once, fully anchored, at most 4096 bytes |
+
+Configured field/cookie names accept 1..128 ASCII letters, digits, underscores,
+hyphens, and dots. Match custom progress and session names to the actual PHP
+configuration. If the application uses upload progress, disable its BLOCK
+explicitly; file contents mentioning the field name are not blocked.
+
+The profile percent-decodes the configured session cookie value once, rejects
+malformed encoding, excess decoded length, invalid UTF-8, and values outside the
+configured pattern. Empty deletion cookies are allowed. Only configured names
+are checked; Rails signed/encrypted cookies are not constrained. Custom PHP
+session handlers may require a different length or character pattern.
+Every Set-Cookie field is examined, and a violation replaces the entire response
+with `403` without forwarding its cookies. This happens before response-body
+buffering and response ALLOW, even with no response-phase rules, and before a
+WebSocket tunnel is established. Changes hot-reload with the configuration.
+
+Metrics are `kunato_form_rejected_total`, `kunato_php_request_rejected_total`,
+and `kunato_php_response_rejected_total`. Rejection logs omit cookie contents.
+
+These controls mitigate specific PHP2Shell paths, not every producer/consumer
+or application-dependent OOM. Update PHP to a fixed vendor build and restart
+every worker. See the [OOM advisory](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)
+and [stale-state advisory](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp).
+Form limits and the PHP profile are binary features: upgrade Kunato before
+using these local configuration fields. Managed signatures continue to use the
+v0.7.3 rule-set format and pass the release compatibility gate.
+
+#### General limits and timeouts
+
 Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
 Values must fit in the unit (no silent overflow) and must not exceed 365 days.
 Defaults:

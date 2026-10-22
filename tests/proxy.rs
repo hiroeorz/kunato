@@ -4727,3 +4727,481 @@ async fn http3_rejects_request_heads_before_reading_bodies() {
     }
     running.stop().await;
 }
+
+fn form_body_with_headers(extra: usize) -> String {
+    format!(
+        "--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\"\r\n{}\r\n\r\n--X--\r\n",
+        "X-Test: ok\r\n".repeat(extra)
+    )
+}
+
+#[tokio::test]
+async fn form_structure_limits_run_before_allow_without_protection() {
+    let upstream = spawn_body_echo_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nprotection: {{ enabled: false }}\nlimits: {{ upload_inspection: off, form: {{ max_headers_per_part: 2 }} }}\ncategories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: all\n        match: {{ path: '^/' }}\n"
+    )).await;
+    let body = form_body_with_headers(2);
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body.into_bytes(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let valid = form_body_with_headers(1);
+    let (status, echoed) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        valid.as_bytes().to_vec(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, valid.as_bytes());
+    assert_eq!(running.metrics.form_rejected.load(Ordering::Relaxed), 1);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn form_structure_checks_decode_gzip_and_preserve_forwarded_bytes() {
+    let upstream = spawn_body_echo_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: off, form: {{ max_headers_per_part: 2 }} }}\ncategories: []\n"
+    )).await;
+    let headers = [
+        ("content-type", "multipart/form-data; boundary=X"),
+        ("content-encoding", "gzip"),
+    ];
+    let body = gzip(form_body_with_headers(2).as_bytes());
+    let (status, _) = send_bytes(running.addr, Method::POST, "/upload", body, &headers).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let valid = gzip(form_body_with_headers(1).as_bytes());
+    let (status, echoed) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        valid.clone(),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, valid);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn form_checks_require_complete_bodies_even_with_stream_and_allow() {
+    let upstream = spawn_body_echo_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 32, body_inspection: stream, upload_inspection: off }}\ncategories:\n  - name: trusted\n    action: ALLOW\n    rules:\n      - name: all\n        match: {{ path: '^/' }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+    let body = form_body_with_headers(0);
+    let headers = [("content-type", "multipart/form-data; boundary=X")];
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body.as_bytes().to_vec(),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    running.stop().await;
+
+    let yaml = yaml.replace(
+        "upload_inspection: off",
+        "upload_inspection: off, form: { enabled: false }",
+    );
+    let running = start_kunato(&yaml).await;
+    let (status, echoed) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body.as_bytes().to_vec(),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, body.as_bytes());
+    running.stop().await;
+
+    let running = start_kunato(&format!("{yaml}php: {{ enabled: true, paths: [/] }}\n")).await;
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body.as_bytes().to_vec(),
+        &headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn form_checks_reject_invalid_multipart_and_urlencoded_depth() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/submit",
+        b"--X\r\npartial".to_vec(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body = format!("root{}=ok", "%5Ba%5D".repeat(17));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/submit",
+        body.into_bytes(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn form_checks_cover_chunked_and_lengthless_http2_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ form: {{ max_headers_per_part: 2 }} }}\ncategories: []\n")).await;
+    let body = form_body_with_headers(2);
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: kunato.test\r\nContent-Type: multipart/form-data; boundary=X\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+        body.len()
+    );
+    assert_eq!(
+        send_raw_request(running.addr, &request).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+
+    let stream = TcpStream::connect(running.addr).await.expect("connect");
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+            .await
+            .expect("h2");
+    let task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let body = http_body_util::StreamBody::new(futures_util::stream::iter([Ok::<_, Infallible>(
+        hyper::body::Frame::data(Bytes::from(body)),
+    )]));
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("http://kunato.test/upload")
+        .header("content-type", "multipart/form-data; boundary=X")
+        .body(body)
+        .expect("request");
+    assert!(!request.headers().contains_key("content-length"));
+    let response = sender.send_request(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    response.into_body().collect().await.expect("body");
+    task.abort();
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn form_checks_cover_http3_and_websocket_handshake_bodies() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert, key, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert,
+        &key,
+        "limits: { form: { max_headers_per_part: 2 } }\ncategories: []",
+    )
+    .await;
+    let body = form_body_with_headers(2);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("https://localhost/upload")
+        .header("content-type", "multipart/form-data; boundary=X")
+        .body(())
+        .expect("request");
+    let (status, _, _) = send_h3_request(running.addr, certificate, request, &body).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    running.stop().await;
+    let running = start_kunato(&format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ form: {{ max_headers_per_part: 2 }} }}\ncategories: []\n")).await;
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/ws",
+        "kunato.test",
+        &[
+            ("content-type", "multipart/form-data; boundary=X"),
+            ("connection", "upgrade"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ("sec-websocket-version", "13"),
+        ],
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn php_profile_blocks_only_scoped_upload_progress_fields() {
+    let upstream = spawn_body_echo_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nprotection: {{ enabled: false }}\nphp: {{ enabled: true, hosts: [php.example], paths: [/php], upload_progress_names: [CUSTOM_PROGRESS] }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+    let body =
+        "--X\r\nContent-Disposition: form-data; name= 'CUSTOM_PROGRESS'\r\n\r\np\r\n--X--\r\n";
+    for (host, path, expected) in [
+        ("php.example", "/php/upload", StatusCode::FORBIDDEN),
+        ("php.example", "/%70hp/upload", StatusCode::FORBIDDEN),
+        ("php.example", "/other", StatusCode::OK),
+        ("rails.example", "/php/upload", StatusCode::OK),
+    ] {
+        let (status, _) = send_h1_with_host(
+            running.addr,
+            Method::POST,
+            path,
+            host,
+            &[("content-type", "multipart/form-data; boundary=X")],
+            body,
+        )
+        .await;
+        assert_eq!(status, expected, "{host}{path}");
+    }
+    let new_yaml = yaml.replace(
+        "enabled: true, hosts:",
+        "enabled: true, block_upload_progress: false, hosts:",
+    );
+    running
+        .config
+        .store(Arc::new(config::parse(&new_yaml).expect("valid reload")));
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::POST,
+        "/php/upload",
+        "php.example",
+        &[("content-type", "multipart/form-data; boundary=X")],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        running.metrics.php_request_rejected.load(Ordering::Relaxed),
+        2
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn php_profile_can_disable_multipart_without_disabling_ordinary_forms() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\nphp: {{ enabled: true, paths: [/], block_multipart: true }}\ncategories: []\n")).await;
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        form_body_with_headers(0).into_bytes(),
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/submit",
+        b"message=hello".to_vec(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn php_profile_rejects_custom_session_cookies_without_response_rules() {
+    let cookie = format!("CUSTOMSID={}; Path=/; HttpOnly", "a".repeat(399));
+    let upstream = spawn_encoded_response_upstream(
+        StatusCode::OK,
+        vec![(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_str(&cookie).expect("header"),
+        )],
+        b"ok".to_vec(),
+    )
+    .await;
+    let running = start_kunato(&format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\nphp: {{ enabled: true, paths: [/php], session_cookies: [CUSTOMSID] }}\ncategories: []\n")).await;
+    let (status, headers) = send_with_headers(running.addr, Method::GET, "/php/login", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!headers.contains_key("set-cookie"));
+    let (status, headers) = send_with_headers(running.addr, Method::GET, "/rails/login", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["set-cookie"], cookie);
+    assert_eq!(
+        running
+            .metrics
+            .php_response_rejected
+            .load(Ordering::Relaxed),
+        1
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn php_profile_checks_response_headers_before_waiting_for_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let upstream = listener.local_addr().expect("address");
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.expect("read") > 0);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nSet-Cookie: PHPSESSID=%00secret\r\nContent-Length: 100\r\n\r\n").await.expect("headers");
+        std::future::pending::<()>().await;
+    });
+    let running = start_kunato(&format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\nphp: {{ enabled: true, paths: [/] }}\ntimeouts: {{ upstream_response: 5s }}\ncategories:\n  - name: body\n    phase: response\n    action: BLOCK\n    rules:\n      - name: secret\n        match: {{ regex: SECRET, in: [response_body] }}\n")).await;
+    let (status, headers) = tokio::time::timeout(
+        Duration::from_secs(1),
+        send_with_headers(running.addr, Method::GET, "/", ""),
+    )
+    .await
+    .expect("must not wait for body");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!headers.contains_key("set-cookie"));
+    running.stop().await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn php2shell_bundled_response_rules_block_short_disclosure_and_keep_rails_cookies() {
+    for (cookie, expected) in [
+        (
+            "PHPSESSID=abc%00def; Path=/".to_owned(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            format!("PHPSESSID={}", "a".repeat(400)),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            format!("_goodify_space_session={}", "a".repeat(2000)),
+            StatusCode::OK,
+        ),
+        ("PHPSESSID=abc123; Path=/".to_owned(), StatusCode::OK),
+    ] {
+        let upstream = spawn_encoded_response_upstream(
+            StatusCode::OK,
+            vec![(
+                HeaderName::from_static("set-cookie"),
+                HeaderValue::from_str(&cookie).expect("header"),
+            )],
+            b"ok".to_vec(),
+        )
+        .await;
+        let mut compiled = config::parse(include_str!("../rules.example.yaml")).expect("config");
+        compiled.listen = "127.0.0.1:0".parse().expect("listen");
+        compiled.upstream = config::parse(&format!(
+            "listen: 127.0.0.1:0\nupstream: http://{upstream}\n"
+        ))
+        .expect("upstream")
+        .upstream;
+        compiled
+            .categories
+            .retain(|category| category.name != "trusted-sources");
+        compiled.protection.enabled = false;
+        let config = Arc::new(ArcSwap::from_pointee(compiled));
+        let metrics = Arc::new(Metrics::new());
+        let server = Server::bind(
+            "127.0.0.1:0".parse().expect("listen"),
+            config.clone(),
+            metrics.clone(),
+            None,
+        )
+        .await
+        .expect("server");
+        let addr = server.local_addr().expect("address");
+        let (shutdown, rx) = watch::channel(false);
+        let running = Running {
+            addr,
+            config,
+            metrics,
+            shutdown,
+            task: tokio::spawn(server.run(rx)),
+        };
+        let body = form_body_with_headers(0);
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::POST,
+            "/upload",
+            body.into_bytes(),
+            &[("content-type", "multipart/form-data; boundary=X")],
+        )
+        .await;
+        assert_eq!(status, expected, "{cookie}");
+        running.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn php_profile_rejects_bad_cookies_on_http2_and_http3_head_responses() {
+    let upstream = spawn_encoded_response_upstream(
+        StatusCode::OK,
+        vec![(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_static("CUSTOMSID=%00secret"),
+        )],
+        b"origin body".to_vec(),
+    )
+    .await;
+    let settings =
+        "php: { enabled: true, paths: [/], session_cookies: [CUSTOMSID] }\ncategories: []";
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\n{settings}\n"
+    ))
+    .await;
+    let (status, _, headers) =
+        send_h2c_with_headers(running.addr, "kunato.test", None, "/login", &[]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!headers.contains_key("set-cookie"));
+    running.stop().await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert, key, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(upstream, &cert, &key, settings).await;
+    let (status, body, headers) =
+        send_h3(running.addr, certificate, Method::HEAD, "/login", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.is_empty());
+    assert!(!headers.contains_key("set-cookie"));
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn php_profile_checks_cookies_before_establishing_a_websocket_tunnel() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let upstream = listener.local_addr().expect("address");
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.expect("read") > 0);
+        stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: test\r\nSet-Cookie: PHPSESSID=%00secret\r\n\r\n").await.expect("headers");
+        std::future::pending::<()>().await;
+    });
+    let running = start_kunato(&format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\nphp: {{ enabled: true, paths: [/] }}\ncategories: []\n")).await;
+    let (headers, stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(headers.starts_with("HTTP/1.1 403"), "{headers}");
+    assert!(!headers.to_ascii_lowercase().contains("set-cookie"));
+    assert!(!headers.to_ascii_lowercase().contains("upgrade: websocket"));
+    drop(stream);
+    running.stop().await;
+    task.abort();
+}

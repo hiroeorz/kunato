@@ -15,6 +15,7 @@ const MAX_CONTENT_ENCODING_LAYERS: usize = 3;
 const MAX_MULTIPART_PARTS: usize = 64;
 const MAX_MULTIPART_NAME_BYTES: usize = 1024;
 const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
+const MAX_DISPOSITION_PARAMETERS: usize = 64;
 pub(crate) const MAX_MULTIPART_BOUNDARIES: usize = 4;
 
 pub struct DecodedBody {
@@ -483,6 +484,20 @@ pub(crate) fn multipart_parts<'a>(
     body: &'a [u8],
     boundary: &str,
 ) -> Option<Vec<MultipartPart<'a>>> {
+    multipart_parts_limited(body, boundary, MAX_MULTIPART_PARTS).ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultipartError {
+    Malformed,
+    TooManyParts,
+}
+
+pub(crate) fn multipart_parts_limited<'a>(
+    body: &'a [u8],
+    boundary: &str,
+    max_parts: usize,
+) -> Result<Vec<MultipartPart<'a>>, MultipartError> {
     let delimiter = format!("--{boundary}");
     let closing = format!("--{boundary}--");
     let mut parts = Vec::new();
@@ -500,8 +515,8 @@ pub(crate) fn multipart_parts<'a>(
         let is_closing = line == closing.as_bytes();
         if is_delimiter || is_closing {
             if let Some(start) = part_start.take() {
-                if parts.len() == MAX_MULTIPART_PARTS {
-                    return None;
+                if parts.len() == max_parts {
+                    return Err(MultipartError::TooManyParts);
                 }
                 let (headers, value) = split_part(&body[start..offset]);
                 parts.push(MultipartPart { headers, value });
@@ -515,7 +530,11 @@ pub(crate) fn multipart_parts<'a>(
         offset = line_end;
     }
 
-    if closed { Some(parts) } else { None }
+    if closed {
+        Ok(parts)
+    } else {
+        Err(MultipartError::Malformed)
+    }
 }
 
 /// Flattens the parts of a `multipart/form-data` body into one document for
@@ -544,6 +563,18 @@ fn flatten_part(part: MultipartPart<'_>, output: &mut Vec<u8>) {
     if let Some(filename) = part.filename() {
         output.extend_from_slice(truncate_utf8(filename, MAX_MULTIPART_NAME_BYTES).as_bytes());
         output.push(b'\n');
+    }
+    // Preserve empty-upload metadata in a canonical spelling for signatures;
+    // the forwarded body remains byte-for-byte unchanged.
+    let headers = String::from_utf8_lossy(part.headers);
+    if let Some(disposition) = header_value(&headers, "content-disposition")
+        && disposition_param(disposition, "filename").is_some_and(|value| value.is_empty())
+        && let Some(name) = disposition_param(disposition, "name")
+    {
+        let name = truncate_utf8(name, MAX_MULTIPART_NAME_BYTES);
+        output.extend_from_slice(b"Content-Disposition: form-data; name=\"");
+        output.extend_from_slice(name.replace('\\', "\\\\").replace('"', "\\\"").as_bytes());
+        output.extend_from_slice(b"\"; filename=\"\"\n");
     }
 }
 
@@ -587,15 +618,31 @@ fn disposition_filename(disposition: &str) -> Option<String> {
     disposition_param(disposition, "filename")
 }
 
-fn disposition_param(header: &str, key: &str) -> Option<String> {
+pub(crate) fn disposition_param(header: &str, key: &str) -> Option<String> {
+    parse_disposition_parameters(header, false, Some(key))?
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value)
+}
+
+pub(crate) fn disposition_parameters(header: &str) -> Option<Vec<(String, String)>> {
+    parse_disposition_parameters(header, true, None)
+}
+
+fn parse_disposition_parameters(
+    header: &str,
+    strict: bool,
+    target: Option<&str>,
+) -> Option<Vec<(String, String)>> {
     let bytes = header.as_bytes();
     let mut index = 0;
+    let mut parameters = Vec::new();
     while index < bytes.len() {
         while index < bytes.len() && bytes[index] != b';' {
             index += 1;
         }
         index += 1;
-        while index < bytes.len() && bytes[index] == b' ' {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
         let name_start = index;
@@ -607,13 +654,14 @@ fn disposition_param(header: &str, key: &str) -> Option<String> {
         }
         let name = &header[name_start..index];
         index += 1;
-        while index < bytes.len() && bytes[index] == b' ' {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
-        let value = if index < bytes.len() && bytes[index] == b'"' {
+        let value = if index < bytes.len() && matches!(bytes[index], b'"' | b'\'') {
+            let quote = bytes[index];
             index += 1;
             let mut out = Vec::new();
-            while index < bytes.len() && bytes[index] != b'"' {
+            while index < bytes.len() && bytes[index] != quote {
                 if bytes[index] == b'\\' && index + 1 < bytes.len() {
                     out.push(bytes[index + 1]);
                     index += 2;
@@ -624,6 +672,8 @@ fn disposition_param(header: &str, key: &str) -> Option<String> {
             }
             if index < bytes.len() {
                 index += 1;
+            } else if strict {
+                return None;
             }
             String::from_utf8_lossy(&out).into_owned()
         } else {
@@ -633,11 +683,18 @@ fn disposition_param(header: &str, key: &str) -> Option<String> {
             }
             header[value_start..index].trim().to_owned()
         };
-        if name.trim().eq_ignore_ascii_case(key) {
-            return Some(value);
+        if let Some(target) = target {
+            if name.trim().eq_ignore_ascii_case(target) {
+                return Some(vec![(name.trim().to_owned(), value)]);
+            }
+            continue;
         }
+        if parameters.len() == MAX_DISPOSITION_PARAMETERS {
+            return None;
+        }
+        parameters.push((name.trim().to_owned(), value));
     }
-    None
+    Some(parameters)
 }
 
 fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
@@ -1382,5 +1439,29 @@ mod tests {
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         *state ^ (*state >> 33)
+    }
+
+    #[test]
+    fn permissive_filename_inspection_does_not_disappear_when_form_guard_is_disabled() {
+        assert_eq!(
+            disposition_param("form-data; name=x; filename=\"photo.jpg", "filename").as_deref(),
+            Some("photo.jpg")
+        );
+        assert!(disposition_parameters("form-data; name=x; filename=\"photo.jpg").is_none());
+        assert_eq!(
+            disposition_param("form-data; name= 'file'; filename='photo.jpg'", "filename")
+                .as_deref(),
+            Some("photo.jpg")
+        );
+        let padded = format!(
+            "form-data; {}filename=\"photo.jpg\"; {}",
+            "x=y; ".repeat(70),
+            "x=y; ".repeat(70)
+        );
+        assert_eq!(
+            disposition_param(&padded, "filename").as_deref(),
+            Some("photo.jpg")
+        );
+        assert!(disposition_parameters(&padded).is_none());
     }
 }

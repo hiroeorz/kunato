@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-22; the managed set carried 491 rules then.
+2026-10-22; the managed set carried 492 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -233,18 +233,28 @@ not match the Marshal signatures.
 
 ### PHP engine memory corruption (php2shell)
 
-CVE-2026-109618 and CVE-2026-109619 are OOM-fatal memory-corruption bugs in
-the PHP engine, exploited across two requests that the same worker handles.
-The request shapes live in `cve-2026-10-signatures`; the disclosure response
-is handled by `response-leaks`.
+CVE-2026-109618 interrupts partially initialized PHP state on OOM; cleanup can
+consume that state in the same request. CVE-2026-109619 retains request-owned
+state across worker requests and can be triggered by non-OOM fatal errors and
+initialization diagnostics too. FPM is not generally immune. The request shapes
+live in `cve-2026-10-signatures`, with origin-facing form limits in `limits.form`,
+optional scoped PHP controls in `php`, and disclosure heuristics in `response-leaks`.
 
 | Area | Status | Evidence / notes |
 | --- | --- | --- |
-| OOM amplifier (multipart empty uploads) | 🔶 | `cve-2026-10-signatures.php2shell-nested-empty-upload` rejects a multipart part whose empty upload (`filename=""`) uses three or more nested name levels, the shape that multiplies the `$_FILES` hierarchy below `post_max_size`; parameter order is matched both ways, the existing 32-part `multipart-part-flood` covers count-based amplification, and compressed bodies are decoded before matching. Depth and count thresholds are heuristic, so a tuned body can still reach the fatal |
-| `post_max_size` bypass (chunked / compressed) | ✅ | Chunked multipart is rejected by `rack-chunked-multipart-upload`; a compressed multipart body is decoded and inspected (the bundled gzip request is blocked by the php2shell rule), and an undecodable body with body rules is rejected rather than forwarded |
-| Upload-progress stale-state consumption | ❌ | The final request (a multipart form with `PHP_SESSION_UPLOAD_PROGRESS` and no file part) is indistinguishable from a legitimate upload-progress form; no bundled signature |
-| Worker-memory disclosure via `PHPSESSID` | ✅ | `response-leaks.php2shell-session-cookie-leak` BLOCKs a `Set-Cookie` whose `PHPSESSID` value exceeds 400 characters (a PHP session id is at most 256 before encoding); response rules are outside the black-box harness, so no request-line test pins it |
+| OOM amplifier (multipart empty uploads) | 🔶 | `php2shell-nested-empty-upload` handles quoted, single-quoted, unquoted, reordered, spaced, empty-index, long-index, and padded metadata; decoded empty-upload metadata also has a canonical inspection form. The 32-part signature and default structural limits cap count, nesting, empty uploads, names, and cumulative work. These are heuristics, not a PHP allocator model |
+| Multipart resource amplification | ✅ | Default `limits.form` enforces part/header count, per-part header bytes, field/filename bytes, nesting, field/empty-file count, and cumulative metadata complexity before ALLOW and forwarding. Malformed/ambiguous inputs are rejected. URL-encoded forms receive field-count/name/nesting checks too; unit and integration tests cover exact limits and benign forms |
+| `post_max_size` bypass (lengthless / chunked / compressed) | 🔶 | Enabled form limits require complete actual decoded bodies on every transport, including stream mode and ALLOW; decoded oversize or incomplete forms get 413. Chunked multipart also has a bundled signature. HTTP/2/HTTP/3, gzip, and chunked integration tests pin the size/structure policy, but input limits cannot bound arbitrary application allocations and can be explicitly disabled |
+| Upload-progress stale-state consumption | 🔶 | The opt-in `php` profile blocks parsed configured progress field names, even without a file, or all multipart when unused. It is scoped by actual hosts/path prefixes and not enabled globally because upload progress can be legitimate. Custom names and positive/negative scopes have regression tests |
+| Worker-memory disclosure via session cookies | 🔶 | Bundled `php2shell-session-cookie-leak` blocks PHPSESSID values of 400 or more characters; `php2shell-session-cookie-control-bytes` detects short encoded-control leaks in multipart transactions. The opt-in PHP profile validates configured cookie names, decoded length and character pattern before body buffering/response ALLOW, even without response rules. Integration tests preserve Rails cookies and prevent leaking rejected headers; smaller or alternate-channel disclosures remain possible |
 | RCE after the stale-state step | ❌ | The corruption happens inside the PHP process after the fatal; a WAF cannot see the heap, so patching PHP is the only complete fix |
+
+The 2026-10-22 structural/signature regression adds 14 blocked shapes and six
+benign guards. Full-corpus forwarding misses fell from 14 to 0; false blocks
+remained 0, and final upstream accesses equaled all 454 allowed requests. Existing
+malformed-framing probes retain protocol rejections (one intentionally stalled
+framing probe times out without reaching the upstream). Response/profile paths
+are integration-tested rather than claimed as request-corpus coverage.
 
 ## 10. Reconnaissance
 
@@ -297,7 +307,7 @@ is handled by `response-leaks`.
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
 | Content-Encoding Compression | ✅ | gzip (all members), deflate, br, and zstd bodies are decompressed for inspection, stacked up to three layers. When a body rule exists, a body that cannot be fully decoded within the limit is rejected (413 over-limit, 415 unsupported, 400 malformed) instead of being forwarded uninspected |
 | Chunked Encoding Abuse | 🔶 | Rejected at the protocol layer (hyper) |
-| Multipart Boundary Abuse | ✅ | every declared boundary is flattened for inspection (up to four, closing the CVE-2026-26961 parser-differential class); 64-part and 1 KiB name limits, malformed bodies inspected raw, part-flood rule, and the Rack DoS signatures (escape-heavy part headers, chunked multipart uploads), plus `cve-2026-10-signatures.php2shell-nested-empty-upload` for empty uploads with deeply nested field names |
+| Multipart Boundary Abuse | ✅ | every declared boundary is checked (up to four, closing the CVE-2026-26961 parser-differential class); default `limits.form` enforces real 64-part/1 KiB name and per-part header/complexity limits and rejects malformed or ambiguous metadata instead of silently falling back. The part-flood/Rack DoS signatures and expanded `php2shell-nested-empty-upload` complement this structural policy; disabling it explicitly leaves only bounded prefix/signature inspection |
 | JSON/XML Structure Evasion | 🔶 | JSON escapes are decoded; no dedicated structural detection |
 | Obfuscated JavaScript / SQL | ✅ | Whitespace- and comment-tolerant regexes |
 | WAF Fingerprinting | ❌ | Impossible to hide entirely (the block behavior is itself a signature) |
@@ -332,11 +342,12 @@ be fixed by a WAF at all; Kunato can only assist through custom response-phase
 rules. Closing a gap usually means either a YAML rule (most request-shape gaps)
 or an engine feature (behavioral and stateful checks).
 
-PHP2Shell (CVE-2026-109618 / CVE-2026-109619) stays Partial: the bundled rules
-stop the published multipart OOM amplifier and the leaked `PHPSESSID` response,
-but the stale-state consumption request is indistinguishable from a legitimate
-upload-progress form and the heap corruption itself is below the WAF. Patching
-PHP is the only complete fix.
+PHP2Shell (CVE-2026-109618 / CVE-2026-109619) stays Partial: form resource
+guards and expanded signatures reduce multipart OOM pressure, the opt-in PHP
+profile can disable unused upload progress, and response checks catch some
+session-cookie disclosures. Application-dependent allocations, other lifecycle
+consumers, alternate disclosure channels, and shared OPcache/heap state remain
+below the WAF. Patching PHP is the only complete fix.
 
 Behavioral detection (Phase 1) covers `404` probing, per-source authentication
 failure bursts, and a global authentication-failure log. It defaults to `LOG`;

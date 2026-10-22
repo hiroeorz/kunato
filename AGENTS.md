@@ -40,6 +40,8 @@ src/
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
+  form.rs          # Origin-facing multipart and URL-encoded resource limits
+  php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations
   upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
   config/
@@ -117,6 +119,14 @@ rule-set updates.
   PDF, office, media, or font claim. `strict` also covers generic binary claims;
   `off` disables the check. It runs before rule evaluation, so `ALLOW` does not
   bypass it.
+- `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
+  must be complete and pass field/part/header/name/nesting/complexity limits
+  before ALLOW or forwarding. This also applies in body `stream` mode; explicitly
+  disable the form guard to stream larger forms, accepting incomplete inspection.
+  `php` is an opt-in, explicitly host/path-scoped profile that always applies
+  form limits in scope, optionally rejects multipart or upload-progress fields,
+  and validates only configured PHP session response cookies before body reads
+  and response ALLOW. Neither mechanism replaces PHP security updates.
 - `allowed_hosts` is an optional Host/authority allowlist. When set, a missing,
   malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority`
   (HTTP/2 / HTTP/3) is rejected with `400`/`421` before rule evaluation, and

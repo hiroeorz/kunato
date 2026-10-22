@@ -14,6 +14,9 @@ pub struct Metrics {
     pub request_truncated: AtomicU64,
     pub request_body_rejected: AtomicU64,
     pub upload_rejected: AtomicU64,
+    pub form_rejected: AtomicU64,
+    pub php_request_rejected: AtomicU64,
+    pub php_response_rejected: AtomicU64,
     pub host_rejected: AtomicU64,
     pub response_decode_truncated: AtomicU64,
     pub request_decode_truncated: AtomicU64,
@@ -58,6 +61,9 @@ impl Metrics {
             request_truncated: AtomicU64::new(0),
             request_body_rejected: AtomicU64::new(0),
             upload_rejected: AtomicU64::new(0),
+            form_rejected: AtomicU64::new(0),
+            php_request_rejected: AtomicU64::new(0),
+            php_response_rejected: AtomicU64::new(0),
             host_rejected: AtomicU64::new(0),
             response_decode_truncated: AtomicU64::new(0),
             request_decode_truncated: AtomicU64::new(0),
@@ -92,6 +98,25 @@ impl Metrics {
 
     pub fn render(&self, active_connections: u64) -> String {
         let mut out = String::with_capacity(1024);
+        for (name, help, count) in [
+            (
+                "kunato_form_rejected_total",
+                "Requests rejected by form structure limits.",
+                &self.form_rejected,
+            ),
+            (
+                "kunato_php_request_rejected_total",
+                "Requests rejected by the PHP profile.",
+                &self.php_request_rejected,
+            ),
+            (
+                "kunato_php_response_rejected_total",
+                "Responses rejected by PHP session cookie validation.",
+                &self.php_response_rejected,
+            ),
+        ] {
+            counter(&mut out, name, help, count.load(Ordering::Relaxed));
+        }
 
         counter(
             &mut out,

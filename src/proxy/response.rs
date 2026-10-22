@@ -93,6 +93,16 @@ pub(crate) async fn inspect(
     response: Response<ProxyBody>,
     inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
+    if config.php.matches(request) && config.php.rejects_response(response.headers()) {
+        metrics
+            .php_response_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(client = %peer.ip(), path = %request.uri.path(), "PHP profile rejected an anomalous session cookie");
+        return Ok(forward::error_response(
+            StatusCode::FORBIDDEN,
+            "invalid PHP session response",
+        ));
+    }
     let buffered = if !config.has_response_body_rules() {
         let (parts, body) = response.into_parts();
         Buffered {

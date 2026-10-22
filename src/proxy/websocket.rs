@@ -135,7 +135,9 @@ pub(crate) async fn forward_handshake(
         Ok(Ok(response)) => response,
     };
 
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS
+        || (config.php.matches(parts) && config.php.rejects_response(response.headers()))
+    {
         return Ok(Handshake::Response(forward::convert_response(response)));
     }
 

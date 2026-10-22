@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name='files[a][b][c]'; filename=''
+
+
+--X--
+
