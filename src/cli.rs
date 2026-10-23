@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+mod parse;
+
+pub use parse::ParseError;
 
 use crate::allowed_hosts::AllowedHosts;
 use crate::error::Error;
@@ -12,46 +14,33 @@ pub const DEFAULT_RULES_URL: &str =
 pub const DEFAULT_RULES_FILE: &str = "/var/lib/kunato/rules.yaml";
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
 
-#[derive(Debug, Parser)]
-#[command(name = "kunato", version, about = "Personal-use WAF reverse proxy")]
+#[derive(Debug)]
 pub struct Cli {
     /// Path to the YAML configuration file (used by server/config modes).
-    #[arg(
-        short,
-        long,
-        default_value = DEFAULT_CONFIG_PATH,
-        value_name = "PATH",
-        global = true
-    )]
     pub config: PathBuf,
 
     /// Validate the configuration and exit (server/config modes).
-    #[arg(long, global = true)]
     pub validate: bool,
 
     /// Disable DoS/DDoS protection for server mode.
     ///
     /// Disables rate limits, bans, and connection budgets. Not used by the log
     /// subcommand.
-    #[arg(long, global = true)]
     pub disable_protection: bool,
 
     /// Service log level filter (overrides RUST_LOG).
     ///
     /// Examples: error, warn, info, debug, trace, kunato::proxy=debug,info.
     /// This does not filter the output of the log subcommand.
-    #[arg(long, value_name = "LEVEL", global = true)]
     pub log_level: Option<String>,
 
     /// Service log output format (not the log viewer; use --format there).
-    #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
     pub log_format: LogFormat,
 
-    #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 pub enum Command {
     /// Write a starter configuration file and exit.
     Init(Box<InitArgs>),
@@ -70,25 +59,22 @@ pub enum Command {
     Log(Box<LogArgs>),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct UpgradeArgs {
     /// Release tag to install (default: the latest release).
-    #[arg(long, value_name = "TAG")]
     pub version: Option<String>,
 
     /// Print what would be downloaded and run without changing anything.
-    #[arg(long)]
     pub dry_run: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct LogArgs {
     /// Follow new journal entries.
     ///
     /// Without --lines or --since, starts at the current end and shows only
     /// new entries. With either option, shows that backlog first and then
     /// follows.
-    #[arg(short, long)]
     pub follow: bool,
 
     /// Number of journal lines to read.
@@ -96,7 +82,6 @@ pub struct LogArgs {
     /// This limits the lines read from journalctl before filtering, not the
     /// number of matching events. 0 disables the history. The non-follow
     /// default is 100; the follow default is 0. Examples: 20, 100, 1000.
-    #[arg(short = 'n', long, value_name = "N")]
     pub lines: Option<usize>,
 
     /// Start time passed to journalctl.
@@ -105,14 +90,12 @@ pub struct LogArgs {
     /// "yesterday", "today", or "1 hour ago". Quote values containing spaces.
     /// If --lines is not given, a --since range is not limited to the implicit
     /// 100 lines.
-    #[arg(long, value_name = "TIME")]
     pub since: Option<String>,
 
     /// End time passed to journalctl.
     ///
     /// Accepts the same syntax as --since, for example "now", "today", or
     /// "2026-10-21 18:00:00". Quote values containing spaces.
-    #[arg(long, value_name = "TIME")]
     pub until: Option<String>,
 
     /// Filter by resolved client IP address or CIDR.
@@ -121,7 +104,6 @@ pub struct LogArgs {
     /// 203.0.113.9, 2001:db8::1, 203.0.113.0/24, or 2001:db8::/32.
     /// Events without a client field fall back to the transport peer.
     /// Repeat the flag or comma-separate values; values are ORed.
-    #[arg(long = "ip", value_name = "IP|CIDR", value_delimiter = ',')]
     pub ips: Vec<String>,
 
     /// Filter by transport peer address or CIDR.
@@ -129,7 +111,6 @@ pub struct LogArgs {
     /// This is the direct connection address before client_ip resolution.
     /// Accepts the same forms as --ip: 203.0.113.9, 2001:db8::1,
     /// 203.0.113.0/24, or 2001:db8::/32. Repeat or comma-separate.
-    #[arg(long = "peer-ip", value_name = "IP|CIDR", value_delimiter = ',')]
     pub peer_ips: Vec<String>,
 
     /// Filter by category-based attack type.
@@ -156,7 +137,6 @@ pub struct LogArgs {
     ///
     /// Examples: sqli, xss, scanner, cve-2025. Use --list-attacks for the
     /// full class-to-category mapping. Repeat or comma-separate values.
-    #[arg(long = "attack", value_name = "CLASS", value_delimiter = ',')]
     pub attacks: Vec<String>,
 
     /// Filter by exact rule category name.
@@ -164,34 +144,24 @@ pub struct LogArgs {
     /// Case-insensitive. Examples: sql-injection, scanners-and-bots,
     /// cve-2025-signatures, response-leaks. Use --list-attacks to see how
     /// classes map to categories. Repeat or comma-separate values.
-    #[arg(long = "category", value_name = "NAME", value_delimiter = ',')]
     pub categories: Vec<String>,
 
     /// Filter by exact rule name.
     ///
     /// Case-insensitive. Examples: union-select, log4shell,
     /// seo-and-ai-crawlers, private-key-material. Repeat or comma-separate.
-    #[arg(long = "rule", value_name = "NAME", value_delimiter = ',')]
     pub rules: Vec<String>,
 
     /// Filter by logged action.
     ///
     /// Accepted values: BLOCK, LOG. ALLOW rule matches are not logged, so
     /// ALLOW is not accepted. Repeat or comma-separate.
-    #[arg(
-        long = "action",
-        value_name = "ACTION",
-        value_delimiter = ',',
-        ignore_case = true,
-        value_parser = ["BLOCK", "LOG"]
-    )]
     pub actions: Vec<String>,
 
     /// Filter by HTTP method.
     ///
     /// Case-insensitive. Common values: GET, POST, PUT, PATCH, DELETE, HEAD,
     /// OPTIONS. Extension methods are also accepted. Repeat or comma-separate.
-    #[arg(long = "method", value_name = "METHOD", value_delimiter = ',')]
     pub methods: Vec<String>,
 
     /// Filter by recorded HTTP status code.
@@ -199,19 +169,12 @@ pub struct LogArgs {
     /// Accepts 100-599. Examples: 403, 404, 429. Only events that recorded a
     /// status match (rule blocks, rejections, rate limits, response events).
     /// Repeat or comma-separate.
-    #[arg(
-        long = "status",
-        value_name = "CODE",
-        value_delimiter = ',',
-        value_parser = clap::value_parser!(u16).range(100..=599)
-    )]
     pub statuses: Vec<u16>,
 
     /// Filter by request path using a Rust regular expression.
     ///
     /// Matched against the recorded path only; the query string is not logged.
     /// Examples: ^/api/, (?i)login, \.php$, /admin/.
-    #[arg(long, value_name = "REGEX")]
     pub path: Option<String>,
 
     /// Viewer output format.
@@ -222,19 +185,16 @@ pub struct LogArgs {
     /// json: one JSON object per line, with normalized fields and a fields map.
     /// This does not change the service logging format; use the global
     /// --log-format option for that.
-    #[arg(long, value_enum, default_value_t = LogOutputFormat::Raw)]
     pub format: LogOutputFormat,
 
     /// Disable ANSI colors in table output.
     ///
     /// Colors are used only when stdout is a terminal and NO_COLOR is not set.
-    #[arg(long)]
     pub no_color: bool,
 
     /// systemd unit name to read.
     ///
     /// For example kunato or kunato.service. The default is kunato.
-    #[arg(short, long, default_value = "kunato", value_name = "UNIT")]
     pub unit: String,
 
     /// journalctl executable to run.
@@ -242,82 +202,63 @@ pub struct LogArgs {
     /// For example /usr/bin/journalctl. The default searches PATH for
     /// journalctl. This option is mainly for non-standard installations and
     /// tests.
-    #[arg(long, default_value = "journalctl", value_name = "PATH")]
     pub journalctl: String,
 
     /// List supported attack types and exit.
     ///
     /// Prints every class, alias, and the categories it matches; does not read
     /// the journal or require journal permissions.
-    #[arg(long)]
     pub list_attacks: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogOutputFormat {
     Raw,
     Table,
     Json,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct InitArgs {
     /// Upstream URL that Kunato forwards requests to.
-    #[arg(long, value_name = "URL")]
     pub upstream: String,
 
     /// Address to listen on.
-    #[arg(long, default_value = "0.0.0.0:443", value_name = "ADDR")]
     pub listen: SocketAddr,
 
     /// TLS certificate chain in PEM format.
-    #[arg(long, value_name = "PATH", requires = "key_file")]
     pub cert_file: Option<PathBuf>,
 
     /// TLS private key in PEM format.
-    #[arg(long, value_name = "PATH", requires = "cert_file")]
     pub key_file: Option<PathBuf>,
 
     /// Obtain certificates automatically through ACME (Let's Encrypt); repeat
     /// for every domain.
-    #[arg(
-        long = "acme-domain",
-        value_name = "DOMAIN",
-        conflicts_with_all = ["cert_file", "key_file"]
-    )]
     pub acme_domains: Vec<String>,
 
     /// Contact email registered with the ACME account.
-    #[arg(long, value_name = "EMAIL", requires = "acme_domains")]
     pub acme_contact: Option<String>,
 
     /// Use the Let's Encrypt staging directory (untrusted test certificates).
-    #[arg(long, requires = "acme_domains")]
     pub acme_staging: bool,
 
     /// Extra Host names or IP literals clients use to reach this server. The
     /// ACME domains are added automatically; repeat the flag for more names.
-    #[arg(long = "allowed-host", value_name = "HOST")]
     pub allowed_hosts: Vec<String>,
 
     /// Rules file refreshed by the daily updater.
-    #[arg(long, default_value = DEFAULT_RULES_FILE, value_name = "PATH")]
     pub rules_file: PathBuf,
 
     /// URL to download the rules file from.
-    #[arg(long, default_value = DEFAULT_RULES_URL, value_name = "URL")]
     pub rules_url: String,
 
     /// Optional local overrides file, evaluated before every other rule source.
-    #[arg(long, value_name = "PATH")]
     pub overrides_file: Option<PathBuf>,
 
     /// Output configuration path.
-    #[arg(long, default_value = "kunato.yaml", value_name = "PATH")]
     pub output: PathBuf,
 
     /// Overwrite an existing configuration file.
-    #[arg(long)]
     pub force: bool,
 }
 
@@ -488,7 +429,7 @@ fn yaml_scalar(value: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     Text,
     Json,

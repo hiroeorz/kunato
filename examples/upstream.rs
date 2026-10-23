@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use bytes::Bytes;
-use clap::Parser;
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, Limited};
@@ -17,20 +16,41 @@ use tracing::{error, info};
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BODY_DISPLAY: usize = 4096;
 
-#[derive(Debug, Parser)]
-#[command(about = "Example upstream server for testing Kunato with a browser or curl")]
-struct Args {
-    /// Address to listen on.
-    #[arg(long, default_value = "127.0.0.1:3000")]
-    listen: SocketAddr,
+fn parse_args() -> Result<SocketAddr, String> {
+    let mut args = std::env::args().skip(1);
+    let mut listen = SocketAddr::from(([127, 0, 0, 1], 3000));
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--listen" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--listen requires an address".to_owned())?;
+                listen = value
+                    .parse()
+                    .map_err(|_| format!("invalid address `{value}`"))?;
+            }
+            "-h" | "--help" => {
+                println!("Usage: upstream [--listen <ADDR>]");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unexpected argument `{other}`")),
+        }
+    }
+    Ok(listen)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
 
-    let args = Args::parse();
-    let listener = TcpListener::bind(args.listen).await?;
+    let listen = match parse_args() {
+        Ok(listen) => listen,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
+    let listener = TcpListener::bind(listen).await?;
     info!(addr = %listener.local_addr()?, "example upstream listening");
 
     loop {

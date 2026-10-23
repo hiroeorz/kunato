@@ -2,7 +2,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use clap::Parser;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 

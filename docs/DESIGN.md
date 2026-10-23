@@ -717,7 +717,6 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
-| `clap` (derive)           | CLI parsing                    | Conventional, low-boilerplate argument handling.           |
 | `tracing`, `tracing-subscriber` | Structured logging       | Levels, spans, JSON output without custom code.            |
 | `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
