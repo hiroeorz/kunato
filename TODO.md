@@ -32,8 +32,8 @@ its dependency edge is removed or replaced by in-tree code.
 
 ## Completed
 
-Changes 1-6 are committed. Change 5 is `b70f37c` and change 6 is
-`c4d23e8`; change 7 is in the working tree.
+Changes 1-7 are committed. Change 5 is `b70f37c`, change 6 is
+`c4d23e8`, and change 7 is `bd73060`.
 
 | # | Change | Commit | KPI after | Removed from the Linux tree | Tradeoffs / notes |
 |---|--------|--------|----------:|-----------------------------|-------------------|
@@ -43,7 +43,7 @@ Changes 1-6 are committed. Change 5 is `b70f37c` and change 6 is
 | 4 | `tracing-subscriber` -> in-tree logging | `64c675f` | 180 -> 173 (-7) | tracing-subscriber, matchers, nu-ansi-term, sharded-slab, thread_local, tracing-log, tracing-serde | New [src/telemetry/](src/telemetry/); 22 tests. Filter supports `level` and `target=level`; span/field directives are unsupported. `log` records from dependencies are bridged. |
 | 5 | `tokio-rustls-acme` -> in-tree ACME client | `b70f37c` | 173 -> 112 (-61) | tokio-rustls-acme, async-trait, reqwest, rcgen, x509-parser, chrono, url/ICU4X, tower, and their support crates | New [src/acme/](src/acme/); RFC 8555 with TLS-ALPN-01, ECDSA P-256 CSR/challenge-certificate DER, renewal at two thirds of validity, and cached account/certificate material. Pebble issuance, renewal, HTTP/3, and cache-reuse tests pass. `rcgen`/`x509-parser` remain dev-only. |
 | 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
-| 7 | ACME origin and order resilience | uncommitted | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
+| 7 | ACME origin and order resilience | `bd73060` | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -110,13 +110,13 @@ contains either crate.
 
 ## Recommended next step
 
-1. The ACME replacement (`b70f37c`) and its review hardening (`c4d23e8`) are
-   committed; the KPI remains 112.
-2. Review and commit the change 7 origin/order-resilience work.
-3. If dependency work continues, start a **`serde-saphyr` design spike** (-12):
+1. The ACME replacement (`b70f37c`), review hardening (`c4d23e8`), and
+   origin/order resilience (`bd73060`) are committed; the KPI remains 112.
+   No action.
+2. If dependency work continues, start a **`serde-saphyr` design spike** (-12):
    enumerate the YAML features used by `rules.example.yaml` and the
    configuration schema, then decide on an in-house parser.
-4. Do not start compression or regex work unless the KPI target changes. The
+3. Do not start compression or regex work unless the KPI target changes. The
    HTTP/3 removal (-14) remains a product decision.
 
 ## Definition of done (per item)
