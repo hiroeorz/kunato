@@ -304,11 +304,10 @@ descriptive message (fail fast).
 
 ### Reload
 
-The watcher reacts to `notify` events on the config file **and its parent
-directory** (editors often replace files via rename), debounced (250 ms), and in
-addition polls the source files for mtime/size changes every 2 s. The poll keeps
-hot reload working when the platform watcher cannot be created or a watch
-registration fails. A reload re-runs the
+The watcher polls the config file and every file it references (the managed rules
+file and the optional overrides file) for mtime/size changes every 2 s. Polling
+the path itself also catches rename-based replacements, which editors use for
+atomic saves. A reload re-runs the
 parse → validate → compile pipeline; on success the snapshot is swapped with
 `ArcSwap::store`; on failure the previous snapshot stays active and the error is
 logged. In-flight requests keep using the snapshot they loaded.
@@ -317,8 +316,8 @@ Reloadable: categories/rules, protection, timeouts, limits, `allowed_hosts`, `cl
 upstream. Restart-only: `listen` address, `tls`, `http3`, and `admin`. Changing
 them during reload logs a warning and keeps the current listener.
 
-Watcher implementation: `notify` crate, with an mtime polling fallback (2 s) if the
-platform watcher fails. Tests drive the reload function directly.
+Watcher implementation: mtime/size polling every 2 s. Tests drive the reload
+function directly, and one test exercises the polling loop end to end.
 
 ### Rule sources and managed updates
 
@@ -718,7 +717,6 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
-| `notify`                  | Config file watching           | Cross-platform filesystem events; polling fallback.        |
 | `clap` (derive)           | CLI parsing                    | Conventional, low-boilerplate argument handling.           |
 | `tracing`, `tracing-subscriber` | Structured logging       | Levels, spans, JSON output without custom code.            |
 | `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |

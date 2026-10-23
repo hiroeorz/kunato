@@ -22,7 +22,6 @@ hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "rustls-native-certs", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 ipnet = "2"
-notify = "8"
 quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 regex = "1"
 # Directly used for HIR-based validation of ALLOW rule anchors.

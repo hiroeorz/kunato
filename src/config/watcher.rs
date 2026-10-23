@@ -1,19 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
-use notify::{Event, EventKind, RecursiveMode, Watcher};
-use tokio::sync::{mpsc, watch};
-use tracing::{error, info, trace, warn};
+use tokio::sync::watch;
+use tracing::{error, info, warn};
 
 use crate::config::{self, CompiledConfig};
 use crate::metrics::Metrics;
 
-const DEBOUNCE: Duration = Duration::from_millis(250);
+#[cfg(not(test))]
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// All files that make up the active configuration: the main file, the managed
 /// rules file, and the optional overrides file.
@@ -41,33 +42,6 @@ pub async fn watch(
 ) {
     let main = absolute(&path);
     let initial = source_paths(&main, &config.load());
-    let watched: Arc<Mutex<BTreeSet<PathBuf>>> =
-        Arc::new(Mutex::new(initial.iter().cloned().collect()));
-    let (event_tx, mut event_rx) = mpsc::channel::<()>(1);
-    let notify_tx = event_tx.clone();
-    let filter = watched.clone();
-
-    let mut watcher =
-        match notify::recommended_watcher(move |result: notify::Result<Event>| match result {
-            Ok(event) if is_relevant(&event, &filter) => {
-                let _ = notify_tx.try_send(());
-            }
-            Ok(_) => {}
-            Err(err) => warn!(error = %err, "filesystem watch error"),
-        }) {
-            Ok(watcher) => Some(watcher),
-            Err(err) => {
-                warn!(error = %err, "failed to create file watcher; using polling");
-                None
-            }
-        };
-
-    let mut state = WatchState::default();
-    if let Some(watcher) = &mut watcher {
-        for source in &initial {
-            state.add(watcher, source);
-        }
-    }
     let mut stamps = source_stamps(&initial);
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -83,24 +57,10 @@ pub async fn watch(
         }
         let changed = tokio::select! {
             _ = shutdown.changed() => break,
-            event = event_rx.recv() => {
-                match event {
-                    None => break,
-                    Some(()) => {
-                        trace!("configuration source changed");
-                        debounce(&mut event_rx).await;
-                        true
-                    }
-                }
-            }
             _ = poll.tick() => {
                 let sources = source_paths(&main, &config.load());
                 let current = source_stamps(&sources);
                 if current.keys().ne(stamps.keys()) {
-                    if let Some(watcher) = &mut watcher {
-                        state.sync(watcher, &watched, &sources);
-                    }
-                    *lock(&watched) = sources.into_iter().collect();
                     stamps = current;
                     false
                 } else {
@@ -112,20 +72,16 @@ pub async fn watch(
             let path = main.clone();
             let reload_config = Arc::clone(&config);
             let metrics = Arc::clone(&metrics);
-            let loaded = tokio::task::spawn_blocking(move || {
+            if let Err(err) = tokio::task::spawn_blocking(move || {
                 reload(&path, &reload_config, &metrics, disable_protection)
             })
-            .await;
-            if let Ok(Some(sources)) = loaded {
-                if let Some(watcher) = &mut watcher {
-                    state.sync(watcher, &watched, &sources);
-                }
-                *lock(&watched) = sources.into_iter().collect();
+            .await
+            {
+                error!(error = %err, "configuration reload task failed");
             }
             stamps = source_stamps(&source_paths(&main, &config.load()));
         }
     }
-    drop(event_tx);
 }
 
 fn source_stamps(paths: &[PathBuf]) -> BTreeMap<PathBuf, Option<(SystemTime, u64)>> {
@@ -215,95 +171,6 @@ pub fn reload(
     }
 }
 
-#[derive(Debug, Default)]
-struct WatchState {
-    files: BTreeSet<PathBuf>,
-    parents: BTreeMap<PathBuf, usize>,
-}
-
-impl WatchState {
-    fn add(&mut self, watcher: &mut impl Watcher, path: &Path) {
-        if !self.files.insert(path.to_path_buf()) {
-            return;
-        }
-        if let Err(err) = watcher.watch(path, RecursiveMode::NonRecursive) {
-            warn!(
-                path = %path.display(),
-                error = %err,
-                "failed to watch configuration file"
-            );
-        }
-        if let Some(parent) = path.parent() {
-            let count = self.parents.entry(parent.to_path_buf()).or_insert(0);
-            if *count == 0
-                && let Err(err) = watcher.watch(parent, RecursiveMode::NonRecursive)
-            {
-                warn!(
-                    path = %parent.display(),
-                    error = %err,
-                    "failed to watch configuration directory; rename-based updates may be missed"
-                );
-            }
-            *count += 1;
-        }
-    }
-
-    fn remove(&mut self, watcher: &mut impl Watcher, path: &Path) {
-        if !self.files.remove(path) {
-            return;
-        }
-        let _ = watcher.unwatch(path);
-        if let Some(parent) = path.parent()
-            && let Some(count) = self.parents.get_mut(parent)
-        {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.parents.remove(parent);
-                let _ = watcher.unwatch(parent);
-            }
-        }
-    }
-
-    fn sync(
-        &mut self,
-        watcher: &mut impl Watcher,
-        watched: &Mutex<BTreeSet<PathBuf>>,
-        sources: &[PathBuf],
-    ) {
-        let desired: BTreeSet<PathBuf> = sources.iter().cloned().collect();
-        let stale: Vec<PathBuf> = self
-            .files
-            .iter()
-            .filter(|path| !desired.contains(*path))
-            .cloned()
-            .collect();
-        for path in stale {
-            self.remove(watcher, &path);
-        }
-        for path in &desired {
-            self.add(watcher, path);
-        }
-        *lock(watched) = desired;
-    }
-}
-
-fn lock(set: &Mutex<BTreeSet<PathBuf>>) -> std::sync::MutexGuard<'_, BTreeSet<PathBuf>> {
-    set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn is_relevant(event: &Event, watched: &Mutex<BTreeSet<PathBuf>>) -> bool {
-    let relevant_kind = matches!(
-        event.kind,
-        EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    );
-    relevant_kind && event.paths.iter().any(|path| lock(watched).contains(path))
-}
-
-async fn debounce(rx: &mut mpsc::Receiver<()>) {
-    let deadline = tokio::time::Instant::now() + DEBOUNCE;
-    while let Ok(Some(_)) = tokio::time::timeout_at(deadline, rx.recv()).await {}
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +199,44 @@ mod tests {
         let current = config.load();
         assert_eq!(current.limits.max_body_bytes, 42);
         assert_eq!(current.listen.port(), 8080);
+    }
+
+    #[tokio::test]
+    async fn watch_reloads_after_a_polled_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
+        );
+        let config = Arc::new(ArcSwap::from_pointee(
+            config::load(&path).expect("initial config"),
+        ));
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let watcher = tokio::spawn(watch(
+            path.clone(),
+            Arc::clone(&config),
+            Arc::new(Metrics::new()),
+            false,
+            shutdown_rx,
+        ));
+
+        tokio::time::sleep(POLL_INTERVAL * 5).await;
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nlimits: { max_body_bytes: 42 }\n",
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while config.load().limits.max_body_bytes != 42 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("polled reload");
+
+        let _ = shutdown.send(true);
+        watcher.await.expect("watcher task");
     }
 
     #[test]
