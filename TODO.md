@@ -32,8 +32,8 @@ its dependency edge is removed or replaced by in-tree code.
 
 ## Completed
 
-Changes 1-5 were completed and committed on 2026-10-23. Change 5 is
-`b70f37c`; the follow-up review fixes are in the working tree.
+Changes 1-6 are committed. Change 5 is `b70f37c` and change 6 is
+`c4d23e8`.
 
 | # | Change | Commit | KPI after | Removed from the Linux tree | Tradeoffs / notes |
 |---|--------|--------|----------:|-----------------------------|-------------------|
@@ -42,7 +42,7 @@ Changes 1-5 were completed and committed on 2026-10-23. Change 5 is
 | 3 | `clap` -> in-house parser | `f3d652e` | 192 -> 180 (-12) | clap, clap_builder, clap_derive, clap_lex, anstream, anstyle-parse, anstyle-query, colorchoice, heck, is_terminal_polyfill, strsim, utf8parse | New [src/cli/parse.rs](src/cli/parse.rs); 17 parser tests. Help and error wording is not byte-identical to clap. |
 | 4 | `tracing-subscriber` -> in-tree logging | `64c675f` | 180 -> 173 (-7) | tracing-subscriber, matchers, nu-ansi-term, sharded-slab, thread_local, tracing-log, tracing-serde | New [src/telemetry/](src/telemetry/); 22 tests. Filter supports `level` and `target=level`; span/field directives are unsupported. `log` records from dependencies are bridged. |
 | 5 | `tokio-rustls-acme` -> in-tree ACME client | `b70f37c` | 173 -> 112 (-61) | tokio-rustls-acme, async-trait, reqwest, rcgen, x509-parser, chrono, url/ICU4X, tower, and their support crates | New [src/acme/](src/acme/); RFC 8555 with TLS-ALPN-01, ECDSA P-256 CSR/challenge-certificate DER, renewal at two thirds of validity, and cached account/certificate material. Pebble issuance, renewal, HTTP/3, and cache-reuse tests pass. `rcgen`/`x509-parser` remain dev-only. |
-| 6 | ACME review hardening | uncommitted | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
+| 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -109,9 +109,8 @@ contains either crate.
 
 ## Recommended next step
 
-1. The ACME replacement is committed as `b70f37c`; review the hardening changes
-   in the working tree, commit them, and refresh the change 6 row with the new
-   commit hash (the KPI remains 112).
+1. The ACME replacement (`b70f37c`) and its review hardening (`c4d23e8`) are
+   committed; the KPI remains 112. No action.
 2. If dependency work continues, start a **`serde-saphyr` design spike** (-12):
    enumerate the YAML features used by `rules.example.yaml` and the
    configuration schema, then decide on an in-house parser.
