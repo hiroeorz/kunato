@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-22; the managed set carried 492 rules then.
+2026-10-23; the managed set carried 492 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -60,8 +60,8 @@ expresses.
 | Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
 | Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
-| Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...) plus `limits.upload_inspection` (default `mismatch`), which rejects an executable or server-side script behind an image, PDF, office, media, or font claim. There is no full content or archive scan: a polyglot beyond the leading bytes or a payload inside an archive is not inspected |
-| Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths); the upload check catches a script behind a safe claim, including a `GIF89a<?php` polyglot in the first 1 KiB, but deeper polyglots and archive contents remain uninspected |
+| Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...) plus `limits.upload_inspection` (default `mismatch`), which rejects an executable header or active markup at the leading position and server-side script markers (`<?php`, `<?=`, `<%`) anywhere in the inspected part. Padding cannot hide a script polyglot behind an image/PDF/office/media/font claim. Archive contents, executable/markup bytes beyond the leading position, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
+| Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths); the upload check scans the whole inspected part for server-side script markers, so a `GIF89a` + padding + `<?php` polyglot is rejected at any offset. Archive contents, active markup/executable bytes beyond the leading position, and parts outside the inspected prefix remain uninspected |
 | Double Extension | ✅ | The extension regex also matches `shell.php.jpg` (`\b` boundary) |
 | MIME Type Spoofing | ✅ | `limits.upload_inspection` (default `mismatch`) checks every multipart file part against its declared type or safe filename extension and rejects executable, server-side script, or HTML/XML/SVG content with `403` before rule evaluation; `strict` also covers generic `application/octet-stream` claims, `off` disables the check, and an upload over `max_body_bytes` is prefix-only under `body_inspection: stream` |
 | Null Byte Injection | ✅ | `protocol-anomalies.null-byte` (`%00`) |
@@ -334,8 +334,9 @@ are integration-tested rather than claimed as request-corpus coverage.
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
 either direction, arbitrary re-signing), open redirect via unlisted parameter
-names, HPP, deep upload content (polyglots beyond the inspected prefix,
-archives, nested files), `200`-only scraping, distributed mitigation for
+names, HPP, deep upload content (content outside the inspected prefix,
+archives, nested files, executable or markup bytes beyond the leading
+position), `200`-only scraping, distributed mitigation for
 credential stuffing, and the business-logic family (IDOR/BOLA, mass assignment,
 parameter tampering). CSRF, IDOR, authorization gaps, and session design cannot
 be fixed by a WAF at all; Kunato can only assist through custom response-phase

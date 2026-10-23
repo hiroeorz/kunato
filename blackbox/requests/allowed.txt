@@ -368,6 +368,8 @@ POST /api/search header="Content-Type: application/json" chunked=1 body="{\"quer
 #     explicitly active type, and an executable behind a generic type (which
 #     only `upload_inspection: strict` rejects) must keep passing ---
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg.bin
+# A large safe image with no script marker must still pass the full-part scan.
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg-deep.bin
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-generic-elf.bin
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-page.bin
 

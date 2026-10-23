@@ -9,10 +9,11 @@
 //!
 //! The check shares the multipart boundary, part, and body limits with rule
 //! inspection and never copies the body. It runs before rule evaluation, so an
-//! `ALLOW` rule cannot bypass it. It is deliberately a heuristic: a valid image
-//! header followed by a deeper polyglot, an unsupported boundary
-//! interpretation, or an upload larger than `max_body_bytes` without
-//! `body_inspection: stream` is not fully inspected.
+//! `ALLOW` rule cannot bypass it. It is deliberately a heuristic: server-side
+//! script markers are scanned throughout the inspected part, but executable and
+//! markup detection beyond the leading bytes, an unsupported boundary
+//! interpretation, archive contents, or an upload larger than `max_body_bytes`
+//! without `body_inspection: stream` is not fully inspected.
 
 use http::header::{CONTENT_TYPE, HeaderMap};
 
@@ -20,10 +21,6 @@ use crate::config::UploadInspection;
 use crate::decoding::{
     MAX_MULTIPART_BOUNDARIES, MultipartPart, multipart_boundaries, multipart_parts,
 };
-
-/// Bytes searched for embedded server-side script markers. The leading bytes
-/// are checked separately; the scan catches polyglots such as `GIF89a<?php`.
-const SCRIPT_SCAN_BYTES: usize = 1024;
 
 const SAFE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "jpe", "png", "gif", "webp", "bmp", "tif", "tiff", "ico", "pdf", "doc", "docx",
@@ -127,7 +124,21 @@ fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejec
     }
     let declared = part.declared_content_type();
     let claim = claim_for(declared.as_deref(), &filename);
-    let kind = dangerous_content(part.value)?;
+    let kind = match mode {
+        UploadInspection::Off => return None,
+        UploadInspection::Mismatch
+            if matches!(claim, Claim::ExplicitDangerous | Claim::Generic) =>
+        {
+            return None;
+        }
+        UploadInspection::Mismatch if claim == Claim::ActiveWeb => {
+            if !is_executable(part.value) {
+                return None;
+            }
+            DangerousKind::Executable
+        }
+        _ => dangerous_content(part.value)?,
+    };
     blocks(mode, claim, kind).then_some(Rejection {
         filename,
         declared,
@@ -269,7 +280,7 @@ fn dangerous_content(value: &[u8]) -> Option<DangerousKind> {
     if leading.starts_with(b"<") {
         return Some(DangerousKind::ActiveWeb);
     }
-    if contains_script_marker(&value[..value.len().min(SCRIPT_SCAN_BYTES)]) {
+    if contains_script_marker(value) {
         return Some(DangerousKind::Script);
     }
     None
@@ -508,6 +519,35 @@ mod tests {
         )]);
         let rejection = inspect_mismatch(&body).expect("rejected");
         assert_eq!(rejection.kind, DangerousKind::Script);
+    }
+
+    #[test]
+    fn a_deep_gif_php_polyglot_is_rejected() {
+        let mut value = b"GIF89a\x01\x00\x01\x00".to_vec();
+        value.extend(std::iter::repeat_n(b'A', 4096));
+        value.extend_from_slice(b"<?php echo 1; ?>");
+        let body = body(&[("pixel.gif", Some("image/gif"), &value)]);
+        let rejection = inspect_mismatch(&body).expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::Script);
+        assert_eq!(rejection.filename, "pixel.gif");
+    }
+
+    #[test]
+    fn deep_script_markers_are_case_insensitive() {
+        let mut value = b"\xff\xd8\xff\xe0JFIF".to_vec();
+        value.extend(std::iter::repeat_n(b'\0', 4096));
+        value.extend_from_slice(b"<?PHP echo 1; ?>");
+        let body = body(&[("photo.jpg", Some("image/jpeg"), &value)]);
+        let rejection = inspect_mismatch(&body).expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::Script);
+    }
+
+    #[test]
+    fn a_large_benign_image_passes() {
+        let mut value = b"GIF89a\x01\x00\x01\x00".to_vec();
+        value.extend(std::iter::repeat_n(b'\0', 8192));
+        let body = body(&[("pixel.gif", Some("image/gif"), &value)]);
+        assert!(inspect_mismatch(&body).is_none());
     }
 
     #[test]

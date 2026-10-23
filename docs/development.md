@@ -824,13 +824,15 @@ evaluation. A part that carries a `filename` is a file upload; its declared
 not hide an executable, server-side script, or markup payload. The default
 `mismatch` mode rejects a part that claims an image, PDF, office document, media
 file, or font (by type, or by a safe extension such as `.jpg`, `.png`, `.pdf`, or
-`.docx`) while its content starts with:
+`.docx`) while its content contains any of:
 
-- an executable header (ELF, PE, Mach-O, a Java class, or WebAssembly);
-- a server-side script marker (`<?php`, `<?=`, `<%`, or a `#!` shebang), also
-  when that marker appears within the first 1 KiB after a valid image header (a
-  `GIF89a<?php` polyglot);
-- HTML/XML/SVG markup (a leading `<` after an optional BOM and whitespace).
+- an executable header (ELF, PE, Mach-O, a Java class, or WebAssembly) at the
+  leading position;
+- a server-side script marker (`<?php`, `<?=`, or `<%`) anywhere in the part, or
+  a `#!` shebang at the leading position (a `GIF89a` + padding + `<?php`
+  polyglot is caught no matter where the marker sits);
+- active HTML/XML/SVG markup (a leading `<` after an optional BOM and
+  whitespace).
 
 A declared type that is itself active (`text/html`, `image/svg+xml`,
 JavaScript) or explicitly executable (`application/x-msdownload`, ...) is
@@ -859,9 +861,13 @@ because the file bytes must be complete for inspection. With
 remainder is forwarded; a warning is logged at load or reload. The check does
 not cover a file part outside the inspected prefix, a body with more than four
 boundary parameters, a malformed multipart body, archives or nested files, or
-active content embedded deeper than the leading bytes and the first 1 KiB
-script scan. A part without a `filename` is a form field, not an upload, and is
-not checked.
+active markup or executable headers embedded beyond the leading bytes. The
+script-marker scan is linear in the inspected part size and bounded by
+`max_body_bytes`; a safe-claim file that legitimately contains `<?php` (for
+example a PDF code sample) is rejected, so a deployment that must accept such
+documents needs an explicit policy decision rather than a smaller scan window;
+`upload_inspection: off` accepts that risk for every upload. A part without a
+`filename` is a form field, not an upload, and is not checked.
 
 ### GraphQL limits
 
