@@ -723,6 +723,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
 | `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |
 | `ruzstd`                  | Zstandard decoding             | Pure-Rust decoder; frames with a window over 8 MiB fall back to raw inspection. |
+| `ring`                    | SHA-256 checksums              | Already built as the TLS crypto provider; reused for rule-set verification. |
 | `rustls`, `tokio-rustls`  | TLS termination                | Pure-Rust TLS 1.2/1.3 with the ring provider.              |
 | `tokio-rustls-acme`       | Automatic certificates         | ACME client with TLS-ALPN-01, renewal, and resolver support; default webpki roots disabled to stay within the license policy. |
 | `rustls-native-certs`     | ACME API trust store           | Uses the system CA store for ACME directory requests.      |

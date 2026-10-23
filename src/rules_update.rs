@@ -15,7 +15,6 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
@@ -508,9 +507,9 @@ pub async fn fetch_release_asset(url: &str, max_bytes: usize) -> Result<Vec<u8>,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     let mut out = String::with_capacity(64);
-    for byte in digest {
+    for byte in digest.as_ref() {
         let _ = write!(out, "{byte:02x}");
     }
     out
@@ -686,11 +685,39 @@ mod tests {
     }
 
     #[test]
-    fn sha256_hex_matches_known_vector() {
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
+    fn sha256_hex_matches_known_vectors() {
+        let padding_boundary = [b'a'; 55];
+        let full_block = [b'a'; 64];
+        let cases: &[(&[u8], &str)] = &[
+            // Empty input.
+            (
+                b"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            // "abc" from the NIST test suite.
+            (
+                b"abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            // 56 bytes: the padding no longer fits in the final block.
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+            // 55 bytes: the largest message whose padding fits in one block.
+            (
+                &padding_boundary,
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            // 64 bytes: one full block plus a padding block.
+            (
+                &full_block,
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+        ];
+        for &(input, expected) in cases {
+            assert_eq!(sha256_hex(input), expected);
+        }
     }
 
     #[test]

@@ -14,7 +14,6 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use sha2::Digest;
 use tokio::net::TcpListener;
 
 use kunato::config::{self, RulesUpdate};
@@ -124,8 +123,11 @@ async fn spawn_server_on(host: &str, routes: HashMap<String, Route>) -> SocketAd
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = sha2::Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn rules_routes(rules: &[u8]) -> HashMap<String, Route> {
