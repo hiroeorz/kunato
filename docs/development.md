@@ -1229,6 +1229,8 @@ tls:
     enabled: true
     domains: [example.com, www.example.com]
     contact: admin@example.com   # optional
+    # allowed_origins: [https://certificates.example.com]  # optional, for a CA
+    # that serves resources from a different origin
 ```
 
 Requirements:
@@ -1237,13 +1239,21 @@ Requirements:
   must be reachable from the internet; wildcard names and setups behind a
   TLS-terminating CDN or proxy cannot be validated with TLS-ALPN-01;
 - `domains` entries must be DNS names, not IP addresses (use punycode for
-  international names); duplicates are rejected case-insensitively.
+  international names); duplicates are rejected case-insensitively;
+- URLs returned by the ACME directory and its orders are fetched only when
+  their HTTPS origin (scheme, host, and port) matches the directory URL. A
+  custom CA that serves nonce, authorization, challenge, finalize, or
+  certificate resources from another origin must list each origin in
+  `tls.acme.allowed_origins` (for example
+  `https://certificates.example.com:8443`); entries are origins, not paths.
 
 Kunato registers an ACME account (using `contact` for expiry notices when
 set), answers the challenge, and serves the issued chain. Certificates renew
 automatically once about two thirds of their validity have elapsed — roughly
 30 days before expiry for the 90-day Let's Encrypt certificates — with
-exponential backoff while the ACME server is unreachable. The certificate,
+exponential backoff while the ACME server is unreachable. Transient network,
+5xx, and 429 failures inside an order are retried against the same order
+(honouring `Retry-After`) before a new order is created. The certificate,
 account key, and a small cache metadata file are written under `cache_dir`
 (default `/var/lib/kunato/acme`, created with mode 0700) so restarts keep
 serving the cached certificate without contacting the ACME server again.

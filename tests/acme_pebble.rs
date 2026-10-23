@@ -294,6 +294,7 @@ async fn pebble_service_reuses_cache() {
         contact: None,
         directory: PEBBLE_DIRECTORY.to_owned(),
         cache_dir: cache_dir.clone(),
+        allowed_origins: Vec::new(),
     };
 
     // First run: bind a real server so Pebble can validate the challenge.

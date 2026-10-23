@@ -37,9 +37,50 @@ type HttpsClient = Client<
     Full<Bytes>,
 >;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Origin {
+    host: String,
+    port: u16,
+}
+
+impl Origin {
+    fn parse(value: &str) -> Result<Self, AcmeError> {
+        let uri: http::Uri = value
+            .parse()
+            .map_err(|_| AcmeError::Protocol("invalid ACME URL".to_owned()))?;
+        Self::from_uri(&uri)
+            .ok_or_else(|| AcmeError::Protocol("ACME URLs must use an https origin".to_owned()))
+    }
+
+    fn from_uri(uri: &http::Uri) -> Option<Self> {
+        if uri.scheme_str() != Some("https") {
+            return None;
+        }
+        let authority = uri.authority()?;
+        if authority.as_str().contains('@') {
+            return None;
+        }
+        Some(Self {
+            host: uri.host()?.to_ascii_lowercase(),
+            port: uri.port_u16().unwrap_or(443),
+        })
+    }
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.port {
+            443 => write!(formatter, "https://{}", self.host),
+            port => write!(formatter, "https://{}:{port}", self.host),
+        }
+    }
+}
+
 pub(crate) struct AcmeClient {
     http: HttpsClient,
     directory_url: String,
+    directory_origin: Origin,
+    allowed_origins: Vec<Origin>,
     directory: Option<Directory>,
     account_key: Arc<AccountKey>,
     kid: Option<String>,
@@ -50,8 +91,14 @@ pub(crate) struct AcmeClient {
 impl AcmeClient {
     pub(crate) fn new(
         directory_url: String,
+        allowed_origins: &[String],
         account_key: Arc<AccountKey>,
     ) -> Result<Self, AcmeError> {
+        let directory_origin = Origin::parse(&directory_url)?;
+        let allowed_origins = allowed_origins
+            .iter()
+            .map(|origin| Origin::parse(origin))
+            .collect::<Result<Vec<_>, _>>()?;
         let roots = native_roots();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ClientConfig::builder_with_provider(provider)
@@ -70,6 +117,8 @@ impl AcmeClient {
         Ok(Self {
             http,
             directory_url,
+            directory_origin,
+            allowed_origins,
             directory: None,
             account_key,
             kid: None,
@@ -85,6 +134,22 @@ impl AcmeClient {
     /// Return the delay requested by the most recent successful response.
     pub(crate) fn retry_after(&mut self) -> Option<Duration> {
         self.retry_after.take()
+    }
+
+    fn check_url(&self, url: &str) -> Result<(), AcmeError> {
+        let uri: http::Uri = url
+            .parse()
+            .map_err(|_| AcmeError::Protocol("ACME response contains an invalid URL".to_owned()))?;
+        let origin = Origin::from_uri(&uri).ok_or_else(|| {
+            AcmeError::Protocol("ACME response URL is not an https origin".to_owned())
+        })?;
+        if origin == self.directory_origin || self.allowed_origins.contains(&origin) {
+            return Ok(());
+        }
+        Err(AcmeError::Protocol(format!(
+            "ACME response URL uses an unconfigured origin: {}",
+            bounded_text(&origin.to_string())
+        )))
     }
 
     pub(crate) async fn register_account(
@@ -288,6 +353,7 @@ impl AcmeClient {
         body: Option<&str>,
         content_type: Option<&str>,
     ) -> Result<Response, AcmeError> {
+        self.check_url(url)?;
         let mut builder = Request::builder()
             .method(method)
             .uri(url)
@@ -516,6 +582,30 @@ pub(crate) fn bounded_text(value: &str) -> String {
 mod tests {
     use super::*;
     use http::HeaderMap;
+
+    fn test_client(directory: &str, allowed: &[&str]) -> AcmeClient {
+        let key = Arc::new(AccountKey::generate().expect("account key").0);
+        let allowed: Vec<String> = allowed.iter().map(|origin| (*origin).to_owned()).collect();
+        AcmeClient::new(directory.to_owned(), &allowed, key).expect("client")
+    }
+
+    #[test]
+    fn constrains_acme_response_urls_to_configured_origins() {
+        let client = test_client("https://ca.example/directory", &[]);
+        assert!(client.check_url("https://ca.example/acme/order").is_ok());
+        assert!(client.check_url("https://CA.EXAMPLE:443/order?x=1").is_ok());
+        assert!(client.check_url("http://ca.example/order").is_err());
+        assert!(client.check_url("https://evil.example/order").is_err());
+        assert!(client.check_url("https://ca.example.evil/order").is_err());
+        assert!(client.check_url("https://ca.example:8443/order").is_err());
+        assert!(client.check_url("https://user@ca.example/order").is_err());
+        let client = test_client(
+            "https://ca.example/directory",
+            &["https://cdn.example:8443"],
+        );
+        assert!(client.check_url("https://cdn.example:8443/cert").is_ok());
+        assert!(client.check_url("https://cdn.example/cert").is_err());
+    }
 
     fn response(headers: HeaderMap) -> Response {
         Response {

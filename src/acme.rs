@@ -55,6 +55,7 @@ const CHALLENGE_ATTEMPTS: u32 = 6;
 const MAX_CHAIN_BYTES: usize = 64 * 1024;
 const MAX_CHAIN_CERTS: usize = 10;
 const MAX_POLL_DELAY: Duration = Duration::from_secs(30);
+const MAX_ORDER_TRANSIENT_RETRIES: u32 = 4;
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(3600);
 /// Minimum delay before re-ordering when a freshly issued certificate is
@@ -470,81 +471,133 @@ async fn order_certificate(
     .map_err(|_| AcmeError::Timeout)?
 }
 
+struct OrderState {
+    url: String,
+    order: Order,
+    csr: Option<der::CsrMaterial>,
+    finalized: bool,
+    poll_attempt: u32,
+}
+
+async fn process_order(
+    client: &mut AcmeClient,
+    resolver: &AcmeResolver,
+    settings: &Acme,
+    state: &mut OrderState,
+) -> Result<Option<Vec<u8>>, AcmeError> {
+    match state.order.status {
+        OrderStatus::Pending => {
+            let mut pending = Vec::new();
+            for url in &state.order.authorizations {
+                if let Some(authorization) =
+                    start_authorization(client, resolver, &settings.domains, url).await?
+                {
+                    pending.push(authorization);
+                }
+            }
+            if !pending.is_empty() {
+                poll_authorizations(client, &mut pending).await?;
+            }
+            state.order = client.order(&state.url).await?;
+            if matches!(state.order.status, OrderStatus::Pending) {
+                let delay = client
+                    .retry_after()
+                    .unwrap_or_else(|| Duration::from_secs(1))
+                    .max(Duration::from_secs(1))
+                    .min(MAX_POLL_DELAY);
+                tokio::time::sleep(delay).await;
+            }
+            Ok(None)
+        }
+        OrderStatus::Ready => {
+            if !state.finalized {
+                if state.csr.is_none() {
+                    state.csr = Some(der::generate_csr(&settings.domains)?);
+                }
+                let material = state.csr.as_ref().ok_or_else(|| {
+                    AcmeError::Protocol("certificate signing request vanished".to_owned())
+                })?;
+                let finalize_url = state.order.finalize.clone();
+                state.order = client.finalize(&finalize_url, &material.der).await?;
+                state.finalized = true;
+            } else {
+                let delay = client
+                    .retry_after()
+                    .unwrap_or_else(|| Duration::from_secs(1))
+                    .max(Duration::from_secs(1))
+                    .min(MAX_POLL_DELAY);
+                tokio::time::sleep(delay).await;
+                state.order = client.order(&state.url).await?;
+            }
+            Ok(None)
+        }
+        OrderStatus::Processing => {
+            let delay = client
+                .retry_after()
+                .unwrap_or_else(|| Duration::from_secs(1u64 << state.poll_attempt.min(4)))
+                .max(Duration::from_secs(1))
+                .min(MAX_POLL_DELAY);
+            state.poll_attempt += 1;
+            tokio::time::sleep(delay).await;
+            state.order = client.order(&state.url).await?;
+            Ok(None)
+        }
+        OrderStatus::Valid => {
+            let certificate_url = state.order.certificate.clone().ok_or_else(|| {
+                AcmeError::Protocol("valid ACME order has no certificate URL".to_owned())
+            })?;
+            let chain = client.certificate(&certificate_url).await?;
+            let material = state.csr.take().ok_or_else(|| {
+                AcmeError::Protocol("ACME order completed without a CSR".to_owned())
+            })?;
+            Ok(Some(combine_key_and_chain(&material.key_pkcs8, &chain)))
+        }
+        OrderStatus::Invalid => Err(order_error(&state.order)),
+    }
+}
+
 async fn order_certificate_inner(
     settings: &Acme,
     resolver: &AcmeResolver,
     account_key: &Arc<AccountKey>,
 ) -> Result<Vec<u8>, AcmeError> {
-    let mut client = AcmeClient::new(settings.directory.clone(), Arc::clone(account_key))?;
+    let mut client = AcmeClient::new(
+        settings.directory.clone(),
+        &settings.allowed_origins,
+        Arc::clone(account_key),
+    )?;
     client.register_account(settings.contact.as_deref()).await?;
 
-    let (order_url, mut order) = client.new_order(&settings.domains).await?;
-    let mut csr = None;
-    let mut finalized = false;
-    let mut poll_attempt = 0u32;
+    let (order_url, order) = client.new_order(&settings.domains).await?;
+    let mut state = OrderState {
+        url: order_url,
+        order,
+        csr: None,
+        finalized: false,
+        poll_attempt: 0,
+    };
+    let mut steps = 0usize;
+    let mut transient_failures = 0u32;
 
-    for _ in 0..ORDER_ATTEMPTS {
-        match order.status {
-            OrderStatus::Pending => {
-                let mut pending = Vec::new();
-                for url in &order.authorizations {
-                    if let Some(authorization) =
-                        start_authorization(&mut client, resolver, &settings.domains, url).await?
-                    {
-                        pending.push(authorization);
-                    }
-                }
-                if !pending.is_empty() {
-                    poll_authorizations(&mut client, &mut pending).await?;
-                }
-                order = client.order(&order_url).await?;
-                if matches!(order.status, OrderStatus::Pending) {
-                    let delay = client
-                        .retry_after()
-                        .unwrap_or_else(|| Duration::from_secs(1))
-                        .min(MAX_POLL_DELAY);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-            OrderStatus::Ready => {
-                if !finalized {
-                    if csr.is_none() {
-                        csr = Some(der::generate_csr(&settings.domains)?);
-                    }
-                    let material = csr.as_ref().ok_or_else(|| {
-                        AcmeError::Protocol("certificate signing request vanished".to_owned())
-                    })?;
-                    order = client.finalize(&order.finalize, &material.der).await?;
-                    finalized = true;
-                } else {
-                    let delay = client
-                        .retry_after()
-                        .unwrap_or_else(|| Duration::from_secs(1))
-                        .min(MAX_POLL_DELAY);
-                    tokio::time::sleep(delay).await;
-                    order = client.order(&order_url).await?;
-                }
-            }
-            OrderStatus::Processing => {
-                let delay = client
-                    .retry_after()
-                    .unwrap_or_else(|| Duration::from_secs(1u64 << poll_attempt.min(4)))
-                    .min(MAX_POLL_DELAY);
-                poll_attempt += 1;
+    while steps < ORDER_ATTEMPTS {
+        match process_order(&mut client, resolver, settings, &mut state).await {
+            Ok(Some(blob)) => return Ok(blob),
+            Ok(None) => steps += 1,
+            Err(err) if err.is_transient() && transient_failures < MAX_ORDER_TRANSIENT_RETRIES => {
+                transient_failures += 1;
+                warn!(error = %err, "ACME order step failed; retrying the same order");
+                let delay =
+                    Duration::from_secs(1u64 << transient_failures.min(4)).min(MAX_POLL_DELAY);
                 tokio::time::sleep(delay).await;
-                order = client.order(&order_url).await?;
+                match client.order(&state.url).await {
+                    Ok(order) => state.order = order,
+                    Err(err) if err.is_transient() => {
+                        debug!(error = %err, "could not refresh the ACME order yet");
+                    }
+                    Err(err) => return Err(err),
+                }
             }
-            OrderStatus::Valid => {
-                let certificate_url = order.certificate.as_deref().ok_or_else(|| {
-                    AcmeError::Protocol("valid ACME order has no certificate URL".to_owned())
-                })?;
-                let chain = client.certificate(certificate_url).await?;
-                let material = csr.ok_or_else(|| {
-                    AcmeError::Protocol("ACME order completed without a CSR".to_owned())
-                })?;
-                return Ok(combine_key_and_chain(&material.key_pkcs8, &chain));
-            }
-            OrderStatus::Invalid => return Err(order_error(&order)),
+            Err(err) => return Err(err),
         }
     }
 
@@ -856,6 +909,7 @@ mod tests {
             domains: vec!["Example.com".to_owned(), "www.example.com".to_owned()],
             contact: None,
             cache_dir: std::path::PathBuf::from("/tmp/kunato-acme-test"),
+            allowed_origins: Vec::new(),
         };
         let metadata = CacheMetadata {
             directory: settings.directory.clone(),
@@ -884,6 +938,37 @@ mod tests {
             &configured
         ));
         assert!(!domains_cover(&["example.com".to_owned()], &configured));
+    }
+
+    #[test]
+    fn transient_acme_errors_are_retryable() {
+        assert!(AcmeError::Http("network".to_owned()).is_transient());
+        assert!(AcmeError::Timeout.is_transient());
+        assert!(
+            AcmeError::Api {
+                status: 503,
+                detail: "unavailable".to_owned(),
+                retry_after: None,
+            }
+            .is_transient()
+        );
+        assert!(
+            AcmeError::Api {
+                status: 429,
+                detail: "slow down".to_owned(),
+                retry_after: None,
+            }
+            .is_transient()
+        );
+        assert!(
+            !AcmeError::Api {
+                status: 400,
+                detail: "bad request".to_owned(),
+                retry_after: None,
+            }
+            .is_transient()
+        );
+        assert!(!AcmeError::Protocol("invalid order".to_owned()).is_transient());
     }
 
     #[test]

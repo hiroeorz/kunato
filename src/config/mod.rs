@@ -587,6 +587,8 @@ pub struct AcmeSpec {
     pub directory: Option<String>,
     #[serde(default)]
     pub cache_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1021,6 +1023,7 @@ pub struct Acme {
     pub contact: Option<String>,
     pub directory: String,
     pub cache_dir: PathBuf,
+    pub allowed_origins: Vec<String>,
 }
 
 impl From<&TlsSpec> for Tls {
@@ -1054,6 +1057,7 @@ impl From<&AcmeSpec> for Acme {
                 .cache_dir
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_ACME_CACHE_DIR)),
+            allowed_origins: spec.allowed_origins.clone(),
         }
     }
 }
@@ -2087,9 +2091,9 @@ fn validate_acme(acme: &AcmeSpec, issues: &mut Vec<String>) {
         issues.push("tls.acme.staging cannot be combined with tls.acme.directory".to_owned());
     }
     if let Some(directory) = &acme.directory
-        && !directory.starts_with("https://")
+        && let Err(reason) = validate_acme_url(directory)
     {
-        issues.push("tls.acme.directory must be an https:// URL".to_owned());
+        issues.push(format!("tls.acme.directory {reason}"));
     }
     if let Some(contact) = &acme.contact
         && (contact.trim().is_empty() || !contact.contains('@'))
@@ -2101,6 +2105,37 @@ fn validate_acme(acme: &AcmeSpec, issues: &mut Vec<String>) {
     {
         issues.push("tls.acme.cache_dir must not be empty".to_owned());
     }
+    for origin in &acme.allowed_origins {
+        if let Err(reason) = validate_acme_origin(origin) {
+            issues.push(format!("tls.acme.allowed_origins: `{origin}` {reason}"));
+        }
+    }
+}
+
+fn validate_acme_url(url: &str) -> Result<(), &'static str> {
+    let uri: Uri = url.parse().map_err(|_| "must be a valid URL")?;
+    if uri.scheme_str() != Some("https") {
+        return Err("must use https://");
+    }
+    let Some(authority) = uri.authority() else {
+        return Err("must include a host");
+    };
+    if authority.as_str().contains('@') {
+        return Err("must not include user information");
+    }
+    if uri.host().is_none() {
+        return Err("must include a host");
+    }
+    Ok(())
+}
+
+fn validate_acme_origin(origin: &str) -> Result<(), &'static str> {
+    validate_acme_url(origin)?;
+    let uri: Uri = origin.parse().map_err(|_| "must be a valid URL")?;
+    if uri.path() != "/" || uri.query().is_some() {
+        return Err("must be an origin without a path or query");
+    }
+    Ok(())
 }
 
 fn validate_acme_domain(domain: &str) -> Result<(), &'static str> {
@@ -3961,6 +3996,7 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
     enabled: true
     domains: [example.com, www.example.com]
     contact: admin@example.com
+    allowed_origins: [https://cdn.example.com, https://acme.example.com:8443]
 ",
         )
         .expect("valid config");
@@ -3969,6 +4005,13 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         let acme = tls.acme.expect("acme settings");
         assert_eq!(acme.domains, vec!["example.com", "www.example.com"]);
         assert_eq!(acme.contact.as_deref(), Some("admin@example.com"));
+        assert_eq!(
+            acme.allowed_origins,
+            vec![
+                "https://cdn.example.com".to_owned(),
+                "https://acme.example.com:8443".to_owned()
+            ]
+        );
         assert_eq!(
             acme.directory,
             crate::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY
@@ -4031,6 +4074,25 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
     fn rejects_acme_without_domains() {
         let error = parse_with(BASE, "tls: { acme: { enabled: true } }\n").expect_err("must fail");
         assert!(error.to_string().contains("tls.acme.domains"));
+    }
+
+    #[test]
+    fn rejects_invalid_acme_allowed_origins() {
+        for origin in [
+            "http://cdn.example.com",
+            "https://cdn.example.com/path",
+            "https://user@cdn.example.com",
+            "https://cdn.example.com?query",
+        ] {
+            let yaml = format!(
+                "tls: {{ acme: {{ enabled: true, domains: [example.com], allowed_origins: ['{origin}'] }} }}\n"
+            );
+            let error = parse_with(BASE, &yaml).expect_err("must fail");
+            assert!(
+                error.to_string().contains("allowed_origins"),
+                "unexpected error for {origin}: {error}"
+            );
+        }
     }
 
     #[test]
