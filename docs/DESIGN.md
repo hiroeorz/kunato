@@ -610,8 +610,11 @@ invariant.
 
 ## 9. Observability
 
-- Structured logging via `tracing` + `tracing-subscriber`, controlled by
-  `RUST_LOG`; `--log-format json` switches to JSON lines.
+- Structured logging via `tracing` with an in-tree subscriber, controlled by
+  `RUST_LOG`; `--log-format json` switches to JSON lines. The filter accepts
+  comma-separated `level` and `target=level` directives with target prefixes;
+  span and field directives are not supported. `log` records from dependencies
+  are bridged into the same output.
 - Levels: `error` (invalid config at startup, upstream failure), `warn` (reload
   failure, ban issued), `info` (startup, successful reload, shutdown, aggregated
   rate-limit events), `debug` / `trace` (rule evaluation detail, individual
@@ -717,7 +720,8 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
-| `tracing`, `tracing-subscriber` | Structured logging       | Levels, spans, JSON output without custom code.            |
+| `tracing`                 | Structured logging             | Event macros are shared with hyper and quinn; the subscriber, filter, and text/JSON formatters are in-tree. |
+| `log`                     | Dependency log bridge          | Already present via rustls; forwards dependency records to the in-tree subscriber. |
 | `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
 | `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |

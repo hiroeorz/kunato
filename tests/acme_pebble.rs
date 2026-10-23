@@ -32,9 +32,7 @@ const QUIC_PORT: u16 = 15002;
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-        .try_init();
+    let _ = kunato::telemetry::init(Some("info"), kunato::cli::LogFormat::Text);
 }
 
 fn trust_store(path: &Path) -> RootCertStore {

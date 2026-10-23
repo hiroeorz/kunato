@@ -41,7 +41,7 @@ fn parse_args() -> Result<SocketAddr, String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().init();
+    let _ = kunato::telemetry::init(Some("info"), kunato::cli::LogFormat::Text);
 
     let listen = match parse_args() {
         Ok(listen) => listen,
