@@ -282,6 +282,16 @@ async fn spawn_upgrade_upstream() -> SocketAddr {
 
                     let mut response = Response::new(Full::new(Bytes::new()));
                     *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                    if let Some(value) = request.headers().get("x-forwarded-for") {
+                        response
+                            .headers_mut()
+                            .insert("x-forwarded-for", value.clone());
+                    }
+                    if let Some(value) = request.headers().get("cf-connecting-ip") {
+                        response
+                            .headers_mut()
+                            .insert("cf-connecting-ip", value.clone());
+                    }
                     response.headers_mut().insert(
                         "connection",
                         HeaderValue::from_static("upgrade, x-upstream-hop"),
@@ -5204,4 +5214,352 @@ async fn php_profile_checks_cookies_before_establishing_a_websocket_tunnel() {
     drop(stream);
     running.stop().await;
     task.abort();
+}
+
+#[tokio::test]
+async fn trusted_proxy_resolves_chains_and_rewrites_forwarded_identity() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-for").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip:
+  trusted_proxies: [127.0.0.1, 10.0.0.0/24]
+"
+    );
+    let running = start_kunato(&yaml).await;
+    let (status, body) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "app.test",
+        &[
+            ("x-forwarded-for", "192.0.2.99, 203.0.113.7"),
+            ("x-forwarded-for", "10.0.0.2"),
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "203.0.113.7");
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn trusted_proxy_ignores_headers_from_untrusted_direct_peers() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-for").await;
+    for settings in ["", "client_ip: { trusted_proxies: [10.0.0.1] }\n"] {
+        let yaml = format!(
+            "listen: 127.0.0.1:0
+upstream: http://{upstream}
+{settings}"
+        );
+        let running = start_kunato(&yaml).await;
+        let (status, body) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            "/",
+            "app.test",
+            &[("x-forwarded-for", "garbage")],
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "127.0.0.1");
+        running.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn trusted_proxy_invalid_headers_are_rejected_before_body_and_allow() {
+    let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+protection: {{ enabled: false }}
+categories:
+  - name: allow-all
+    action: ALLOW
+    rules:
+      - name: all
+        match: {{ path: '^/' }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    for value in [
+        None,
+        Some("unknown"),
+        Some("127.0.0.1"),
+        Some("203.0.113.7, bad"),
+    ] {
+        let header = value
+            .map(|value| format!("x-forwarded-for: {value}\r\n"))
+            .unwrap_or_default();
+        let raw = format!(
+            "POST /login HTTP/1.1\r\nhost: app.test\r\n{header}content-length: 1000\r\n\r\n"
+        );
+        let status =
+            tokio::time::timeout(Duration::from_secs(2), send_raw_request(running.addr, &raw))
+                .await
+                .expect("reject before waiting for body");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(running.metrics.requests.load(Ordering::Relaxed), 4);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn trusted_proxy_source_rules_apply_in_both_phases() {
+    let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+categories:
+  - name: request-source
+    action: BLOCK
+    rules:
+      - name: client-a
+        match: {{ source_ip: 203.0.113.7 }}
+  - name: response-source
+    phase: response
+    action: BLOCK
+    response: {{ status: 451 }}
+    rules:
+      - name: client-b
+        match: {{ source_ip: 203.0.113.8 }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    for (ip, expected) in [
+        ("203.0.113.7", StatusCode::FORBIDDEN),
+        ("203.0.113.8", StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS),
+        ("203.0.113.9", StatusCode::OK),
+    ] {
+        let (status, _) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            "/",
+            "app.test",
+            &[("x-forwarded-for", ip)],
+            "",
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn trusted_proxy_keeps_rate_budgets_separate_and_applies_client_allowlist() {
+    let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+protection:
+  allowlist: [127.0.0.1, 203.0.113.9]
+  requests_per_second: 0.000001
+  burst: 1
+"
+    );
+    let running = start_kunato(&yaml).await;
+    for (ip, expected) in [
+        ("203.0.113.7", StatusCode::OK),
+        ("203.0.113.7", StatusCode::TOO_MANY_REQUESTS),
+        ("203.0.113.8", StatusCode::OK),
+        ("203.0.113.9", StatusCode::OK),
+        ("203.0.113.9", StatusCode::OK),
+        ("2001:db8::1", StatusCode::OK),
+        ("2001:db8::2", StatusCode::TOO_MANY_REQUESTS),
+        ("2001:db8:1::1", StatusCode::OK),
+    ] {
+        let (status, _) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            "/",
+            "app.test",
+            &[("x-forwarded-for", ip)],
+            "",
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn trusted_proxy_behavior_bans_only_the_client_on_a_shared_http2_connection() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+protection:
+  behavior:
+    min_requests: 1
+    enumeration: {{ action: BLOCK, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    let stream = TcpStream::connect(running.addr).await.expect("connect");
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+            .await
+            .expect("HTTP/2 handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    for (ip, expected) in [
+        ("203.0.113.7", StatusCode::NOT_FOUND),
+        ("203.0.113.7", StatusCode::TOO_MANY_REQUESTS),
+        ("203.0.113.8", StatusCode::NOT_FOUND),
+    ] {
+        let request = Request::builder()
+            .uri("http://app.test/missing")
+            .header("x-forwarded-for", ip)
+            .body(Full::new(Bytes::new()))
+            .expect("request");
+        let response = sender.send_request(request).await.expect("response");
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::TOO_MANY_REQUESTS {
+            assert!(response.headers().contains_key("retry-after"));
+        }
+        response.into_body().collect().await.expect("body");
+    }
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 2);
+    drop(sender);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn trusted_proxy_auth_observation_excludes_successes_and_unrelated_paths() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::OK,
+        StatusCode::FOUND,
+    ] {
+        let upstream = spawn_upstream(status, "response").await;
+        let yaml = format!(
+            "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ paths: ['^/custom-login$'], min_failures: 2 }}
+    global_auth: {{ min_failures: 3 }}
+"
+        );
+        let running = start_kunato(&yaml).await;
+        for (ip, path) in [
+            ("203.0.113.7", "/api/users"),
+            ("203.0.113.7", "/custom-login"),
+            ("203.0.113.8", "/custom-login"),
+            ("203.0.113.7", "/custom-login"),
+        ] {
+            let (actual, _) = send_h1_with_host(
+                running.addr,
+                Method::POST,
+                path,
+                "app.test",
+                &[("x-forwarded-for", ip)],
+                "",
+            )
+            .await;
+            assert_eq!(actual, status);
+        }
+        let is_failure = matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+        assert_eq!(
+            running
+                .metrics
+                .behavior_auth_failures
+                .load(Ordering::Relaxed),
+            if is_failure { 3 } else { 0 }
+        );
+        assert_eq!(
+            running.metrics.behavior_auth_flags.load(Ordering::Relaxed),
+            u64::from(is_failure)
+        );
+        assert_eq!(
+            running
+                .metrics
+                .behavior_global_auth_flags
+                .load(Ordering::Relaxed),
+            u64::from(is_failure)
+        );
+        running.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn trusted_proxy_http3_resolves_identity_and_rejects_missing_headers() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-for").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "client_ip: { trusted_proxies: [127.0.0.1] }",
+    )
+    .await;
+    let request = Request::builder()
+        .uri("https://localhost/")
+        .header("x-forwarded-for", "2001:db8::7")
+        .body(())
+        .expect("request");
+    let (status, body, _) = send_h3_request(running.addr, certificate.clone(), request, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "2001:db8::7");
+    let (status, _, _) = send_h3(running.addr, certificate, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn trusted_proxy_websocket_handshake_uses_canonical_identity() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1], header: cf-connecting-ip }}
+categories:
+  - name: blocked-client
+    action: BLOCK
+    rules:
+      - name: source
+        match: {{ source_ip: 203.0.113.8 }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    let (response, stream) = websocket_handshake_with_headers(
+        running.addr,
+        "/ws",
+        &[("cf-connecting-ip", "203.0.113.7")],
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 101"));
+    // The test upstream echoes the canonical forwarded identity in its handshake.
+    assert!(
+        response.contains("x-forwarded-for: 203.0.113.7"),
+        "{response}"
+    );
+    assert!(!response.contains("cf-connecting-ip"), "{response}");
+    drop(stream);
+    let (response, stream) = websocket_handshake_with_headers(
+        running.addr,
+        "/ws",
+        &[("cf-connecting-ip", "203.0.113.8")],
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"));
+    drop(stream);
+    let (response, stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(response.starts_with("HTTP/1.1 400"));
+    drop(stream);
+    running.stop().await;
 }

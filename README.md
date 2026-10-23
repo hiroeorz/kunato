@@ -65,6 +65,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
   flag iterative `404` probing and authentication-failure bursts, and a global
   window records distributed authentication failures. Observation is the
   default; `BLOCK` is opt-in per signal.
+- **Trusted proxy support** — Explicit proxy IP/CIDR trust resolves client
+  identities behind CDNs and load balancers for rules, request limits, and
+  behavioral bans. See the [deployment checklist](docs/behavioral-readiness.md).
 - **DoS / DDoS detection and mitigation** — Detects abnormal request patterns and
   automatically throttles or blocks abusive sources.
 - **Simple deployment** — One binary and one YAML configuration file. No database,

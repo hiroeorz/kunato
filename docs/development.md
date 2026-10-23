@@ -816,6 +816,70 @@ logs a warning at startup or reload when a configured ACME domain is missing
 from the list. Leaving `allowed_hosts` out (or using `--cert-file` without
 `--allowed-host`) keeps the previous behavior: any Host is accepted.
 
+### Client identity behind trusted proxies
+
+By default, request rules, rate limits, bans, and behavioral detection use the
+direct connection's IP. Identity headers from an untrusted peer are ignored.
+For a CDN or load balancer, configure the actual proxy addresses explicitly:
+
+```yaml
+client_ip:
+  trusted_proxies: [10.0.0.10/32, '2001:db8:1::10/128']
+  header: x-forwarded-for
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `client_ip` | omitted or null | Use the direct peer; no forwarded identity is trusted |
+| `client_ip.trusted_proxies` | required when configured | 1..64 IPv4/IPv6 addresses or CIDRs for actual proxies |
+| `client_ip.header` | `x-forwarded-for` | Case-insensitive selection of `x-forwarded-for`, `x-real-ip`, `cf-connecting-ip`, or `true-client-ip` |
+
+For a trusted direct peer, the selected header is mandatory. All its field
+values together must fit in 4096 bytes, including commas between repeated
+fields, and contain at most 16 addresses. Only bare IPv4/IPv6 literals are
+accepted: ports, brackets, unknown tokens, and empty elements are rejected.
+IPv4-mapped IPv6 addresses are normalized to IPv4.
+
+`x-forwarded-for` fields are combined in wire order and traversed from right to
+left, starting at the direct peer. Trusted proxy hops are skipped; the first
+untrusted address is the client. Addresses further left cannot replace that
+client, but the entire header must still be valid and within the bounds.
+The other three header choices require exactly one address in one field.
+Missing, malformed, over-limit, or entirely trusted chains receive `400` before
+body ingestion and rule evaluation, including with an `ALLOW` rule,
+`protection.enabled: false`, or `--disable-protection`. There is no fallback to
+the proxy IP for a trusted peer with an invalid identity assertion.
+
+The resolved IP is used consistently by request and response `source_ip`
+conditions, per-rule and per-source request limits, inspection costs,
+behavioral signals, bans, and request-time `protection.allowlist` checks.
+IPv6 request state is still aggregated by `protection.aggregate_ipv6_prefix`
+(default `/64`). TCP/QUIC connection caps and connection-time allowlist checks
+use the transport peer, because a client identity is not available at accept
+time. Trusting a proxy does not exempt its clients from request protection.
+Connection and client entries share the existing bounded source table.
+
+HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes use the same policy, resolved
+anew for each request. Request decision logs distinguish `client` (resolved IP)
+from `peer` (transport address). Before forwarding, Kunato removes the selected
+identity header and the alternate `Forwarded`, `X-Real-IP`, `X-Client-IP`,
+`X-Forwarded-Port`, `CF-Connecting-IP`, and `True-Client-IP` assertions. It then
+writes a single canonical `X-Forwarded-For` containing the resolved client IP.
+`X-Forwarded-Proto` continues to describe the connection to Kunato; this setting
+does not trust forwarded scheme or host assertions.
+
+Each trusted proxy must overwrite a single-address header or correctly append
+its observed peer to XFF. Restrict the trusted ranges to actual proxies and
+document direct-origin access separately; this setting is not a network access
+allowlist. The block supports atomic hot reload; invalid candidates retain the
+previous configuration. A valid trust-policy change does not clear existing
+rate/ban state, so review active bans when migrating an existing deployment.
+This is a local configuration feature, not a managed rule-set field: upgrade
+the binary before adding it to an older installation.
+
+Complete the [behavioral readiness checklist](behavioral-readiness.md) before
+using behavioral `BLOCK` behind a proxy.
+
 ### Upload inspection
 
 Multipart file parts are checked against the type they claim to be before rule
@@ -1222,9 +1286,8 @@ in the existing tracked-source table and remains bounded by `max_tracked_ips`
 
 Limitations:
 
-- Behind a CDN or load balancer every client shares the proxy's source address.
-  Keep the action at `LOG` in that topology until trusted-proxy handling is
-  implemented.
+- Behind a CDN or load balancer, configure and verify `client_ip` before
+  enabling `BLOCK`; otherwise every client shares the proxy's source address.
 - A slow prober below every threshold is not detected. A scraper that only
   receives `200` responses is not detected either; both remain rate-limit and
   rule-set responsibilities.

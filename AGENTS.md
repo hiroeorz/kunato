@@ -37,6 +37,7 @@ src/
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
+  client_ip.rs     # Bounded trusted-proxy client identity resolution
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
@@ -63,6 +64,7 @@ docs/
   DESIGN.md           # Overall design
   attack-coverage.md  # Attack-coverage tracker (covered / partial / gap per attack class)
   behavioral-detection.md # Behavioral bot and authentication-abuse detection
+  behavioral-readiness.md # Deployment and authentication observation checklist
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
@@ -135,6 +137,15 @@ rule-set updates.
   literals are accepted. An empty list or null value is invalid; omit the field
   to disable the check. `kunato init` seeds `--acme-domain` values and accepts
   `--allowed-host`; the installer passes it through.
+- `client_ip` optionally declares `trusted_proxies` (1..64 IPs/CIDRs) and an
+  identity `header` (default `x-forwarded-for`). Only trusted direct peers may
+  supply identity; their header is required, bounded to 4096 bytes/16 addresses,
+  and invalid or entirely trusted chains get `400` before body reads and ALLOW.
+  XFF is walked from right to left to the first untrusted address. Other
+  supported headers (`x-real-ip`, `cf-connecting-ip`, `true-client-ip`) require
+  one address. Resolved IPs key request limits, rules, behavioral signals, bans,
+  and request allowlists; connection caps use the transport peer. Upstream XFF
+  contains only the resolved IP. The policy remains active without protection.
 - `protection.behavior` enables per-source behavioral detection over upstream
   responses: enumeration (`404` ratio and distinct paths) and authentication
   failures (`401`/`403` on login/token/session/MFA/SSO paths), plus a global

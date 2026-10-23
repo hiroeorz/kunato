@@ -742,9 +742,10 @@ exact. This is a follow-up hardening item, not part of the first release.
 ## 9. Security and false-positive analysis
 
 The trust boundary is the same as the existing protection layer: the source is
-the TCP peer address (IPv6-aggregated), and the signal is the upstream's
-response status. Client-supplied `X-Forwarded-For` is ignored, as it is for rate
-limits. An attacker who controls the upstream can shape statuses; the detector
+the resolved client IP (IPv6-aggregated), and the signal is the upstream's
+response status. The direct peer is the default; `client_ip` optionally resolves
+a bounded identity assertion from explicitly trusted proxies. Assertions from
+untrusted peers are ignored. An attacker who controls the upstream can shape statuses; the detector
 is a mitigation layer, not a security invariant, and the rule set plus protocol
 limits remain the primary controls.
 
@@ -762,11 +763,12 @@ Because the default action is `LOG`, a false positive produces a log line and a
 metric, not a blocked user. The documentation recommends running in `LOG`
 mode for a representative period before setting `BLOCK`.
 
-Deployments behind a CDN or load balancer are a special case: Kunato sees the
-proxy's address as the source for every client, so per-source thresholds
-aggregate unrelated users and a `BLOCK` action would ban the proxy. Keep `LOG`
-mode in that topology until trusted-proxy handling is implemented (see
-`docs/DESIGN.md`, Section 16).
+Deployments behind a CDN or load balancer must configure and verify `client_ip`
+before enabling `BLOCK`. Without it, per-source thresholds aggregate unrelated
+users and a `BLOCK` action bans the proxy's identity. Follow the
+[readiness checklist](behavioral-readiness.md) to verify source separation and
+the application's authentication response semantics. NAT clients still share
+an identity, and trusted proxy support does not add session/account tracking.
 
 ### 9.2 Evasion
 

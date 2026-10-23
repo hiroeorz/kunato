@@ -1,5 +1,4 @@
 use std::io;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -16,6 +15,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::debug;
 
+use crate::client_ip::ClientSource;
 use crate::config::CompiledConfig;
 use crate::protection::ConnectionGuard;
 use crate::proxy::forward::{self, HttpError};
@@ -40,7 +40,7 @@ pub(crate) async fn forward_handshake(
     parts: &http::request::Parts,
     body: ProxyBody,
     scheme: &'static str,
-    peer: SocketAddr,
+    source: ClientSource,
     upgrade: Upgrade,
 ) -> Result<Handshake, HttpError> {
     let path_and_query = parts
@@ -109,7 +109,7 @@ pub(crate) async fn forward_handshake(
         request.headers_mut(),
         &parts.headers,
         &parts.uri,
-        peer,
+        source.client_ip,
         scheme,
     );
 
@@ -157,7 +157,7 @@ pub(crate) async fn forward_handshake(
         config.timeouts.websocket_idle,
         upgrade.shutdown,
         guard,
-        peer,
+        source,
     ));
     Ok(Handshake::Upgraded(handshake))
 }
@@ -174,26 +174,26 @@ async fn tunnel(
     idle: Duration,
     mut shutdown: watch::Receiver<bool>,
     guard: Option<ConnectionGuard>,
-    peer: SocketAddr,
+    source: ClientSource,
 ) {
     let _guard = guard;
 
     let downstream = match downstream.await {
         Ok(upgraded) => upgraded,
         Err(err) => {
-            debug!(client = %peer, error = %err, "client upgrade failed");
+            debug!(client = %source.client_ip, peer = %source.peer, error = %err, "client upgrade failed");
             return;
         }
     };
     let upstream = match upstream.await {
         Ok(upgraded) => upgraded,
         Err(err) => {
-            debug!(client = %peer, error = %err, "upstream upgrade failed");
+            debug!(client = %source.client_ip, peer = %source.peer, error = %err, "upstream upgrade failed");
             return;
         }
     };
 
-    debug!(client = %peer, "WebSocket tunnel established");
+    debug!(client = %source.client_ip, peer = %source.peer, "WebSocket tunnel established");
     let activity = Arc::new(Mutex::new(Instant::now()));
     let mut downstream = ActivityIo::new(TokioIo::new(downstream), Arc::clone(&activity));
     let mut upstream = ActivityIo::new(TokioIo::new(upstream), Arc::clone(&activity));
@@ -201,10 +201,10 @@ async fn tunnel(
     tokio::select! {
         _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream) => {}
         _ = idle_watchdog(activity, idle) => {
-            debug!(client = %peer, "WebSocket tunnel idle timeout");
+            debug!(client = %source.client_ip, peer = %source.peer, "WebSocket tunnel idle timeout");
         }
         _ = shutdown.changed() => {
-            debug!(client = %peer, "WebSocket tunnel closed for shutdown");
+            debug!(client = %source.client_ip, peer = %source.peer, "WebSocket tunnel closed for shutdown");
         }
     }
 }

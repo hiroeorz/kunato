@@ -2,6 +2,7 @@ pub mod acme;
 pub mod admin;
 pub mod allowed_hosts;
 pub mod cli;
+pub mod client_ip;
 pub mod config;
 pub mod decoding;
 pub mod error;

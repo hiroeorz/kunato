@@ -398,6 +398,33 @@ mod tests {
     }
 
     #[test]
+    fn client_ip_reload_applies_valid_changes_and_keeps_previous_trust_on_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        let base = "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n";
+        write(&path, base);
+        let config = ArcSwap::from_pointee(config::load(&path).expect("config"));
+        let peer = "127.0.0.1:443".parse().expect("peer");
+        let headers = http::HeaderMap::new();
+        assert!(config.load().client_ip.resolve(peer, &headers).is_ok());
+        write(
+            &path,
+            &format!("{base}client_ip: {{ trusted_proxies: [127.0.0.1] }}\n"),
+        );
+        assert!(reload(&path, &config, &Metrics::new(), false).is_some());
+        assert!(config.load().client_ip.resolve(peer, &headers).is_err());
+        write(
+            &path,
+            &format!("{base}client_ip: {{ trusted_proxies: [] }}\n"),
+        );
+        assert!(reload(&path, &config, &Metrics::new(), false).is_none());
+        assert!(config.load().client_ip.resolve(peer, &headers).is_err());
+        write(&path, base);
+        assert!(reload(&path, &config, &Metrics::new(), false).is_some());
+        assert!(config.load().client_ip.resolve(peer, &headers).is_ok());
+    }
+
+    #[test]
     fn reload_keeps_previous_configuration_on_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("rules.yaml");

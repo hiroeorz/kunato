@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -7,6 +9,7 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use tracing::debug;
 
+use crate::client_ip::ClientSource;
 use crate::config::{CompiledConfig, ResponseSpec};
 use crate::protection::normalize_ip;
 use crate::proxy::client::UpstreamClient;
@@ -72,7 +75,7 @@ pub async fn forward_request(
     config: &CompiledConfig,
     parts: &http::request::Parts,
     body: ProxyBody,
-    peer: SocketAddr,
+    source: ClientSource,
     scheme: &'static str,
     exchange_timeout: Duration,
 ) -> Result<Response<ProxyBody>, HttpError> {
@@ -100,7 +103,7 @@ pub async fn forward_request(
         request.headers_mut(),
         &parts.headers,
         &parts.uri,
-        peer,
+        source.client_ip,
         scheme,
     );
 
@@ -130,20 +133,26 @@ pub async fn forward_request(
 /// added. Clients can forge all of them, so applications behind Kunato must
 /// rely on the canonical `X-Forwarded-*` trio (rewritten below) instead; the
 /// forged copies are removed from every forwarded request.
-const LEGACY_IDENTITY_HEADERS: [&str; 4] =
-    ["forwarded", "x-real-ip", "x-client-ip", "x-forwarded-port"];
+const LEGACY_IDENTITY_HEADERS: [&str; 6] = [
+    "forwarded",
+    "x-real-ip",
+    "x-client-ip",
+    "x-forwarded-port",
+    "cf-connecting-ip",
+    "true-client-ip",
+];
 
 pub(crate) fn set_forwarded_headers(
     target: &mut HeaderMap,
     source: &HeaderMap,
     source_uri: &http::Uri,
-    peer: SocketAddr,
+    client_ip: IpAddr,
     scheme: &'static str,
 ) {
     for name in LEGACY_IDENTITY_HEADERS {
         target.remove(name);
     }
-    if let Ok(forwarded_for) = HeaderValue::from_str(&normalize_ip(peer.ip()).to_string()) {
+    if let Ok(forwarded_for) = HeaderValue::from_str(&normalize_ip(client_ip).to_string()) {
         target.insert("x-forwarded-for", forwarded_for);
     }
     let forwarded_proto = if scheme == "https" {
@@ -323,7 +332,7 @@ mod tests {
         let uri: http::Uri = "/".parse().expect("valid URI");
         let peer: SocketAddr = "[::ffff:10.0.0.1]:1234".parse().expect("valid peer");
 
-        set_forwarded_headers(&mut target, &source, &uri, peer, "http");
+        set_forwarded_headers(&mut target, &source, &uri, peer.ip(), "http");
 
         assert_eq!(
             target
@@ -341,12 +350,14 @@ mod tests {
         target.append("x-real-ip", HeaderValue::from_static("8.8.8.8"));
         target.insert("x-client-ip", HeaderValue::from_static("9.9.9.9"));
         target.insert("x-forwarded-port", HeaderValue::from_static("1234"));
+        target.insert("cf-connecting-ip", HeaderValue::from_static("10.10.10.10"));
+        target.insert("true-client-ip", HeaderValue::from_static("11.11.11.11"));
         let mut source = HeaderMap::new();
         source.insert("x-real-ip", HeaderValue::from_static("10.10.10.10"));
         let uri: http::Uri = "/".parse().expect("valid URI");
         let peer: SocketAddr = "203.0.113.7:4444".parse().expect("valid peer");
 
-        set_forwarded_headers(&mut target, &source, &uri, peer, "http");
+        set_forwarded_headers(&mut target, &source, &uri, peer.ip(), "http");
 
         for name in LEGACY_IDENTITY_HEADERS {
             assert!(

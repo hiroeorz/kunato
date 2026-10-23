@@ -265,12 +265,17 @@ In strict body mode an over-limit upload is rejected with `413` unless an
   `Transfer-Encoding`, `Upgrade`, `Proxy-*`, `Proxy-Connection`) plus headers
   named by `Connection`.
 - Set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. The
-  `X-Forwarded-For` value is always overwritten with the direct peer address, so
-  client-supplied values cannot spoof the source; trusted-proxy append support
-  (for deployments behind a CDN or load balancer) is future work, and until it
-  exists `source_ip` rules and protection budgets see the direct peer.
+  `X-Forwarded-For` value is overwritten with the resolved client IP: the direct
+  peer by default, or the first untrusted address found by walking a bounded
+  XFF chain from right to left through explicitly configured `client_ip`
+  proxies. Trusted peers must supply a valid identity header; errors get `400`
+  before body reads. Single-address provider headers are also supported.
+  Request/response rules, request limits, allowlists, bans, and behavior share
+  this identity; transport connection caps keep using the actual peer. See
+  `docs/development.md`, "Client identity behind trusted proxies".
 - Remove legacy identity headers (`Forwarded`, `X-Real-IP`, `X-Client-IP`,
-  `X-Forwarded-Port`): clients can forge all of them, so applications behind
+  `X-Forwarded-Port`, `CF-Connecting-IP`, `True-Client-IP`, and the selected
+  client identity header): clients can forge them, so applications behind
   Kunato must trust the canonical `X-Forwarded-*` trio above instead.
 - WebSocket handshakes keep `Connection` and `Upgrade` (normalized to
   `Connection: Upgrade` and `Upgrade: websocket`) while all other hop-by-hop
@@ -308,7 +313,7 @@ parse → validate → compile pipeline; on success the snapshot is swapped with
 `ArcSwap::store`; on failure the previous snapshot stays active and the error is
 logged. In-flight requests keep using the snapshot they loaded.
 
-Reloadable: categories/rules, protection, timeouts, limits, `allowed_hosts`,
+Reloadable: categories/rules, protection, timeouts, limits, `allowed_hosts`, `client_ip`,
 upstream. Restart-only: `listen` address, `tls`, `http3`, and `admin`. Changing
 them during reload logs a warning and keeps the current listener.
 
@@ -653,6 +658,7 @@ src/
   error.rs         # Error types
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
+  client_ip.rs     # Bounded identity assertions from explicitly trusted proxies
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document extraction and depth/field analysis
@@ -809,8 +815,6 @@ response-phase rules, and behavioral detection.
 - Behavioral detection follow-ups (opt-in global authentication throttle or
   challenge, `200`-only scraping signals, configurable static exclusions); see
   [the design](behavioral-detection.md).
-- Trusted-proxy handling for `X-Forwarded-For` and client-IP rules behind a CDN
-  or load balancer.
 - Multiple upstreams and load balancing.
 - Admin API beyond the `/metrics` endpoint.
 - Config includes/anchors for large rule sets.

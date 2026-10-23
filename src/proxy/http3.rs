@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::acme::AcmeService;
+use crate::client_ip::ClientSource;
 use crate::config::CompiledConfig;
 use crate::error::Error;
 use crate::protection::ConnectionGuard;
@@ -222,22 +223,29 @@ async fn handle_request(
     let head_request = request.method() == Method::HEAD;
     let (mut parts, _) = request.into_parts();
     let (mut send, recv) = stream.split();
-    let mut response = if let Some(err) = server::admission_error(&context, peer, &config) {
-        server::rejected(peer, &err)
-    } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, peer) {
-        server::rejected(peer, &err)
+    let resolved = server::resolve_source(&context, peer, &config, &parts);
+    let source = resolved
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|_| ClientSource::direct(peer));
+    let mut response = if let Err(err) = resolved {
+        server::rejected(source, &err)
+    } else if let Some(err) = server::admission_error(&context, source, &config) {
+        server::rejected(source, &err)
+    } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, source) {
+        server::rejected(source, &err)
     } else if let Some(err) = server::request_head_error(&config, &parts) {
-        server::rejected(peer, &err)
+        server::rejected(source, &err)
     } else if let Some(inspection) = context.reserve_request_inspection() {
         match read_prefix(recv, &config, inspection, &context).await {
             Ok((payload, inspection)) => {
-                server::process_payload(parts, payload, peer, &config, &context, inspection).await
+                server::process_payload(parts, payload, source, &config, &context, inspection).await
             }
-            Err(err) => server::rejected(peer, &err),
+            Err(err) => server::rejected(source, &err),
         }
     } else {
         context.record_overloaded();
-        server::rejected(peer, &server::inspection_capacity_error())
+        server::rejected(source, &server::inspection_capacity_error())
     };
     config.response_headers.apply(response.headers_mut());
     if let Err(err) = send_response(&mut send, response, head_request).await {

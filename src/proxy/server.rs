@@ -23,6 +23,7 @@ use tokio_rustls_acme::AcmeAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::acme::AcmeService;
+use crate::client_ip::ClientSource;
 use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
 use crate::metrics::Metrics;
@@ -828,16 +829,23 @@ async fn handle_request(
 
     let config = context.config();
     let (mut parts, body) = request.into_parts();
-    let result = if let Some(err) = admission_error(&context, peer, &config) {
+    let resolved = resolve_source(&context, peer, &config, &parts);
+    let source = resolved
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|_| ClientSource::direct(peer));
+    let result = if let Err(err) = resolved {
         Err(err)
-    } else if let Some(err) = host_policy_error(&context, &config, &mut parts, peer) {
+    } else if let Some(err) = admission_error(&context, source, &config) {
+        Err(err)
+    } else if let Some(err) = host_policy_error(&context, &config, &mut parts, source) {
         Err(err)
     } else if let Some(err) = request_head_error(&config, &parts) {
         Err(err)
     } else if let Some(inspection) = context.reserve_request_inspection() {
         match read_body(body, &config, inspection, &context).await {
             Ok((body, inspection)) => {
-                process(parts, body, peer, &config, &context, upgrade, inspection).await
+                process(parts, body, source, &config, &context, upgrade, inspection).await
             }
             Err(err) => Err(err),
         }
@@ -847,7 +855,7 @@ async fn handle_request(
     };
     let mut response = match result {
         Ok(response) => response,
-        Err(err) => rejected(peer, &err),
+        Err(err) => rejected(source, &err),
     };
     config.response_headers.apply(response.headers_mut());
     if let Some(alt_svc) = &context.alt_svc {
@@ -865,18 +873,30 @@ async fn handle_request(
     Ok(Response::from_parts(parts, body))
 }
 
-/// Admission check that runs before a request body is ingested. It consumes
-/// the source's rate budget and counts the request, so a rate-limited client
-/// never causes a body buffer allocation.
-pub(crate) fn admission_error(
+pub(crate) fn resolve_source(
     context: &Context,
     peer: SocketAddr,
     config: &CompiledConfig,
-) -> Option<HttpError> {
+    parts: &http::request::Parts,
+) -> Result<ClientSource, HttpError> {
     context.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    config
+        .client_ip
+        .resolve(peer, &parts.headers)
+        .map_err(|reason| HttpError::new(StatusCode::BAD_REQUEST, reason))
+}
+
+/// Admission check that runs before a request body is ingested. It consumes
+/// the source's rate budget, so a rate-limited client
+/// never causes a body buffer allocation.
+pub(crate) fn admission_error(
+    context: &Context,
+    source: ClientSource,
+    config: &CompiledConfig,
+) -> Option<HttpError> {
     let decision = context
         .protection
-        .check_request(peer.ip(), &config.protection);
+        .check_request(source.client_ip, &config.protection);
     protection_error(context, decision)
 }
 
@@ -887,7 +907,7 @@ pub(crate) fn host_policy_error(
     context: &Context,
     config: &CompiledConfig,
     parts: &mut http::request::Parts,
-    peer: SocketAddr,
+    source: ClientSource,
 ) -> Option<HttpError> {
     forward::normalize_host_header(parts);
     let allowed = config.allowed_hosts.as_ref()?;
@@ -900,7 +920,7 @@ pub(crate) fn host_policy_error(
         .fetch_add(1, Ordering::Relaxed);
     if let Some(host) = violation.host() {
         debug!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             host = %host,
             "request Host is not in allowed_hosts"
         );
@@ -1094,7 +1114,7 @@ fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
     }
 }
 
-pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody> {
+pub(crate) fn rejected(source: ClientSource, err: &HttpError) -> Response<ProxyBody> {
     // Rate limits and load shedding are expected under attack; logging every
     // one at warning level turns a flood into a disk-I/O amplifier. Metrics
     // still count them.
@@ -1103,14 +1123,14 @@ pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody>
         StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
     ) {
         debug!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             status = err.status.as_u16(),
             reason = err.message,
             "request rejected"
         );
     } else {
         warn!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             status = err.status.as_u16(),
             reason = err.message,
             "request rejected"
@@ -1122,14 +1142,14 @@ pub(crate) fn rejected(peer: SocketAddr, err: &HttpError) -> Response<ProxyBody>
 pub(crate) async fn process_payload(
     parts: http::request::Parts,
     payload: RequestPayload,
-    peer: SocketAddr,
+    source: ClientSource,
     config: &CompiledConfig,
     context: &Context,
     inspection: InspectionGuard,
 ) -> Response<ProxyBody> {
-    match process(parts, payload, peer, config, context, None, inspection).await {
+    match process(parts, payload, source, config, context, None, inspection).await {
         Ok(response) => response,
-        Err(err) => rejected(peer, &err),
+        Err(err) => rejected(source, &err),
     }
 }
 
@@ -1196,13 +1216,13 @@ fn header_has_token(headers: &HeaderMap, name: http::header::HeaderName, token: 
 
 fn record_behavior(
     context: &Context,
-    peer: SocketAddr,
+    source: ClientSource,
     parts: &http::request::Parts,
     status: StatusCode,
     config: &CompiledConfig,
 ) {
     let outcome = context.protection.observe_response(
-        peer.ip(),
+        source.client_ip,
         parts.uri.path(),
         status,
         &config.protection,
@@ -1236,7 +1256,7 @@ fn record_behavior(
                     f64::from(flag.not_found) / f64::from(flag.requests)
                 };
                 warn!(
-                    client = %peer.ip(),
+                    client = %source.client_ip, peer = %source.peer,
                     signal = flag.signal.as_str(),
                     path = %parts.uri.path(),
                     requests = flag.requests,
@@ -1256,7 +1276,7 @@ fn record_behavior(
                     .behavior_auth_flags
                     .fetch_add(1, Ordering::Relaxed);
                 warn!(
-                    client = %peer.ip(),
+                    client = %source.client_ip, peer = %source.peer,
                     signal = flag.signal.as_str(),
                     path = %parts.uri.path(),
                     auth_failures = flag.auth_failures,
@@ -1311,7 +1331,7 @@ fn record_upstream_error(context: &Context, err: &HttpError) {
 async fn process(
     mut parts: http::request::Parts,
     payload: RequestPayload,
-    peer: SocketAddr,
+    source: ClientSource,
     config: &CompiledConfig,
     context: &Context,
     upgrade: Option<Upgrade>,
@@ -1319,7 +1339,7 @@ async fn process(
 ) -> Result<Response<ProxyBody>, HttpError> {
     // The request entry points enforce this before buffering the body. Repeat
     // it here so a direct `process_payload` caller cannot skip the policy.
-    if let Some(err) = host_policy_error(context, config, &mut parts, peer) {
+    if let Some(err) = host_policy_error(context, config, &mut parts, source) {
         return Err(err);
     }
     if let Some(err) = request_head_error(config, &parts) {
@@ -1332,7 +1352,7 @@ async fn process(
             .request_truncated
             .fetch_add(1, Ordering::Relaxed);
         debug!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             limit = config.limits.max_body_bytes,
             path = %parts.uri.path(),
             "request body truncated for inspection"
@@ -1409,7 +1429,7 @@ async fn process(
                     .request_decode_truncated
                     .fetch_add(1, Ordering::Relaxed);
                 warn!(
-                    client = %peer.ip(),
+                    client = %source.client_ip, peer = %source.peer,
                     limit = config.limits.max_body_bytes,
                     path = %parts.uri.path(),
                     decoded_complete = complete,
@@ -1430,7 +1450,7 @@ async fn process(
                 .request_decode_skipped
                 .fetch_add(1, Ordering::Relaxed);
             warn!(
-                client = %peer.ip(),
+                client = %source.client_ip, peer = %source.peer,
                 path = %parts.uri.path(),
                 "request body encoding cannot be inspected; rejecting"
             );
@@ -1445,7 +1465,7 @@ async fn process(
                 .request_decode_skipped
                 .fetch_add(1, Ordering::Relaxed);
             warn!(
-                client = %peer.ip(),
+                client = %source.client_ip, peer = %source.peer,
                 path = %parts.uri.path(),
                 "request body encoding is malformed; rejecting"
             );
@@ -1457,7 +1477,7 @@ async fn process(
     };
     if decode_body {
         let decision = context.protection.charge_inspection(
-            peer.ip(),
+            source.client_ip,
             &config.protection,
             inspected_body.len(),
         );
@@ -1494,7 +1514,7 @@ async fn process(
                     .php_request_rejected
                     .fetch_add(1, Ordering::Relaxed);
             }
-            debug!(client = %peer.ip(), path = %parts.uri.path(), ?violation, "form request rejected");
+            debug!(client = %source.client_ip, peer = %source.peer, path = %parts.uri.path(), ?violation, "form request rejected");
             return Err(HttpError::new(status, violation.message()));
         }
     }
@@ -1510,7 +1530,7 @@ async fn process(
             .upload_rejected
             .fetch_add(1, Ordering::Relaxed);
         debug!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             path = %parts.uri.path(),
             filename = %rejection.filename,
             declared = rejection.declared.as_deref().unwrap_or("-"),
@@ -1539,7 +1559,7 @@ async fn process(
             .graphql_rejected
             .fetch_add(1, Ordering::Relaxed);
         debug!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             path = %parts.uri.path(),
             ?violation,
             "graphql request rejected"
@@ -1551,7 +1571,7 @@ async fn process(
         &parts.uri,
         &parts.headers,
         inspected_body.as_ref(),
-        peer.ip(),
+        source.client_ip,
         body_rules,
     )
     .with_body_truncated(body_truncated);
@@ -1566,7 +1586,7 @@ async fn process(
             category = %record.category,
             rule = %record.rule,
             action = record.action.as_str(),
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             method = %parts.method,
             path = %parts.uri.path(),
             "rule matched"
@@ -1583,7 +1603,7 @@ async fn process(
             rule = %blocked.rule,
             action = "BLOCK",
             rate_limited = blocked.rate_limited,
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             method = %parts.method,
             path = %parts.uri.path(),
             "request blocked"
@@ -1604,7 +1624,7 @@ async fn process(
             .request_body_rejected
             .fetch_add(1, Ordering::Relaxed);
         debug!(
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             limit = config.limits.max_body_bytes,
             path = %parts.uri.path(),
             "request body exceeds the inspection limit; rejecting"
@@ -1636,7 +1656,7 @@ async fn process(
                 Arc::clone(&inspection),
             )),
             context.scheme,
-            peer,
+            source,
             upgrade,
         )
         .await;
@@ -1646,7 +1666,7 @@ async fn process(
         return match result? {
             websocket::Handshake::Upgraded(response) => Ok(response),
             websocket::Handshake::Response(response) => {
-                record_behavior(context, peer, &parts, response.status(), config);
+                record_behavior(context, source, &parts, response.status(), config);
                 if !config.has_response_rules() && !php_profile {
                     return Ok(response);
                 }
@@ -1662,7 +1682,7 @@ async fn process(
                         body: inspected_body.as_ref(),
                         truncated: body_truncated,
                     },
-                    peer,
+                    source,
                     response,
                     response_inspection,
                 )
@@ -1703,7 +1723,7 @@ async fn process(
         config,
         &parts,
         outbound_body,
-        peer,
+        source,
         context.scheme,
         exchange_timeout,
     )
@@ -1712,7 +1732,7 @@ async fn process(
         record_upstream_error(context, err);
     }
     let response = result?;
-    record_behavior(context, peer, &parts, response.status(), config);
+    record_behavior(context, source, &parts, response.status(), config);
 
     if !config.has_response_rules() && !php_profile {
         return Ok(response);
@@ -1730,7 +1750,7 @@ async fn process(
             body: inspected_body.as_ref(),
             truncated: body_truncated,
         },
-        peer,
+        source,
         response,
         response_inspection,
     )
@@ -2027,7 +2047,7 @@ categories:
                 body: b"",
                 truncated: false,
             },
-            "127.0.0.1:1234".parse().expect("peer"),
+            ClientSource::direct("127.0.0.1:1234".parse().expect("peer")),
             Response::new(full_body("ok")),
             inspection,
         )

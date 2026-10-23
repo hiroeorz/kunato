@@ -225,6 +225,14 @@ impl InitArgs {
         }
 
         out.push_str(
+            "\n# Behind a CDN/load balancer, trust only its actual IPs/CIDRs. Requests\n\
+             # from these peers must carry a valid client identity header.\n\
+             # client_ip:\n\
+             #   trusted_proxies: [10.0.0.10/32]\n\
+             #   header: x-forwarded-for\n",
+        );
+
+        out.push_str(
             "\n# Behavioral detection observes upstream response statuses and can flag\n\
              # sources that probe missing paths or fail authentication repeatedly. It\n\
              # starts in LOG mode; uncomment and raise a signal's action to BLOCK after\n\

@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -9,6 +8,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Body, Frame};
 use tracing::{debug, info, warn};
 
+use crate::client_ip::ClientSource;
 use crate::config::CompiledConfig;
 use crate::metrics::Metrics;
 use crate::proxy::forward::{self, HttpError};
@@ -89,7 +89,7 @@ pub(crate) async fn inspect(
     metrics: &Metrics,
     request: &http::request::Parts,
     inspected_request: InspectedRequest<'_>,
-    peer: SocketAddr,
+    source: ClientSource,
     response: Response<ProxyBody>,
     inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
@@ -97,7 +97,7 @@ pub(crate) async fn inspect(
         metrics
             .php_response_rejected
             .fetch_add(1, Ordering::Relaxed);
-        warn!(client = %peer.ip(), path = %request.uri.path(), "PHP profile rejected an anomalous session cookie");
+        warn!(client = %source.client_ip, peer = %source.peer, path = %request.uri.path(), "PHP profile rejected an anomalous session cookie");
         return Ok(forward::error_response(
             StatusCode::FORBIDDEN,
             "invalid PHP session response",
@@ -184,7 +184,7 @@ pub(crate) async fn inspect(
         &request.uri,
         &request.headers,
         inspected_request.body,
-        peer.ip(),
+        source.client_ip,
         config.response_targets_request_body(),
     )
     .with_body_truncated(inspected_request.truncated);
@@ -205,7 +205,7 @@ pub(crate) async fn inspect(
             category = %record.category,
             rule = %record.rule,
             action = record.action.as_str(),
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             status = buffered.parts.status.as_u16(),
             "response rule matched"
         );
@@ -218,7 +218,7 @@ pub(crate) async fn inspect(
             category = %blocked.category,
             rule = %blocked.rule,
             action = "BLOCK",
-            client = %peer.ip(),
+            client = %source.client_ip, peer = %source.peer,
             status = buffered.parts.status.as_u16(),
             "response blocked"
         );

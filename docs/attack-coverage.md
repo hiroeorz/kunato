@@ -118,7 +118,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Content-Type Spoofing | ❌ | No rules |
 | JSON/XML Payload Tampering | 🔶 | JSON escapes, multipart, and form-urlencoded bodies are decoded for inspection; detection depends on signatures |
 | Schema Validation Violations | ❌ | No schema validation feature |
-| API Rate Limit Evasion | ✅ | Limits key on the TCP peer IP; client-supplied `X-Forwarded-For` is ignored and IPv6 is aggregated by prefix (default /64), so rotation cannot bypass |
+| API Rate Limit Evasion | ✅ | Limits key on the resolved client IP: direct peer by default, or a bounded assertion from explicitly configured `client_ip.trusted_proxies`. XFF is walked right to left through trusted hops; malformed/missing assertions from trusted peers get `400`. Untrusted peers cannot change identity with headers. IPv6 is aggregated by prefix (default /64), preventing rotation within that prefix from obtaining fresh budgets. Shared-IP users remain grouped |
 
 ## 6. Authentication and Login Attacks
 
@@ -355,3 +355,12 @@ failure bursts, and a global authentication-failure log. It defaults to `LOG`;
 a class becomes `Covered` only when the bundled default stops the attack, not
 merely because a signal exists. See
 [the behavioral detection notes](behavioral-detection.md).
+
+Trusted-proxy identity resolution now keeps clients behind a CDN/load balancer
+separate when `client_ip` is configured. All request protection, source rules,
+and upstream canonical XFF use the same resolved IP; connection caps remain
+transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
+bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
+authentication outcome counts. This closes a deployment limitation without
+changing category verdicts or the bundled 492-rule count; behavioral actions
+still default to LOG. The snapshot date remains 2026-10-23.

@@ -20,6 +20,12 @@ upstream: http://127.0.0.1:3000
 #   - example.com
 #   - 127.0.0.1
 
+# Optional client identity behind a CDN or load balancer. Trust only the actual
+# proxy addresses; requests from them must carry a valid identity header.
+# client_ip:
+#   trusted_proxies: [10.0.0.10/32]
+#   header: x-forwarded-for
+
 categories:
   # Trusted clients skip the remaining request rules and the strict body-size
   # rejection. Engine limits (header/path size, GraphQL, undecodable bodies) and

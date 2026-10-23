@@ -18,6 +18,7 @@ use serde::{Deserialize, Deserializer};
 pub mod watcher;
 
 use crate::allowed_hosts::AllowedHosts;
+use crate::client_ip::ClientIp;
 use crate::error::{Error, UNKNOWN_TARGET_ISSUE};
 use crate::rules::matcher::{
     Matcher, PayloadMatcher, StatusRange, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH,
@@ -245,6 +246,18 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ClientIpSpec {
+    pub trusted_proxies: Vec<String>,
+    #[serde(default = "default_client_ip_header")]
+    pub header: String,
+}
+
+fn default_client_ip_header() -> String {
+    "x-forwarded-for".to_owned()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigSpec {
     pub listen: SocketAddr,
     pub upstream: String,
@@ -253,6 +266,8 @@ pub struct ConfigSpec {
     /// rejected.
     #[serde(default, deserialize_with = "de_allowed_hosts")]
     pub allowed_hosts: Option<Vec<String>>,
+    #[serde(default)]
+    pub client_ip: Option<ClientIpSpec>,
     #[serde(default)]
     pub categories: Vec<CategorySpec>,
     #[serde(default)]
@@ -1225,6 +1240,7 @@ pub struct CompiledConfig {
     pub listen: SocketAddr,
     pub upstream: Upstream,
     pub allowed_hosts: Option<AllowedHosts>,
+    pub client_ip: ClientIp,
     pub categories: Vec<CompiledCategory>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -1538,6 +1554,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     validate_tls(&spec.tls, &mut issues);
     validate_http3(&spec.http3, &spec.tls, &mut issues);
     let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
+    let client_ip = compile_client_ip(spec.client_ip.as_ref(), &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
     let php = compile_php(&spec.php, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
@@ -1576,6 +1593,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         listen: spec.listen,
         upstream,
         allowed_hosts,
+        client_ip,
         categories,
         timeouts: Timeouts::from(&spec.timeouts),
         limits: Limits::from(&spec.limits),
@@ -1589,6 +1607,48 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         overrides_file: sources.overrides_file,
         rules_update,
     })
+}
+
+fn compile_client_ip(spec: Option<&ClientIpSpec>, issues: &mut Vec<String>) -> ClientIp {
+    let Some(spec) = spec else {
+        return ClientIp::default();
+    };
+    if spec.trusted_proxies.is_empty() || spec.trusted_proxies.len() > 64 {
+        issues.push(
+            "client_ip.trusted_proxies must contain between 1 and 64 IPs or CIDRs".to_owned(),
+        );
+    }
+    let mut networks = Vec::new();
+    for value in spec.trusted_proxies.iter().take(64) {
+        match parse_ip_net(value) {
+            Ok(network) => {
+                let network = match network {
+                    IpNet::V6(net) if net.prefix_len() >= 96 => net
+                        .addr()
+                        .to_ipv4_mapped()
+                        .and_then(|ip| ipnet::Ipv4Net::new(ip, net.prefix_len() - 96).ok())
+                        .map(IpNet::V4)
+                        .unwrap_or(network),
+                    _ => network,
+                };
+                networks.push(network);
+            }
+            Err(error) => issues.push(format!("client_ip.trusted_proxies: {error}")),
+        }
+    }
+    let header = HeaderName::from_bytes(spec.header.as_bytes())
+        .ok()
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "x-forwarded-for" | "x-real-ip" | "cf-connecting-ip" | "true-client-ip"
+            )
+        });
+    let header = header.unwrap_or_else(|| {
+        issues.push("client_ip.header must be x-forwarded-for, x-real-ip, cf-connecting-ip, or true-client-ip".to_owned());
+        HeaderName::from_static("x-forwarded-for")
+    });
+    ClientIp::new(networks, header)
 }
 
 fn compile_allowed_hosts(
@@ -3059,6 +3119,70 @@ mod tests {
         assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn client_ip_configuration_validates_trust_and_header_names() {
+        let peer = "127.0.0.1:443".parse().expect("peer");
+        let headers = HeaderMap::new();
+        assert!(
+            parse(BASE)
+                .expect("default")
+                .client_ip
+                .resolve(peer, &headers)
+                .is_ok()
+        );
+        for entry in ["127.0.0.1", "127.0.0.0/8", "::ffff:127.0.0.1/128"] {
+            let config = parse_with(
+                BASE,
+                &format!("client_ip: {{ trusted_proxies: ['{entry}'] }}\n"),
+            )
+            .expect("config");
+            assert!(config.client_ip.resolve(peer, &headers).is_err());
+        }
+        for value in [
+            "client_ip: {}\n",
+            "client_ip: { trusted_proxies: [] }\n",
+            "client_ip: { trusted_proxies: [localhost] }\n",
+            "client_ip: { trusted_proxies: ['127.0.0.1/33'] }\n",
+            "client_ip: { trusted_proxies: [127.0.0.1], header: host }\n",
+            "client_ip: { trusted_proxies: [127.0.0.1], unknown: true }\n",
+        ] {
+            assert!(parse_with(BASE, value).is_err(), "{value}");
+        }
+        let entries = vec!["127.0.0.1"; 65].join(", ");
+        assert!(
+            parse_with(
+                BASE,
+                &format!("client_ip: {{ trusted_proxies: [{entries}] }}\n")
+            )
+            .is_err()
+        );
+        for header in [
+            "X-Forwarded-For",
+            "X-Real-IP",
+            "CF-Connecting-IP",
+            "True-Client-IP",
+        ] {
+            let config = parse_with(
+                BASE,
+                &format!("client_ip: {{ trusted_proxies: [127.0.0.1], header: {header} }}\n"),
+            )
+            .expect("config");
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                HeaderName::from_bytes(header.as_bytes()).expect("name"),
+                HeaderValue::from_static("203.0.113.7"),
+            );
+            assert_eq!(
+                config
+                    .client_ip
+                    .resolve(peer, &headers)
+                    .expect("client")
+                    .client_ip,
+                "203.0.113.7".parse::<IpAddr>().expect("IP")
+            );
+        }
     }
 
     #[test]
