@@ -148,10 +148,26 @@ restart:
 
 ```sh
 systemctl status kunato
-sudo journalctl -u kunato -e
+sudo kunato log -n 50
 curl -s http://127.0.0.1:9090/metrics | head
 sudo kunato validate
 ```
+
+`kunato log` reads the same systemd journal and adds structured filters:
+
+```sh
+sudo kunato log -f                                  # new entries, real time
+sudo kunato log --ip 203.0.113.9 --since '1 hour ago'
+sudo kunato log --attack sqli --action BLOCK
+sudo kunato log --status 429 --format table         # aggregated 429 events
+sudo kunato log --attack cve-2025 --format json | jq .
+```
+
+`--attack` accepts the category-based classes listed by
+`kunato log --list-attacks`; `--category` and `--rule` select exact names.
+Rate-limit and ban rejections are aggregated per source with a `suppressed`
+count (a new ban is emitted immediately), so `--ip` remains usable during a
+flood without writing one journal line per rejected request.
 
 Rerunning the installer upgrades the binary and unit, keeps the
 configuration, and restarts the service; `--uninstall` removes them. See

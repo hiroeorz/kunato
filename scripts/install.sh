@@ -414,7 +414,7 @@ main() {
         log "kunato $VERSION is running; metrics: curl http://127.0.0.1:9090/metrics"
     else
         stop_service_if_present
-        die "kunato failed to start; inspect the logs with: journalctl -u kunato -e"
+        die "kunato failed to start; inspect the logs with: kunato log -n 50 (or journalctl -u kunato -e)"
     fi
 }
 

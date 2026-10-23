@@ -614,8 +614,17 @@ invariant.
 - Structured logging via `tracing` + `tracing-subscriber`, controlled by
   `RUST_LOG`; `--log-format json` switches to JSON lines.
 - Levels: `error` (invalid config at startup, upstream failure), `warn` (reload
-  failure, ban issued), `info` (startup, successful reload, shutdown), `debug` /
-  `trace` (rule evaluation detail, protection decisions).
+  failure, ban issued), `info` (startup, successful reload, shutdown, aggregated
+  rate-limit events), `debug` / `trace` (rule evaluation detail, individual
+  protection decisions).
+- Per-source rate-limit and ban rejections are aggregated with a `suppressed`
+  count; a new ban is emitted immediately. Metrics still count every rejection.
+  This keeps per-IP 429 analysis usable during a flood without per-request
+  journal writes.
+- `kunato log` reads the systemd journal through `journalctl` and filters those
+  fields by client IP/CIDR, attack class, category, rule, action, method, status,
+  and path. It supports raw, table, and JSON output and follows new entries with
+  `-f`. See [Log viewer](development.md#log-viewer).
 - Access log entry: timestamp, client IP, method, path, status, bytes,
   duration_ms, verdict, matched `category.rule` + action list, protection actions,
   upstream address, error.
@@ -634,16 +643,19 @@ invariant.
   checks), `--disable-protection` (turn off DoS/DDoS protection for load and
   black-box testing), `--log-level`, `--log-format`, `--version`.
 - Subcommands: `init` (write a starter configuration), `validate` (validate the
-  full configuration and exit), `update-rules` (one rules check and exit), and
+  full configuration and exit), `update-rules` (one rules check and exit),
   `upgrade` (`sudo kunato upgrade` reruns the installer published with the
   target release, keeping the configuration; `--version TAG` pins a release,
-  `--dry-run` prints what would run). The installer remains the only component
-  that writes `/usr/local/bin` and the systemd unit, so upgrades behave exactly
-  like a manual installer rerun.
+  `--dry-run` prints what would run), and `log` (read and filter the systemd
+  journal; see [Log viewer](development.md#log-viewer)). The installer remains
+  the only component that writes `/usr/local/bin` and the systemd unit, so
+  upgrades behave exactly like a manual installer rerun.
 - Exit codes: `0` success, `1` configuration error, `2` usage error.
 - Signals: `SIGINT` / `SIGTERM` trigger graceful shutdown; `SIGHUP` triggers a
   reload.
-- Distribution: single static binary (musl target), no runtime dependencies.
+- Distribution: single static binary (musl target), no runtime dependencies
+  for the proxy itself; the optional `log` subcommand reads the system journal
+  through `journalctl`.
 - An example configuration is shipped as `rules.example.yaml`.
 - Optional TLS termination via `rustls` when a `tls` block is configured, or
   automatic certificates through ACME (`tls.acme`) with TLS-ALPN-01 challenges

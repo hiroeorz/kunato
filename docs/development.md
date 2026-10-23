@@ -1050,6 +1050,142 @@ deployed ACME certificate. Non-loopback addresses are rejected at validation
 time, and if the port is already in use Kunato logs a warning and continues
 without the admin endpoint.
 
+### Log viewer
+
+`kunato log` reads the systemd journal for the `kunato` unit through
+`journalctl` and filters the structured fields Kunato already writes. It does
+not require the configuration file and does not change logging or retention:
+
+```sh
+kunato log                          # last 100 entries
+kunato log -f                       # new entries only, real time
+kunato log -f -n 50                 # last 50 entries, then follow
+kunato log --since '1 hour ago'
+```
+
+Reading the system journal normally requires root or membership in the
+`systemd-journal` group, so use `sudo kunato log` on a default install.
+
+Options:
+
+| Option | Meaning |
+| --- | --- |
+| `-f`, `--follow` | Follow new entries. Without `--lines` or `--since` it starts at the current end. |
+| `-n`, `--lines N` | Number of entries to show. Non-follow defaults to 100; follow defaults to 0. |
+| `--since TIME`, `--until TIME` | Passed to `journalctl`. A `--since` without `--lines` removes the implicit 100-line limit. |
+| `--ip IP\|CIDR` | Match the resolved client IP; events without one fall back to the transport peer. |
+| `--peer-ip IP\|CIDR` | Match the transport peer only. |
+| `--attack CLASS` | Match a category-based attack class. |
+| `--category NAME` | Match an exact category name. |
+| `--rule NAME` | Match an exact rule name. |
+| `--action BLOCK\|LOG` | Match the logged action. `ALLOW` matches are not logged. |
+| `--method METHOD` | Match the HTTP method. |
+| `--status CODE` | Match a recorded response status. |
+| `--path REGEX` | Match the recorded `path` with a Rust regular expression. |
+| `--format raw\|table\|json` | Output format. `raw` is the default. |
+| `--no-color` | Disable ANSI colors in table output. |
+| `-u`, `--unit UNIT` | systemd unit name (default `kunato`). |
+| `--journalctl PATH` | journalctl executable (default `journalctl`). |
+| `--list-attacks` | Print the supported attack classes and exit. |
+
+All filters are optional. Repeated or comma-separated values within one option
+are ORed; different options are ANDed. For example:
+
+```sh
+sudo kunato log --ip 203.0.113.9,198.51.100.0/24 --attack sqli --action BLOCK
+sudo kunato log --status 429 --format table
+sudo kunato log --attack cve-2025 --format json | jq .
+```
+
+#### Attack classes
+
+`--attack` is category-based: an event has the class of its category. Use
+`--category` for an exact name and `--rule` for an individual signature.
+`--list-attacks` prints the authoritative list, including aliases.
+
+| Class | Categories |
+| --- | --- |
+| `sql-injection` (`sqli`) | `sql-injection` |
+| `nosql-injection` (`nosql`) | `nosql-injection` |
+| `ldap-injection` (`ldap`) | `ldap-injection` |
+| `xpath-injection` (`xpath`) | `xpath-injection` |
+| `jdbc-injection` (`jdbc`) | `jdbc-injection` |
+| `xss` | `xss` |
+| `css-injection` (`css`) | `css-injection` |
+| `ssti` | `ssti` |
+| `command-injection` (`rce`) | `command-injection` |
+| `path-traversal` (`traversal`, `lfi`) | `path-traversal`, `path-normalization` |
+| `remote-file-inclusion` (`rfi`) | `remote-file-inclusion` |
+| `ssrf` | `ssrf` |
+| `xxe` | `xxe` |
+| `deserialization` | `ruby-deserialization`, `python-deserialization`, `php-deserialization`, `java-deserialization` |
+| `prototype-pollution` (`prototype`) | `prototype-pollution` |
+| `open-redirect` (`redirect`) | `open-redirect` |
+| `config-injection` (`config`) | `config-injection` |
+| `jwt` | `jwt` |
+| `malicious-upload` (`upload`) | `malicious-upload` |
+| `protocol` | `protocol-anomalies`, `bad-methods`, `nginx-capture-overflow`, `webdav-and-digest` |
+| `scanner` | `scanners-and-bots` |
+| `brute-force` (`login-throttle`) | `login-throttle` |
+| `discovery` | `api-discovery`, `admin-interfaces` |
+| `exposure` | `rails-debug-endpoints`, `django-debug-endpoints`, `nextjs-dev-endpoints`, `laravel-debug-endpoints`, `vite-dev-endpoints`, `spring-actuator`, `ai-service-management`, `ci-cd-servers` |
+| `info-disclosure` (`leaks`) | `sensitive-files`, `response-leaks` |
+| `bypass` | `framework-routing-bypass` |
+| `exploit` | `known-exploits` |
+| `cve`, `cve-YYYY`, `cve-YYYY-MM` | every `cve-*` category |
+
+CVE signatures living in a non-CVE category (for example `ci-cd-servers` or
+`framework-routing-bypass`) take that category's class. `trusted-sources` is an
+`ALLOW` category and is not logged, so it has no attack class.
+
+#### Output
+
+`raw` prints the `journalctl --output=short-iso` line unchanged, including the
+local-time prefix. `table` prints one normalized row per matching event:
+
+```text
+TIME                      LEVEL EVENT      ACTION ATTACK         CLIENT                    METHOD PATH                           STATUS RULE                          DETAIL
+2026-10-21T18:35:17+0900  WARN  reject     -      -              185.73.23.161             -      -                              421    -                             host not allowed
+2026-10-21T18:36:02+0900  INFO  block      BLOCK  sql-injection  203.0.113.9               GET    /search                         403    sql-injection.union-select    request blocked
+```
+
+`json` writes one JSON object per line. Promoted fields are `journal_timestamp`,
+`timestamp`, `level`, `target`, `event`, `action`, `attack`, `client`, `peer`,
+`method`, `path`, `status`, `category`, `rule`, and `message`; `fields` retains
+every parsed logging field, including `suppressed`, `retry_after_ms`, `signal`,
+and `reason`. Missing fields are omitted. `event` is one of `block`, `match`,
+`reject`, `rate-limit`, `ban`, `behavior`, or `service`.
+
+The command reads the journal as a stream and does not buffer the full history.
+It does not use a pager; pipe it to `less` when needed.
+
+#### Rate-limit and ban logging
+
+A source that exceeds the request budget produces one `info` line
+(`event="protection.rate_limit"`) or one `warn` line
+(`event="protection.ban"`) at most every ten seconds. A new ban is emitted
+immediately, even when a rate-limit line was just written. The line includes
+`client`, `peer`, `status=429`, `retry_after_ms`, `method`, `path`, and the
+number of rejections since the previous line in `suppressed`. Individual
+rejections remain at debug level, and the Prometheus counters still count every
+request. This keeps per-IP 429 analysis available during a flood without one
+journal write per rejected request.
+
+For example, after a burst from `203.0.113.9`:
+
+```sh
+sudo kunato log --ip 203.0.113.9 --status 429 --format json |
+  jq -c '{timestamp, suppressed: .fields.suppressed, retry_after_ms: .fields.retry_after_ms}'
+```
+
+#### Limitations
+
+- `ALLOW` rule matches are not logged, so `--action ALLOW` is rejected.
+- Query strings, headers, and bodies are not part of the log entry; `--path`
+  only matches the recorded path.
+- Attack classification is category-level, not per-rule metadata.
+- The viewer depends on `journalctl` and the systemd journal retention policy.
+
 ### TLS
 
 Set a certificate and private key (PEM) to terminate HTTPS directly:

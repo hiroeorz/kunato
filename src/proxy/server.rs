@@ -836,7 +836,7 @@ async fn handle_request(
         .unwrap_or_else(|_| ClientSource::direct(peer));
     let result = if let Err(err) = resolved {
         Err(err)
-    } else if let Some(err) = admission_error(&context, source, &config) {
+    } else if let Some(err) = admission_error(&context, source, &parts, &config) {
         Err(err)
     } else if let Some(err) = host_policy_error(&context, &config, &mut parts, source) {
         Err(err)
@@ -892,12 +892,19 @@ pub(crate) fn resolve_source(
 pub(crate) fn admission_error(
     context: &Context,
     source: ClientSource,
+    parts: &http::request::Parts,
     config: &CompiledConfig,
 ) -> Option<HttpError> {
     let decision = context
         .protection
         .check_request(source.client_ip, &config.protection);
-    protection_error(context, decision)
+    protection_error(
+        context,
+        source,
+        config,
+        Some((parts.method.as_str(), parts.uri.path())),
+        decision,
+    )
 }
 
 /// Enforce the optional Host/authority allowlist before the request body is
@@ -976,7 +983,67 @@ pub(crate) fn inspection_capacity_error() -> HttpError {
 
 /// Map a protection decision to the error response Kunato returns, recording
 /// the matching metric. `Decision::Allow` maps to `None`.
-pub(crate) fn protection_error(context: &Context, decision: Decision) -> Option<HttpError> {
+///
+/// Rate-limit and ban decisions also produce an aggregated `info`/`warn` line
+/// per source. Individual rejections stay at debug level to avoid turning a
+/// flood into a journal-write amplifier.
+pub(crate) fn protection_error(
+    context: &Context,
+    source: ClientSource,
+    config: &CompiledConfig,
+    request: Option<(&str, &str)>,
+    decision: Decision,
+) -> Option<HttpError> {
+    if let Some(report) =
+        context
+            .protection
+            .record_throttle(source.client_ip, &config.protection, decision)
+    {
+        let (method, path) = request.unzip();
+        let (event, message, retry_after) = match decision {
+            Decision::RateLimited { retry_after } => {
+                ("protection.rate_limit", "rate limit exceeded", retry_after)
+            }
+            Decision::Banned { retry_after } => {
+                ("protection.ban", "client temporarily banned", retry_after)
+            }
+            _ => {
+                return protection_http_error(context, decision);
+            }
+        };
+        if event == "protection.ban" {
+            warn!(
+                event = event,
+                client = %source.client_ip,
+                peer = %source.peer,
+                status = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                retry_after_ms = duration_millis(retry_after),
+                suppressed = report.suppressed,
+                method = method.unwrap_or("-"),
+                path = path.unwrap_or("-"),
+                "{}",
+                message
+            );
+        } else {
+            info!(
+                event = event,
+                client = %source.client_ip,
+                peer = %source.peer,
+                status = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                retry_after_ms = duration_millis(retry_after),
+                suppressed = report.suppressed,
+                limit_rps = config.protection.requests_per_second,
+                method = method.unwrap_or("-"),
+                path = path.unwrap_or("-"),
+                "{}",
+                message
+            );
+        }
+    }
+    protection_http_error(context, decision)
+}
+
+fn protection_http_error(context: &Context, decision: Decision) -> Option<HttpError> {
     match decision {
         Decision::Allow => None,
         Decision::RateLimited { retry_after } => {
@@ -1004,6 +1071,10 @@ pub(crate) fn protection_error(context: &Context, decision: Decision) -> Option<
             ))
         }
     }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// A request body read for inspection: a bounded prefix plus, when the body is
@@ -1481,7 +1552,13 @@ async fn process(
             &config.protection,
             inspected_body.len(),
         );
-        if let Some(err) = protection_error(context, decision) {
+        if let Some(err) = protection_error(
+            context,
+            source,
+            config,
+            Some((parts.method.as_str(), parts.uri.path())),
+            decision,
+        ) {
             return Err(err);
         }
     }
@@ -1602,6 +1679,7 @@ async fn process(
             category = %blocked.category,
             rule = %blocked.rule,
             action = "BLOCK",
+            status = blocked.response.status,
             rate_limited = blocked.rate_limited,
             client = %source.client_ip, peer = %source.peer,
             method = %parts.method,

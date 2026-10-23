@@ -49,6 +49,7 @@ src/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
   rules/           # Category/rule model, matcher, and evaluation engine
+  logs/            # `kunato log`: journalctl reader, parsing, filters, attack classes
   proxy/           # Listener, upstream client, forwarding, TLS termination, HTTP/3, WebSocket
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)

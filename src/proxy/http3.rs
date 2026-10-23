@@ -230,7 +230,7 @@ async fn handle_request(
         .unwrap_or_else(|_| ClientSource::direct(peer));
     let mut response = if let Err(err) = resolved {
         server::rejected(source, &err)
-    } else if let Some(err) = server::admission_error(&context, source, &config) {
+    } else if let Some(err) = server::admission_error(&context, source, &parts, &config) {
         server::rejected(source, &err)
     } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, source) {
         server::rejected(source, &err)

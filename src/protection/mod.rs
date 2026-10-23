@@ -15,6 +15,10 @@ use crate::decoding::{normalize_path, percent_decode_forms};
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
 const GLOBAL_WINDOW: Duration = Duration::from_secs(1);
+/// Minimum interval between per-source rate-limit/ban log lines. Rejections
+/// inside the interval are counted and reported as `suppressed` on the next
+/// line, so a flood cannot turn the journal into a disk-I/O amplifier.
+const THROTTLE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 /// One rate-limit token covers this many inspected body bytes. A 1 MiB body
 /// therefore costs about four extra tokens on top of the admission token.
 const INSPECTION_BYTES_PER_TOKEN: f64 = 256.0 * 1024.0;
@@ -30,6 +34,13 @@ pub enum Decision {
     RateLimited { retry_after: Duration },
     Banned { retry_after: Duration },
     Overloaded { retry_after: Duration },
+}
+
+/// Per-source log throttle report for a rate-limit or ban decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThrottleReport {
+    /// Rejections for this source since the previous emitted line.
+    pub suppressed: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,8 +177,63 @@ impl ProtectionState {
             entry.banned_until = None;
             entry.violations = 0;
             entry.window_start = now;
+            entry.throttle = ThrottleLog::default();
             None
         }
+    }
+
+    /// Return a report when this rejection should be logged. Repeated
+    /// rate-limit or ban decisions for one source are aggregated so a flood
+    /// produces at most one line per [`THROTTLE_LOG_INTERVAL`].
+    pub(crate) fn record_throttle(
+        &self,
+        ip: IpAddr,
+        config: &Protection,
+        decision: Decision,
+    ) -> Option<ThrottleReport> {
+        self.record_throttle_at(ip, config, decision, Instant::now())
+    }
+
+    fn record_throttle_at(
+        &self,
+        ip: IpAddr,
+        config: &Protection,
+        decision: Decision,
+        now: Instant,
+    ) -> Option<ThrottleReport> {
+        let kind = match decision {
+            Decision::RateLimited { .. } => ThrottleKind::RateLimited,
+            Decision::Banned { .. } => ThrottleKind::Ban,
+            _ => return None,
+        };
+        if !config.enabled || is_allowlisted(normalize_ip(ip), &config.allowlist) {
+            return None;
+        }
+
+        let key = tracking_key(ip, config);
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        let Some(entry) = shard.entries.get_mut(&key) else {
+            return Some(ThrottleReport { suppressed: 0 });
+        };
+
+        let log = &mut entry.throttle;
+        let interval_elapsed = log
+            .last_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= THROTTLE_LOG_INTERVAL);
+        // A new ban is important enough to bypass the interval once, even when
+        // the same source was rate-limited immediately before it.
+        let should_log = match kind {
+            ThrottleKind::Ban if !log.last_was_ban => true,
+            _ => interval_elapsed,
+        };
+        if !should_log {
+            log.suppressed = log.suppressed.saturating_add(1);
+            return None;
+        }
+        let suppressed = std::mem::take(&mut log.suppressed);
+        log.last_at = Some(now);
+        log.last_was_ban = kind == ThrottleKind::Ban;
+        Some(ThrottleReport { suppressed })
     }
 
     /// Observe an upstream response for the behavioral signals. The returned
@@ -430,6 +496,7 @@ impl ProtectionState {
             entry.banned_until = None;
             entry.violations = 0;
             entry.window_start = now;
+            entry.throttle = ThrottleLog::default();
         }
 
         let elapsed = now
@@ -658,6 +725,7 @@ struct Entry {
     connections: u32,
     last_seen: Instant,
     behavior: BehaviorEntry,
+    throttle: ThrottleLog,
 }
 
 impl Entry {
@@ -672,8 +740,22 @@ impl Entry {
             connections: 0,
             last_seen: now,
             behavior: BehaviorEntry::new(now),
+            throttle: ThrottleLog::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThrottleKind {
+    RateLimited,
+    Ban,
+}
+
+#[derive(Default)]
+struct ThrottleLog {
+    last_at: Option<Instant>,
+    suppressed: u32,
+    last_was_ban: bool,
 }
 
 struct BehaviorEntry {
@@ -973,6 +1055,79 @@ mod tests {
         );
         let decision = state.check_request(ip("10.0.0.1"), &config());
         assert!(matches!(decision, Decision::RateLimited { .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn throttle_logs_are_aggregated_per_source() {
+        let state = ProtectionState::new();
+        let config = config();
+        let source = ip("10.0.0.1");
+        assert_eq!(state.check_request(source, &config), Decision::Allow);
+
+        let now = Instant::now();
+        let decision = Decision::RateLimited {
+            retry_after: Duration::from_millis(10),
+        };
+        let first = state
+            .record_throttle_at(source, &config, decision, now)
+            .expect("first rejection is logged");
+        assert_eq!(first.suppressed, 0);
+        assert!(
+            state
+                .record_throttle_at(source, &config, decision, now + Duration::from_secs(1))
+                .is_none()
+        );
+        let next = state
+            .record_throttle_at(source, &config, decision, now + Duration::from_secs(10))
+            .expect("next interval is logged");
+        assert_eq!(next.suppressed, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_ban_bypasses_the_rate_limit_log_interval() {
+        let state = ProtectionState::new();
+        let config = config();
+        let source = ip("10.0.0.1");
+        assert_eq!(state.check_request(source, &config), Decision::Allow);
+
+        let now = Instant::now();
+        assert!(
+            state
+                .record_throttle_at(
+                    source,
+                    &config,
+                    Decision::RateLimited {
+                        retry_after: Duration::from_millis(10),
+                    },
+                    now,
+                )
+                .is_some()
+        );
+        assert!(
+            state
+                .record_throttle_at(
+                    source,
+                    &config,
+                    Decision::Banned {
+                        retry_after: Duration::from_secs(60),
+                    },
+                    now + Duration::from_secs(1),
+                )
+                .is_some(),
+            "a ban is logged even when the rate-limit line was just emitted"
+        );
+        assert!(
+            state
+                .record_throttle_at(
+                    source,
+                    &config,
+                    Decision::Banned {
+                        retry_after: Duration::from_secs(59),
+                    },
+                    now + Duration::from_secs(2),
+                )
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -15,7 +15,7 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
 #[derive(Debug, Parser)]
 #[command(name = "kunato", version, about = "Personal-use WAF reverse proxy")]
 pub struct Cli {
-    /// Path to the YAML configuration file.
+    /// Path to the YAML configuration file (used by server/config modes).
     #[arg(
         short,
         long,
@@ -25,19 +25,25 @@ pub struct Cli {
     )]
     pub config: PathBuf,
 
-    /// Validate the configuration and exit.
+    /// Validate the configuration and exit (server/config modes).
     #[arg(long, global = true)]
     pub validate: bool,
 
-    /// Disable DoS/DDoS protection (rate limits, bans, connection budgets).
+    /// Disable DoS/DDoS protection for server mode.
+    ///
+    /// Disables rate limits, bans, and connection budgets. Not used by the log
+    /// subcommand.
     #[arg(long, global = true)]
     pub disable_protection: bool,
 
-    /// Log level filter (overrides RUST_LOG).
+    /// Service log level filter (overrides RUST_LOG).
+    ///
+    /// Examples: error, warn, info, debug, trace, kunato::proxy=debug,info.
+    /// This does not filter the output of the log subcommand.
     #[arg(long, value_name = "LEVEL", global = true)]
     pub log_level: Option<String>,
 
-    /// Log output format.
+    /// Service log output format (not the log viewer; use --format there).
     #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
     pub log_format: LogFormat,
 
@@ -59,6 +65,9 @@ pub enum Command {
     /// Upgrade the installed binary and systemd unit from a release,
     /// keeping the configuration, by rerunning the official installer.
     Upgrade(UpgradeArgs),
+
+    /// Read the systemd journal for the Kunato service.
+    Log(Box<LogArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -70,6 +79,185 @@ pub struct UpgradeArgs {
     /// Print what would be downloaded and run without changing anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LogArgs {
+    /// Follow new journal entries.
+    ///
+    /// Without --lines or --since, starts at the current end and shows only
+    /// new entries. With either option, shows that backlog first and then
+    /// follows.
+    #[arg(short, long)]
+    pub follow: bool,
+
+    /// Number of journal lines to read.
+    ///
+    /// This limits the lines read from journalctl before filtering, not the
+    /// number of matching events. 0 disables the history. The non-follow
+    /// default is 100; the follow default is 0. Examples: 20, 100, 1000.
+    #[arg(short = 'n', long, value_name = "N")]
+    pub lines: Option<usize>,
+
+    /// Start time passed to journalctl.
+    ///
+    /// Accepts journalctl time syntax, for example "2026-10-21 10:00:00",
+    /// "yesterday", "today", or "1 hour ago". Quote values containing spaces.
+    /// If --lines is not given, a --since range is not limited to the implicit
+    /// 100 lines.
+    #[arg(long, value_name = "TIME")]
+    pub since: Option<String>,
+
+    /// End time passed to journalctl.
+    ///
+    /// Accepts the same syntax as --since, for example "now", "today", or
+    /// "2026-10-21 18:00:00". Quote values containing spaces.
+    #[arg(long, value_name = "TIME")]
+    pub until: Option<String>,
+
+    /// Filter by resolved client IP address or CIDR.
+    ///
+    /// Accepts exact IPv4/IPv6 addresses and CIDR ranges, for example
+    /// 203.0.113.9, 2001:db8::1, 203.0.113.0/24, or 2001:db8::/32.
+    /// Events without a client field fall back to the transport peer.
+    /// Repeat the flag or comma-separate values; values are ORed.
+    #[arg(long = "ip", value_name = "IP|CIDR", value_delimiter = ',')]
+    pub ips: Vec<String>,
+
+    /// Filter by transport peer address or CIDR.
+    ///
+    /// This is the direct connection address before client_ip resolution.
+    /// Accepts the same forms as --ip: 203.0.113.9, 2001:db8::1,
+    /// 203.0.113.0/24, or 2001:db8::/32. Repeat or comma-separate.
+    #[arg(long = "peer-ip", value_name = "IP|CIDR", value_delimiter = ',')]
+    pub peer_ips: Vec<String>,
+
+    /// Filter by category-based attack type.
+    ///
+    /// Injection and browser classes (aliases in parentheses):
+    ///   sql-injection (sqli), nosql-injection (nosql),
+    ///   ldap-injection (ldap), xpath-injection (xpath),
+    ///   jdbc-injection (jdbc), command-injection (command, rce), ssti,
+    ///   config-injection (config), xss, css-injection (css),
+    ///   open-redirect (redirect).
+    ///
+    /// Server-side and file classes:
+    ///   path-traversal (traversal, lfi),
+    ///   remote-file-inclusion (rfi), malicious-upload (upload), ssrf, xxe,
+    ///   deserialization, prototype-pollution (prototype), jwt.
+    ///
+    /// Access, reconnaissance, and exploit classes:
+    ///   scanner (scanners), brute-force (bruteforce, login-throttle),
+    ///   discovery, exposure,
+    ///   info-disclosure (infodisclosure, leaks), bypass, exploit, protocol.
+    ///
+    /// Vulnerability classes:
+    ///   cve, cve-YYYY, cve-YYYY-MM.
+    ///
+    /// Examples: sqli, xss, scanner, cve-2025. Use --list-attacks for the
+    /// full class-to-category mapping. Repeat or comma-separate values.
+    #[arg(long = "attack", value_name = "CLASS", value_delimiter = ',')]
+    pub attacks: Vec<String>,
+
+    /// Filter by exact rule category name.
+    ///
+    /// Case-insensitive. Examples: sql-injection, scanners-and-bots,
+    /// cve-2025-signatures, response-leaks. Use --list-attacks to see how
+    /// classes map to categories. Repeat or comma-separate values.
+    #[arg(long = "category", value_name = "NAME", value_delimiter = ',')]
+    pub categories: Vec<String>,
+
+    /// Filter by exact rule name.
+    ///
+    /// Case-insensitive. Examples: union-select, log4shell,
+    /// seo-and-ai-crawlers, private-key-material. Repeat or comma-separate.
+    #[arg(long = "rule", value_name = "NAME", value_delimiter = ',')]
+    pub rules: Vec<String>,
+
+    /// Filter by logged action.
+    ///
+    /// Accepted values: BLOCK, LOG. ALLOW rule matches are not logged, so
+    /// ALLOW is not accepted. Repeat or comma-separate.
+    #[arg(
+        long = "action",
+        value_name = "ACTION",
+        value_delimiter = ',',
+        ignore_case = true,
+        value_parser = ["BLOCK", "LOG"]
+    )]
+    pub actions: Vec<String>,
+
+    /// Filter by HTTP method.
+    ///
+    /// Case-insensitive. Common values: GET, POST, PUT, PATCH, DELETE, HEAD,
+    /// OPTIONS. Extension methods are also accepted. Repeat or comma-separate.
+    #[arg(long = "method", value_name = "METHOD", value_delimiter = ',')]
+    pub methods: Vec<String>,
+
+    /// Filter by recorded HTTP status code.
+    ///
+    /// Accepts 100-599. Examples: 403, 404, 429. Only events that recorded a
+    /// status match (rule blocks, rejections, rate limits, response events).
+    /// Repeat or comma-separate.
+    #[arg(
+        long = "status",
+        value_name = "CODE",
+        value_delimiter = ',',
+        value_parser = clap::value_parser!(u16).range(100..=599)
+    )]
+    pub statuses: Vec<u16>,
+
+    /// Filter by request path using a Rust regular expression.
+    ///
+    /// Matched against the recorded path only; the query string is not logged.
+    /// Examples: ^/api/, (?i)login, \.php$, /admin/.
+    #[arg(long, value_name = "REGEX")]
+    pub path: Option<String>,
+
+    /// Viewer output format.
+    ///
+    /// raw: the journalctl line unchanged (default).
+    /// table: normalized columns TIME, LEVEL, EVENT, ACTION, ATTACK, CLIENT,
+    ///        METHOD, PATH, STATUS, RULE, DETAIL.
+    /// json: one JSON object per line, with normalized fields and a fields map.
+    /// This does not change the service logging format; use the global
+    /// --log-format option for that.
+    #[arg(long, value_enum, default_value_t = LogOutputFormat::Raw)]
+    pub format: LogOutputFormat,
+
+    /// Disable ANSI colors in table output.
+    ///
+    /// Colors are used only when stdout is a terminal and NO_COLOR is not set.
+    #[arg(long)]
+    pub no_color: bool,
+
+    /// systemd unit name to read.
+    ///
+    /// For example kunato or kunato.service. The default is kunato.
+    #[arg(short, long, default_value = "kunato", value_name = "UNIT")]
+    pub unit: String,
+
+    /// journalctl executable to run.
+    ///
+    /// For example /usr/bin/journalctl. The default searches PATH for
+    /// journalctl. This option is mainly for non-standard installations and
+    /// tests.
+    #[arg(long, default_value = "journalctl", value_name = "PATH")]
+    pub journalctl: String,
+
+    /// List supported attack types and exit.
+    ///
+    /// Prints every class, alias, and the categories it matches; does not read
+    /// the journal or require journal permissions.
+    #[arg(long)]
+    pub list_attacks: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogOutputFormat {
+    Raw,
+    Table,
+    Json,
 }
 
 #[derive(Debug, Args)]
@@ -492,6 +680,70 @@ mod tests {
 
         let cli = Cli::try_parse_from(["kunato", "--config", "local.yaml"]).expect("parse");
         assert_eq!(cli.config, PathBuf::from("local.yaml"));
+    }
+
+    #[test]
+    fn parses_log_filters() {
+        let cli = Cli::try_parse_from([
+            "kunato",
+            "log",
+            "-f",
+            "--ip",
+            "203.0.113.9,10.0.0.0/8",
+            "--attack",
+            "sqli,xss",
+            "--category",
+            "sql-injection",
+            "--action",
+            "BLOCK",
+            "--status",
+            "429",
+            "--format",
+            "json",
+        ])
+        .expect("parse");
+        let Some(Command::Log(args)) = cli.command else {
+            panic!("expected the log command");
+        };
+        assert!(args.follow);
+        assert_eq!(
+            args.ips,
+            vec!["203.0.113.9".to_owned(), "10.0.0.0/8".to_owned()]
+        );
+        assert_eq!(args.attacks, vec!["sqli".to_owned(), "xss".to_owned()]);
+        assert_eq!(args.categories, vec!["sql-injection".to_owned()]);
+        assert_eq!(args.actions, vec!["BLOCK".to_owned()]);
+        assert_eq!(args.statuses, vec![429]);
+        assert_eq!(args.format, LogOutputFormat::Json);
+        assert_eq!(args.unit, "kunato");
+    }
+
+    #[test]
+    fn log_defaults_to_raw_output() {
+        let cli = Cli::try_parse_from(["kunato", "log"]).expect("parse");
+        let Some(Command::Log(args)) = cli.command else {
+            panic!("expected the log command");
+        };
+        assert!(!args.follow);
+        assert_eq!(args.lines, None);
+        assert_eq!(args.format, LogOutputFormat::Raw);
+    }
+
+    #[test]
+    fn log_validates_action_and_status_values() {
+        let cli = Cli::try_parse_from(["kunato", "log", "--action", "block,log"])
+            .expect("actions are case-insensitive");
+        let Some(Command::Log(args)) = cli.command else {
+            panic!("expected the log command");
+        };
+        assert_eq!(args.actions.len(), 2);
+        assert!(args.actions.iter().all(|action| {
+            action.eq_ignore_ascii_case("BLOCK") || action.eq_ignore_ascii_case("LOG")
+        }));
+
+        assert!(Cli::try_parse_from(["kunato", "log", "--action", "ALLOW"]).is_err());
+        assert!(Cli::try_parse_from(["kunato", "log", "--status", "99"]).is_err());
+        assert!(Cli::try_parse_from(["kunato", "log", "--status", "429"]).is_ok());
     }
 
     #[test]

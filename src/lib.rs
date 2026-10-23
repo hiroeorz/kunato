@@ -8,6 +8,7 @@ pub mod decoding;
 pub mod error;
 mod form;
 pub mod graphql;
+pub mod logs;
 pub mod metrics;
 mod php;
 pub mod protection;
