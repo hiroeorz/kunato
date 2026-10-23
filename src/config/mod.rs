@@ -2072,9 +2072,15 @@ fn validate_acme(acme: &AcmeSpec, issues: &mut Vec<String>) {
     if acme.domains.is_empty() {
         issues.push("tls.acme.domains must contain at least one domain".to_owned());
     }
+    let mut seen_domains = std::collections::HashSet::new();
     for domain in &acme.domains {
         if let Err(reason) = validate_acme_domain(domain) {
             issues.push(format!("tls.acme.domains: `{domain}` {reason}"));
+        }
+        if !seen_domains.insert(domain.to_ascii_lowercase()) {
+            issues.push(format!(
+                "tls.acme.domains: `{domain}` is a duplicate (domains are case-insensitive)"
+            ));
         }
     }
     if acme.staging && acme.directory.is_some() {
@@ -4025,6 +4031,16 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
     fn rejects_acme_without_domains() {
         let error = parse_with(BASE, "tls: { acme: { enabled: true } }\n").expect_err("must fail");
         assert!(error.to_string().contains("tls.acme.domains"));
+    }
+
+    #[test]
+    fn rejects_duplicate_acme_domains_case_insensitively() {
+        let error = parse_with(
+            BASE,
+            "tls: { acme: { enabled: true, domains: [example.com, Example.com] } }\n",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("duplicate"));
     }
 
     #[test]

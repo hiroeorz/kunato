@@ -1,0 +1,19 @@
+name: ACME Pebble
+
+on:
+  schedule:
+    # Run nightly so the end-to-end ACME flow is not only tested manually.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pebble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sh scripts/acme-pebble-test.sh

@@ -96,6 +96,18 @@ mod tests {
     }
 
     #[test]
+    fn random_input_does_not_panic() {
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        for _ in 0..256 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let bytes = state.to_le_bytes();
+            let _ = decode_blocks(&bytes);
+        }
+    }
+
+    #[test]
     fn rejects_malformed_blocks() {
         assert!(decode_blocks(b"-----BEGIN CERTIFICATE-----\nAA==\n").is_none());
         assert!(

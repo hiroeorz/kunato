@@ -34,6 +34,9 @@ const OID_PRIME256V1: &[u64] = &[1, 2, 840, 10045, 3, 1, 7];
 const OID_ECDSA_WITH_SHA256: &[u64] = &[1, 2, 840, 10045, 4, 3, 2];
 const OID_ACME_IDENTIFIER: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 31];
 
+// DER content of the subjectAltName OID (2.5.29.17).
+const SAN_OID_CONTENT: &[u8] = &[0x55, 0x1d, 0x11];
+
 pub(crate) struct CsrMaterial {
     pub der: Vec<u8>,
     pub key_pkcs8: Vec<u8>,
@@ -125,25 +128,8 @@ pub(crate) fn generate_challenge_cert(
 }
 
 pub(crate) fn certificate_validity(cert_der: &[u8]) -> Result<Validity, AcmeError> {
-    let mut input = cert_der;
-    let (tag, certificate) = take(&mut input)?;
-    if tag != TAG_SEQUENCE {
-        return Err(invalid("certificate is not a SEQUENCE"));
-    }
-
-    let mut input = certificate;
-    let (tag, tbs) = take(&mut input)?;
-    if tag != TAG_SEQUENCE {
-        return Err(invalid("tbsCertificate is not a SEQUENCE"));
-    }
-
-    let mut tbs = tbs;
-    if tbs.first() == Some(&TAG_CONTEXT_0_CONSTRUCTED) {
-        let _version = take(&mut tbs)?;
-    }
-    let _serial = take(&mut tbs)?;
-    let _signature = take(&mut tbs)?;
-    let _issuer = take(&mut tbs)?;
+    let mut tbs = certificate_tbs(cert_der)?;
+    skip_tbs_prefix(&mut tbs)?;
     let (tag, validity) = take(&mut tbs)?;
     if tag != TAG_SEQUENCE {
         return Err(invalid("validity is not a SEQUENCE"));
@@ -162,6 +148,112 @@ pub(crate) fn certificate_validity(cert_der: &[u8]) -> Result<Validity, AcmeErro
         not_before,
         not_after,
     })
+}
+
+/// Return the DER-encoded SubjectPublicKeyInfo field of the leaf certificate.
+pub(crate) fn certificate_spki(cert_der: &[u8]) -> Result<&[u8], AcmeError> {
+    let mut tbs = certificate_tbs(cert_der)?;
+    skip_tbs_prefix(&mut tbs)?;
+    take(&mut tbs)?; // validity
+    take(&mut tbs)?; // subject
+    let before = tbs;
+    let (tag, _) = take(&mut tbs)?;
+    if tag != TAG_SEQUENCE {
+        return Err(invalid("subjectPublicKeyInfo is not a SEQUENCE"));
+    }
+    let consumed = before.len() - tbs.len();
+    Ok(&before[..consumed])
+}
+
+/// Return the DNS subject alternative names of the leaf certificate.
+pub(crate) fn certificate_sans(cert_der: &[u8]) -> Result<Vec<String>, AcmeError> {
+    let mut tbs = certificate_tbs(cert_der)?;
+    skip_tbs_prefix(&mut tbs)?;
+    take(&mut tbs)?; // validity
+    take(&mut tbs)?; // subject
+    take(&mut tbs)?; // subjectPublicKeyInfo
+
+    if tbs.first() != Some(&TAG_CONTEXT_3_CONSTRUCTED) {
+        return Ok(Vec::new());
+    }
+    let (tag, extensions) = take(&mut tbs)?;
+    if tag != TAG_CONTEXT_3_CONSTRUCTED {
+        return Err(invalid("extensions are not a constructed context field"));
+    }
+
+    let mut extensions = extensions;
+    let (tag, extensions) = take(&mut extensions)?;
+    if tag != TAG_SEQUENCE {
+        return Err(invalid("extensions are not a SEQUENCE"));
+    }
+
+    let mut extensions = extensions;
+    let mut sans = Vec::new();
+    while !extensions.is_empty() {
+        let (tag, extension) = take(&mut extensions)?;
+        if tag != TAG_SEQUENCE {
+            return Err(invalid("extension is not a SEQUENCE"));
+        }
+
+        let mut extension = extension;
+        let (tag, oid) = take(&mut extension)?;
+        if tag != TAG_OID {
+            return Err(invalid("extension id is not an OID"));
+        }
+        let mut value = extension;
+        if value.first() == Some(&TAG_BOOLEAN) {
+            take(&mut value)?;
+        }
+        let (tag, value) = take(&mut value)?;
+        if tag != TAG_OCTET_STRING {
+            return Err(invalid("extension value is not an OCTET STRING"));
+        }
+        if oid != SAN_OID_CONTENT {
+            continue;
+        }
+
+        let mut names = value;
+        let (tag, names) = take(&mut names)?;
+        if tag != TAG_SEQUENCE {
+            return Err(invalid("subjectAltName is not a SEQUENCE"));
+        }
+        let mut names = names;
+        while !names.is_empty() {
+            let (tag, name) = take(&mut names)?;
+            if tag == TAG_CONTEXT_2_PRIMITIVE {
+                let name = std::str::from_utf8(name)
+                    .map_err(|_| invalid("subjectAltName is not valid UTF-8"))?;
+                sans.push(name.to_owned());
+            }
+        }
+    }
+
+    Ok(sans)
+}
+
+fn certificate_tbs(cert_der: &[u8]) -> Result<&[u8], AcmeError> {
+    let mut input = cert_der;
+    let (tag, certificate) = take(&mut input)?;
+    if tag != TAG_SEQUENCE {
+        return Err(invalid("certificate is not a SEQUENCE"));
+    }
+
+    let mut input = certificate;
+    let (tag, tbs) = take(&mut input)?;
+    if tag != TAG_SEQUENCE {
+        return Err(invalid("tbsCertificate is not a SEQUENCE"));
+    }
+    Ok(tbs)
+}
+
+fn skip_tbs_prefix(tbs: &mut &[u8]) -> Result<(), AcmeError> {
+    if tbs.first() == Some(&TAG_CONTEXT_0_CONSTRUCTED) {
+        take(tbs)?; // version
+    }
+    take(tbs)?; // serialNumber
+    take(tbs)?; // signature
+    take(tbs)?; // issuer
+    Ok(())
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -562,5 +654,43 @@ mod tests {
         let validity = certificate_validity(certified.cert.der()).expect("validity");
         assert!(validity.not_after > validity.not_before);
         assert!(validity.not_after > unix_now());
+    }
+
+    #[test]
+    fn extracts_subject_alt_names_and_spki() {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("cert");
+        let der = certified.cert.der();
+        assert_eq!(
+            certificate_sans(der).expect("sans"),
+            vec!["localhost".to_owned()]
+        );
+
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
+        );
+        let signing_key = rustls::crypto::ring::sign::any_ecdsa_type(&key).expect("signing key");
+        let public_key = signing_key.public_key().expect("public key");
+        assert_eq!(certificate_spki(der).expect("spki"), public_key.as_ref());
+
+        let challenge = generate_challenge_cert("example.com", &[7u8; 32]).expect("challenge");
+        assert_eq!(
+            certificate_sans(&challenge.cert_der).expect("challenge sans"),
+            vec!["example.com".to_owned()]
+        );
+    }
+
+    #[test]
+    fn random_input_does_not_panic() {
+        let mut state = 0x4d59_5df4_d0f3_3173u64;
+        for _ in 0..512 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let bytes = state.to_le_bytes();
+            let _ = certificate_validity(&bytes);
+            let _ = certificate_sans(&bytes);
+            let _ = certificate_spki(&bytes);
+        }
     }
 }

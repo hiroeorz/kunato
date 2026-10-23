@@ -61,12 +61,20 @@ async fn tls_handshake(
     addr: SocketAddr,
     roots: RootCertStore,
 ) -> Result<Vec<CertificateDer<'static>>, String> {
+    tls_handshake_for(addr, roots, DOMAIN).await
+}
+
+async fn tls_handshake_for(
+    addr: SocketAddr,
+    roots: RootCertStore,
+    domain: &'static str,
+) -> Result<Vec<CertificateDer<'static>>, String> {
     let connector = tokio_rustls::TlsConnector::from(client_config(roots, &[]));
     let stream = TcpStream::connect(addr)
         .await
         .map_err(|err| err.to_string())?;
     let tls = connector
-        .connect(ServerName::try_from(DOMAIN).expect("server name"), stream)
+        .connect(ServerName::try_from(domain).expect("server name"), stream)
         .await
         .map_err(|err| err.to_string())?;
     let (_, connection) = tls.get_ref();
@@ -77,9 +85,17 @@ async fn tls_handshake(
 }
 
 async fn wait_for_tls(addr: SocketAddr, roots: RootCertStore) -> Vec<CertificateDer<'static>> {
+    wait_for_tls_for(addr, roots, DOMAIN).await
+}
+
+async fn wait_for_tls_for(
+    addr: SocketAddr,
+    roots: RootCertStore,
+    domain: &'static str,
+) -> Vec<CertificateDer<'static>> {
     let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
     loop {
-        match tls_handshake(addr, roots.clone()).await {
+        match tls_handshake_for(addr, roots.clone(), domain).await {
             Ok(certs) => return certs,
             Err(err) => {
                 if tokio::time::Instant::now() >= deadline {
@@ -215,6 +231,55 @@ async fn pebble_server_manages_certificates() {
     let _ = service.into_driver().await;
 }
 
+/// A certificate with two names exercises the per-domain challenge map and
+/// the batch authorization poll.
+#[tokio::test]
+#[ignore]
+async fn pebble_issues_a_multi_domain_certificate() {
+    init_tracing();
+    let roots = pebble_roots();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache_dir = dir.path().join("acme");
+    let yaml = format!(
+        "listen: 127.0.0.1:{TLS_PORT}\n\
+         upstream: http://127.0.0.1:9\n\
+         tls:\n\
+         \x20 acme:\n\
+         \x20   enabled: true\n\
+         \x20   domains: [localhost, www.localhost]\n\
+         \x20   directory: {PEBBLE_DIRECTORY}\n\
+         \x20   cache_dir: {}\n",
+        cache_dir.display()
+    );
+    let compiled = config::parse(&yaml).expect("valid config");
+    let listen = compiled.listen;
+    let settings = compiled
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.acme.clone())
+        .expect("acme settings");
+    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let metrics = Arc::new(Metrics::new());
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let service = AcmeService::start(&settings, metrics.clone(), shutdown_rx.clone())
+        .await
+        .expect("start ACME service");
+    let server = Server::bind(listen, config, metrics.clone(), Some(&service))
+        .await
+        .expect("bind kunato");
+    let server_task = tokio::spawn(server.run(shutdown_rx));
+    wait_for_counter(&metrics.acme_issued, 1, "multi-domain certificate").await;
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], TLS_PORT));
+    let _ = wait_for_tls_for(addr, roots.clone(), DOMAIN).await;
+    let _ = wait_for_tls_for(addr, roots, "www.localhost").await;
+
+    let _ = shutdown_tx.send(true);
+    let _ = server_task.await;
+    let _ = service.into_driver().await;
+}
+
 /// A restart with the same cache directory deploys the cached certificate
 /// before serving traffic, without registering a new account or placing a new
 /// order.
@@ -261,6 +326,7 @@ async fn pebble_service_reuses_cache() {
     let _ = service.into_driver().await;
     wait_for_file(&cache_dir.join("cert.pem")).await;
     wait_for_file(&cache_dir.join("account.key")).await;
+    wait_for_file(&cache_dir.join("cert.meta.json")).await;
 
     let restarted_metrics = Arc::new(Metrics::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -272,6 +338,8 @@ async fn pebble_service_reuses_cache() {
         1,
         "cached certificate must be deployed during startup"
     );
+    service.activate();
+    tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(
         restarted_metrics.acme_issued.load(Ordering::Relaxed),
         0,

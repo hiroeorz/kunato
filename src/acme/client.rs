@@ -26,7 +26,10 @@ use super::base64;
 use super::jose::AccountKey;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_INLINE_RETRY_AFTER: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_RETRY_AFTER_SECS: u64 = 60;
+const MAX_PROBLEM_CHARS: usize = 512;
 const USER_AGENT_VALUE: &str = concat!("kunato/", env!("CARGO_PKG_VERSION"));
 
 type HttpsClient = Client<
@@ -41,6 +44,7 @@ pub(crate) struct AcmeClient {
     account_key: Arc<AccountKey>,
     kid: Option<String>,
     nonce: Option<String>,
+    retry_after: Option<Duration>,
 }
 
 impl AcmeClient {
@@ -48,7 +52,7 @@ impl AcmeClient {
         directory_url: String,
         account_key: Arc<AccountKey>,
     ) -> Result<Self, AcmeError> {
-        let roots = native_roots()?;
+        let roots = native_roots();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -70,11 +74,17 @@ impl AcmeClient {
             account_key,
             kid: None,
             nonce: None,
+            retry_after: None,
         })
     }
 
     pub(crate) fn account_key(&self) -> &AccountKey {
         &self.account_key
+    }
+
+    /// Return the delay requested by the most recent successful response.
+    pub(crate) fn retry_after(&mut self) -> Option<Duration> {
+        self.retry_after.take()
     }
 
     pub(crate) async fn register_account(
@@ -99,7 +109,7 @@ impl AcmeClient {
             }),
         };
         let response = self
-            .post_signed(&directory.new_account, Some(&payload), true)
+            .post_signed(&directory.new_account, Some(&payload), true, false)
             .await?;
         let location = response
             .location()
@@ -119,7 +129,7 @@ impl AcmeClient {
             .collect();
         let payload = json!({ "identifiers": identifiers });
         let response = self
-            .post_signed(&directory.new_order, Some(&payload), false)
+            .post_signed(&directory.new_order, Some(&payload), false, false)
             .await?;
         let location = response
             .location()
@@ -129,28 +139,28 @@ impl AcmeClient {
     }
 
     pub(crate) async fn authorization(&mut self, url: &str) -> Result<Auth, AcmeError> {
-        let response = self.post_signed(url, None, false).await?;
+        let response = self.post_signed(url, None, false, true).await?;
         serde_json::from_slice(&response.body).map_err(AcmeError::Json)
     }
 
     pub(crate) async fn trigger_challenge(&mut self, url: &str) -> Result<(), AcmeError> {
-        self.post_signed(url, Some(&json!({})), false).await?;
+        self.post_signed(url, Some(&json!({})), false, true).await?;
         Ok(())
     }
 
     pub(crate) async fn order(&mut self, url: &str) -> Result<Order, AcmeError> {
-        let response = self.post_signed(url, None, false).await?;
+        let response = self.post_signed(url, None, false, true).await?;
         serde_json::from_slice(&response.body).map_err(AcmeError::Json)
     }
 
     pub(crate) async fn finalize(&mut self, url: &str, csr_der: &[u8]) -> Result<Order, AcmeError> {
         let payload = json!({ "csr": base64::encode_url(csr_der) });
-        let response = self.post_signed(url, Some(&payload), false).await?;
+        let response = self.post_signed(url, Some(&payload), false, false).await?;
         serde_json::from_slice(&response.body).map_err(AcmeError::Json)
     }
 
     pub(crate) async fn certificate(&mut self, url: &str) -> Result<String, AcmeError> {
-        let response = self.post_signed(url, None, false).await?;
+        let response = self.post_signed(url, None, false, true).await?;
         let text = String::from_utf8(response.body)
             .map_err(|_| AcmeError::Protocol("certificate response is not UTF-8".to_owned()))?;
         if !text.contains("-----BEGIN CERTIFICATE-----") {
@@ -182,6 +192,7 @@ impl AcmeClient {
         url: &str,
         payload: Option<&Value>,
         use_jwk: bool,
+        retry_transient: bool,
     ) -> Result<Response, AcmeError> {
         let payload = match payload {
             Some(payload) => serde_json::to_string(payload).map_err(AcmeError::Json)?,
@@ -195,34 +206,63 @@ impl AcmeClient {
                 })?),
             };
 
-        for attempt in 0..2 {
+        let mut bad_nonce_retried = false;
+        let mut transient_retries = if retry_transient { 2 } else { 0 };
+
+        loop {
             let nonce = self.take_nonce().await?;
             let body = self
                 .account_key
                 .sign_request(kid.as_deref(), &nonce, url, &payload)?;
-            let response = self
+            let response = match self
                 .request(
                     Method::POST,
                     url,
                     Some(&body),
                     Some("application/jose+json"),
                 )
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(err) if transient_retries > 0 && err.is_transient() => {
+                    transient_retries -= 1;
+                    let delay = err
+                        .retry_after()
+                        .unwrap_or(Duration::from_millis(500))
+                        .min(MAX_INLINE_RETRY_AFTER);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+
             if let Some(nonce) = response.replay_nonce() {
                 self.nonce = Some(nonce);
             }
             if response.status.is_success() {
+                self.retry_after = response.retry_after();
                 return Ok(response);
             }
-            let retry = attempt == 0 && response.is_bad_nonce();
-            let error = response.into_api_error();
-            if !retry {
-                return Err(error);
-            }
-            debug!("ACME server rejected a nonce; retrying once");
-        }
 
-        Err(AcmeError::Protocol("ACME nonce retry exhausted".to_owned()))
+            let bad_nonce = !bad_nonce_retried && response.is_bad_nonce();
+            let error = response.into_api_error();
+            if bad_nonce {
+                bad_nonce_retried = true;
+                debug!("ACME server rejected a nonce; retrying once");
+                continue;
+            }
+            if transient_retries > 0 && error.is_transient() {
+                transient_retries -= 1;
+                let delay = error
+                    .retry_after()
+                    .unwrap_or(Duration::from_millis(500))
+                    .min(MAX_INLINE_RETRY_AFTER);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            self.retry_after = None;
+            return Err(error);
+        }
     }
 
     async fn take_nonce(&mut self) -> Result<String, AcmeError> {
@@ -266,7 +306,12 @@ impl AcmeClient {
             .map_err(|err| AcmeError::Http(err.to_string()))?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = read_body(response.into_body(), MAX_RESPONSE_BYTES).await?;
+        let body = tokio::time::timeout(
+            HTTP_TIMEOUT,
+            read_body(response.into_body(), MAX_RESPONSE_BYTES),
+        )
+        .await
+        .map_err(|_| AcmeError::Timeout)??;
         Ok(Response {
             status,
             headers,
@@ -289,7 +334,7 @@ async fn read_body(mut body: Incoming, limit: usize) -> Result<Vec<u8>, AcmeErro
     Ok(output)
 }
 
-fn native_roots() -> Result<rustls::RootCertStore, AcmeError> {
+fn native_roots() -> rustls::RootCertStore {
     let native = rustls_native_certs::load_native_certs();
     if !native.errors.is_empty() {
         debug!(
@@ -306,7 +351,7 @@ fn native_roots() -> Result<rustls::RootCertStore, AcmeError> {
             "no native CA certificates found; ACME directory requests will fail until a trust store is available"
         );
     }
-    Ok(roots)
+    roots
 }
 
 struct Response {
@@ -324,6 +369,12 @@ impl Response {
         self.header("replay-nonce")
     }
 
+    fn retry_after(&self) -> Option<Duration> {
+        let value = self.header("retry-after")?;
+        let seconds: u64 = value.trim().parse().ok()?;
+        Some(Duration::from_secs(seconds.min(MAX_RETRY_AFTER_SECS)))
+    }
+
     fn header(&self, name: &str) -> Option<String> {
         self.headers.get(name)?.to_str().ok().map(str::to_owned)
     }
@@ -335,10 +386,11 @@ impl Response {
     }
 
     fn into_api_error(self) -> AcmeError {
+        let retry_after = self.retry_after();
         let detail = match serde_json::from_slice::<Problem>(&self.body) {
             Ok(problem) => problem.to_string(),
             Err(_) => {
-                let text = String::from_utf8_lossy(&self.body);
+                let text = bounded_text(&String::from_utf8_lossy(&self.body));
                 let text: String = text.chars().take(256).collect();
                 if text.is_empty() {
                     self.status
@@ -353,6 +405,7 @@ impl Response {
         AcmeError::Api {
             status: self.status.as_u16(),
             detail,
+            retry_after,
         }
     }
 }
@@ -407,6 +460,8 @@ pub(crate) enum AuthStatus {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Identifier {
+    #[serde(rename = "type")]
+    pub kind: String,
     pub value: String,
 }
 
@@ -435,11 +490,84 @@ impl Problem {
 
 impl fmt::Display for Problem {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.kind, &self.detail) {
+        match (
+            self.kind.as_deref().map(bounded_text),
+            self.detail.as_deref().map(bounded_text),
+        ) {
             (Some(kind), Some(detail)) => write!(formatter, "{detail} ({kind})"),
-            (Some(kind), None) => formatter.write_str(kind),
-            (None, Some(detail)) => formatter.write_str(detail),
+            (Some(kind), None) => formatter.write_str(&kind),
+            (None, Some(detail)) => formatter.write_str(&detail),
             (None, None) => formatter.write_str("ACME problem document"),
         }
+    }
+}
+
+/// Bound and sanitize strings that come from the ACME server before they are
+/// used in errors or logs.
+pub(crate) fn bounded_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .take(MAX_PROBLEM_CHARS)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+
+    fn response(headers: HeaderMap) -> Response {
+        Response {
+            status: http::StatusCode::OK,
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn detects_bad_nonce_problems() {
+        let problem = Problem {
+            kind: Some("urn:ietf:params:acme:error:badNonce".to_owned()),
+            detail: None,
+        };
+        assert!(problem.is_bad_nonce());
+        let other = Problem {
+            kind: Some("urn:ietf:params:acme:error:malformed".to_owned()),
+            detail: None,
+        };
+        assert!(!other.is_bad_nonce());
+    }
+
+    #[test]
+    fn parses_retry_after_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().expect("header"));
+        assert_eq!(
+            response(headers).retry_after(),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn ignores_http_date_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().expect("header"),
+        );
+        assert_eq!(response(headers).retry_after(), None);
+    }
+
+    #[test]
+    fn bounds_and_sanitizes_problem_text() {
+        let problem = Problem {
+            kind: Some("kind\nwith-newline".to_owned()),
+            detail: Some("x".repeat(2_000)),
+        };
+        let text = problem.to_string();
+        assert!(!text.contains('\n'));
+        assert!(text.chars().count() < 1_100);
+        assert_eq!(bounded_text("a\u{1b}[31m\tb"), "a[31m\tb");
     }
 }

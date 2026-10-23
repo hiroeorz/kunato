@@ -39,7 +39,7 @@ impl AccountKey {
         url: &str,
         payload: &str,
     ) -> Result<String, AcmeError> {
-        let jwk = self.jwk();
+        let jwk = self.jwk()?;
         let protected = Protected {
             alg: "ES256",
             jwk: kid.is_none().then_some(&jwk),
@@ -64,7 +64,7 @@ impl AccountKey {
     }
 
     pub(crate) fn thumbprint(&self) -> Result<String, AcmeError> {
-        let jwk = self.jwk();
+        let jwk = self.jwk()?;
         let thumbprint = JwkThumbprint {
             crv: "P-256",
             kty: "EC",
@@ -83,23 +83,28 @@ impl AccountKey {
         Ok(output)
     }
 
-    fn jwk(&self) -> Jwk {
-        let (x, y) = public_coordinates(self.pair.public_key().as_ref());
-        Jwk {
+    fn jwk(&self) -> Result<Jwk, AcmeError> {
+        let (x, y) = public_coordinates(self.pair.public_key().as_ref()).ok_or_else(|| {
+            AcmeError::Protocol("account key is not a P-256 public key".to_owned())
+        })?;
+        Ok(Jwk {
             alg: "ES256",
             crv: "P-256",
             kty: "EC",
             use_: "sig",
             x: base64::encode_url(x),
             y: base64::encode_url(y),
-        }
+        })
     }
 }
 
-fn public_coordinates(public_key: &[u8]) -> (&[u8], &[u8]) {
+fn public_coordinates(public_key: &[u8]) -> Option<(&[u8], &[u8])> {
     // P-256 public keys are the uncompressed point 0x04 || x || y.
-    let coordinates = public_key.get(1..).unwrap_or(&[]);
-    coordinates.split_at(coordinates.len().min(32))
+    let coordinates = public_key.strip_prefix(&[0x04])?;
+    if coordinates.len() != 64 {
+        return None;
+    }
+    Some(coordinates.split_at(32))
 }
 
 fn crypto(err: ring::error::Unspecified) -> AcmeError {

@@ -146,6 +146,20 @@ mod tests {
     }
 
     #[test]
+    fn random_input_does_not_panic() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..256 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let bytes = state.to_le_bytes();
+            let input: String = bytes.iter().map(|byte| char::from(byte % 128)).collect();
+            let _ = decode_standard(&input);
+            let _ = decode_url(&input);
+        }
+    }
+
+    #[test]
     fn round_trips_every_length() {
         for length in 0..64 {
             let input: Vec<u8> = (0..length).map(|index| (index * 37 + 11) as u8).collect();

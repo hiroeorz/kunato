@@ -1237,16 +1237,32 @@ Requirements:
   must be reachable from the internet; wildcard names and setups behind a
   TLS-terminating CDN or proxy cannot be validated with TLS-ALPN-01;
 - `domains` entries must be DNS names, not IP addresses (use punycode for
-  international names).
+  international names); duplicates are rejected case-insensitively.
 
 Kunato registers an ACME account (using `contact` for expiry notices when
 set), answers the challenge, and serves the issued chain. Certificates renew
 automatically once about two thirds of their validity have elapsed — roughly
 30 days before expiry for the 90-day Let's Encrypt certificates — with
-exponential backoff while the ACME server is unreachable. The certificate and
-account key are cached under `cache_dir` (default `/var/lib/kunato/acme`,
-created with mode 0700) so restarts keep serving the cached certificate
-without contacting the ACME server again.
+exponential backoff while the ACME server is unreachable. The certificate,
+account key, and a small cache metadata file are written under `cache_dir`
+(default `/var/lib/kunato/acme`, created with mode 0700) so restarts keep
+serving the cached certificate without contacting the ACME server again.
+The cache is reused only when the certificate covers every configured domain
+and has not expired; `cert.meta.json` additionally records the directory and
+domain set, so changing `tls.acme.domains` or switching between staging and
+production triggers a fresh order instead of serving the old certificate.
+A cache written by an older release has no metadata file; it is accepted when
+its subject alternative names and validity match, but its original directory
+cannot be verified until the next issuance writes the metadata. Issued
+certificates must list every configured name as a subject alternative name;
+CN-only certificates are not deployed.
+
+Issued certificates are parsed normally by rustls. If a private CA includes a
+critical extension that webpki does not understand, Kunato falls back to
+verifying the certificate's SubjectPublicKeyInfo against the private key and
+serves the chain opaquely, preserving compatibility with private CAs. A CA
+response with an unsupported chain of more than 10 certificates or 64 KiB is
+rejected.
 
 Set `staging: true` to use the Let's Encrypt staging directory (untrusted
 test certificates), or `directory: https://…` for a custom ACME directory such

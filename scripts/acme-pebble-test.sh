@@ -19,6 +19,7 @@ trap cleanup EXIT
 
 docker rm -f kunato-pebble >/dev/null 2>&1 || true
 docker run -d --name kunato-pebble --network host \
+    --add-host www.localhost:127.0.0.1 \
     -e PEBBLE_VA_NOSLEEP=1 \
     -e PEBBLE_WFE_NONCEREJECT=0 \
     -v "$ROOT/tests/acme/pebble-config.json:/test/config/pebble-config.json:ro" \
