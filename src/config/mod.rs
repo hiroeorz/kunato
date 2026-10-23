@@ -1041,8 +1041,8 @@ impl From<&AcmeSpec> for Acme {
     fn from(spec: &AcmeSpec) -> Self {
         let directory = spec.directory.clone().unwrap_or_else(|| {
             match spec.staging {
-                true => tokio_rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY,
-                false => tokio_rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+                true => crate::acme::LETS_ENCRYPT_STAGING_DIRECTORY,
+                false => crate::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY,
             }
             .to_owned()
         });
@@ -3965,7 +3965,7 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert_eq!(acme.contact.as_deref(), Some("admin@example.com"));
         assert_eq!(
             acme.directory,
-            tokio_rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY
+            crate::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY
         );
         assert_eq!(acme.cache_dir, PathBuf::from(DEFAULT_ACME_CACHE_DIR));
     }
@@ -3978,10 +3978,7 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         )
         .expect("valid config");
         let acme = config.tls.expect("tls block").acme.expect("acme settings");
-        assert_eq!(
-            acme.directory,
-            tokio_rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY
-        );
+        assert_eq!(acme.directory, crate::acme::LETS_ENCRYPT_STAGING_DIRECTORY);
 
         let config = parse_with(
             BASE,

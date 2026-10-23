@@ -1,25 +1,21 @@
 //! Automatic certificate management through the ACME protocol (RFC 8555).
 //!
 //! Challenges are answered with TLS-ALPN-01 on the same listener as regular
-//! TLS traffic, and certificates are renewed automatically after roughly two
-//! thirds of their validity have elapsed. Issued material is cached in a
-//! directory with restrictive permissions so restarts reuse it without
-//! contacting the certificate authority again.
+//! TLS traffic, and certificates are renewed after roughly two thirds of their
+//! validity have elapsed. Issued material is cached in a directory with
+//! restrictive permissions so restarts reuse it without contacting the
+//! certificate authority again.
 
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use async_trait::async_trait;
-use futures_util::StreamExt;
 use rustls::ServerConfig;
-use tokio::io::AsyncWriteExt as _;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
+use rustls::sign::CertifiedKey;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio_rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY;
-use tokio_rustls_acme::{AccountCache, AcmeAcceptor, AcmeConfig, CertCache, EventOk};
 use tracing::{debug, info, warn};
 
 use crate::config::Acme;
@@ -27,30 +23,65 @@ use crate::error::Error;
 use crate::metrics::Metrics;
 use crate::proxy::tls;
 
-const CERT_FILE_NAME: &str = "cert.pem";
-const ACCOUNT_FILE_NAME: &str = "account.key";
+mod base64;
+mod cache;
+mod client;
+mod der;
+mod jose;
+mod pem;
+mod resolver;
 
-/// How long startup waits for a cached certificate to be deployed before
-/// serving traffic with a not-yet-available certificate.
-const CACHE_LOAD_TIMEOUT: Duration = Duration::from_secs(5);
+use client::{AcmeClient, Auth, AuthStatus, Order, OrderStatus};
+use der::Validity;
+use jose::AccountKey;
+use resolver::AcmeResolver;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Readiness {
-    Pending,
-    Deployed,
-    Failed,
+pub const LETS_ENCRYPT_STAGING_DIRECTORY: &str =
+    "https://acme-staging-v02.api.letsencrypt.org/directory";
+pub const LETS_ENCRYPT_PRODUCTION_DIRECTORY: &str =
+    "https://acme-v02.api.letsencrypt.org/directory";
+pub(crate) const ACME_TLS_ALPN: &[u8] = b"acme-tls/1";
+
+/// How long a challenge certificate stays available for the CA's validation
+/// connection.
+const CHALLENGE_LIFETIME: Duration = Duration::from_secs(600);
+/// Upper bound for one complete issuance attempt, including validation polls.
+const ORDER_TIMEOUT: Duration = Duration::from_secs(120);
+const ORDER_ATTEMPTS: usize = 20;
+const CHALLENGE_ATTEMPTS: u32 = 5;
+const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(3600);
+/// Minimum delay before re-ordering when a freshly issued certificate is
+/// already past its renewal point (for example, a CA that backdates validity).
+const RENEWAL_RETRY_DELAY: u64 = 60;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AcmeError {
+    #[error("ACME HTTP error: {0}")]
+    Http(String),
+    #[error("ACME response JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("ACME cryptography error: {0}")]
+    Crypto(String),
+    #[error("ACME protocol error: {0}")]
+    Protocol(String),
+    #[error("ACME response is missing the {0} header")]
+    MissingHeader(&'static str),
+    #[error("ACME API error ({status}): {detail}")]
+    Api { status: u16, detail: String },
+    #[error("ACME operation timed out")]
+    Timeout,
 }
 
 /// A running ACME certificate manager.
 ///
-/// Owns the certificate resolver shared by the TCP and QUIC listeners, the
-/// TLS-ALPN-01 challenge acceptor, and the background task that orders,
-/// renews, and caches certificates. The task stops when the shutdown channel
-/// fires.
+/// Owns the TLS configurations that read from the shared certificate resolver
+/// and the background task that orders, renews, and caches certificates. The
+/// task stops when the shutdown channel fires.
 pub struct AcmeService {
-    acceptor: AcmeAcceptor,
     tls_config: Arc<ServerConfig>,
     quic_config: Arc<ServerConfig>,
+    activate: watch::Sender<bool>,
     driver: JoinHandle<()>,
 }
 
@@ -70,71 +101,52 @@ impl AcmeService {
             warn!("ACME staging directory in use; issued certificates are not trusted by browsers");
         }
 
-        let mut config =
-            AcmeConfig::new_with_client_tls_config(settings.domains.clone(), api_client_config()?)
-                .directory(settings.directory.clone())
-                .cache(FileCache::new(settings.cache_dir.clone()));
-        if let Some(contact) = &settings.contact {
-            config = config.contact_push(match contact.starts_with("mailto:") {
-                true => contact.clone(),
-                false => format!("mailto:{contact}"),
-            });
-        }
-
-        let mut state = config.state();
-        let resolver = state.resolver();
-        let acceptor = state.acceptor();
-        let tls_config = tls::server_config_with_resolver(resolver.clone(), &[b"h2", b"http/1.1"])?;
-        let quic_config = tls::server_config_with_resolver(resolver, &[b"h3"])?;
-
-        let (ready_tx, mut ready_rx) = watch::channel(Readiness::Pending);
-        let driver_metrics = Arc::clone(&metrics);
-        let driver = tokio::spawn(async move {
-            let mut shutdown = shutdown;
-            loop {
-                tokio::select! {
-                    _ = shutdown.changed() => break,
-                    event = state.next() => {
-                        let Some(event) = event else { break };
-                        match event {
-                            Ok(EventOk::DeployedNewCert) => {
-                                driver_metrics.acme_issued.fetch_add(1, Ordering::Relaxed);
-                                mark_deployed(&ready_tx, &driver_metrics);
-                                info!("ACME certificate issued and deployed");
-                            }
-                            Ok(EventOk::DeployedCachedCert) => {
-                                driver_metrics.acme_cached.fetch_add(1, Ordering::Relaxed);
-                                mark_deployed(&ready_tx, &driver_metrics);
-                                info!("ACME certificate loaded from the cache");
-                            }
-                            Ok(event) => debug!(?event, "ACME event"),
-                            Err(err) => {
-                                driver_metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                                warn!(error = %err, "ACME certificate error");
-                                if *ready_tx.borrow() == Readiness::Pending {
-                                    let _ = ready_tx.send(Readiness::Failed);
-                                }
-                            }
-                        }
-                    }
+        let resolver = Arc::new(AcmeResolver::new());
+        let renew_at = Arc::new(AtomicU64::new(0));
+        match cache::load_cert(&settings.cache_dir).await {
+            Ok(Some(blob)) => match parse_certificate_cache(&blob) {
+                Ok((certified, validity)) => {
+                    resolver.set_current(Arc::new(certified));
+                    renew_at.store(renewal_time(validity), Ordering::Relaxed);
+                    metrics.acme_cached.fetch_add(1, Ordering::Relaxed);
+                    mark_last_success(&metrics);
+                    info!("ACME certificate loaded from cache");
                 }
+                Err(err) => {
+                    metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                    warn!(error = %err, "cached ACME certificate could not be used");
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                warn!(error = %err, "failed to read the ACME certificate cache");
             }
-        });
-
-        if settings.cache_dir.join(CERT_FILE_NAME).is_file() {
-            wait_for_cache_load(&mut ready_rx).await;
         }
+
+        let account_key = load_account_key(&settings.cache_dir).await?;
+        let tls_config = tls::server_config_with_resolver(
+            resolver.clone(),
+            &[ACME_TLS_ALPN, b"h2", b"http/1.1"],
+        )?;
+        let quic_config = tls::server_config_with_resolver(resolver.clone(), &[b"h3"])?;
+        let (activate, activate_rx) = watch::channel(false);
+        let driver = tokio::spawn(run_driver(
+            settings.clone(),
+            resolver,
+            account_key,
+            renew_at,
+            metrics,
+            activate_rx,
+            shutdown,
+        ));
 
         Ok(Self {
-            acceptor,
             tls_config,
             quic_config,
+            activate,
             driver,
         })
-    }
-
-    pub fn acceptor(&self) -> AcmeAcceptor {
-        self.acceptor.clone()
     }
 
     pub fn tls_config(&self) -> Arc<ServerConfig> {
@@ -145,247 +157,396 @@ impl AcmeService {
         Arc::clone(&self.quic_config)
     }
 
+    /// Allow the driver to start ordering certificates.
+    ///
+    /// Call this after the TLS listener is bound so the certificate authority
+    /// can reach the TLS-ALPN-01 endpoint. `Server::bind` calls it
+    /// automatically; users who drive [`AcmeService`] directly must call it
+    /// once their listener is ready.
+    pub fn activate(&self) {
+        let _ = self.activate.send(true);
+    }
+
     /// Returns the background task; it stops after the shutdown channel fires.
     pub fn into_driver(self) -> JoinHandle<()> {
         self.driver
     }
 }
 
-fn mark_deployed(ready: &watch::Sender<Readiness>, metrics: &Metrics) {
-    if *ready.borrow() == Readiness::Pending {
-        let _ = ready.send(Readiness::Deployed);
+async fn load_account_key(cache_dir: &Path) -> Result<Arc<AccountKey>, Error> {
+    match cache::load_account(cache_dir).await {
+        Ok(Some(bytes)) => match AccountKey::from_pkcs8(&bytes) {
+            Ok(key) => return Ok(Arc::new(key)),
+            Err(err) => {
+                warn!(error = %err, "cached ACME account key is invalid; generating a new one");
+            }
+        },
+        Ok(None) => {}
+        Err(err) => {
+            warn!(error = %err, "failed to read the ACME account key cache");
+        }
     }
-    metrics
-        .acme_last_success
-        .store(unix_timestamp(), Ordering::Relaxed);
+
+    let (key, pkcs8) = AccountKey::generate()
+        .map_err(|err| Error::Message(format!("failed to generate an ACME account key: {err}")))?;
+    if let Err(err) = cache::store_account(cache_dir, &pkcs8).await {
+        warn!(error = %err, "failed to cache the ACME account key");
+    }
+    Ok(Arc::new(key))
 }
 
-async fn wait_for_cache_load(ready: &mut watch::Receiver<Readiness>) {
-    let wait = async {
-        loop {
-            if *ready.borrow() != Readiness::Pending {
-                break;
+async fn run_driver(
+    settings: Acme,
+    resolver: Arc<AcmeResolver>,
+    account_key: Arc<AccountKey>,
+    renew_at: Arc<AtomicU64>,
+    metrics: Arc<Metrics>,
+    mut activate: watch::Receiver<bool>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    if *shutdown.borrow() {
+        return;
+    }
+    if !*activate.borrow() {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            changed = activate.changed() => {
+                if changed.is_err() {
+                    return;
+                }
             }
-            if ready.changed().await.is_err() {
-                break;
+        }
+    }
+
+    let mut backoff = BACKOFF_INITIAL;
+
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        let now = der::unix_now();
+        let renew = renew_at.load(Ordering::Relaxed);
+        if renew > now {
+            let wait = Duration::from_secs(renew - now);
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tokio::time::sleep(wait) => {}
             }
+            continue;
+        }
+
+        resolver.clear_challenges();
+        let result = tokio::select! {
+            _ = shutdown.changed() => break,
+            result = order_certificate(&settings, &resolver, &account_key) => result,
+        };
+
+        resolver.clear_challenges();
+        let mut failed = false;
+        match result {
+            Ok(blob) => match parse_certificate_cache(&blob) {
+                Ok((certified, validity)) => {
+                    resolver.set_current(Arc::new(certified));
+                    let issued_at = der::unix_now();
+                    let renew = renewal_time(validity);
+                    let renew = if renew <= issued_at {
+                        issued_at + RENEWAL_RETRY_DELAY
+                    } else {
+                        renew
+                    };
+                    renew_at.store(renew, Ordering::Relaxed);
+                    metrics.acme_issued.fetch_add(1, Ordering::Relaxed);
+                    mark_last_success(&metrics);
+                    info!("ACME certificate issued and deployed");
+                    if let Err(err) = cache::store_cert(&settings.cache_dir, &blob).await {
+                        metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                        warn!(error = %err, "failed to cache the ACME certificate");
+                    }
+                    backoff = BACKOFF_INITIAL;
+                }
+                Err(err) => {
+                    metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                    warn!(error = %err, "ACME certificate response could not be parsed");
+                    failed = true;
+                }
+            },
+            Err(err) => {
+                metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                warn!(error = %err, "ACME certificate error");
+                failed = true;
+            }
+        }
+
+        if failed {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = (backoff * 2).min(BACKOFF_MAX);
+        }
+    }
+}
+
+async fn order_certificate(
+    settings: &Acme,
+    resolver: &AcmeResolver,
+    account_key: &Arc<AccountKey>,
+) -> Result<Vec<u8>, AcmeError> {
+    tokio::time::timeout(
+        ORDER_TIMEOUT,
+        order_certificate_inner(settings, resolver, account_key),
+    )
+    .await
+    .map_err(|_| AcmeError::Timeout)?
+}
+
+async fn order_certificate_inner(
+    settings: &Acme,
+    resolver: &AcmeResolver,
+    account_key: &Arc<AccountKey>,
+) -> Result<Vec<u8>, AcmeError> {
+    let mut client = AcmeClient::new(settings.directory.clone(), Arc::clone(account_key))?;
+    client.register_account(settings.contact.as_deref()).await?;
+
+    let (order_url, mut order) = client.new_order(&settings.domains).await?;
+    let mut csr = None;
+    let mut poll_attempt = 0u32;
+
+    for _ in 0..ORDER_ATTEMPTS {
+        match order.status {
+            OrderStatus::Pending => {
+                for url in &order.authorizations {
+                    authorize(&mut client, resolver, url).await?;
+                }
+                order = client.order(&order_url).await?;
+            }
+            OrderStatus::Ready => {
+                if csr.is_none() {
+                    csr = Some(der::generate_csr(&settings.domains)?);
+                }
+                let material = csr.as_ref().ok_or_else(|| {
+                    AcmeError::Protocol("certificate signing request vanished".to_owned())
+                })?;
+                order = client.finalize(&order.finalize, &material.der).await?;
+            }
+            OrderStatus::Processing => {
+                let delay = Duration::from_secs(1u64 << poll_attempt.min(4));
+                poll_attempt += 1;
+                tokio::time::sleep(delay).await;
+                order = client.order(&order_url).await?;
+            }
+            OrderStatus::Valid => {
+                let certificate_url = order.certificate.as_deref().ok_or_else(|| {
+                    AcmeError::Protocol("valid ACME order has no certificate URL".to_owned())
+                })?;
+                let chain = client.certificate(certificate_url).await?;
+                let material = csr.ok_or_else(|| {
+                    AcmeError::Protocol("ACME order completed without a CSR".to_owned())
+                })?;
+                return Ok(combine_key_and_chain(&material.key_pkcs8, &chain));
+            }
+            OrderStatus::Invalid => return Err(order_error(&order)),
+        }
+    }
+
+    Err(AcmeError::Protocol(
+        "ACME order did not reach a final state".to_owned(),
+    ))
+}
+
+async fn authorize(
+    client: &mut AcmeClient,
+    resolver: &AcmeResolver,
+    url: &str,
+) -> Result<(), AcmeError> {
+    let auth = client.authorization(url).await?;
+    match auth.status {
+        AuthStatus::Valid => return Ok(()),
+        AuthStatus::Pending => {}
+        _ => return Err(auth_error(&auth)),
+    }
+
+    let domain = auth.identifier.value.clone();
+    let challenge = auth
+        .challenges
+        .iter()
+        .find(|challenge| challenge.kind == "tls-alpn-01")
+        .ok_or_else(|| {
+            AcmeError::Protocol(format!("no TLS-ALPN-01 challenge offered for {domain}"))
+        })?;
+    if challenge.token.is_empty() {
+        return Err(AcmeError::Protocol(format!(
+            "TLS-ALPN-01 challenge for {domain} has no token"
+        )));
+    }
+
+    let digest = client
+        .account_key()
+        .key_authorization_digest(&challenge.token)?;
+    let challenge_cert = der::generate_challenge_cert(&domain, &digest)?;
+    let certified = certified_key(&challenge_cert.cert_der, &challenge_cert.key_pkcs8)?;
+    resolver.insert_challenge(&domain, Arc::new(certified), CHALLENGE_LIFETIME);
+
+    debug!(domain = %domain, "triggering TLS-ALPN-01 challenge");
+    client.trigger_challenge(&challenge.url).await?;
+
+    for attempt in 0..CHALLENGE_ATTEMPTS {
+        let delay = Duration::from_secs(1u64 << attempt.min(3));
+        tokio::time::sleep(delay).await;
+        let auth = client.authorization(url).await?;
+        match auth.status {
+            AuthStatus::Valid => return Ok(()),
+            AuthStatus::Pending => {}
+            _ => return Err(auth_error(&auth)),
+        }
+    }
+
+    Err(AcmeError::Protocol(format!(
+        "TLS-ALPN-01 authorization for {domain} did not complete"
+    )))
+}
+
+fn auth_error(auth: &Auth) -> AcmeError {
+    let challenge_error = auth
+        .challenges
+        .iter()
+        .find_map(|challenge| challenge.error.as_ref());
+    match (&auth.error, challenge_error) {
+        (Some(error), _) => AcmeError::Protocol(format!(
+            "authorization for {} failed: {error}",
+            auth.identifier.value
+        )),
+        (None, Some(error)) => AcmeError::Protocol(format!(
+            "authorization for {} failed: {error}",
+            auth.identifier.value
+        )),
+        (None, None) => AcmeError::Protocol(format!(
+            "authorization for {} has status {:?}",
+            auth.identifier.value, auth.status
+        )),
+    }
+}
+
+fn order_error(order: &Order) -> AcmeError {
+    match &order.error {
+        Some(error) => AcmeError::Protocol(format!("ACME order failed: {error}")),
+        None => AcmeError::Protocol("ACME order is invalid".to_owned()),
+    }
+}
+
+fn certified_key(cert_der: &[u8], key_pkcs8: &[u8]) -> Result<CertifiedKey, AcmeError> {
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pkcs8.to_vec()));
+    // Do not use `CertifiedKey::from_der` here: the TLS-ALPN-01 certificate
+    // carries the acmeIdentifier extension (1.3.6.1.5.5.7.1.31), whose last
+    // OID arc collides with id-ce-cRLDistributionPoints in webpki's extension
+    // dispatcher. The challenge certificate is only presented to the CA's
+    // validator, so parse the key and keep the certificate opaque.
+    let signing_key = rustls::crypto::ring::sign::any_ecdsa_type(&key)
+        .map_err(|err| AcmeError::Protocol(format!("invalid ACME key: {err}")))?;
+    Ok(CertifiedKey::new(
+        vec![CertificateDer::from(cert_der.to_vec())],
+        signing_key,
+    ))
+}
+
+fn parse_certificate_cache(blob: &[u8]) -> Result<(CertifiedKey, Validity), AcmeError> {
+    let blocks = pem::decode_blocks(blob).ok_or_else(|| {
+        AcmeError::Protocol("cached ACME certificate is not valid PEM".to_owned())
+    })?;
+    let mut blocks = blocks.into_iter();
+    let first = blocks
+        .next()
+        .ok_or_else(|| AcmeError::Protocol("cached ACME certificate is empty".to_owned()))?;
+    let key = match first.label.as_str() {
+        "PRIVATE KEY" => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(first.der)),
+        "EC PRIVATE KEY" => PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(first.der)),
+        label => {
+            return Err(AcmeError::Protocol(format!(
+                "cached ACME key has unsupported PEM label `{label}`"
+            )));
         }
     };
-    match tokio::time::timeout(CACHE_LOAD_TIMEOUT, wait).await {
-        Ok(()) if *ready.borrow() == Readiness::Deployed => {
-            info!("ACME certificate cache restored")
-        }
-        Ok(()) => {
-            warn!("ACME certificate cache could not be loaded; a new certificate will be ordered")
-        }
-        Err(_) => warn!("timed out loading the ACME certificate cache; continuing without it"),
+    let certificates: Vec<CertificateDer<'static>> = blocks
+        .filter(|block| block.label == "CERTIFICATE")
+        .map(|block| CertificateDer::from(block.der))
+        .collect();
+    if certificates.is_empty() {
+        return Err(AcmeError::Protocol(
+            "cached ACME certificate has no certificate chain".to_owned(),
+        ));
     }
+
+    let provider = rustls::crypto::ring::default_provider();
+    let certified = CertifiedKey::from_der(certificates, key, &provider)
+        .map_err(|err| AcmeError::Protocol(format!("invalid cached certificate: {err}")))?;
+    let validity = der::certificate_validity(certified.cert[0].as_ref())?;
+    Ok((certified, validity))
 }
 
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
+fn combine_key_and_chain(key_pkcs8: &[u8], chain: &str) -> Vec<u8> {
+    let mut output = pem::encode("PRIVATE KEY", key_pkcs8).into_bytes();
+    output.extend_from_slice(chain.trim_end().as_bytes());
+    output.push(b'\n');
+    output
 }
 
-fn api_client_config() -> Result<Arc<rustls::ClientConfig>, Error> {
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        debug!(
-            errors = native.errors.len(),
-            "failed to load some native CA certificates"
-        );
-    }
-    let mut roots = rustls::RootCertStore::empty();
-    for certificate in native.certs {
-        let _ = roots.add(certificate);
-    }
-    if roots.is_empty() {
-        warn!(
-            "no native CA certificates found; ACME directory requests will fail until a trust store is available"
-        );
-    }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|err| Error::Tls(format!("failed to initialize TLS client: {err}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
+fn renewal_time(validity: Validity) -> u64 {
+    let lifetime = validity.not_after.saturating_sub(validity.not_before);
+    validity.not_after.saturating_sub(lifetime / 3)
 }
 
-/// Caches the certificate chain (private key first) and the ACME account key
-/// as files written atomically with mode 0600 inside a 0700 directory.
-struct FileCache {
-    dir: PathBuf,
-}
-
-impl FileCache {
-    fn new(dir: PathBuf) -> Self {
-        Self { dir }
-    }
-
-    fn cert_path(&self) -> PathBuf {
-        self.dir.join(CERT_FILE_NAME)
-    }
-
-    fn account_path(&self) -> PathBuf {
-        self.dir.join(ACCOUNT_FILE_NAME)
-    }
-
-    async fn load(path: &Path) -> Result<Option<Vec<u8>>, io::Error> {
-        match tokio::fs::read(path).await {
-            Ok(contents) => Ok(Some(contents)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn store(&self, path: &Path, contents: &[u8]) -> Result<(), io::Error> {
-        tokio::fs::create_dir_all(&self.dir).await?;
-        set_dir_permissions(&self.dir).await?;
-        let tmp = path.with_extension("tmp");
-        let mut options = tokio::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp).await?;
-        // `mode` only applies when the file is created; an older temp file may
-        // have wider permissions, so narrow it before writing key material.
-        set_file_permissions(&tmp).await?;
-        file.write_all(contents).await?;
-        file.flush().await?;
-        drop(file);
-        match tokio::fs::rename(&tmp, path).await {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                Err(err)
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-async fn set_file_permissions(path: &Path) -> Result<(), io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
-}
-
-#[cfg(not(unix))]
-async fn set_file_permissions(_path: &Path) -> Result<(), io::Error> {
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn set_dir_permissions(path: &Path) -> Result<(), io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await
-}
-
-#[cfg(not(unix))]
-async fn set_dir_permissions(_path: &Path) -> Result<(), io::Error> {
-    Ok(())
-}
-
-#[async_trait]
-impl CertCache for FileCache {
-    type EC = io::Error;
-
-    async fn load_cert(
-        &self,
-        _domains: &[String],
-        _directory_url: &str,
-    ) -> Result<Option<Vec<u8>>, io::Error> {
-        Self::load(&self.cert_path()).await
-    }
-
-    async fn store_cert(
-        &self,
-        _domains: &[String],
-        _directory_url: &str,
-        cert: &[u8],
-    ) -> Result<(), io::Error> {
-        self.store(&self.cert_path(), cert).await
-    }
-}
-
-#[async_trait]
-impl AccountCache for FileCache {
-    type EA = io::Error;
-
-    async fn load_account(
-        &self,
-        _contact: &[String],
-        _directory_url: &str,
-    ) -> Result<Option<Vec<u8>>, io::Error> {
-        Self::load(&self.account_path()).await
-    }
-
-    async fn store_account(
-        &self,
-        _contact: &[String],
-        _directory_url: &str,
-        account: &[u8],
-    ) -> Result<(), io::Error> {
-        self.store(&self.account_path(), account).await
-    }
+fn mark_last_success(metrics: &Metrics) {
+    metrics
+        .acme_last_success
+        .store(der::unix_now(), Ordering::Relaxed);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn file_cache_round_trips_and_tightens_permissions() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cache_dir = dir.path().join("acme");
-        let cache = FileCache::new(cache_dir.clone());
+    #[test]
+    fn renewal_happens_at_two_thirds() {
+        let validity = Validity {
+            not_before: 1_000,
+            not_after: 1_900,
+        };
+        assert_eq!(renewal_time(validity), 1_600);
+    }
 
-        assert_eq!(cache.load_cert(&[], "").await.expect("load"), None);
-
-        cache
-            .store_cert(&[], "", b"cert")
-            .await
-            .expect("store cert");
-        cache
-            .store_account(&[], "", b"account")
-            .await
-            .expect("store account");
-        assert_eq!(
-            cache.load_cert(&[], "").await.expect("load"),
-            Some(b"cert".to_vec())
+    #[test]
+    fn cache_blob_round_trips_through_pem() {
+        let challenge = der::generate_challenge_cert("localhost", &[3u8; 32]).expect("cert");
+        let blob = combine_key_and_chain(
+            &challenge.key_pkcs8,
+            "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n",
         );
-        assert_eq!(
-            cache.load_account(&[], "").await.expect("load"),
-            Some(b"account".to_vec())
-        );
+        let blocks = pem::decode_blocks(&blob).expect("pem");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].label, "PRIVATE KEY");
+        assert_eq!(blocks[1].label, "CERTIFICATE");
+    }
 
-        cache
-            .store_cert(&[], "", b"renewed")
-            .await
-            .expect("replace cert");
-        assert_eq!(
-            cache.load_cert(&[], "").await.expect("load"),
-            Some(b"renewed".to_vec())
+    #[test]
+    fn parses_a_certificate_cache_blob() {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("cert");
+        let blob = format!(
+            "{}{}",
+            certified.signing_key.serialize_pem(),
+            certified.cert.pem()
         );
+        let (key, validity) = parse_certificate_cache(blob.as_bytes()).expect("parse");
+        assert_eq!(key.cert.len(), 1);
+        assert!(validity.not_after > validity.not_before);
+    }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |path: &Path| {
-                std::fs::metadata(path)
-                    .expect("metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777
-            };
-            assert_eq!(mode(&cache.cert_path()), 0o600);
-            assert_eq!(mode(&cache.account_path()), 0o600);
-            assert_eq!(mode(&cache_dir), 0o700);
-        }
+    #[test]
+    fn builds_a_challenge_certified_key() {
+        let challenge = der::generate_challenge_cert("localhost", &[3u8; 32]).expect("cert");
+        let certified = certified_key(&challenge.cert_der, &challenge.key_pkcs8).expect("key");
+        assert_eq!(certified.cert.len(), 1);
+        assert!(certified.key.public_key().is_some());
     }
 }

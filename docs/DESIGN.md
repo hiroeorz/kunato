@@ -715,6 +715,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | ------------------------- | ------------------------------ | ---------------------------------------------------------- |
 | `tokio`                   | Async runtime                  | Required by hyper; mature, standard choice.                |
 | `hyper`, `hyper-util`     | HTTP server and client         | Streaming-friendly HTTP/1.1 and HTTP/2; no framework overhead. |
+| `hyper-rustls`            | HTTPS client                   | Upstream forwarding and ACME directory requests over rustls. |
 | `http`                    | Shared HTTP types              | Core request/response types used across the proxy.         |
 | `http-body-util`, `bytes` | Body utilities and buffers     | Companion crates for hyper; bounded-body helpers.          |
 | `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
@@ -726,17 +727,22 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
 | `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |
 | `ruzstd`                  | Zstandard decoding             | Pure-Rust decoder; frames with a window over 8 MiB fall back to raw inspection. |
-| `ring`                    | SHA-256 checksums              | Already built as the TLS crypto provider; reused for rule-set verification. |
+| `ring`                    | Crypto and checksums           | TLS crypto provider, SHA-256 checksums, and P-256 ECDSA keys and signatures for ACME. |
 | `rustls`, `tokio-rustls`  | TLS termination                | Pure-Rust TLS 1.2/1.3 with the ring provider.              |
-| `tokio-rustls-acme`       | Automatic certificates         | ACME client with TLS-ALPN-01, renewal, and resolver support; default webpki roots disabled to stay within the license policy. |
 | `rustls-native-certs`     | ACME API trust store           | Uses the system CA store for ACME directory requests.      |
 | `quinn`, `h3`, `h3-quinn` | HTTP/3 over QUIC               | Mature Rust QUIC stack and the hyperium HTTP/3 implementation. |
 | `thiserror`               | Error types                    | Explicit, low-boilerplate error enums.                     |
 | `tempfile` (dev)          | Test fixtures                  | Writing config files for reload tests.                     |
-| `rcgen` (dev)             | Test certificates              | Self-signed certificates for the TLS integration test.     |
+| `rcgen` (dev)             | Test certificates              | Self-signed certificates for TLS integration tests and parsing generated CSRs. |
 | `brotli` (dev)            | Compressed test fixtures       | Encoder used to build brotli payloads in tests.            |
 
-Optional later: `rustls`, `tokio-rustls`, `rustls-pemfile` for TLS termination.
+The ACME client (RFC 8555) is implemented in `src/acme/` on top of `rustls`,
+`ring`, `hyper`, and `hyper-rustls`. It registers an account, orders
+certificates, answers TLS-ALPN-01 challenges with a short-lived self-signed
+P-256 certificate, renews at roughly two thirds of validity, and caches the
+account key and certificate chain. Only TLS-ALPN-01 is implemented; HTTP-01,
+DNS-01, external account binding, and ACME renewal information are not
+exposed by the configuration.
 
 ## 13. Testing Strategy
 

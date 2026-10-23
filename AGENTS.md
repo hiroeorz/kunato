@@ -39,7 +39,7 @@ src/
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
   metrics.rs       # Prometheus counters and gauges
-  acme.rs          # ACME certificate management (Let's Encrypt) and cache
+  acme/            # RFC 8555 client, TLS-ALPN-01 resolver, and certificate cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
   form.rs          # Origin-facing multipart and URL-encoded resource limits
   php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations

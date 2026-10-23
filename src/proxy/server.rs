@@ -19,10 +19,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use tokio_rustls_acme::AcmeAcceptor;
 use tracing::{debug, info, warn};
 
-use crate::acme::AcmeService;
+use crate::acme::{ACME_TLS_ALPN, AcmeService};
 use crate::client_ip::ClientSource;
 use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
@@ -271,10 +270,6 @@ enum Protocol {
 enum TlsMode {
     Plain,
     Static(tokio_rustls::TlsAcceptor),
-    Acme {
-        acceptor: AcmeAcceptor,
-        config: Arc<rustls::ServerConfig>,
-    },
 }
 
 #[derive(Clone)]
@@ -365,10 +360,7 @@ impl Server {
         let connect_timeout = snapshot.timeouts.upstream_connect;
         let (tls, scheme) = match acme {
             Some(service) => (
-                TlsMode::Acme {
-                    acceptor: service.acceptor(),
-                    config: service.tls_config(),
-                },
+                TlsMode::Static(tokio_rustls::TlsAcceptor::from(service.tls_config())),
                 "https",
             ),
             None => match snapshot.tls.as_ref() {
@@ -400,6 +392,9 @@ impl Server {
             }
         };
         drop(snapshot);
+        if let Some(service) = acme {
+            service.activate();
+        }
         Ok(Self {
             listener,
             context: Context {
@@ -545,38 +540,6 @@ async fn serve_connection(
             };
             serve_tls_connection(tls, peer, context, header_read_timeout, shutdown, guard).await;
         }
-        TlsMode::Acme { acceptor, config } => {
-            let handshake =
-                match tokio::time::timeout(header_read_timeout, acceptor.accept(stream)).await {
-                    Ok(Ok(Some(handshake))) => handshake,
-                    Ok(Ok(None)) => {
-                        debug!(client = %peer, "TLS-ALPN-01 challenge completed");
-                        return;
-                    }
-                    Ok(Err(err)) => {
-                        debug!(client = %peer, error = %err, "TLS handshake failed");
-                        return;
-                    }
-                    Err(_) => {
-                        debug!(client = %peer, "TLS handshake timed out");
-                        return;
-                    }
-                };
-            let tls = match tokio::time::timeout(header_read_timeout, handshake.into_stream(config))
-                .await
-            {
-                Ok(Ok(tls)) => tls,
-                Ok(Err(err)) => {
-                    debug!(client = %peer, error = %err, "TLS handshake failed");
-                    return;
-                }
-                Err(_) => {
-                    debug!(client = %peer, "TLS handshake timed out");
-                    return;
-                }
-            };
-            serve_tls_connection(tls, peer, context, header_read_timeout, shutdown, guard).await;
-        }
         TlsMode::Plain => {
             let Some((protocol, prefix)) = detect_protocol(&mut stream, header_read_timeout).await
             else {
@@ -605,6 +568,10 @@ async fn serve_tls_connection(
     shutdown: watch::Receiver<bool>,
     guard: ConnectionGuard,
 ) {
+    if tls.get_ref().1.alpn_protocol() == Some(ACME_TLS_ALPN) {
+        debug!(client = %peer, "TLS-ALPN-01 challenge completed");
+        return;
+    }
     let protocol = if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
         Protocol::Http2
     } else {

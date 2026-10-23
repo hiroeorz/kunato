@@ -1215,9 +1215,13 @@ Response `Set-Cookie` fields remain separate.
 #### Automatic certificates (Let's Encrypt)
 
 Kunato can obtain and renew certificates automatically through the ACME
-protocol (RFC 8555) without any helper process. Challenges are answered with
-TLS-ALPN-01 on the same port as regular TLS traffic, so no extra port is
-needed:
+protocol (RFC 8555) without any helper process. The client is implemented
+in-tree and supports TLS-ALPN-01 with P-256 ECDSA account and certificate
+keys; HTTP-01, DNS-01, external account binding, and ACME renewal information
+are not implemented, and the client connects directly without using
+`HTTP_PROXY`/`HTTPS_PROXY` environment variables or following redirects.
+Challenges are answered with TLS-ALPN-01 on the same port as regular TLS
+traffic, so no extra port is needed:
 
 ```yaml
 tls:
