@@ -2,8 +2,8 @@
 
 Date: 2026-10-24
 
-Status: implemented on branch `replace-serde-saphyr` (commit pending). This
-file is retained as the design and decision record.
+Status: implemented in commit `586234c`. This file is retained as the design
+and decision record.
 
 ## Summary
 
@@ -61,7 +61,7 @@ The proposed path was approved and implemented:
 3. Value-tree memory bound (about 127 MB at 1,000,000 nodes; typical files a few
    MB): accepted. A streaming deserializer remains a possible follow-up.
 
-The commit is pending on branch `replace-serde-saphyr`.
+Committed as `586234c`.
 
 ## State before the change
 

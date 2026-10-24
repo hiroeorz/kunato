@@ -22,8 +22,7 @@ cargo tree --offline -e normal --target x86_64-unknown-linux-gnu --prefix none \
 ```
 
 - Start: **205**
-- Current: **101** (-104) on branch `replace-serde-saphyr`; change 8 is not
-  committed yet.
+- Current: **101** (-104).
 - Reference only: `Cargo.lock` contains 167 package entries (283 at the start).
   This counts all platforms and duplicate versions and is not the KPI.
 
@@ -33,8 +32,7 @@ its dependency edge is removed or replaced by in-tree code.
 
 ## Completed
 
-Changes 1-7 are committed. Change 8 is implemented in the working tree on
-branch `replace-serde-saphyr`; its commit is pending. Change 5 is `b70f37c`,
+Changes 1-8 are committed. Change 8 is `586234c`; change 5 is `b70f37c`,
 change 6 is `c4d23e8`, and change 7 is `bd73060`.
 
 | # | Change | Commit | KPI after | Removed from the Linux tree | Tradeoffs / notes |
@@ -46,7 +44,7 @@ change 6 is `c4d23e8`, and change 7 is `bd73060`.
 | 5 | `tokio-rustls-acme` -> in-tree ACME client | `b70f37c` | 173 -> 112 (-61) | tokio-rustls-acme, async-trait, reqwest, rcgen, x509-parser, chrono, url/ICU4X, tower, and their support crates | New [src/acme/](src/acme/); RFC 8555 with TLS-ALPN-01, ECDSA P-256 CSR/challenge-certificate DER, renewal at two thirds of validity, and cached account/certificate material. Pebble issuance, renewal, HTTP/3, and cache-reuse tests pass. `rcgen`/`x509-parser` remain dev-only. |
 | 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
 | 7 | ACME origin and order resilience | `bd73060` | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
-| 8 | `serde-saphyr` -> `granit-parser` + in-tree serde deserializer | pending | 112 -> 101 (-11) | serde-saphyr, annotate-snippets, anstyle, unicode-width, encoding_rs_io, encoding_rs, core_detect, multiversion_no_op, scopeguard, simdutf8, num-traits | New [src/yaml/](src/yaml/); YAML 1.2 syntax from `granit-parser`, serde mapping in-tree. Anchors, aliases, merge keys, explicit tags, directives, and multiple documents are rejected; error rendering and locations differ from `serde-saphyr`. 514 unit tests and all integration tests pass; a typical 89 KB file parses in about 1.8 ms with a 3 MB peak. |
+| 8 | `serde-saphyr` -> `granit-parser` + in-tree serde deserializer | `586234c` | 112 -> 101 (-11) | serde-saphyr, annotate-snippets, anstyle, unicode-width, encoding_rs_io, encoding_rs, core_detect, multiversion_no_op, scopeguard, simdutf8, num-traits | New [src/yaml/](src/yaml/); YAML 1.2 syntax from `granit-parser`, serde mapping in-tree. Anchors, aliases, merge keys, explicit tags, directives, and multiple documents are rejected; error rendering and locations differ from `serde-saphyr`. 514 unit tests and all integration tests pass; a typical 89 KB file parses in about 1.8 ms with a 3 MB peak. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -124,8 +122,7 @@ The full in-house parser (-13, XL) is not a candidate unless the direct
 
 ## Recommended next step
 
-1. Review and commit change 8 on branch `replace-serde-saphyr`; the KPI is 101.
-   The full test suite, clippy, and the dependency audit pass.
+1. Change 8 is committed as `586234c`; the KPI is 101. No action.
 2. No further dependency work is recommended. Compression, regex, and `arc-swap`
    remain closed for the reasons above, and HTTP/3 is retained by product
    decision (2026-10-24).
