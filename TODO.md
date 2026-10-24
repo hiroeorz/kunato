@@ -22,8 +22,8 @@ cargo tree --offline -e normal --target x86_64-unknown-linux-gnu --prefix none \
 ```
 
 - Start: **205**
-- Current: **101** (-104).
-- Reference only: `Cargo.lock` contains 167 package entries (283 at the start).
+- Current: **99** (-106).
+- Reference only: `Cargo.lock` contains 165 package entries (283 at the start).
   This counts all platforms and duplicate versions and is not the KPI.
 
 `deny.toml` uses `[graph] all-features = true`, so Cargo feature-gating alone
@@ -32,8 +32,9 @@ its dependency edge is removed or replaced by in-tree code.
 
 ## Completed
 
-Changes 1-8 are committed. Change 8 is `586234c`; change 5 is `b70f37c`,
-change 6 is `c4d23e8`, and change 7 is `bd73060`.
+Changes 1-8 are committed. Change 9 is implemented in the working tree on
+branch `remove-granit-parser`; its commit is pending. Change 8 is `586234c`;
+change 5 is `b70f37c`, change 6 is `c4d23e8`, and change 7 is `bd73060`.
 
 | # | Change | Commit | KPI after | Removed from the Linux tree | Tradeoffs / notes |
 |---|--------|--------|----------:|-----------------------------|-------------------|
@@ -45,6 +46,7 @@ change 6 is `c4d23e8`, and change 7 is `bd73060`.
 | 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
 | 7 | ACME origin and order resilience | `bd73060` | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
 | 8 | `serde-saphyr` -> `granit-parser` + in-tree serde deserializer | `586234c` | 112 -> 101 (-11) | serde-saphyr, annotate-snippets, anstyle, unicode-width, encoding_rs_io, encoding_rs, core_detect, multiversion_no_op, scopeguard, simdutf8, num-traits | New [src/yaml/](src/yaml/); YAML 1.2 syntax from `granit-parser`, serde mapping in-tree. Anchors, aliases, merge keys, explicit tags, directives, and multiple documents are rejected; error rendering and locations differ from `serde-saphyr`. 514 unit tests and all integration tests pass; a typical 89 KB file parses in about 1.8 ms with a 3 MB peak. |
+| 9 | `granit-parser` -> in-tree YAML subset parser | pending | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. Flow collections and quoted scalars must be on one line; block scalars, multi-line plain scalars, comments, and compact block collections are supported. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -56,7 +58,8 @@ dependencies used by the certificate tests.
 
 Change 8 removes 11 names from the production tree. `num-traits` remains in
 `Cargo.lock` as a dev-only dependency of `rcgen`/`x509-parser`, like those two
-crates.
+crates. Change 9 removes `granit-parser` and its `arraydeque` dependency, which
+change 8 had retained.
 
 ### Behavior changes to remember
 
@@ -74,10 +77,12 @@ crates.
 - ACME retry backoff starts at 1 s and caps at 1 h. The client connects
   directly; outbound proxy environment variables and directory redirects are
   not used.
-- Configuration and rule files are parsed by the in-tree YAML deserializer in
-  [src/yaml/](src/yaml/). Anchors, aliases, merge keys, explicit tags,
-  directives, and multiple documents are rejected; block scalars and comments
-  are supported.
+- Configuration and rule files are parsed by the in-tree YAML parser and
+  deserializer in [src/yaml/](src/yaml/). Anchors, aliases, merge keys, explicit
+  tags, directives, and multiple documents are rejected; block scalars,
+  multi-line plain scalars, and comments are supported. Flow collections and
+  quoted scalars must be on one line, and document markers must be on their own
+  line.
 - YAML parse errors keep serde's unknown-field, unknown-variant, and
   missing-field classification for rule-set compatibility, but the wording and
   snippet rendering are in-tree.
@@ -99,13 +104,12 @@ starting each item: removing one dependency can change the savings of another.
 | - | Dev-only edges: `tempfile`, `brotli`, `rcgen`, `x509-parser`, `rustix`, `linux-raw-sys` | 0 | S-M | Low | Not KPI; do not prioritize. |
 
 `rcgen` and `x509-parser` are now dev-only; the production tree no longer
-contains either crate. Priority 1 (`serde-saphyr`) is complete; see change 8.
-The full in-house parser (-13, XL) is not a candidate unless the direct
-`granit-parser` dependency is later rejected.
+contains either crate. Priority 1 (`serde-saphyr`) and its follow-up
+(`granit-parser`) are complete; see changes 8 and 9.
 
 ### Notes on the backlog
 
-- **YAML (done):** see change 8. The supported subset is documented in
+- **YAML (done):** see changes 8 and 9. The supported subset is documented in
   [docs/development.md](docs/development.md); the design record is in
   [docs/serde-saphyr-replacement-spike.md](docs/serde-saphyr-replacement-spike.md).
 - **HTTP/3 (-16):** retained by product decision on 2026-10-24. The measured
@@ -122,12 +126,11 @@ The full in-house parser (-13, XL) is not a candidate unless the direct
 
 ## Recommended next step
 
-1. Change 8 is committed as `586234c`; the KPI is 101. No action.
+1. Review and commit change 9 on branch `remove-granit-parser`; the KPI is 99.
+   The full test suite, clippy, and the dependency audit pass.
 2. No further dependency work is recommended. Compression, regex, and `arc-swap`
    remain closed for the reasons above, and HTTP/3 is retained by product
    decision (2026-10-24).
-3. The full in-house YAML parser (-13) is a separate XL project only if the
-   direct `granit-parser` dependency is later rejected.
 
 ## Definition of done (per item)
 

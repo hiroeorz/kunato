@@ -190,12 +190,15 @@ clients as IPv4-mapped addresses, even if the host has no routable IPv6 address;
 use `0.0.0.0` where the kernel has IPv6 disabled or `net.ipv6.bindv6only=1`.
 
 Configuration and rule files use a YAML subset: block and flow collections,
-plain, single-quoted, double-quoted, and block scalars, and comments. Anchors,
-aliases, merge keys, explicit tags, `%YAML`/`%TAG` directives, and multiple
-documents in one file are rejected with a parse error; duplicate mapping keys
-are rejected too. Quoting is significant for untagged values such as `status`,
-where `404` is a numeric code and `'404'` is a text match. Typed fields accept
-quoted values, so `window: '60s'` and `window: 60s` are equivalent.
+plain, single-quoted, double-quoted, and block scalars, and comments. The
+parser is in-tree (`src/yaml/`). Flow collections and quoted scalars must start
+and end on one line; block scalars and multi-line plain scalars are supported.
+Document markers (`---`, `...`) must be on their own line. Anchors, aliases,
+merge keys, explicit tags, `%YAML`/`%TAG` directives, and multiple documents in
+one file are rejected with a parse error; duplicate mapping keys are rejected
+too. Quoting is significant for untagged values such as `status`, where `404` is
+a numeric code and `'404'` is a text match. Typed fields accept quoted values,
+so `window: '60s'` and `window: 60s` are equivalent.
 
 Each category groups related rules (for example SQL injection or XSS signatures)
 and defines a default action that its rules inherit. Individual rules can override

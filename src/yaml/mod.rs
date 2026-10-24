@@ -1,13 +1,14 @@
-//! In-tree YAML deserializer for configuration and rule files.
+//! In-tree YAML parser and serde deserializer for configuration and rule files.
 //!
-//! YAML syntax is parsed by `granit-parser`; this module maps its events to a
-//! small [`Value`] tree and implements [`serde::Deserializer`] for it. The
-//! supported YAML subset is documented in `docs/development.md`: block and flow
-//! collections, plain/quoted/block scalars, and comments. Anchors, aliases,
-//! merge keys, explicit tags, directives, and multiple documents are rejected.
+//! The parser builds a small [`value::Value`] tree and [`de`] implements
+//! [`serde::Deserializer`] for it. The supported YAML subset is documented in
+//! `docs/development.md`: block and flow collections, plain/quoted/block
+//! scalars, and comments. Anchors, aliases, merge keys, explicit tags,
+//! directives, and multiple documents are rejected.
 
 mod de;
 mod error;
+mod parser;
 mod value;
 
 pub(crate) use error::Error;
@@ -25,7 +26,7 @@ where
     T: DeserializeOwned,
 {
     error::reset_location();
-    let result = value::parse(input).and_then(T::deserialize);
+    let result = parser::parse(input).and_then(T::deserialize);
     error::reset_location();
     result.map_err(|mut error| {
         error.attach_source(input);

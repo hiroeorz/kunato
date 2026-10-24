@@ -5,6 +5,12 @@ Date: 2026-10-24
 Status: implemented in commit `586234c`. This file is retained as the design
 and decision record.
 
+Follow-up (change 9): the retained `granit-parser` and `arraydeque` dependency
+was later removed by replacing the event parser with an in-tree parser in
+[`../src/yaml/parser.rs`](../src/yaml/parser.rs). The YAML subset is unchanged
+except that flow collections and quoted scalars are limited to one line. The
+KPI is now 99. The sections below describe the first step (change 8).
+
 ## Summary
 
 **Implemented: a direct `granit-parser` dependency plus an in-tree serde
@@ -18,18 +24,19 @@ without adding a new crate to the graph.
 | Effort | L, roughly 8-12 working days |
 | Risk | Medium |
 | Removed crates | `serde-saphyr`, `annotate-snippets`, `anstyle`, `unicode-width`, `encoding_rs_io`, `encoding_rs`, `core_detect`, `multiversion_no_op`, `scopeguard`, `simdutf8`, `num-traits` |
-| Retained | `granit-parser`, `arraydeque` (already transitive) |
+| Retained | `granit-parser`, `arraydeque` (already transitive; removed by change 9) |
 
-Implementation result: the KPI is 101, `serde-saphyr` is no longer in the
-production graph, and 514 unit tests plus all integration tests pass. The
-production parser lives in [`../src/yaml/`](../src/yaml/); its unit tests cover
-the scalar matrix, duplicate keys, unsupported constructs, error locations, and
-a deterministic mutation pass over the rule set.
+Implementation result (change 8): the KPI was 101, `serde-saphyr` is no longer
+in the production graph, and 514 unit tests plus all integration tests pass. The
+production deserializer lives in [`../src/yaml/`](../src/yaml/); its unit tests
+cover the scalar matrix, duplicate keys, unsupported constructs, error
+locations, and a deterministic mutation pass over the rule set.
 
 The alternative, writing a full YAML 1.2 parser in-tree, removes two more
 crates (`granit-parser`, `arraydeque`) for -13 KPI but is XL effort and high
-risk. It is not recommended while `granit-parser` is available and tested
-against the YAML test suite.
+risk. It was not recommended while `granit-parser` was available and tested
+against the YAML test suite. Change 9 revisited this after the deserializer made
+the remaining parser work smaller.
 
 The design was validated with a scratch prototype (not committed; see
 `target/yaml-spike/`):
