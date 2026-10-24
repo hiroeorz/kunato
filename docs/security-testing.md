@@ -1,16 +1,24 @@
 # Local adversarial testing lab
 
-Status: design selected on 2026-10-24. The initial recording-origin and curated
-goTestWAF implementation is available; see [lab usage](../lab/README.md).
-Real exploit fixtures, Nuclei/sqlmap, and the later milestones remain planned.
-This document describes the complete target design, not achieved attack coverage.
+Status: design selected on 2026-10-24. The recording origin, curated goTestWAF,
+DVWA/sqlmap, the CVE-2021-41773/Nuclei fixture, ffuf path discovery and
+enumeration behavior, and an authenticated ZAP spider/passive baseline are
+available; see [lab usage](../lab/README.md). ZAP active scanning is currently
+blocked by a ZAP 2.17 plan exit on the authenticated DVWA file-inclusion page;
+deterministic mutation, CRS comparison, and protocol/load campaigns remain
+planned. This document describes the complete target design, not achieved attack
+coverage.
 
 ## Decision
 
 Use a disposable local Linux VM with Docker Engine and Compose for vulnerable
 applications and attack tools. Start with **goTestWAF, Nuclei, and sqlmap**, plus
-Kunato's existing black-box runner. Add ZAP, ffuf, mutations, and protocol/load
-campaigns after per-case evidence collection works.
+Kunato's existing black-box runner. Add ZAP and ffuf next, then mutations and
+protocol/load campaigns after per-case evidence collection works. The
+implemented ZAP plan covers form login, spidering, and passive discovery; the
+active-scan plan must be revisited when the authenticated fixture no longer
+aborts ZAP 2.17, and the passing active-injection controls remain
+sqlmap/Nuclei/goTestWAF.
 
 These are development dependencies: Kunato still deploys as one binary and one
 configuration file. The core tools run locally without a paid service. Selection
@@ -27,6 +35,7 @@ with nearby legitimate requests decide whether a change can ship.
 
 | Component | Reuse and extension |
 | --- | --- |
+| `lab/` | Isolated recording/DVWA/CVE fixtures, pinned attack tools, direct controls, fail-closed verdicts, and retained evidence for the first two milestones. |
 | `scripts/blackbox-test.sh` | Already builds binaries, removes `trusted-sources`, starts Kunato/upstream, replays both corpora, and retains logs. Add case-level evidence around this foundation. |
 | `blackbox/src/main.rs`, `h2c.rs`, `hpack.rs` | Dependency-free HTTP/1.1 and h2c replay with selected HPACK/header probes. Keep simple replay cases here. |
 | `examples/upstream.rs` | Useful forwarded-request inspector. Introduce a separate bounded recording fixture for lab observations. |
@@ -103,12 +112,14 @@ flowchart LR
     S -. callback events .-> A
 ```
 
-Use two Compose networks with `internal: true`. The protected runner joins only
-`front`, the origin joins only `back`, and Kunato joins both. Create a short-lived
-runner on `back` for direct positive controls and destroy it before the protected
-phase. Origin/database ports are never published. Only optional manual Kunato
-ports bind to VM loopback; include UDP for HTTP/3. Collect admin metrics from
-loopback inside Kunato's network namespace.
+Use two traffic networks plus a data-only network, each with `internal: true`.
+The protected runner joins only `front`, the fixtures and direct controls join
+`back`, and Kunato joins both. DVWA joins `back` and `data`; the database joins
+only `data`. Create a short-lived runner on `back` for direct positive controls
+and destroy it before the protected phase. Fixture/database ports are never
+published. Only optional manual Kunato ports bind to VM loopback; include UDP
+for HTTP/3. Collect admin metrics from loopback inside Kunato's network
+namespace.
 
 Compose's internal network is external network isolation, not a VM boundary or
 proof of host-service isolation. Preflight checks IPv4/IPv6 routes, DNS, redirects,
@@ -136,6 +147,7 @@ using observed runner and target resource use.
 | [DVWA](https://github.com/digininja/DVWA) and its database | Initial sqlmap fixture. Fix revision, security level, authentication, database seed, and synthetic canary query result. |
 | [OWASP Juice Shop](https://devguide.owasp.org/en/07-training-education/01-vulnerable-apps/01-juice-shop/) | Second-stage JavaScript/API/browser workflows and selected injection challenges. Use business-logic cases to document WAF boundaries. |
 | Selected [Vulhub](https://github.com/vulhub/vulhub) environment or vendor reproduction | One pinned fixture per selected CVE. Check the affected version and reproduction against the vendor advisory; merely starting the environment proves nothing. |
+| Lab Apache 2.4.49 CVE-2021-41773 fixture | A pinned, lab-only canary image built from the pinned `httpd:2.4.49` base and a reviewed Dockerfile. The direct Nuclei control must extract the canary; the protected attempt must not. It is not a general-purpose vulnerable application. |
 | Controlled response/protocol fixtures | Response leaks, malicious upstream headers, incomplete bodies, ambiguous framing, and sentinel requests; reuse integration helpers where practical. |
 
 Reset database/files/uploads, sessions, callback events, and Kunato state between
@@ -153,7 +165,8 @@ fallback does not count as an H2/H3 test.
 | Signature discovery | Remove the entire `trusted-sources` category: Docker private addresses match it too. Disable automatic protection; isolate or explicitly disable YAML rule-level throttles in an archived lab profile when they interfere. Keep other guards unless the case explicitly varies them. |
 | Scanner identification | Preserve default tool fingerprints and attribute blocks to their actual rules. This measures scanner recognition separately. |
 | Payload efficacy | Use a fixed ordinary User-Agent and verify that templates did not override it. Every relevant attack runs here even if default fingerprints already trigger a block. |
-| Protection/behavior | Enable intended rate/connection/ban settings and remove matching `protection.allowlist` entries. Check thresholds, windows, recovery, and normal traffic from a separate source. |
+| Protection/behavior | Enable intended rate/connection/ban settings and remove matching `protection.allowlist` entries. Check thresholds, windows, recovery, and normal traffic from a separate source. The ffuf behavior phase uses an explicit enumeration `BLOCK` profile and a long-lived normal client whose address cannot reuse the banned runner. |
+| Workflow/discovery | Authenticate through the form and spider/passively scan the application with ZAP; run bounded ffuf path discovery with the same wordlist directly and through the WAF. Require receipts, status/length parity, LOG/block events, and a separate normal source. ZAP active scanning is attempted but not part of a passing plan until the authenticated fixture no longer aborts ZAP 2.17. |
 | Full configuration | Run intended rules and policies with explicit lab addresses/keys and no trusted test sources; assert complete legitimate workflows and actual rejection reasons. |
 
 `--disable-protection` does not disable YAML rule-level limits. A later ban or
@@ -293,15 +306,17 @@ resistance to Internet link saturation or a distributed botnet.
 
 ## Implementation sequence
 
-The initial implementation uses these paths; additional tool/fixture plans are
-added as their controls and outcome evidence become available:
+The implemented paths are below; additional tool/fixture plans are added as
+their controls and outcome evidence become available:
 
 ```text
 lab/
-  compose.yaml          # Networks and one-at-a-time fixture/tool profiles
+  compose.yaml          # Networks and one-at-a-time fixture/tool services
   artifacts.lock.json   # Tool/image/template/fixture revisions and hashes
   cases/                # Controls, scenario metadata, and expected outcomes
-  plans/                # Scanner, workflow, mutation, and load settings
+  fixtures/             # DVWA setup and the lab-only CVE fixture
+  templates/            # Reviewed Nuclei template adaptations
+  plans/                # Generated scanner, workflow, and mutation settings
 scripts/security-lab.sh  # prepare, verify, run, report, and down operations
 target/security-lab/    # Generated evidence and temporary state
 ```
@@ -311,17 +326,22 @@ existing reporting. Check `Cargo.toml` before justifying any new crate. Keep
 downloaded third-party corpora outside Git and preserve provenance/licenses when
 importing reviewed samples into repository regressions.
 
+Milestones 1 and 2 are implemented (recording origin, goTestWAF, DVWA/sqlmap,
+and the CVE-2021-41773 canary). Milestone 3 is partially implemented: ffuf
+discovery/enumeration and the authenticated ZAP spider/passive baseline pass;
+ZAP active scanning, deterministic mutations, and CRS comparison remain planned.
+
 | Milestone | Deliverable and acceptance evidence |
 | --- | --- |
 | 1. Evidence foundation | Networks, version lock, reset/preflight, recording origin, case report. Valid requests are observed, known blocks are absent, private-source ALLOW is removed, and broken controls/collection fail the run. |
 | 2. Initial attack loop | goTestWAF, DVWA/sqlmap, one selected high-severity HTTP CVE fixture/Nuclei template. Direct controls succeed; ordinary-UA results have evidence; confirmed failures become attack/benign regression pairs, or a bounded no-gap result is recorded. |
-| 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. |
+| 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. Implemented: ffuf discovery/enumeration and the authenticated ZAP spider/passive baseline. ZAP active scanning is blocked on the authenticated DVWA file-inclusion page; mutations and CRS remain. |
 | 4. Protocol/availability | Raw/H2/H3/WS cases, k6, slow HTTP. Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
 | 5. Continuous regression | Fast PR gates, scheduled discovery, release smoke tests. Mandatory cases cannot silently skip and reports reproduce locally. |
 
 | Cadence | Workload and gate |
 | --- | --- |
-| Relevant PRs | Required repository checks, full existing attack/benign corpus, then stable lab smoke cases once implemented. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
+| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline campaigns. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
 | Daily/on demand | Existing CVE intake plus selected template/fixture smoke tests with pinned inputs. Promote confirmed findings into reviewed regressions; do not demand 100% of an unreviewed public scanner catalog. |
 | Weekly/on demand | Larger ZAP/ffuf/mutation campaigns and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
 | Before release | Stable regressions, representative fixture controls, protocol/availability on a fixed runner, rule compatibility, and archived evidence. |

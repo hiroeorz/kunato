@@ -31,21 +31,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke:
+  campaigns:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test observation and verdict failures
         run: python3 -m unittest discover -s lab/tests -v
-      - name: Check the shell entrypoint
-        run: shellcheck scripts/security-lab.sh lab/tool-runner.sh
+      - name: Check the shell entrypoints and runner wrappers
+        run: shellcheck scripts/security-lab.sh lab/tool-runner.sh lab/tool-runner-nuclei.sh lab/tool-runner-ffuf.sh lab/tool-runner-zap.sh
       - name: Prepare frozen inputs
         run: scripts/security-lab.sh prepare
-      - name: Run direct controls and protected campaigns
-        run: scripts/security-lab.sh run --campaign gotestwaf
+      - name: Run the replay, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP campaigns
+        run: scripts/security-lab.sh run --campaign all
       - name: Retain reports and reproduction inputs
         if: always()
         uses: actions/upload-artifact@v7

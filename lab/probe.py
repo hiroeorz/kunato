@@ -35,7 +35,7 @@ def request(case, host="app.test", port=8080):
     return result
 
 
-def isolation(origin_ip):
+def isolation(hosts, addresses):
     failures = []
     routes = Path("/proc/net/route").read_text().splitlines()[1:]
     if any(line.split()[1] == "00000000" for line in routes):
@@ -44,40 +44,53 @@ def isolation(origin_ip):
     if any(line.split()[0] == "0" * 32 and line.split()[1] == "00"
            and line.split()[-1] != "lo" for line in routes6):
         failures.append("IPv6 default route is present")
-    try:
-        socket.getaddrinfo("origin", 8080)
-        failures.append("Protected runner can resolve origin directly")
-    except socket.gaierror:
-        pass
-    try:
-        connection = socket.create_connection((origin_ip, 8080), timeout=1)
-    except OSError:
-        pass
-    else:
-        connection.close()
-        failures.append("Protected runner can reach the origin IP directly")
+    for host in hosts:
+        try:
+            socket.getaddrinfo(host, 80)
+            failures.append(f"Protected runner can resolve {host} directly")
+        except socket.gaierror:
+            pass
+    for address in addresses:
+        for port in (80, 8080, 3306):
+            try:
+                connection = socket.create_connection((address, port), timeout=1)
+            except OSError:
+                continue
+            connection.close()
+            failures.append(f"Protected runner can reach {address}:{port} directly")
+            break
     return {"isolation_ok": not failures, "failures": failures}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["health", "cases", "isolation", "metrics"])
-    parser.add_argument("--origin-ip")
+    parser.add_argument("--path", default="/health")
+    parser.add_argument("--status", type=int, default=200)
+    parser.add_argument("--nonce")
+    parser.add_argument("--host", default="app.test")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--forbidden-host", action="append", default=[])
+    parser.add_argument("--forbidden-ip", action="append", default=[])
     args = parser.parse_args()
     if args.mode == "cases":
         for case in json.loads(Path("/lab/cases/smoke.json").read_text()):
             print(json.dumps(request(case)), flush=True)
+    elif args.mode == "health":
+        result = request({"id": "health", "method": "GET", "target": args.path},
+                         args.host, args.port)
+        print(json.dumps(result))
+        ok = not result.get("error") and result.get("status") == args.status
+        if args.nonce:
+            ok = ok and result.get("origin") == args.nonce
+        return int(not ok)
     elif args.mode == "isolation":
-        if not args.origin_ip:
-            parser.error("isolation requires --origin-ip")
-        result = isolation(args.origin_ip)
+        result = isolation(args.forbidden_host, args.forbidden_ip)
         print(json.dumps(result))
         return int(not result["isolation_ok"])
     else:
-        metrics = args.mode == "metrics"
-        result = request({"id": args.mode, "method": "GET",
-                          "target": "/metrics" if metrics else "/health"},
-                         "127.0.0.1" if metrics else "app.test", 9090 if metrics else 8080)
+        result = request({"id": "metrics", "method": "GET", "target": "/metrics"},
+                         "127.0.0.1", 9090)
         print(json.dumps(result))
         return int("error" in result or result.get("status") != 200)
     return 0

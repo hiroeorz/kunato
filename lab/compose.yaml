@@ -19,6 +19,24 @@ x-runtime: &runtime
     driver: json-file
     options: { max-size: 4m, max-file: "2" }
 
+x-fixture: &fixture
+  platform: ${LAB_PLATFORM}
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  mem_limit: 512m
+  memswap_limit: 512m
+  cpus: 1.0
+  pids_limit: 128
+  init: true
+  restart: "no"
+  pull_policy: never
+  dns: [127.0.0.1]
+  dns_search: ["."]
+  dns_opt: ["timeout:1", "attempts:1"]
+  logging:
+    driver: json-file
+    options: { max-size: 4m, max-file: "2" }
+
 services:
   origin:
     <<: *runtime
@@ -38,8 +56,16 @@ services:
     <<: *runtime
     image: ${LAB_PYTHON_IMAGE}
     platform: ${LAB_PLATFORM}
-    entrypoint: [/kunato]
-    command: [--config, /config/rules.yaml, --disable-protection, --log-format, json, --log-level, debug]
+    entrypoint: [/bin/sh, /lab/kunato-runner.sh]
+    command:
+      - --config
+      - /config/${LAB_CONFIG:-rules-origin.yaml}
+      - --log-format
+      - json
+      - --log-level
+      - debug
+    environment:
+      LAB_DISABLE_PROTECTION: ${LAB_DISABLE_PROTECTION:-1}
     volumes:
       - ${LAB_INPUT}/kunato:/kunato:ro
       - ${LAB_INPUT}/config:/config:ro
@@ -48,6 +74,59 @@ services:
       front:
         aliases: [app.test]
       back: {}
+
+  db:
+    <<: *fixture
+    image: ${LAB_MARIADB_IMAGE:?Run prepare first}
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: dvwa
+      MARIADB_USER: dvwa
+      MARIADB_PASSWORD: p@ssw0rd
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    tmpfs:
+      - /var/lib/mysql:size=268435456
+      - /run/mysqld:size=16777216
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+    networks: [data]
+
+  dvwa:
+    <<: *fixture
+    image: ${LAB_DVWA_IMAGE:?Run prepare first}
+    environment:
+      DB_SERVER: db
+      DB_DATABASE: dvwa
+      DB_USER: dvwa
+      DB_PASSWORD: p@ssw0rd
+      DEFAULT_SECURITY_LEVEL: low
+      DISABLE_AUTHENTICATION: ${LAB_DVWA_DISABLE_AUTH:-true}
+    cap_add: [CHOWN, DAC_OVERRIDE, NET_BIND_SERVICE, SETGID, SETUID]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1/login.php') === false ? 1 : 0);"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+    networks:
+      back: {}
+      data: {}
+
+  cve:
+    <<: *fixture
+    image: ${LAB_CVE_IMAGE:?Run prepare first}
+    environment:
+      LAB_NONCE: ${LAB_NONCE}
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    cap_add: [CHOWN, DAC_OVERRIDE, NET_BIND_SERVICE, SETGID, SETUID]
+    networks: [back]
 
   client:
     <<: *runtime
@@ -59,12 +138,32 @@ services:
       - ${LAB_INPUT}/lab:/lab:ro
     networks: [front]
 
+  normal:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, -c, "import time; time.sleep(3600)"]
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
   control:
     <<: *runtime
     image: ${LAB_PYTHON_IMAGE}
     platform: ${LAB_PLATFORM}
     profiles: [tools]
     entrypoint: [python3, -B, /lab/probe.py]
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [back]
+
+  bootstrap:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, -B, /lab/fixtures/dvwa.py]
     volumes:
       - ${LAB_INPUT}/lab:/lab:ro
     networks: [back]
@@ -91,8 +190,99 @@ services:
       service: gotestwaf
     networks: !override [back]
 
+  sqlmap:
+    <<: *runtime
+    image: ${LAB_SQLMAP_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, /sqlmap/sqlmap.py]
+    environment:
+      HOME: /tmp
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
+  sqlmap-control:
+    extends:
+      service: sqlmap
+    networks: !override [back]
+
+  nuclei:
+    <<: *runtime
+    image: ${LAB_NUCLEI_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [/bin/sh, /lab/tool-runner-nuclei.sh]
+    environment:
+      HOME: /tmp
+    mem_limit: 512m
+    memswap_limit: 512m
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+      - /reports:size=67108864,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
+  nuclei-control:
+    extends:
+      service: nuclei
+    networks: !override [back]
+
+  ffuf:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [/bin/sh, /lab/tool-runner-ffuf.sh]
+    environment:
+      HOME: /tmp
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+      - /reports:size=16777216,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+      - ${LAB_INPUT}/ffuf:/usr/local/bin/ffuf:ro
+    networks: [front]
+
+  ffuf-control:
+    extends:
+      service: ffuf
+    networks: !override [back]
+
+  zap:
+    <<: *runtime
+    image: ${LAB_ZAP_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    user: "1000:1000"
+    entrypoint: [/bin/sh, /lab/tool-runner-zap.sh]
+    environment:
+      HOME: /home/zap
+    mem_limit: 5g
+    memswap_limit: 5g
+    cpus: 2
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+      - /home/zap:size=1073741824,mode=1777
+      - /zap/wrk:size=33554432,mode=1777
+      - /reports:size=134217728,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
+  zap-control:
+    extends:
+      service: zap
+    networks: !override [back]
+
 networks:
   front:
     internal: true
   back:
+    internal: true
+  data:
     internal: true

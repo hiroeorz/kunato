@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-23; the managed set carried 492 rules then.
+2026-10-24; the managed set carried 492 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -30,7 +30,7 @@ body coverage on those routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| SQL Injection | ✅ | `sql-injection`: UNION, boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
+| SQL Injection | ✅ | `sql-injection`: UNION (including padded `/*...*/`, `--`, and `#` comments between UNION and SELECT, closed after the local lab bypassed a fixed 20-character gap), boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
 | NoSQL Injection | ✅ | `nosql-injection`: Mongo operators (`$where/$ne/$regex`, ...) |
 | OS Command Injection | ✅ | `command-injection`: shell metacharacters plus command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627) |
 | JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
@@ -59,7 +59,7 @@ body coverage on those routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match |
+| Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match. The lab-only CVE-2021-41773 fixture confirms the direct `.%2e` traversal canary extraction is blocked by the decoded path rule |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
 | Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
 | Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...) plus `limits.upload_inspection` (default `mismatch`), which rejects an executable header or active markup at the leading position and server-side script markers (`<?php`, `<?=`, `<%`) anywhere in the inspected part. Padding cannot hide a script polyglot behind an image/PDF/office/media/font claim. Archive contents, executable/markup bytes beyond the leading position, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
@@ -303,7 +303,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Unicode Encoding | 🔶 | JSON `\u0075` is decoded, but no Unicode normalization (documented in `docs/development.md`) |
 | Overlong UTF-8 | 🔶 | No normalization; specific byte patterns (e.g. `%c0%af`) are caught by raw patterns only |
 | Case Variation | ✅ | Main rules use `(?i)` |
-| Comment Insertion | ✅ | SQL timing rules tolerate comments between function name and parenthesis |
+| Comment Insertion | ✅ | SQL keyword adjacency tolerates whitespace and `/*...*/`, `--`, and `#` comments (UNION/SELECT, ALL/DISTINCT, and time-based function/parenthesis); the local lab added the padded-comment regression |
 | Null Byte | ✅ | `%00` blocked |
 | Payload / Parameter Fragmentation | 🔶 | Embedded-HTTP inspection and multipart flattening exist; general fragmentation is unhandled |
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
@@ -331,6 +331,24 @@ are integration-tested rather than claimed as request-corpus coverage.
 | API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
 | HTTP Flood | ✅ |
+
+## Local security lab evidence
+
+The 2026-10-24 ffuf campaign confirms the current discovery verdicts on DVWA:
+`/.git/config`, `/.env`, `/.svn/entries`, `/.htaccess`, `/.DS_Store`,
+`/backup.sql`, `/config.php.bak`, `/phpinfo.php`, and `/wp-config.php` are
+blocked without origin receipts, `/admin` is blocked by
+`etherpad-admin-bypass`, `/wp-admin/` is logged, and 18 legitimate paths retain
+their status and body length. The behavior phase enables
+`protection.behavior.enumeration` with `BLOCK`; the enumeration source is banned
+(403/429) and the separate normal client stays at 200.
+
+The authenticated ZAP baseline logs in, spiders 176 control and 224 protected
+authenticated URLs, and runs the passive scan through the WAF while the normal
+client stays healthy. ZAP active scanning is not part of a passing plan: ZAP
+2.17 exits on the authenticated DVWA file-inclusion active scan. Active
+injection controls therefore remain the sqlmap UNION dump, the Nuclei
+CVE-2021-41773 canary, and goTestWAF.
 
 ## Notable Gaps
 
@@ -365,4 +383,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled 492-rule count; behavioral actions
-still default to LOG. The snapshot date remains 2026-10-23.
+still default to LOG. The snapshot date is 2026-10-24.

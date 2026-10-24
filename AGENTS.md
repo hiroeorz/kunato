@@ -57,13 +57,17 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
-lab/               # Isolated recording-origin and attack-tool test environment
+lab/               # Isolated WAF lab with recording/DVWA/CVE fixtures and pinned tools
+  cases/           # Replay and ffuf discovery cases, benign guards, and expected outcomes
+  fixtures/        # DVWA bootstrap and the lab-only CVE fixture
+  templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
+  tool-runner-*.sh # Bounded wrappers for detached lab scanners
 dist/
   rules.yaml       # Managed rule set for daily updates (generated; keep in sync)
   rules.yaml.sha256
 examples/
   upstream.rs      # Manual test upstream with access logs
-scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box test runner
+scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box and lab runners
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md           # Overall design
@@ -210,6 +214,8 @@ cargo deny check                 # Dependency, license, advisory, and source aud
 cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
+./scripts/security-lab.sh prepare             # Prepare pinned lab images and fixtures
+./scripts/security-lab.sh run --campaign all  # Isolated WAF campaigns with evidence
 ./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ```

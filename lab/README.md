@@ -1,48 +1,177 @@
 # Local security lab
 
-This is the first implementation of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, Kunato request-rejection
-regressions, and a curated goTestWAF campaign. It measures signature behavior;
-the origin is not a vulnerable application and cannot prove exploit prevention.
-Nuclei/CVE fixtures, DVWA/sqlmap, authenticated ZAP workflows, and load/protocol
-campaigns remain subsequent milestones.
+This covers the first three milestones of the [adversarial testing design](../docs/security-testing.md):
+an isolated recording origin, direct receipt controls, and six WAF campaigns.
+It runs curated goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a
+Nuclei canary against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
+path-discovery/enumeration comparison, and an authenticated ZAP spider/passive
+baseline. It measures request rejection and bounded exploit prevention; the
+fixtures do not prove protection for arbitrary applications. ZAP active
+scanning, protocol fuzzing, and load campaigns remain subsequent work: the
+current ZAP 2.17 plan exits on the authenticated DVWA file-inclusion active
+scan, so active-injection coverage stays with sqlmap, Nuclei, and goTestWAF.
 
 ## Run locally
 
 Requirements: a Linux amd64 host, Docker Engine with Compose 2.24.4 or later,
 Python 3.11 or later, and the repository's Rust toolchain. Use a disposable VM
-for adversarial work. The initial Compose environment has no published ports,
-host networking, privileged containers, or Docker-socket mounts. Internal Docker
+for adversarial work. The Compose environment has no published ports, host
+networking, privileged containers, or Docker-socket mounts. Internal Docker
 networks do not by themselves establish isolation from every host service.
 
 ```sh
-# Preparation may download the locked images and build the current Rust source.
+# Preparation may download the locked images, build the CVE fixture, and build
+# the current Rust source.
 scripts/security-lab.sh prepare
 
-# Verify cached images, binary, and source hashes without downloading anything.
+# Verify cached images, fixture, template, and source hashes without downloads.
 scripts/security-lab.sh verify
 
 # Direct controls, followed by WAF inspection of attacks and benign guards.
 scripts/security-lab.sh run
 
-# Run the receipt regressions and the real goTestWAF binary.
+# Add one campaign, or run every campaign in sequence.
 scripts/security-lab.sh run --campaign gotestwaf
+scripts/security-lab.sh run --campaign sqlmap
+scripts/security-lab.sh run --campaign nuclei
+scripts/security-lab.sh run --campaign ffuf
+scripts/security-lab.sh run --campaign zap
+scripts/security-lab.sh run --campaign all
 ```
 
-Execution always uses local image IDs with `pull_policy: never`; it does not install
-or update scanners, rules, or templates. `prepare` must be repeated after a Rust
-source or image-lock change. Rules and lab cases are copied from the current
-worktree into an immutable input snapshot at the beginning of each run.
+Execution always uses local image IDs with `pull_policy: never`; it does not
+install or update scanners, rules, or templates. `prepare` must be repeated after
+a Rust source, image-lock, fixture, or template change. Rules, cases, fixtures,
+and templates are copied from the current worktree into an immutable input
+snapshot at the beginning of each run.
+
+## Isolation and fixtures
+
+The Compose environment uses three `internal: true` networks:
+
+- `front`: the client and attack tools, plus Kunato's listening side;
+- `back`: the recording origin, Kunato's upstream side, temporary direct-control
+  runners, and the vulnerable fixtures;
+- `data`: the DVWA database and DVWA only.
+
+Kunato joins `front` and `back`; the protected client joins only `front`; the
+direct controls join `back` for one short-lived container per attempt. The
+preflight confirms that every active network is internal, no service publishes a
+port, and the protected client cannot resolve or reach the active fixture or
+database IPs. Fixture ports are never published. Tools run as an unprivileged
+user with a read-only root filesystem; the intentionally vulnerable DVWA,
+MariaDB, and Apache fixtures keep their upstream users and only the capabilities
+their startup needs. They are disposable, have no host mounts, and must never be
+exposed outside this lab.
+
+The prepared inputs are pinned in `artifacts.lock.json`:
+
+| Input | Purpose |
+| --- | --- |
+| `python` image | recording origin, probes, and Kunato's runtime base |
+| `gotestwaf` image | curated payload/placement/encoding sweep |
+| `mariadb` image | DVWA database, recreated from tmpfs for every phase |
+| `dvwa` image | SQL-injection, path-discovery, and benign-page fixture; authentication disabled except for ZAP, security level low |
+| `sqlmap` image | direct and protected SQL-injection dump |
+| `nuclei` image | CVE-2021-41773 template execution |
+| `ffuf` v2.3.0 binary | bounded path discovery and enumeration behavior |
+| `zap` image | authenticated spider/passive baseline |
+| `httpd` image | base for the lab-only CVE-2021-41773 fixture |
+
+The CVE fixture is built during `prepare` from the pinned `httpd` base and the
+Dockerfile in `fixtures/httpd-cve-2021-41773/`. It enables the traversal surface
+and writes a per-attempt canary under `/opt/kunato-lab/`. The Nuclei template in
+`templates/cve-2021-41773-canary.yaml` is a local canary adaptation of the
+upstream CVE template; it is not an upstream-signed template. The fixture keeps
+the Apache event MPM inside a 64-pid budget.
+
+## Campaigns
+
+### Replay and goTestWAF
+
+`cases/smoke.json` pairs SQLi, XSS, traversal, and comment-obfuscated UNION
+probes with benign counterparts and includes legitimate 302/401/404 responses.
+The recording origin proves receipt, method, target, body hash, and nonce. The
+goTestWAF plan derives one payload, encoder, and placement per applicable case
+and uses the fixed lab User-Agent. Direct controls must receive every planned
+case before the protected results are evaluated. Every case executes with an
+ordinary fixed User-Agent; scanner-fingerprint recognition is deliberately not
+claimed here. The lab removes the whole private-source `trusted-sources`
+category and disables automatic protection.
+
+### sqlmap
+
+`sqlmap` compares a direct DVWA SQL-injection dump with the same bounded dump
+through Kunato. Each phase recreates the MariaDB tmpfs and the DVWA container,
+runs the setup, and seeds a fresh `lab_canary` row. The direct control must dump
+that canary; the protected phase uses a second canary and must not retrieve it.
+The verdict is exploit prevention, not request rejection: the report records
+blocked requests, requests that reached the origin, and the rule names. On the
+current rule set the protected run blocked the UNION dump but some column-count
+and parameter probes reached the origin; no canary was extracted. Those probes
+remain visible in the report rather than being presented as a clean sweep. A
+confirmed bypass of the older fixed-gap `union-select` rule was found with a
+padded `/*...*/` comment and is now fixed and retained as an attack/benign pair.
+
+### Nuclei
+
+`nuclei` runs a pinned canary template against the CVE-2021-41773 fixture. The
+direct control must read the canary and match with the lab User-Agent; the
+protected phase must not extract it. The report requires no fixture receipt for
+the blocked paths and records the rule names. The current rules stop both the
+`/icons` traversal and the `/cgi-bin` command with `dot-dot-slash` and
+`shell-metacharacters`, with no origin receipt. The template is run with update
+checks and interactsh disabled; the wrapper creates an empty templates
+directory so Nuclei never tries to download the default catalog.
+
+### ffuf
+
+`ffuf` runs the same 29-path wordlist directly against DVWA and through Kunato.
+The discovery phase compares status and body length, requires an origin receipt
+for allow/log paths, requires no protected receipt plus a matching block event
+for block paths, and requires a LOG event for logged admin paths. The behavior
+phase enables the lab protection, lets the ffuf source enumerate missing paths
+until the enumeration threshold fires, and then requires 403/429 responses,
+fewer distinct origin receipts, and a healthy normal client from a separate
+source. The normal client is a long-lived container so its address cannot reuse
+the banned ffuf source. The direct control sends the lab `Host` header so the
+fixture's host-dependent 404 and setup pages compare like for like.
+
+### ZAP authenticated baseline
+
+The ZAP plan authenticates to DVWA with the seeded `admin`/`password` account,
+spiders the authenticated application, runs the passive scan, and writes a JSON
+report. The direct control and the protected run must both discover the
+authenticated pages (at least 80% of the control count) and produce a report;
+the normal client must stay healthy and the protected run records any blocked
+requests. This verifies the authenticated workflow across the WAF; it does not
+claim active-scan defense. The plan intentionally omits `activeScan`: ZAP 2.17
+exits the plan on this authenticated DVWA file-inclusion active scan, and active
+injection defenses remain covered by the sqlmap, Nuclei, and goTestWAF
+campaigns.
+
+## Evidence and case changes
 
 Each run prints its directory under `target/security-lab/`. It retains:
 
-- `manifest.json`: commit, source/binary hashes, image digests, and input hashes;
-- `input/`: exact rules, case definitions, scanner plans, code, and binary;
+- `manifest.json`: commit, source/binary hashes, image and fixture IDs, and input
+  hashes;
+- `input/`: exact rules, case definitions, scanner plans, fixtures, templates,
+  code, and binary;
 - `control/` and `replay/`: fresh attempt IDs, health probes, client exchanges,
   origin events, Kunato JSON logs, and metrics;
-- `gotestwaf-control/` and `gotestwaf/`: direct/protected tool reports and origin
-  observations when the scanner is selected;
-- `report.json` and `report.md`: case verdicts, counts, and diagnostics.
+- `gotestwaf-control/` and `gotestwaf/`: direct/protected scanner reports and
+  origin observations;
+- `sqlmap-control/` and `sqlmap/`: dump output, exit codes, DVWA access logs,
+  health probes, and Kunato logs;
+- `nuclei-control/` and `nuclei/`: Nuclei JSONL, runner logs, CVE access logs,
+  health probes, and Kunato logs;
+- `ffuf-control/`, `ffuf/`, and `ffuf-behavior/`: ffuf JSON reports, runner logs,
+  DVWA access logs, health probes, and Kunato logs;
+- `zap-control/` and `zap/`: authenticated ZAP plan logs and JSON reports, DVWA
+  access logs, health probes, and Kunato logs;
+- `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
+  diagnostics;
 - `commands.jsonl` and `cleanup.json`: executed commands and verification that
   the run's containers, networks, and named volumes have been removed.
 
@@ -51,44 +180,12 @@ scripts/security-lab.sh report target/security-lab/<run-id>
 scripts/security-lab.sh down target/security-lab/<run-id>
 ```
 
-Reports exit with failure when a required control or observation is missing,
-a tool fails, an attack reaches the origin, a legitimate exchange changes, or
-the campaign is inconclusive. Containers and project networks are removed after
-the run, including on ordinary failure. `down` cleans only the identified lab
-project if a controller was forcibly interrupted; evidence is retained.
-
-## Evidence and case changes
-
-`cases/smoke.json` pairs SQLi, XSS, and traversal probes with benign counterparts
-and includes legitimate 302/401/404 responses. These are general attack-class
-probes, not CVE coverage claims. Every case executes with an ordinary fixed
-User-Agent. The lab removes the whole private-source `trusted-sources` category
-and disables automatic protection. YAML rule-level throttles remain present;
-the short smoke sequence does not target those throttled routes.
-
-Direct controls must prove the exact method, target, body hash, origin nonce,
-and expected status. The protected attempt runs against newly created services.
-A block passes only with an expected 403, a matching non-rate-limited Kunato rule
-event, no origin receipt, and successful surrounding normal probes. A 403 from
-the origin is a gap. A reset or timeout is inconclusive.
-
-The controller derives a one-payload/one-encoder/one-placement goTestWAF plan
-from the same smoke inputs. Query and body placement are preserved; the recording
-path is namespaced for correlation. goTestWAF escapes RawRequest query values,
-so preencoded values are decoded before generating its plan. Direct controls
-verify decoded query parameters, method, and body hash to catch accidental
-double encoding or other request transformations. Direct scanner controls must
-receive every planned case with the ordinary User-Agent before protected results
-are evaluated.
-Original JSON scanner output is retained beside the independent origin verdicts.
-This small stable plan is a regression gate, not the full upstream goTestWAF
-catalog or an estimate of overall WAF efficacy.
-
-For a new discovery, preserve the original tool request, minimize it, add an
-attack and nearby benign guard, reproduce the failure, fix the appropriate rule
-or engine mechanism, and re-run both the regression and original campaign.
-Use the CVE skill and update the coverage documents when evidence changes.
-This lab never edits rules, commits fixes, or publishes managed rule updates.
+Reports exit with failure when a required control or observation is missing, a
+tool fails, an attack reaches the origin in a replay case, a legitimate exchange
+changes, or a campaign is inconclusive. Containers and project networks are
+removed after the run, including on ordinary failure. `down` cleans only the
+identified lab project if a controller was forcibly interrupted; evidence is
+retained.
 
 Validate collector and verdict failures locally:
 
@@ -96,6 +193,26 @@ Validate collector and verdict failures locally:
 python3 -m unittest discover -s lab/tests -v
 ```
 
-The separate security-lab workflow runs these checks and the isolated smoke
-campaign for relevant pull requests and supports manual execution. The daily
-CVE publishing workflow is unchanged.
+The separate security-lab workflow runs these checks and the isolated `all`
+campaign for relevant pull requests and supports manual execution. The daily CVE
+publishing workflow is unchanged. The CVE-2021-41773 canary rows are also in
+`blackbox/requests/` so the ordinary black-box gate retains the request shapes.
+
+## Limits
+
+The recording origin cannot prove exploit prevention, and the DVWA/CVE fixtures
+prove only their bounded scenarios. A missing signature, a fixture mismatch, a
+blocked tool, or an inconclusive collection fails the run; it is never counted
+as defense success. The lab does not test arbitrary applications, distributed
+sources, or availability. The authenticated ZAP baseline covers login, spider,
+and passive discovery; active scanning is not yet part of the passing plan, and
+the active injection defenses remain the sqlmap/Nuclei/goTestWAF campaigns.
+Deterministic mutation and protocol/load campaigns are the next milestones.
+
+The fixtures and tools retain their upstream licenses and provenance: the DVWA
+image and source, MariaDB, Apache httpd 2.4.49, sqlmap, Nuclei, goTestWAF,
+ffuf, ZAP, and the upstream [nuclei-templates CVE-2021-41773
+template](https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2021/CVE-2021-41773.yaml)
+and [Vulhub reproduction](https://github.com/vulhub/vulhub/tree/master/httpd/CVE-2021-41773).
+The canary template and fixture configuration are lab adaptations; their hashes
+are recorded in `artifacts.lock.json` and the run manifest.
