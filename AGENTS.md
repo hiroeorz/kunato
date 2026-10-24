@@ -57,12 +57,17 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
+lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox protocol/slow/load suites
+  cases/           # Replay, ffuf discovery, and deterministic mutation cases
+  fixtures/        # DVWA bootstrap and the lab-only CVE fixture
+  templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
+  tool-runner-*.sh # Bounded wrappers for detached lab scanners
 dist/
   rules.yaml       # Managed rule set for daily updates (generated; keep in sync)
   rules.yaml.sha256
 examples/
   upstream.rs      # Manual test upstream with access logs
-scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box test runner
+scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box and lab runners
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md           # Overall design
@@ -72,6 +77,8 @@ docs/
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
+  security-lab-testing-model.md # Lab control/evidence model, verdicts, and diagrams
+  security-testing.md # Local attack-tool lab design and verification process
 packaging/
   kunato.service   # systemd unit
 rules.example.yaml # Example configuration
@@ -204,19 +211,27 @@ cargo run -- --config rules.yaml # Run locally
 cargo test                       # Run all tests
 cargo fmt                        # Format code
 cargo clippy --all-targets -- -D warnings  # Lint; warnings are errors
-cargo deny check                 # Dependency, license, advisory, and source audit
+./scripts/check-deny.sh          # Dependency, license, advisory, and source audit (read-only-safe)
 cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
+./scripts/security-lab.sh prepare             # Prepare pinned lab images and fixtures
+./scripts/security-lab.sh run --sandbox-suite all  # Isolated WAF sandbox suites with evidence
+./scripts/security-lab.sh run --sandbox-suite protocol  # Raw protocol and WebSocket cases
+./scripts/security-lab.sh run --sandbox-suite slow     # Bounded slow-HTTP availability
+./scripts/security-lab.sh run --sandbox-suite load     # k6 mixed load with recovery
 ./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
-`cargo deny check`, and `cargo test`, in that order. When touching `blackbox/`, run
-its `cargo fmt` and `cargo clippy` variants as well. If a command is unavailable or
-fails for environmental reasons, report it instead of ignoring it. The dependency
-policy lives in `deny.toml`; do not loosen it without an explicit reason.
+`./scripts/check-deny.sh`, and `cargo test`, in that order. The wrapper runs
+`cargo deny check` with a writable temporary advisory database, so it also works when
+`$CARGO_HOME` is read-only; use it instead of invoking `cargo deny check` directly.
+When touching `blackbox/`, run its `cargo fmt` and `cargo clippy` variants as well.
+If a command is unavailable or fails for environmental reasons, report it instead of
+ignoring it. The dependency policy lives in `deny.toml`; do not loosen it without an
+explicit reason.
 
 ## Design Invariants
 

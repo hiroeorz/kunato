@@ -8,7 +8,10 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{CONNECTION, CONTENT_ENCODING, HeaderMap, HeaderValue, UPGRADE};
+use http::header::{
+    CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, HOST, HeaderMap, HeaderValue, TRANSFER_ENCODING,
+    UPGRADE,
+};
 use http::{Request, Response, StatusCode};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
@@ -810,6 +813,25 @@ async fn handle_request(
         Err(err)
     } else if let Some(err) = request_head_error(&config, &parts) {
         Err(err)
+    } else if upgrade.is_some()
+        && !parts.headers.contains_key(CONTENT_LENGTH)
+        && !parts.headers.contains_key(TRANSFER_ENCODING)
+    {
+        if let Some(inspection) = context.reserve_request_inspection() {
+            let payload = RequestPayload {
+                prefix: Bytes::new(),
+                pending: Vec::new(),
+                rest: None,
+                truncated: false,
+            };
+            process(
+                parts, payload, source, &config, &context, upgrade, inspection,
+            )
+            .await
+        } else {
+            context.record_overloaded();
+            Err(inspection_capacity_error())
+        }
     } else if let Some(inspection) = context.reserve_request_inspection() {
         match read_body(body, &config, inspection, &context).await {
             Ok((body, inspection)) => {
@@ -912,6 +934,33 @@ pub(crate) fn request_head_error(
         return Some(HttpError::new(
             StatusCode::BAD_REQUEST,
             "non-canonical HTTP method",
+        ));
+    }
+
+    if parts.headers.get_all(HOST).iter().count() > 1 {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "duplicate Host header",
+        ));
+    }
+    if parts.headers.get_all(CONTENT_LENGTH).iter().count() > 1 {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "duplicate Content-Length header",
+        ));
+    }
+    if parts.headers.contains_key(CONTENT_LENGTH) && parts.headers.contains_key(TRANSFER_ENCODING) {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "ambiguous request framing",
+        ));
+    }
+    if let Some(encoding) = parts.headers.get(TRANSFER_ENCODING)
+        && !encoding.as_bytes().eq_ignore_ascii_case(b"chunked")
+    {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported Transfer-Encoding",
         ));
     }
 

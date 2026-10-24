@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-23; the managed set carried 492 rules then.
+2026-10-24; the managed set carried 492 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -30,7 +30,7 @@ body coverage on those routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| SQL Injection | ✅ | `sql-injection`: UNION, boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
+| SQL Injection | ✅ | `sql-injection`: UNION (including padded `/*...*/`, `--`, and `#` comments between UNION and SELECT, closed after the local lab bypassed a fixed 20-character gap), boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
 | NoSQL Injection | ✅ | `nosql-injection`: Mongo operators (`$where/$ne/$regex`, ...) |
 | OS Command Injection | ✅ | `command-injection`: shell metacharacters plus command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627) |
 | JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
@@ -59,7 +59,7 @@ body coverage on those routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match |
+| Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match. The lab-only CVE-2021-41773 fixture confirms the direct `.%2e` traversal canary extraction is blocked by the decoded path rule |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
 | Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
 | Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...) plus `limits.upload_inspection` (default `mismatch`), which rejects an executable header or active markup at the leading position and server-side script markers (`<?php`, `<?=`, `<%`) anywhere in the inspected part. Padding cannot hide a script polyglot behind an image/PDF/office/media/font claim. Archive contents, executable/markup bytes beyond the leading position, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
@@ -78,11 +78,13 @@ body coverage on those routes and does not change the bundled verdicts.
 | HTTP Response Splitting | 🔶 | Same (CRLF in headers is blocked) |
 | HTTP Parameter Pollution (HPP) | ❌ | Duplicate-parameter inspection/normalization is absent |
 | Host Header Injection | 🔶 | Full enforcement when `allowed_hosts` is configured: a missing, malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority` (HTTP/2 / HTTP/3) is rejected with `400`/`421` before body buffering and rule evaluation, and `ALLOW` rules cannot bypass it. Fresh `kunato init --acme-domain` installs seed the list and accept `--allowed-host`; manual certificate/TLS-proxy installs and existing configs opt in, and an unset list leaves the previous behavior. A client-supplied `X-Forwarded-Host` is replaced with the Host header. `malformed-host-header` and `oversized-host-header` remain as defense in depth when the policy is unset (the Rack/Forwarded allowlist CVEs are CVSS 4.8, below the bundling bar) |
-| Invalid Content-Length / Transfer-Encoding | 🔶 | Rejected at the protocol layer plus CVE-specific rules; no generic rule |
+| Invalid Content-Length / Transfer-Encoding | 🔶 | Kunato's request-head checks reject duplicate Host, duplicate Content-Length, CL+TE, and non-chunked Transfer-Encoding before forwarding; the lab's per-framing direct controls show no smuggled request reaches the origin. CVE-specific rules add defense in depth; no generic TE/CL semantics rule |
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
 | Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Head limits are enforced before body ingestion and inspection-memory reservation on HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes, including when a declared body never arrives. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
-| HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
+| HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either). Rust proxy tests replay Rapid Reset, a CONTINUATION flood, and an oversized HPACK header block while a normal HTTP/2 request still succeeds |
+| Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. The `availability` suite adds a slow-body `408`, a slow-read probe, a per-source connection cap with `503`, and an upstream-response timeout with `504`. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
+| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, immediate recovery, and metrics checks (p95 48.8 ms, p99 49.1 ms, 100% success, no block/rate-limit/overload/upstream-timeout movement). Fixed-runner trend, not a capacity claim |
 | HTTP Desync | 🔶 | Same handling as smuggling |
 
 Protocol compatibility: before HTTP/1.1 forwarding, split request `Cookie`
@@ -303,7 +305,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Unicode Encoding | 🔶 | JSON `\u0075` is decoded, but no Unicode normalization (documented in `docs/development.md`) |
 | Overlong UTF-8 | 🔶 | No normalization; specific byte patterns (e.g. `%c0%af`) are caught by raw patterns only |
 | Case Variation | ✅ | Main rules use `(?i)` |
-| Comment Insertion | ✅ | SQL timing rules tolerate comments between function name and parenthesis |
+| Comment Insertion | ✅ | SQL keyword adjacency tolerates whitespace and `/*...*/`, `--`, and `#` comments (UNION/SELECT, ALL/DISTINCT, and time-based function/parenthesis); the local lab added the padded-comment regression |
 | Null Byte | ✅ | `%00` blocked |
 | Payload / Parameter Fragmentation | 🔶 | Embedded-HTTP inspection and multipart flattening exist; general fragmentation is unhandled |
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected |
@@ -331,6 +333,42 @@ are integration-tested rather than claimed as request-corpus coverage.
 | API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
 | HTTP Flood | ✅ |
+
+## Local security lab evidence
+
+The 2026-10-24 ffuf sandbox suite confirms the current discovery verdicts on DVWA:
+`/.git/config`, `/.env`, `/.svn/entries`, `/.htaccess`, `/.DS_Store`,
+`/backup.sql`, `/config.php.bak`, `/phpinfo.php`, and `/wp-config.php` are
+blocked without origin receipts, `/admin` is blocked by
+`etherpad-admin-bypass`, `/wp-admin/` is logged, and 18 legitimate paths retain
+their status and body length. The behavior phase enables
+`protection.behavior.enumeration` with `BLOCK`; the enumeration source is banned
+(403/429) and the separate normal client stays at 200.
+
+The authenticated ZAP baseline logs in, spiders 193 control and 215 protected
+authenticated URLs, and runs the passive scan through the WAF while the normal
+client stays healthy. ZAP active scanning is not part of a passing plan: ZAP
+2.17 exits on the authenticated DVWA file-inclusion active scan. Active
+injection controls therefore remain the sqlmap UNION dump, the Nuclei
+CVE-2021-41773 canary, and goTestWAF.
+
+The 2026-10-24 mutation sandbox suite ran 15 reviewed attacks and 10 benign
+near-misses: all 15 attacks were blocked with no origin receipt and all 10
+benign cases reached the origin unchanged. The transforms covered keyword
+case, block comments, newlines, JSON and form bodies, parameter pollution,
+alternative XSS tags, dot padding, shell separators, command substitution, and
+header values. The pinned OWASP CRS 4.3.0 comparison agreed on all 25 decisions
+(`agree-block` 15, `agree-allow` 10); it is an observation, not a gate.
+
+The 2026-10-24 benign and availability suites add five benign workflows and eight
+availability checks. The benign cases (JSON API, multipart PDF upload,
+percent-encoded Japanese query, 16 KiB body, chunked response) all forwarded
+unchanged. The availability cases held a partial body to `408`, survived a
+slow read, enforced the per-source connection cap with `503` while the normal
+client stayed `200`, and timed out a slow origin with `504`; RSS, restarts, and
+the upstream-timeout metric stayed within bounds. Ban recovery remains untested.
+The Rust proxy tests add HTTP/2 Rapid Reset, CONTINUATION-flood, and oversized
+HPACK regressions; a normal HTTP/2 request still succeeds afterward.
 
 ## Notable Gaps
 
@@ -365,4 +403,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled 492-rule count; behavioral actions
-still default to LOG. The snapshot date remains 2026-10-23.
+still default to LOG. The snapshot date is 2026-10-24.

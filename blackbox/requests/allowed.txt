@@ -60,6 +60,8 @@ GET /api/search?q=selecting+a+plan
 GET /api/search?q=union+station
 GET /api/search?q=drop+table+reservations
 GET /api/search?q=how+to+use+sql
+GET /api/search?q=The+union+meeting+will+select+a+chair
+GET /docs/sql?q=UNION+%2F*+combines+rows+*%2F+and+SELECT+chooses+columns
 GET /api/search?q=rust+programming
 GET /api/suggest?q=select
 GET /api/products
@@ -491,6 +493,10 @@ GET /search?q=%22quoted%22+and+%22phrased%22
 GET /api/users?username=*
 GET /login/help?topic=asterisk*usage
 POST /login header="Content-Type: application/x-www-form-urlencoded" body="username=tanaka&password=corr3ct-h0rse"
+
+# --- Near-misses for CVE-2021-41773: legitimate Apache icons and CGI helpers ---
+GET /icons/apache_pb.svg
+GET /cgi-bin/printenv
 
 # --- Near-misses for the 2026-10-18 Koha, Risesoft, Payload, Frappe, Agora,
 #     Znuny, Countly, Misskey, Tandoor, MobSF, Checkmk, Froxlor, Vitess, and

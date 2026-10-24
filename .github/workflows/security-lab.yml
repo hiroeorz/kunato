@@ -1,0 +1,34 @@
+name: Local security lab observations
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - lab/**
+      - scripts/security-lab.sh
+      - .github/workflows/security-lab.yml
+  push:
+    branches: [main]
+    paths:
+      - lab/**
+      - scripts/security-lab.sh
+      - .github/workflows/security-lab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  observations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test observation and verdict failures
+        run: python3 -m unittest discover -s lab/tests -v
+      - name: Check the shell entrypoints and runner wrappers
+        run: shellcheck scripts/security-lab.sh lab/tool-runner.sh lab/tool-runner-nuclei.sh lab/tool-runner-ffuf.sh lab/tool-runner-zap.sh lab/tool-runner-k6.sh

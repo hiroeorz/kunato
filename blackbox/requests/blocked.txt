@@ -32,6 +32,9 @@ GET /?id=-1%20union%20select%20user(),password%20from%20users
 GET /?id=1/*!union*/select
 GET /?id=1--%20union%20select
 GET /?id=1%23union%20select
+# Padded comments between UNION and SELECT bypassed a fixed 20-character gap.
+GET /?id=1%27%20UNION%2F*aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa*%2FSELECT%201,2%20FROM%20lab_canary--%20-
+GET /?id=1%27%20UNION%20--%20aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%0ASELECT%201,2
 # --- SQL injection: boolean taunts ---
 GET /?id=1%20or%201=1
 GET /?id=1+or+1=1
@@ -228,6 +231,13 @@ POST /api/import body="filename=..\\..\\win.ini"
 GET /download?name=..%2f..%2f..%2fetc%2fpasswd
 GET /?f=../../../../../../etc/passwd
 GET /?file=test.txt%00
+
+# --- CVE-2021-41773 (Apache HTTP Server 2.4.49): encoded path traversal and CGI RCE ---
+# Dot-plus-encoded-dot segments are normalized before rule evaluation. The
+# canary path is not a known system file, so the traversal rule must stop it.
+GET /icons/.%2e/.%2e/.%2e/.%2e/opt/kunato-lab/canary.txt
+GET /icons/.%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+POST /cgi-bin/.%2e/.%2e/.%2e/.%2e/bin/sh header="Content-Type: text/plain" body="echo Content-Type: text/plain; echo; echo kunato-lab-canary"
 
 # --- Remote file inclusion ---
 # Include-style parameters whose value is a remote URL, protocol-relative, or

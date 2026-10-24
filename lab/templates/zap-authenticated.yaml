@@ -1,0 +1,41 @@
+env:
+  contexts:
+    - name: dvwa
+      urls:
+        - "__TARGET__/"
+      includePaths:
+        - "__TARGET__/.*"
+      authentication:
+        method: form
+        parameters:
+          loginPageUrl: "__TARGET__/login.php"
+          loginRequestUrl: "__TARGET__/login.php"
+          loginRequestBody: "username={%username%}&password={%password%}&Login=Login"
+        verification:
+          method: response
+          loggedInRegex: "Logout"
+      users:
+        - name: lab
+          credentials:
+            username: admin
+            password: password
+      sessionManagement:
+        method: cookie
+  parameters:
+    failOnError: true
+    progressToStdout: true
+jobs:
+  - type: spider
+    parameters:
+      context: dvwa
+      user: lab
+      maxDuration: 1
+      maxDepth: 2
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 1
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /reports
+      reportFile: zap.json

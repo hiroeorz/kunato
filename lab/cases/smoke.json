@@ -1,0 +1,15 @@
+[
+  {"id":"sqli-query","expect":"block","method":"GET","target":"/search/sqli-query?q=1%20UNION%20SELECT%20password%20FROM%20users--"},
+  {"id":"sqli-benign","expect":"allow","method":"GET","target":"/search/sqli-benign?q=O%27Reilly"},
+  {"id":"xss-query","expect":"block","method":"GET","target":"/search/xss-query?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"},
+  {"id":"xss-benign","expect":"allow","method":"GET","target":"/search/xss-benign?q=script%20writing"},
+  {"id":"traversal-query","expect":"block","method":"GET","target":"/download/traversal-query?file=..%2F..%2Fetc%2Fpasswd"},
+  {"id":"traversal-benign","expect":"allow","method":"GET","target":"/download/traversal-benign?file=vacation.jpg"},
+  {"id":"sqli-body","expect":"block","method":"POST","target":"/search/sqli-body","body":"id=1 UNION SELECT password FROM users--","headers":{"Content-Type":"text/plain"}},
+  {"id":"sqli-body-benign","expect":"allow","method":"POST","target":"/search/sqli-body-benign","body":"A union of writers selects a chair.","headers":{"Content-Type":"text/plain"}},
+  {"id":"sqli-comment-select","expect":"block","method":"GET","target":"/search/sqli-comment-select?id=1%27%20UNION%2F*aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa*%2FSELECT%201,2%20FROM%20lab_canary--%20-"},
+  {"id":"sqli-comment-benign","expect":"allow","method":"GET","target":"/search/sqli-comment-benign?q=The%20union%20meeting%20will%20select%20a%20chair"},
+  {"id":"valid-redirect","expect":"allow","method":"GET","target":"/status/302","status":302},
+  {"id":"valid-auth-failure","expect":"allow","method":"GET","target":"/status/401","status":401},
+  {"id":"valid-not-found","expect":"allow","method":"GET","target":"/status/404","status":404}
+]

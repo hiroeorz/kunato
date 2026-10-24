@@ -252,6 +252,29 @@ bundled rules and engine mechanisms cover, which are partial, and which are
 gaps, with the evidence behind every verdict. It is refreshed whenever the rule
 set or the engine changes.
 
+## Security Lab
+
+The local security lab starts a real recording HTTP server and Kunato in
+isolated Docker containers, with no published ports or host networking, and
+exercises them in a sandbox with the same pinned tools used for real scanning:
+goTestWAF, sqlmap, Nuclei against an Apache 2.4.49 CVE-2021-41773 fixture, ffuf,
+ZAP, and k6, plus raw HTTP/1.1 framing, HTTP/2 preface, and WebSocket cases.
+Every case is sent directly to the origin first, without Kunato, so the test is
+valid before the protected result is trusted; each run retains origin receipts,
+Kunato logs, resource measurements, and recovery evidence. See
+[how the lab tests sandbox suites](docs/security-lab-testing-model.md) for the
+topology, control/evidence model, verdicts, and diagrams.
+
+Run the full sandbox suite, or one focused suite at a time:
+
+```sh
+scripts/security-lab.sh prepare
+scripts/security-lab.sh run --sandbox-suite all
+scripts/security-lab.sh run --sandbox-suite protocol
+scripts/security-lab.sh run --sandbox-suite slow
+scripts/security-lab.sh run --sandbox-suite load
+```
+
 ## Development
 
 Running from source, the black-box test suite, deployment and building from
