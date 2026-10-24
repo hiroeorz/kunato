@@ -211,7 +211,7 @@ cargo run -- --config rules.yaml # Run locally
 cargo test                       # Run all tests
 cargo fmt                        # Format code
 cargo clippy --all-targets -- -D warnings  # Lint; warnings are errors
-cargo deny check                 # Dependency, license, advisory, and source audit
+./scripts/check-deny.sh          # Dependency, license, advisory, and source audit (read-only-safe)
 cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
@@ -225,10 +225,13 @@ cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
-`cargo deny check`, and `cargo test`, in that order. When touching `blackbox/`, run
-its `cargo fmt` and `cargo clippy` variants as well. If a command is unavailable or
-fails for environmental reasons, report it instead of ignoring it. The dependency
-policy lives in `deny.toml`; do not loosen it without an explicit reason.
+`./scripts/check-deny.sh`, and `cargo test`, in that order. The wrapper runs
+`cargo deny check` with a writable temporary advisory database, so it also works when
+`$CARGO_HOME` is read-only; use it instead of invoking `cargo deny check` directly.
+When touching `blackbox/`, run its `cargo fmt` and `cargo clippy` variants as well.
+If a command is unavailable or fails for environmental reasons, report it instead of
+ignoring it. The dependency policy lives in `deny.toml`; do not loosen it without an
+explicit reason.
 
 ## Design Invariants
 
