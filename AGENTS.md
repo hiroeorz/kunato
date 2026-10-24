@@ -38,6 +38,7 @@ src/
   admin.rs         # Loopback admin listener exposing /metrics
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
+  cidr.rs          # IPv4/IPv6 CIDR parsing and matching
   metrics.rs       # Prometheus counters and gauges
   acme/            # RFC 8555 client, TLS-ALPN-01 resolver, and certificate cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
@@ -45,6 +46,7 @@ src/
   php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations
   upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
+  snapshot.rs      # Immutable config and runtime snapshots
   yaml/            # In-tree YAML parser and serde deserializer
   config/
     mod.rs         # YAML schema, loading, validation, compilation

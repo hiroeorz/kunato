@@ -92,4 +92,26 @@ mod tests {
         snapshot.store(Arc::new(2));
         assert_eq!(*snapshot.load(), 2);
     }
+
+    #[test]
+    fn concurrent_loads_see_complete_snapshots() {
+        const LAST: u32 = 256;
+        let snapshot = Arc::new(Snapshot::new(0_u32));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let snapshot = Arc::clone(&snapshot);
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        assert!(*snapshot.load() < LAST);
+                    }
+                })
+            })
+            .collect();
+        for value in 0..LAST {
+            snapshot.store(Arc::new(value));
+        }
+        for reader in readers {
+            reader.join().expect("reader");
+        }
+    }
 }

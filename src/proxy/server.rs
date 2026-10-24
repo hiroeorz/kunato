@@ -295,7 +295,7 @@ impl Context {
     pub(crate) fn client_for(&self, config: &CompiledConfig) -> Arc<UpstreamClient> {
         let current = self.client.load();
         if current.connect_timeout() == config.timeouts.upstream_connect {
-            return Arc::clone(&current);
+            return current;
         }
         drop(current);
         let replacement = Arc::new(UpstreamClient::new(config.timeouts.upstream_connect));

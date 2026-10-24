@@ -173,6 +173,14 @@ mod tests {
         ] {
             assert!(value.parse::<IpNet>().is_err(), "{value}");
         }
+        assert!(
+            IpNet::new("10.0.0.1".parse().expect("ip"), 33).is_err(),
+            "IPv4 prefix over 32"
+        );
+        assert!(
+            IpNet::new("2001:db8::1".parse().expect("ip"), 129).is_err(),
+            "IPv6 prefix over 128"
+        );
     }
 
     #[test]

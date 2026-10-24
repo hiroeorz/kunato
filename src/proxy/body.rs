@@ -11,6 +11,7 @@ use hyper::body::{Body, Frame, SizeHint};
 use super::BoxError;
 
 pub trait BodyExt: Body + Sized {
+    /// Poll the next body frame without pinning the caller.
     fn frame(&mut self) -> FrameFuture<'_, Self>
     where
         Self: Unpin,
@@ -18,6 +19,8 @@ pub trait BodyExt: Body + Sized {
         FrameFuture { body: self }
     }
 
+    /// Collect the whole body. The caller is responsible for bounding the body
+    /// size; use `frame()` when a read must be limited.
     fn collect(self) -> Collect<Self>
     where
         Self: Unpin,
@@ -70,9 +73,14 @@ pub struct Full<T> {
     data: Option<T>,
 }
 
-impl<T> Full<T> {
+impl<T: Buf> Full<T> {
     pub fn new(data: T) -> Self {
-        Self { data: Some(data) }
+        let data = if data.has_remaining() {
+            Some(data)
+        } else {
+            None
+        };
+        Self { data }
     }
 }
 
@@ -219,5 +227,35 @@ impl<D: Buf> Collected<D> {
             buffer.put(chunk);
         }
         buffer.freeze()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BodyExt, BoxBody, Full};
+    use crate::proxy::BoxError;
+    use bytes::Bytes;
+    use hyper::body::Body;
+
+    #[tokio::test]
+    async fn empty_full_is_end_stream_and_has_no_frames() {
+        let mut body = Full::new(Bytes::new());
+        assert!(body.is_end_stream());
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn boxed_full_collects_all_data() {
+        let body: BoxBody<Bytes, BoxError> = Full::new(Bytes::from_static(b"abc")).boxed();
+        let collected = body.collect().await.expect("collect");
+        assert_eq!(collected.to_bytes(), Bytes::from_static(b"abc"));
+    }
+
+    #[tokio::test]
+    async fn full_size_hint_is_exact() {
+        let body = Full::new(Bytes::from_static(b"abcd"));
+        assert_eq!(body.size_hint().exact(), Some(4));
+        let empty = Full::new(Bytes::new());
+        assert_eq!(empty.size_hint().exact(), Some(0));
     }
 }

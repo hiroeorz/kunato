@@ -101,7 +101,7 @@ async fn handle(
             break;
         };
         if let Some(chunk) = frame.data_ref() {
-            if body.len() + chunk.len() > MAX_BODY_BYTES {
+            if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
                 too_large = true;
                 break;
             }

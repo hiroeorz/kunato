@@ -677,6 +677,7 @@ src/
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
   client_ip.rs     # Bounded identity assertions from explicitly trusted proxies
+  cidr.rs          # IPv4/IPv6 CIDR parsing and matching
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document extraction and depth/field analysis
@@ -695,9 +696,11 @@ src/
     client.rs      # Upstream client
     forward.rs     # Header and body forwarding
     response.rs    # Response buffering and response-phase inspection
+    body.rs        # In-tree HTTP body helpers
     tls.rs         # Certificate loading and rustls server configuration
     http3.rs       # QUIC endpoint and HTTP/3 request handling
   request_view.rs  # Borrowed request and response representations for the rule engine
+  snapshot.rs      # Immutable config and runtime snapshots
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
 examples/
@@ -725,7 +728,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `serde`                   | Config and rule schema         | Typed config with `deny_unknown_fields`; YAML parsing and the serde deserializer are in-tree (`src/yaml/`). |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `regex-syntax`            | Regex HIR analysis             | Validates that ALLOW patterns are fully anchored.          |
-| `serde_json`              | JSON logs and GraphQL bodies   | Structured `kunato log` records/parsing and GraphQL request inspection. |
+| `serde_json`              | JSON logs and ACME payloads    | Structured `kunato log` records, telemetry, GraphQL request inspection, and ACME/JOSE payloads. |
 | `tracing`                 | Structured logging             | Event macros are shared with hyper and quinn; the subscriber, filter, and text/JSON formatters are in-tree. |
 | `log`                     | Dependency log bridge          | Already present via rustls; forwards dependency records to the in-tree subscriber. |
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
