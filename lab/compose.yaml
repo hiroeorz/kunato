@@ -1,0 +1,98 @@
+x-runtime: &runtime
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  mem_limit: 256m
+  memswap_limit: 256m
+  cpus: 1.0
+  pids_limit: 64
+  init: true
+  restart: "no"
+  pull_policy: never
+  dns: [127.0.0.1]
+  dns_search: ["."]
+  dns_opt: ["timeout:1", "attempts:1"]
+  tmpfs:
+    - /tmp:size=16777216,mode=1777
+  logging:
+    driver: json-file
+    options: { max-size: 4m, max-file: "2" }
+
+services:
+  origin:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    entrypoint: [python3, -B, /lab/origin.py]
+    environment:
+      LAB_NONCE: ${LAB_NONCE}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks:
+      back:
+        aliases: [app.test]
+
+  kunato:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    entrypoint: [/kunato]
+    command: [--config, /config/rules.yaml, --disable-protection, --log-format, json, --log-level, debug]
+    volumes:
+      - ${LAB_INPUT}/kunato:/kunato:ro
+      - ${LAB_INPUT}/config:/config:ro
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks:
+      front:
+        aliases: [app.test]
+      back: {}
+
+  client:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, -B, /lab/probe.py]
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
+  control:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, -B, /lab/probe.py]
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [back]
+
+  gotestwaf:
+    <<: *runtime
+    image: ${LAB_GOTESTWAF_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    init: false
+    entrypoint: [/sbin/tini, --, /bin/sh, /lab/tool-runner.sh]
+    mem_limit: 512m
+    memswap_limit: 512m
+    tmpfs:
+      - /tmp:size=16777216,mode=1777
+      - /reports:size=33554432,mode=1777
+      - /app/reports:size=1048576,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
+  gotestwaf-control:
+    extends:
+      service: gotestwaf
+    networks: !override [back]
+
+networks:
+  front:
+    internal: true
+  back:
+    internal: true

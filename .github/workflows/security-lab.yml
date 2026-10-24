@@ -1,0 +1,58 @@
+name: Local security lab
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - lab/**
+      - scripts/security-lab.sh
+      - rules.example.yaml
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/security-lab.yml
+  push:
+    branches: [main]
+    paths:
+      - lab/**
+      - scripts/security-lab.sh
+      - rules.example.yaml
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/security-lab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test observation and verdict failures
+        run: python3 -m unittest discover -s lab/tests -v
+      - name: Check the shell entrypoint
+        run: shellcheck scripts/security-lab.sh lab/tool-runner.sh
+      - name: Prepare frozen inputs
+        run: scripts/security-lab.sh prepare
+      - name: Run direct controls and protected campaigns
+        run: scripts/security-lab.sh run --campaign gotestwaf
+      - name: Retain reports and reproduction inputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-lab-evidence
+          path: |
+            target/security-lab/2*/
+            !target/security-lab/2*/input/kunato
+          if-no-files-found: warn
+          retention-days: 14

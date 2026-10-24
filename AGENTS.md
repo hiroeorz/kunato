@@ -57,6 +57,7 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
+lab/               # Isolated recording-origin and attack-tool test environment
 dist/
   rules.yaml       # Managed rule set for daily updates (generated; keep in sync)
   rules.yaml.sha256
@@ -72,6 +73,7 @@ docs/
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
+  security-testing.md # Local attack-tool lab design and verification process
 packaging/
   kunato.service   # systemd unit
 rules.example.yaml # Example configuration

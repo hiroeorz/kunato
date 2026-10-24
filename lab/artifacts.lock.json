@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "platform": "linux/amd64",
+  "tool_versions": { "gotestwaf": "v0.5.8" },
+  "images": {
+    "python": "python@sha256:57b29a7c050c4e679e4bea572e14b3965cf4b5839de2da49d55e49ffc4024f39",
+    "gotestwaf": "wallarm/gotestwaf@sha256:ff7184da90029a98c87bfdbadcee544c979b999593175d17b2d38f642ee29977"
+  }
+}

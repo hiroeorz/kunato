@@ -67,6 +67,12 @@ can be expressed as an HTTP request are listed. Classes that need TLS-internal
 state, raw connection framing, or a malicious upstream are recorded as comments
 at the end of the list instead.
 
+For the selected attack tools, isolated local lab topology, evidence requirements,
+and the discovery-to-regression process, see the
+[local adversarial testing design](security-testing.md). The initial recording
+origin and goTestWAF smoke campaign are available through the
+[lab entrypoint](../lab/README.md); later exploit/workflow campaigns remain planned.
+
 ## Dependency Audit
 
 `cargo deny check` runs the advisory, license, ban, and source policy in
