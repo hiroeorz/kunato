@@ -164,12 +164,86 @@ ceiling. Recovery is checked immediately after the load stops.
 - The bounded sandbox suites (`all`, `crs`, `protocol`, `slow`, `load`) are run
   locally before committing and pushing. CI runs only the lab observation unit
   tests and the shellcheck wrappers.
-- The last `all` run, `20261024T220844-52156979`, passed 10 sandbox suites: replay,
+- The last `all` run, `20261024T224332-cd8f6f28`, passed 10 sandbox suites: replay,
   mutations, protocol, slow, load, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP.
-  The mixed load recorded 3001 requests, p95 48.8 ms, p99 48.9 ms, 100%
-  success, normal/recovery `200`, RSS 21.8 MiB of 256 MiB, and no restart.
+  The mixed load recorded 3001 requests, p95 51.4 ms, p99 54.9 ms, 100%
+  success, normal/recovery `200`, RSS 21.9 MiB of 256 MiB, and no restart.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
   [lab usage](../lab/README.md); the target design and cadence are in
   [the adversarial testing design](security-testing.md).
+
+## Remaining coverage
+
+The implemented sandbox suites are a bounded regression harness, not a
+certification. The [attack coverage tracker](attack-coverage.md) still marks many
+classes as partial or absent, and the following areas are not exercised by the
+current suites.
+
+### Attack and engine coverage
+
+- The tracker lists HPP, Content-Type spoofing, API version/schema abuse,
+  session/JWT anomalies, business-logic classes (IDOR, coupon/carding, scalping),
+  and rule-bypass payloads as absent. HTTP request smuggling, desync, response
+  splitting, upload inspection, and GraphQL abuse are partial.
+- The WebSocket suite proves the handshake and tunnel establishment; it does not
+  inspect frames after the upgrade, fragmentation, PING/PONG, or close
+  semantics. The 25 mutations and the tool corpora are reviewed samples, not the
+  full scanner catalogs.
+
+### Protocol coverage
+
+- HTTP/2 is limited to the connection preface. SETTINGS/CONTINUATION, Rapid
+  Reset, HPACK bombs, stream-state abuse, GOAWAY, priority, and h2c are not
+  exercised.
+- HTTP/3, QUIC, and TLS termination/ACME are not exercised in the lab. HTTP/1.0,
+  pipelining, CONNECT, obs-fold, chunked trailers, and very large chunks are not
+  exercised beyond the 12 reviewed cases.
+- WebSocket frames after the upgrade, and the rules that would apply to them,
+  are not tested.
+
+### Availability coverage
+
+- The slow suite holds 8 partial-header connections for 2 seconds. Slow bodies,
+  slow reads, slow upstreams, connection exhaustion, max-connection limits,
+  queue/backpressure, and inspection-budget pressure are not exercised.
+- The load suite is a fixed 50 requests/second run. H2 Rapid Reset, CONTINUATION
+  floods, and HPACK bombs are not attempted; ban/rate-limit recovery windows and
+  distributed sources (impossible in one lab) remain untested. OOM, restart, and
+  graceful-shutdown behavior under pressure are not part of the passing suites.
+
+### Workflows and false positives
+
+- ZAP active scanning is still blocked by the authenticated DVWA fixture; only
+  the spider/passive baseline runs. Authenticated APIs, JSON/GraphQL workflows,
+  multipart and streaming bodies, i18n, large legitimate bodies, and legitimate
+  WebSocket traffic are not in the benign corpus.
+- goTestWAF, sqlmap, Nuclei, ffuf, ZAP, and CRS run bounded plans. The full
+  scanner corpora and additional tamper/template/paranoia variants are not.
+
+### Operations
+
+- Hot reload under load, rules-update failures and format compatibility,
+  `allowed_hosts`/`client_ip`/trusted-proxy combinations, metrics/logs/audit,
+  restart state, and multi-worker or HTTP/2/HTTP/3 upstream translation are not
+  covered by the suites; unit and proxy tests cover parts of these paths.
+
+### Priorities
+
+1. ZAP active scanning, once the authenticated fixture no longer aborts it.
+2. HTTP/2 frame-level cases and HTTP/3; extend the Rust integration fixtures
+   before adding external clients.
+3. WebSocket frame inspection and fragmentation/close behavior.
+4. Slow body/read, connection exhaustion, slow upstream, and ban/recovery.
+5. A broader benign corpus for APIs, uploads, i18n, and streaming.
+6. Hot reload and rules updates under load; metrics and restart behavior.
+7. Full scanner corpora on a nightly or weekly cadence.
+
+### Limits
+
+A fixed single host and fixed runner make the load numbers trends, not capacity
+or distributed-attack claims. The fixtures cover only their bounded scenarios,
+and a zero-finding run means the executed cases passed, not that the application
+is protected against every bypass. The lab's value is the reproducible
+regression loop; the coverage list above is the backlog that keeps it honest.
