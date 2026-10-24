@@ -350,6 +350,14 @@ client stays healthy. ZAP active scanning is not part of a passing plan: ZAP
 injection controls therefore remain the sqlmap UNION dump, the Nuclei
 CVE-2021-41773 canary, and goTestWAF.
 
+The 2026-10-24 mutation campaign ran 15 reviewed attacks and 10 benign
+near-misses: all 15 attacks were blocked with no origin receipt and all 10
+benign cases reached the origin unchanged. The transforms covered keyword
+case, block comments, newlines, JSON and form bodies, parameter pollution,
+alternative XSS tags, dot padding, shell separators, command substitution, and
+header values. The pinned OWASP CRS 4.3.0 comparison agreed on all 25 decisions
+(`agree-block` 15, `agree-allow` 10); it is an observation, not a gate.
+
 ## Notable Gaps
 
 JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in

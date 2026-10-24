@@ -72,9 +72,10 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--forbidden-host", action="append", default=[])
     parser.add_argument("--forbidden-ip", action="append", default=[])
+    parser.add_argument("--cases", default="/lab/cases/smoke.json")
     args = parser.parse_args()
     if args.mode == "cases":
-        for case in json.loads(Path("/lab/cases/smoke.json").read_text()):
+        for case in json.loads(Path(args.cases).read_text()):
             print(json.dumps(request(case)), flush=True)
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},

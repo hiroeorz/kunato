@@ -279,6 +279,32 @@ services:
       service: zap
     networks: !override [back]
 
+  crs:
+    image: ${LAB_CRS_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    environment:
+      BACKEND: http://origin:8080
+      PORT: "8080"
+      SERVER_NAME: app.test
+      METADATA: kunato-lab-crs
+      MODSEC_RULE_ENGINE: "on"
+      BLOCKING_PARANOIA: "1"
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1
+    pids_limit: 256
+    init: true
+    read_only: false
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+      - /var/log/apache2:size=67108864,mode=1777
+      - /var/log/modsecurity:size=67108864,mode=1777
+    networks: [front, back]
+
 networks:
   front:
     internal: true

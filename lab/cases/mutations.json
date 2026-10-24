@@ -1,0 +1,235 @@
+[
+  {
+    "id": "mut-sqli-case",
+    "expect": "block",
+    "seed": "smoke:sqli-query",
+    "transform": "case-toggle",
+    "interpretation": "SQL keywords are case-insensitive; mixed case must not evade the UNION SELECT rule.",
+    "method": "GET",
+    "target": "/search/mut-sqli-case?q=1%27%20UnIoN%20SeLeCt%20password%20FrOm%20users--"
+  },
+  {
+    "id": "mut-sqli-inline",
+    "expect": "block",
+    "seed": "smoke:sqli-comment-select",
+    "transform": "inline-comment",
+    "interpretation": "MySQL treats a block comment as whitespace; the comment-aware rule must still see UNION SELECT.",
+    "method": "GET",
+    "target": "/search/mut-sqli-inline?q=1%27%2F%2A%2A%2FUNION%2F%2A%2A%2FSELECT%2F%2A%2A%2Fpassword%2F%2A%2A%2FFROM%2F%2A%2A%2Fusers--"
+  },
+  {
+    "id": "mut-sqli-newline",
+    "expect": "block",
+    "seed": "smoke:sqli-query",
+    "transform": "line-break",
+    "interpretation": "A newline is whitespace to MySQL and must not split the UNION SELECT signature.",
+    "method": "GET",
+    "target": "/search/mut-sqli-newline?q=1%27%0AUNION%0ASELECT%0Apassword%0AFROM%0Ausers--"
+  },
+  {
+    "id": "mut-sqli-whitespace",
+    "expect": "block",
+    "seed": "smoke:sqli-query",
+    "transform": "whitespace-padding",
+    "interpretation": "Extra spaces and tabs are semantically irrelevant to the UNION SELECT statement.",
+    "method": "GET",
+    "target": "/search/mut-sqli-whitespace?q=1%27%20%20UNION%20%09%20SELECT%20%20password%20%20FROM%20%20users--"
+  },
+  {
+    "id": "mut-sqli-json-body",
+    "expect": "block",
+    "seed": "smoke:sqli-query",
+    "transform": "json-body",
+    "interpretation": "A JSON string value reaches the same database sink and must be inspected as a body parameter.",
+    "method": "POST",
+    "target": "/search/mut-sqli-json-body",
+    "body": "{\"q\":\"1' UNION SELECT password FROM users--\"}",
+    "headers": {"Content-Type": "application/json"}
+  },
+  {
+    "id": "mut-sqli-form-body",
+    "expect": "block",
+    "seed": "smoke:sqli-body",
+    "transform": "urlencoded-body",
+    "interpretation": "URL-encoded form bodies decode to the same UNION SELECT statement before the application uses them.",
+    "method": "POST",
+    "target": "/search/mut-sqli-form-body",
+    "body": "q=1%27+UNION+SELECT+password+FROM+users--",
+    "headers": {"Content-Type": "application/x-www-form-urlencoded"}
+  },
+  {
+    "id": "mut-sqli-hpp",
+    "expect": "block",
+    "seed": "smoke:sqli-query",
+    "transform": "parameter-pollution",
+    "interpretation": "HTTP parameter pollution keeps the attack in the query even when the first value is benign.",
+    "method": "GET",
+    "target": "/search/mut-sqli-hpp?q=benign&q=1%27%20UNION%20SELECT%20password%20FROM%20users--"
+  },
+  {
+    "id": "mut-xss-case",
+    "expect": "block",
+    "seed": "smoke:xss-query",
+    "transform": "case-toggle",
+    "interpretation": "HTML tag and attribute names are case-insensitive; mixed case must stay blocked.",
+    "method": "GET",
+    "target": "/search/mut-xss-case?q=%3CScRiPt%3Ealert(1)%3C%2FScRiPt%3E"
+  },
+  {
+    "id": "mut-xss-img",
+    "expect": "block",
+    "seed": "smoke:xss-query",
+    "transform": "attribute-breakout",
+    "interpretation": "A quote breakout followed by an event handler executes in the same reflected context.",
+    "method": "GET",
+    "target": "/search/mut-xss-img?q=%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E"
+  },
+  {
+    "id": "mut-xss-svg",
+    "expect": "block",
+    "seed": "smoke:xss-query",
+    "transform": "alternative-tag",
+    "interpretation": "SVG onload is an equivalent script execution path and is not covered only by a script-tag signature.",
+    "method": "GET",
+    "target": "/search/mut-xss-svg?q=%3Csvg%2Fonload%3Dalert(1)%3E"
+  },
+  {
+    "id": "mut-traversal-dots",
+    "expect": "block",
+    "seed": "smoke:traversal-query",
+    "transform": "dot-padding",
+    "interpretation": "Dot padding plus a duplicate slash still contains a parent-directory segment after normalization.",
+    "method": "GET",
+    "target": "/download/mut-traversal-dots?file=....%2F%2F....%2F%2Fetc%2Fpasswd"
+  },
+  {
+    "id": "mut-command-semicolon",
+    "expect": "block",
+    "seed": "blackbox:command-injection",
+    "transform": "shell-separator",
+    "interpretation": "A semicolon separates a second shell command when the parameter reaches a command line.",
+    "method": "GET",
+    "target": "/diagnostics/mut-command-semicolon?host=127.0.0.1%3Bid"
+  },
+  {
+    "id": "mut-command-pipe",
+    "expect": "block",
+    "seed": "blackbox:command-injection",
+    "transform": "pipe",
+    "interpretation": "A pipe forwards output into a second command and is a shell metacharacter.",
+    "method": "GET",
+    "target": "/diagnostics/mut-command-pipe?host=127.0.0.1%7Cid"
+  },
+  {
+    "id": "mut-command-subshell",
+    "expect": "block",
+    "seed": "blackbox:command-injection",
+    "transform": "substitution",
+    "interpretation": "Command substitution runs in the same shell before the host argument is consumed.",
+    "method": "GET",
+    "target": "/diagnostics/mut-command-subshell?host=%24(id)"
+  },
+  {
+    "id": "mut-header-xss",
+    "expect": "block",
+    "seed": "smoke:xss-query",
+    "transform": "header-value",
+    "interpretation": "A script in a custom header reaches a downstream logging or reflection sink and is inspected by header rules.",
+    "method": "GET",
+    "target": "/search/mut-header-xss",
+    "headers": {"X-Lab-Comment": "<script>alert(1)</script>"}
+  },
+  {
+    "id": "mut-sqli-benign-case",
+    "expect": "allow",
+    "seed": "smoke:sqli-benign",
+    "transform": "prose",
+    "interpretation": "The words union and select in ordinary prose are not a UNION SELECT statement.",
+    "method": "GET",
+    "target": "/search/mut-sqli-benign-case?q=The%20union%20meeting%20will%20select%20a%20chair"
+  },
+  {
+    "id": "mut-sqli-benign-comment",
+    "expect": "allow",
+    "seed": "smoke:sqli-comment-benign",
+    "transform": "inline-comment-prose",
+    "interpretation": "Block comments inside ordinary prose do not make the empty select word into a SQL statement.",
+    "method": "GET",
+    "target": "/search/mut-sqli-benign-comment?q=The%2F%2A%2A%2Funion%2F%2A%2A%2Fmeeting%2F%2A%2A%2Fselects%2F%2A%2A%2Fa%2F%2A%2A%2Fchair"
+  },
+  {
+    "id": "mut-sqli-benign-hpp",
+    "expect": "allow",
+    "seed": "smoke:sqli-benign",
+    "transform": "parameter-pollution-prose",
+    "interpretation": "Duplicate benign values are still ordinary prose and must not be treated as one SQL statement.",
+    "method": "GET",
+    "target": "/search/mut-sqli-benign-hpp?q=The%20union%20selects%20a%20chair&q=benign"
+  },
+  {
+    "id": "mut-sqli-benign-json",
+    "expect": "allow",
+    "seed": "smoke:sqli-body-benign",
+    "transform": "json-body-prose",
+    "interpretation": "The same prose in a JSON string is not a SQL statement.",
+    "method": "POST",
+    "target": "/search/mut-sqli-benign-json",
+    "body": "{\"q\":\"The union selects a chair\"}",
+    "headers": {"Content-Type": "application/json"}
+  },
+  {
+    "id": "mut-xss-benign",
+    "expect": "allow",
+    "seed": "smoke:xss-benign",
+    "transform": "prose",
+    "interpretation": "The word script in prose is not an executable tag.",
+    "method": "GET",
+    "target": "/search/mut-xss-benign?q=The%20script%20writing%20workshop"
+  },
+  {
+    "id": "mut-xss-entity",
+    "expect": "allow",
+    "seed": "smoke:xss-benign",
+    "transform": "html-entity",
+    "interpretation": "HTML entities render as text in the query context and are not an executable tag; blocking them is a false positive.",
+    "method": "GET",
+    "target": "/search/mut-xss-entity?q=The%20%26lt%3Bscript%26gt%3B%20tag%20is%20shown%20as%20text"
+  },
+  {
+    "id": "mut-traversal-benign",
+    "expect": "allow",
+    "seed": "smoke:traversal-benign",
+    "transform": "filename-dots",
+    "interpretation": "Two dots in a filename without a slash do not form a parent-directory traversal.",
+    "method": "GET",
+    "target": "/download/mut-traversal-benign?file=report..final.pdf"
+  },
+  {
+    "id": "mut-command-benign-semicolon",
+    "expect": "allow",
+    "seed": "blackbox:command-injection-benign",
+    "transform": "version-delimiter",
+    "interpretation": "A semicolon separating version metadata is not a shell separator; blocking it is a false positive.",
+    "method": "GET",
+    "target": "/release/mut-command-benign-semicolon?version=1.2.3%3Bbuild%3D4"
+  },
+  {
+    "id": "mut-command-benign-pipe",
+    "expect": "allow",
+    "seed": "blackbox:command-injection-benign",
+    "transform": "format-list",
+    "interpretation": "A pipe listing two export formats is data, not a pipeline to a second command.",
+    "method": "GET",
+    "target": "/release/mut-command-benign-pipe?formats=csv%7Ctsv"
+  },
+  {
+    "id": "mut-header-benign",
+    "expect": "allow",
+    "seed": "smoke:xss-benign",
+    "transform": "header-value-prose",
+    "interpretation": "A version string in a custom header is not executable markup.",
+    "method": "GET",
+    "target": "/search/mut-header-benign",
+    "headers": {"X-Lab-Comment": "version 1.2"}
+  }
+]

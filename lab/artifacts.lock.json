@@ -7,6 +7,7 @@
     "nuclei": "v3.11.1",
     "ffuf": "2.3.0",
     "zap": "2.17.0",
+    "crs": "4.3.0",
     "dvwa": "ghcr.io/digininja/dvwa@sha256:8029450682bd70e2e8cd1ffe8e46dd1885ff2a913296091cebfa8ba0a7d36498",
     "mariadb": "10.11",
     "httpd": "2.4.49"
@@ -27,6 +28,7 @@
     "sqlmap": "secsi/sqlmap@sha256:dcc989c4f1c87d31f680494dde502b000906bbd5187c61dca135b35c98963fcf",
     "nuclei": "projectdiscovery/nuclei@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb",
     "zap": "zaproxy/zap-stable@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+    "crs": "owasp/modsecurity-crs@sha256:e387db49158de654328b5cc5eff9588ff03131d9b081ddfae29a953ecf92b66a",
     "httpd": "httpd@sha256:dcba0d12e2362fb0c50ec524ae8aa1cca4a4ba7216617a57e7bbca20767e79cc"
   },
   "fixtures": {

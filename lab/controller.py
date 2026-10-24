@@ -15,11 +15,11 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-from evidence import (USER_AGENT, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf,
-                      judge_nuclei, judge_replay, judge_sqlmap, judge_zap,
-                      judge_zap_workflow, origin_response, read_jsonl, summarize,
-                      validate_cases,
-                      validate_ffuf_cases, verify_origin)
+from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
+                      judge_gotestwaf, judge_mutations, judge_nuclei, judge_replay,
+                      judge_sqlmap, judge_zap, judge_zap_workflow, origin_response,
+                      read_jsonl, summarize, validate_cases, validate_ffuf_cases,
+                      validate_mutations, verify_origin)
 
 ROOT = Path(__file__).resolve().parent.parent
 LAB = ROOT / "lab"
@@ -257,6 +257,7 @@ class Campaign:
                     "LAB_SQLMAP_IMAGE": self.manifest["images"]["sqlmap"]["id"],
                     "LAB_NUCLEI_IMAGE": self.manifest["images"]["nuclei"]["id"],
                     "LAB_ZAP_IMAGE": self.manifest["images"]["zap"]["id"],
+                    "LAB_CRS_IMAGE": self.manifest["images"]["crs"]["id"],
                     "LAB_CVE_IMAGE": self.manifest["fixtures"]["httpd_cve_2021_41773"]["id"]}
         self.base = ["docker", "compose", "--project-name", self.project,
                      "--file", str(self.input / "lab/compose.yaml")]
@@ -393,6 +394,28 @@ class Campaign:
         origin, waf = self.logs("replay")
         verdicts = judge_replay(cases, controls, results, origin, waf, nonce)
         return summarize(verdicts)
+
+    def mutations(self):
+        cases = json.loads((self.input / "lab/plans/mutations.json").read_text())
+        control_nonce = self.reset_origin("mutations-control")
+        self.preflight("origin")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", "/lab/plans/mutations.json"),
+                              log=self.run_dir / "mutations-control/probes.jsonl")
+        control_origin, _ = self.logs("mutations-control")
+        verify_origin(control_origin, control_nonce)
+        for case, observation in zip(cases, controls, strict=True):
+            observation["validated"] = origin_response(case, observation, control_nonce)
+        if not all(observation["validated"] for observation in controls):
+            raise ValueError("Direct mutation controls failed")
+        write_json(self.run_dir / "mutations-control/validated.json", controls)
+        nonce = self.reset_origin("mutations")
+        results = self.probe("client", "cases",
+                             extra=("--cases", "/lab/plans/mutations.json"),
+                             log=self.run_dir / "mutations/probes.jsonl")
+        self.healthy("mutations", nonce=nonce)
+        origin, waf = self.logs("mutations")
+        return judge_mutations(cases, controls, results, origin, waf, nonce)
 
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)
@@ -643,6 +666,42 @@ class Campaign:
         return judge_zap_workflow(control_log, protected_log, control_report,
                                   protected_report, control_access, protected_access, waf)
 
+    def crs(self):
+        cases = json.loads((self.input / "lab/plans/mutations.json").read_text())
+        control_nonce = self.reset_origin("crs-control")
+        self.preflight("origin")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", "/lab/plans/mutations.json"),
+                              log=self.run_dir / "crs-control/probes.jsonl")
+        control_origin, _ = self.logs("crs-control")
+        verify_origin(control_origin, control_nonce)
+        for case, observation in zip(cases, controls, strict=True):
+            observation["validated"] = origin_response(case, observation, control_nonce)
+        if not all(observation["validated"] for observation in controls):
+            raise ValueError("Direct CRS-comparison controls failed")
+        write_json(self.run_dir / "crs-control/validated.json", controls)
+        kunato_nonce = self.reset_origin("crs-kunato")
+        kunato_results = self.probe("client", "cases",
+                                    extra=("--cases", "/lab/plans/mutations.json"),
+                                    log=self.run_dir / "crs-kunato/probes.jsonl")
+        self.healthy("crs-kunato", nonce=kunato_nonce)
+        kunato_origin, kunato_waf = self.logs("crs-kunato")
+        kunato_verdicts = judge_replay(cases, controls, kunato_results, kunato_origin,
+                                       kunato_waf, kunato_nonce)
+        crs_nonce = self.reset_origin("crs")
+        self.compose("up", "-d", "crs")
+        self.wait_health("crs", "client",
+                         ("--host", "crs", "--port", "8080", "--path", "/health",
+                          "--status", "200"), nonce=crs_nonce)
+        crs_results = self.probe("client", "cases",
+                                 extra=("--cases", "/lab/plans/mutations.json",
+                                        "--host", "crs", "--port", "8080"),
+                                 log=self.run_dir / "crs/probes.jsonl")
+        crs_origin, _ = self.logs("crs")
+        self.raw_logs("crs", "crs")
+        self.compose("rm", "-s", "-f", "crs", check=False)
+        return judge_crs(cases, crs_results, kunato_verdicts, crs_origin, crs_nonce)
+
     def tool(self, phase, service, args, name, timeout):
         directory = self.run_dir / phase
         directory.mkdir(exist_ok=True)
@@ -727,6 +786,8 @@ def new_run(campaign):
     validate_cases(cases)
     ffuf_cases = json.loads((LAB / "cases/ffuf.json").read_text())
     validate_ffuf_cases(ffuf_cases)
+    mutation_cases = json.loads((LAB / "cases/mutations.json").read_text())
+    validate_mutations(mutation_cases)
     plans = input_dir / "lab/plans"
     plans.mkdir(exist_ok=True)
     write_gotestwaf_cases(plans / "gotestwaf", cases)
@@ -737,6 +798,7 @@ def new_run(campaign):
         zap_template.replace("__TARGET__", "http://dvwa"))
     (plans / "zap.yaml").write_text(
         zap_template.replace("__TARGET__", "http://app.test:8080"))
+    write_json(plans / "mutations.json", mutation_cases)
     hashes = {str(path.relative_to(input_dir)): sha256(path) for path in sorted(input_dir.rglob("*")) if path.is_file()}
     manifest.update(run_id=run_id, project="kunato-lab-" + run_id.lower(), campaign=campaign,
                     commit=command(["git", "rev-parse", "HEAD"]).stdout.strip(), inputs=hashes)
@@ -757,6 +819,8 @@ def run(campaign):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
         report["campaigns"]["replay"] = lab.replay()
+        if campaign in {"mutations", "all"}:
+            report["campaigns"]["mutations"] = lab.mutations()
         if campaign in {"gotestwaf", "all"}:
             report["campaigns"]["gotestwaf"] = lab.gotestwaf()
         if campaign in {"sqlmap", "all"}:
@@ -767,6 +831,8 @@ def run(campaign):
             report["campaigns"]["ffuf"] = lab.ffuf()
         if campaign in {"zap", "all"}:
             report["campaigns"]["zap"] = lab.zap()
+        if campaign == "crs":
+            report["campaigns"]["crs"] = lab.crs()
         report["passed"] = all(result["passed"] for result in report["campaigns"].values())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, TypeError) as error:
         report["error"] = str(error)
@@ -819,7 +885,8 @@ def main():
     subs.add_parser("verify", help="Check prepared inputs without downloads")
     runner = subs.add_parser("run", help="Run the isolated regression campaigns")
     runner.add_argument("--campaign",
-                        choices=["replay", "gotestwaf", "sqlmap", "nuclei", "ffuf", "zap", "all"],
+                        choices=["replay", "mutations", "gotestwaf", "sqlmap", "nuclei",
+                                 "ffuf", "zap", "crs", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)

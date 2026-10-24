@@ -58,7 +58,7 @@ src/
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
 lab/               # Isolated WAF lab with recording/DVWA/CVE fixtures and pinned tools
-  cases/           # Replay and ffuf discovery cases, benign guards, and expected outcomes
+  cases/           # Replay, ffuf discovery, and deterministic mutation cases
   fixtures/        # DVWA bootstrap and the lab-only CVE fixture
   templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
   tool-runner-*.sh # Bounded wrappers for detached lab scanners

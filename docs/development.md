@@ -71,10 +71,10 @@ For the selected attack tools, isolated local lab topology, evidence requirement
 and the discovery-to-regression process, see the
 [local adversarial testing design](security-testing.md). The recording origin,
 goTestWAF, DVWA/sqlmap, one CVE/Nuclei campaign, ffuf path discovery and
-enumeration behavior, and the authenticated ZAP spider/passive baseline are
+enumeration behavior, the authenticated ZAP spider/passive baseline, and 25
+deterministic mutation variants with an optional OWASP CRS comparison are
 available through the [lab entrypoint](../lab/README.md). ZAP active scanning,
-deterministic mutation, CRS comparison, protocol, and load campaigns remain
-planned.
+protocol, and load campaigns remain planned.
 
 ## Dependency Audit
 

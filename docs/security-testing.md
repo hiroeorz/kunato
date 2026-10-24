@@ -2,23 +2,23 @@
 
 Status: design selected on 2026-10-24. The recording origin, curated goTestWAF,
 DVWA/sqlmap, the CVE-2021-41773/Nuclei fixture, ffuf path discovery and
-enumeration behavior, and an authenticated ZAP spider/passive baseline are
+enumeration behavior, an authenticated ZAP spider/passive baseline, 25
+deterministic mutation variants, and a pinned OWASP CRS 4.3.0 comparison are
 available; see [lab usage](../lab/README.md). ZAP active scanning is currently
 blocked by a ZAP 2.17 plan exit on the authenticated DVWA file-inclusion page;
-deterministic mutation, CRS comparison, and protocol/load campaigns remain
-planned. This document describes the complete target design, not achieved attack
-coverage.
+protocol/load campaigns remain planned. This document describes the complete
+target design, not achieved attack coverage.
 
 ## Decision
 
 Use a disposable local Linux VM with Docker Engine and Compose for vulnerable
 applications and attack tools. Start with **goTestWAF, Nuclei, and sqlmap**, plus
-Kunato's existing black-box runner. Add ZAP and ffuf next, then mutations and
-protocol/load campaigns after per-case evidence collection works. The
-implemented ZAP plan covers form login, spidering, and passive discovery; the
-active-scan plan must be revisited when the authenticated fixture no longer
-aborts ZAP 2.17, and the passing active-injection controls remain
-sqlmap/Nuclei/goTestWAF.
+Kunato's existing black-box runner. Add ZAP, ffuf, deterministic mutation, and
+the optional OWASP CRS comparison next, then protocol/load campaigns after
+per-case evidence collection works. The implemented ZAP plan covers form login,
+spidering, and passive discovery; the active-scan plan must be revisited when
+the authenticated fixture no longer aborts ZAP 2.17, and the passing
+active-injection controls remain sqlmap/Nuclei/goTestWAF.
 
 These are development dependencies: Kunato still deploys as one binary and one
 configuration file. The core tools run locally without a paid service. Selection
@@ -167,6 +167,7 @@ fallback does not count as an H2/H3 test.
 | Payload efficacy | Use a fixed ordinary User-Agent and verify that templates did not override it. Every relevant attack runs here even if default fingerprints already trigger a block. |
 | Protection/behavior | Enable intended rate/connection/ban settings and remove matching `protection.allowlist` entries. Check thresholds, windows, recovery, and normal traffic from a separate source. The ffuf behavior phase uses an explicit enumeration `BLOCK` profile and a long-lived normal client whose address cannot reuse the banned runner. |
 | Workflow/discovery | Authenticate through the form and spider/passively scan the application with ZAP; run bounded ffuf path discovery with the same wordlist directly and through the WAF. Require receipts, status/length parity, LOG/block events, and a separate normal source. ZAP active scanning is attempted but not part of a passing plan until the authenticated fixture no longer aborts ZAP 2.17. |
+| Mutation/reference | Run reviewed seed/transform variants (case, comments, whitespace, body formats, parameter pollution, alternative tags, dot padding, shell metacharacters, headers) with direct controls, no origin receipts on blocks, and benign near-misses. Optionally compare the same corpus through a pinned OWASP CRS proxy; report agreement as an observation, not a gate. |
 | Full configuration | Run intended rules and policies with explicit lab addresses/keys and no trusted test sources; assert complete legitimate workflows and actual rejection reasons. |
 
 `--disable-protection` does not disable YAML rule-level limits. A later ban or
@@ -326,22 +327,24 @@ existing reporting. Check `Cargo.toml` before justifying any new crate. Keep
 downloaded third-party corpora outside Git and preserve provenance/licenses when
 importing reviewed samples into repository regressions.
 
-Milestones 1 and 2 are implemented (recording origin, goTestWAF, DVWA/sqlmap,
-and the CVE-2021-41773 canary). Milestone 3 is partially implemented: ffuf
-discovery/enumeration and the authenticated ZAP spider/passive baseline pass;
-ZAP active scanning, deterministic mutations, and CRS comparison remain planned.
+Milestones 1-3 are implemented with one ZAP limitation: recording origin,
+goTestWAF, DVWA/sqlmap, the CVE-2021-41773 canary, ffuf
+discovery/enumeration, the authenticated ZAP spider/passive baseline, 25
+deterministic mutation variants, and the optional OWASP CRS comparison pass.
+ZAP active scanning remains blocked by the authenticated fixture, and protocol
+and load campaigns remain planned.
 
 | Milestone | Deliverable and acceptance evidence |
 | --- | --- |
 | 1. Evidence foundation | Networks, version lock, reset/preflight, recording origin, case report. Valid requests are observed, known blocks are absent, private-source ALLOW is removed, and broken controls/collection fail the run. |
 | 2. Initial attack loop | goTestWAF, DVWA/sqlmap, one selected high-severity HTTP CVE fixture/Nuclei template. Direct controls succeed; ordinary-UA results have evidence; confirmed failures become attack/benign regression pairs, or a bounded no-gap result is recorded. |
-| 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. Implemented: ffuf discovery/enumeration and the authenticated ZAP spider/passive baseline. ZAP active scanning is blocked on the authenticated DVWA file-inclusion page; mutations and CRS remain. |
+| 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. Implemented: ffuf discovery/enumeration, the authenticated ZAP spider/passive baseline, and 25 mutation variants whose 15 attacks are blocked and 10 benign cases pass; the CRS 4.3.0 comparison agrees on all 25. ZAP active scanning is blocked on the authenticated DVWA file-inclusion page. |
 | 4. Protocol/availability | Raw/H2/H3/WS cases, k6, slow HTTP. Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
 | 5. Continuous regression | Fast PR gates, scheduled discovery, release smoke tests. Mandatory cases cannot silently skip and reports reproduce locally. |
 
 | Cadence | Workload and gate |
 | --- | --- |
-| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline campaigns. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
+| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline campaigns, plus the optional CRS comparison. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
 | Daily/on demand | Existing CVE intake plus selected template/fixture smoke tests with pinned inputs. Promote confirmed findings into reviewed regressions; do not demand 100% of an unreviewed public scanner catalog. |
 | Weekly/on demand | Larger ZAP/ffuf/mutation campaigns and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
 | Before release | Stable regressions, representative fixture controls, protocol/availability on a fixed runner, rule compatibility, and archived evidence. |

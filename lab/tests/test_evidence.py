@@ -10,9 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
-from evidence import (USER_AGENT, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf,
-                      judge_nuclei, judge_replay, judge_sqlmap, judge_zap,
-                      judge_zap_workflow, summarize)
+from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
+                      judge_gotestwaf, judge_mutations, judge_nuclei, judge_replay,
+                      judge_sqlmap, judge_zap, judge_zap_workflow, summarize,
+                      validate_mutations)
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -302,6 +303,57 @@ class FfufAndZapTests(unittest.TestCase):
         gap = judge_zap(control, control, "", "", waf)
         self.assertEqual(gap["cases"][1]["verdict"], "gap")
         self.assertFalse(gap["passed"])
+
+
+class MutationAndCrsTests(unittest.TestCase):
+    @staticmethod
+    def mutation(case_id, expect, target):
+        return {"id": case_id, "expect": expect, "method": "GET", "target": target,
+                "seed": "test-seed", "transform": "test-transform",
+                "interpretation": "test interpretation"}
+
+    def test_mutations_retain_seed_and_interpretation(self):
+        cases = [self.mutation("mutation-block", "block", "/mut?q=1")]
+        controls = [{"id": "mutation-block", "validated": True}]
+        results = [{"id": "mutation-block", "status": 403, "origin": None}]
+        origin = [{"event": "ready", "nonce": "n"}]
+        waf = [{"fields": {"message": "request blocked", "path": "/mut", "rule": "rule",
+                           "rate_limited": False}}]
+        result = judge_mutations(cases, controls, results, origin, waf, "n")
+        self.assertEqual(result["cases"][0]["verdict"], "prevented")
+        self.assertEqual(result["cases"][0]["seed"], "test-seed")
+        self.assertEqual(result["notes"]["transforms"], ["test-transform"])
+        self.assertTrue(result["passed"])
+
+    def test_mutations_require_provenance(self):
+        cases = [{"id": "mutation-block", "expect": "block", "method": "GET",
+                  "target": "/mut?q=1"}]
+        with self.assertRaises(ValueError):
+            validate_mutations(cases)
+
+    def test_crs_comparison_records_agreement_and_false_blocks(self):
+        cases = [self.mutation("attack", "block", "/attack?q=1"),
+                 self.mutation("benign", "allow", "/benign?q=2")]
+        nonce = "n"
+        body = {"origin": nonce, "case_id": "benign", "target": "/benign?q=2",
+                "method": "GET", "user_agent": USER_AGENT,
+                "body_sha256": hashlib.sha256(b"").hexdigest()}
+        crs_results = [{"id": "attack", "status": 403, "origin": None},
+                       {"id": "benign", "status": 200, "origin": nonce,
+                        "response": json.dumps(body)}]
+        crs_origin = [{"event": "ready", "nonce": nonce},
+                      {"event": "received", "nonce": nonce, "case_id": "benign"}]
+        kunato = [{"id": "attack", "verdict": "prevented"},
+                  {"id": "benign", "verdict": "passed"}]
+        result = judge_crs(cases, crs_results, kunato, crs_origin, nonce)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["counts"], {"agree-block": 1, "agree-allow": 1})
+        false_block = judge_crs(cases,
+                                [{"id": "attack", "status": 403, "origin": None},
+                                 {"id": "benign", "status": 403, "origin": None}],
+                                kunato, [{"event": "ready", "nonce": nonce}], nonce)
+        self.assertEqual(false_block["counts"], {"agree-block": 1, "crs-false-block": 1})
+        self.assertTrue(false_block["passed"])
 
 
 if __name__ == "__main__":

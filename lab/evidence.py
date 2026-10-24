@@ -61,6 +61,15 @@ def validate_cases(cases):
             raise ValueError("Unsupported method")
 
 
+def validate_mutations(cases):
+    validate_cases(cases)
+    for case in cases:
+        for field in ("seed", "transform", "interpretation"):
+            value = case.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Mutation case {case['id']} lacks {field}")
+
+
 def origin_response(case, result, nonce):
     if result.get("error") or result.get("origin") != nonce:
         return False
@@ -112,6 +121,82 @@ def judge_replay(cases, controls, results, origin, waf_events, nonce):
                          "status": result.get("status"), "origin_receipts": receipts[case["id"]],
                          "rules": [{"category": b.get("category"), "rule": b.get("rule")} for b in blocks]})
     return verdicts
+
+
+def judge_mutations(cases, controls, results, origin, waf_events, nonce):
+    """Judge mutation variants with replay semantics and retain their provenance."""
+    validate_mutations(cases)
+    verdicts = judge_replay(cases, controls, results, origin, waf_events, nonce)
+    metadata = {case["id"]: case for case in cases}
+    for verdict in verdicts:
+        case = metadata[verdict["id"]]
+        verdict.update(seed=case["seed"], transform=case["transform"],
+                       interpretation=case["interpretation"])
+    result = summarize(verdicts)
+    result["notes"] = {
+        "planned": len(cases),
+        "seeds": sorted({case["seed"] for case in cases}),
+        "transforms": sorted({case["transform"] for case in cases}),
+    }
+    return result
+
+
+def judge_crs(cases, crs_results, kunato_verdicts, crs_origin, crs_nonce,
+              crs_version="4.3.0"):
+    """Compare CRS and Kunato decisions for the same mutation corpus."""
+    validate_mutations(cases)
+    verify_origin(crs_origin, crs_nonce)
+    expected_ids = {case["id"] for case in cases}
+    ids = [result["id"] for result in crs_results]
+    if len(ids) != len(set(ids)) or set(ids) != expected_ids:
+        raise ValueError("Missing, duplicate, or unexpected CRS probe results")
+    results = {result["id"]: result for result in crs_results}
+    verdicts = {verdict["id"]: verdict for verdict in kunato_verdicts}
+    receipts = Counter(event.get("case_id") for event in crs_origin
+                       if event.get("event") == "received")
+    rows = []
+    counts = Counter()
+    for case in cases:
+        result = results[case["id"]]
+        if result.get("error"):
+            crs = "inconclusive"
+        elif result.get("status") == 403 and result.get("origin") is None:
+            crs = "blocked"
+        elif origin_response(case, result, crs_nonce):
+            crs = "allowed"
+        else:
+            crs = "inconclusive"
+        kunato = verdicts.get(case["id"], {}).get("verdict", "inconclusive")
+        kunato_correct = kunato == ("prevented" if case["expect"] == "block" else "passed")
+        if case["expect"] == "block":
+            if crs == "blocked" and kunato_correct:
+                agreement = "agree-block"
+            elif crs == "blocked":
+                agreement = "crs-only"
+            elif kunato_correct:
+                agreement = "kunato-only"
+            elif crs == "inconclusive" or kunato == "inconclusive":
+                agreement = "inconclusive"
+            else:
+                agreement = "both-miss"
+        elif crs == "allowed" and kunato_correct:
+            agreement = "agree-allow"
+        elif crs == "blocked" and kunato_correct:
+            agreement = "crs-false-block"
+        elif crs == "allowed" and kunato == "false-block":
+            agreement = "kunato-false-block"
+        elif crs == "inconclusive" or kunato == "inconclusive":
+            agreement = "inconclusive"
+        else:
+            agreement = "both-false-block"
+        counts[agreement] += 1
+        rows.append({"id": case["id"], "expect": case["expect"], "verdict": "observed",
+                     "crs": crs, "kunato": kunato, "agreement": agreement,
+                     "origin_receipts": receipts[case["id"]]})
+    return {"passed": True, "counts": dict(counts), "cases": rows,
+            "notes": {"crs_version": crs_version, "planned": len(cases),
+                      "observation": "CRS comparison is reported, not used as a gate",
+                      "agreement_counts": dict(counts)}}
 
 
 def judge_gotestwaf(report, origin, waf_events, nonce, planned, control=False):

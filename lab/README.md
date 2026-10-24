@@ -1,11 +1,13 @@
 # Local security lab
 
 This covers the first three milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and six WAF campaigns.
-It runs curated goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a
-Nuclei canary against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
-path-discovery/enumeration comparison, and an authenticated ZAP spider/passive
-baseline. It measures request rejection and bounded exploit prevention; the
+an isolated recording origin, direct receipt controls, and eight bounded
+campaigns (the optional CRS comparison is not part of `all`). It runs curated
+goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
+against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
+path-discovery/enumeration comparison, an authenticated ZAP spider/passive
+baseline, 25 deterministic mutation variants, and a pinned OWASP CRS 4.3.0
+comparison. It measures request rejection and bounded exploit prevention; the
 fixtures do not prove protection for arbitrary applications. ZAP active
 scanning, protocol fuzzing, and load campaigns remain subsequent work: the
 current ZAP 2.17 plan exits on the authenticated DVWA file-inclusion active
@@ -36,6 +38,8 @@ scripts/security-lab.sh run --campaign sqlmap
 scripts/security-lab.sh run --campaign nuclei
 scripts/security-lab.sh run --campaign ffuf
 scripts/security-lab.sh run --campaign zap
+scripts/security-lab.sh run --campaign mutations
+scripts/security-lab.sh run --campaign crs   # optional CRS comparison, observation only
 scripts/security-lab.sh run --campaign all
 ```
 
@@ -76,6 +80,7 @@ The prepared inputs are pinned in `artifacts.lock.json`:
 | `nuclei` image | CVE-2021-41773 template execution |
 | `ffuf` v2.3.0 binary | bounded path discovery and enumeration behavior |
 | `zap` image | authenticated spider/passive baseline |
+| `crs` image | optional OWASP CRS 4.3.0 reference comparison |
 | `httpd` image | base for the lab-only CVE-2021-41773 fixture |
 
 The CVE fixture is built during `prepare` from the pinned `httpd` base and the
@@ -150,6 +155,29 @@ exits the plan on this authenticated DVWA file-inclusion active scan, and active
 injection defenses remain covered by the sqlmap, Nuclei, and goTestWAF
 campaigns.
 
+### Deterministic mutations
+
+`cases/mutations.json` contains 25 reviewed variants derived from the replay
+and black-box seeds. Every entry records the seed, deterministic transform, and
+interpretation. The direct control must receive every variant with the exact
+method, target, body hash, and User-Agent; the protected run must block all 15
+attacks with a matching Kunato rule and no origin receipt, and pass all 10
+benign near-misses. The cases cover keyword case, block comments, newlines,
+body formats, parameter pollution, alternative XSS tags, dot padding, shell
+metacharacters, and header values. The mutation table in the report retains the
+seed, transform, and interpretation through `report.json`.
+
+### OWASP CRS comparison
+
+`--campaign crs` runs the same 25 mutation cases directly through a pinned
+OWASP CRS 4.3.0 reverse proxy and through Kunato, then reports the per-case
+agreement. The 2026-10-24 comparison agreed on all 15 attacks (`agree-block`)
+and all 10 benign cases (`agree-allow`). This is an observation, not a gate:
+CRS rule IDs, paranoia, and fixture-specific behavior are not Kunato's
+specification. The CRS service joins the front and back networks; its image's
+unprivileged `httpd` user writes the rendered config and logs, so this
+comparison fixture has an exception to the read-only tool filesystem rule.
+
 ## Evidence and case changes
 
 Each run prints its directory under `target/security-lab/`. It retains:
@@ -170,6 +198,10 @@ Each run prints its directory under `target/security-lab/`. It retains:
   DVWA access logs, health probes, and Kunato logs;
 - `zap-control/` and `zap/`: authenticated ZAP plan logs and JSON reports, DVWA
   access logs, health probes, and Kunato logs;
+- `mutations-control/` and `mutations/`: direct and protected mutation probes,
+  origin logs, and Kunato logs;
+- `crs-control/`, `crs-kunato/`, and `crs/`: CRS-comparison direct control,
+  Kunato baseline, CRS probe results, origin logs, and the ModSecurity audit;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
   diagnostics;
 - `commands.jsonl` and `cleanup.json`: executed commands and verification that
@@ -193,9 +225,9 @@ Validate collector and verdict failures locally:
 python3 -m unittest discover -s lab/tests -v
 ```
 
-The separate security-lab workflow runs these checks and the isolated `all`
-campaign for relevant pull requests and supports manual execution. The daily CVE
-publishing workflow is unchanged. The CVE-2021-41773 canary rows are also in
+The separate security-lab workflow runs these checks, the isolated `all`
+campaign, and the optional CRS comparison for relevant pull requests and
+supports manual execution. The daily CVE publishing workflow is unchanged. The CVE-2021-41773 canary rows are also in
 `blackbox/requests/` so the ordinary black-box gate retains the request shapes.
 
 ## Limits
@@ -206,12 +238,13 @@ blocked tool, or an inconclusive collection fails the run; it is never counted
 as defense success. The lab does not test arbitrary applications, distributed
 sources, or availability. The authenticated ZAP baseline covers login, spider,
 and passive discovery; active scanning is not yet part of the passing plan, and
-the active injection defenses remain the sqlmap/Nuclei/goTestWAF campaigns.
-Deterministic mutation and protocol/load campaigns are the next milestones.
+the active injection defenses remain the sqlmap/Nuclei/goTestWAF campaigns. The
+mutation corpus and the CRS comparison are bounded to the reviewed seeds and
+fixtures; protocol and load campaigns are the next milestones.
 
 The fixtures and tools retain their upstream licenses and provenance: the DVWA
 image and source, MariaDB, Apache httpd 2.4.49, sqlmap, Nuclei, goTestWAF,
-ffuf, ZAP, and the upstream [nuclei-templates CVE-2021-41773
+ffuf, ZAP, the OWASP CRS image, and the upstream [nuclei-templates CVE-2021-41773
 template](https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2021/CVE-2021-41773.yaml)
 and [Vulhub reproduction](https://github.com/vulhub/vulhub/tree/master/httpd/CVE-2021-41773).
 The canary template and fixture configuration are lab adaptations; their hashes
