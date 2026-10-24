@@ -84,7 +84,7 @@ body coverage on those routes and does not change the bundled verdicts.
 | Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Head limits are enforced before body ingestion and inspection-memory reservation on HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes, including when a declared body never arrives. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either). Rust proxy tests replay Rapid Reset, a CONTINUATION flood, and an oversized HPACK header block while a normal HTTP/2 request still succeeds |
 | Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. The `availability` suite adds a slow-body `408`, a slow-read probe, a per-source connection cap with `503`, and an upstream-response timeout with `504`. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
-| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, immediate recovery, and metrics checks (p95 48.8 ms, p99 49.1 ms, 100% success, no block/rate-limit/overload/upstream-timeout movement). Fixed-runner trend, not a capacity claim |
+| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, immediate recovery, and metrics checks (p95 49.9 ms, p99 53.2 ms, 100% success, no block/rate-limit/overload/upstream-timeout movement). Fixed-runner trend, not a capacity claim |
 | HTTP Desync | 🔶 | Same handling as smuggling |
 
 Protocol compatibility: before HTTP/1.1 forwarding, split request `Cookie`
@@ -347,10 +347,11 @@ their status and body length. The behavior phase enables
 
 The authenticated ZAP baseline logs in, spiders 193 control and 215 protected
 authenticated URLs, and runs the passive scan through the WAF while the normal
-client stays healthy. ZAP active scanning is not part of a passing plan: ZAP
-2.17 exits on the authenticated DVWA file-inclusion active scan. Active
-injection controls therefore remain the sqlmap UNION dump, the Nuclei
-CVE-2021-41773 canary, and goTestWAF.
+client stays healthy. ZAP active scanning is deferred: a scoped plan still
+exited at activeScan start with ZAP 2.17.0 (code 2, empty report), and the
+pinned image is the latest published stable digest. Active injection controls
+therefore remain the sqlmap UNION dump, the Nuclei CVE-2021-41773 canary, and
+goTestWAF.
 
 The 2026-10-24 mutation sandbox suite ran 15 reviewed attacks and 10 benign
 near-misses: all 15 attacks were blocked with no origin receipt and all 10
@@ -366,9 +367,14 @@ percent-encoded Japanese query, 16 KiB body, chunked response) all forwarded
 unchanged. The availability cases held a partial body to `408`, survived a
 slow read, enforced the per-source connection cap with `503` while the normal
 client stayed `200`, and timed out a slow origin with `504`; RSS, restarts, and
-the upstream-timeout metric stayed within bounds. Ban recovery remains untested.
-The Rust proxy tests add HTTP/2 Rapid Reset, CONTINUATION-flood, and oversized
-HPACK regressions; a normal HTTP/2 request still succeeds afterward.
+the upstream-timeout metric stayed within bounds. The ban suite then triggered a
+`429` ban from one source, observed a `200` recovery after the two-second ban,
+kept the independent normal client at `200`, and recorded the ban counter. The
+WebSocket suite proved PING/PONG, a fragmented text echo, and a close handshake
+through the tunnel. The Rust proxy tests add HTTP/2 Rapid Reset,
+CONTINUATION-flood, oversized HPACK, a malformed raw HTTP/3 request stream, hot
+reload under load, and rules update plus reload under load; normal HTTP/2 and
+HTTP/3 requests still succeed afterward.
 
 ## Notable Gaps
 

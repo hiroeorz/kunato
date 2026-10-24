@@ -1,21 +1,23 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and thirteen bounded
+an isolated recording origin, direct receipt controls, and fifteen bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
 baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
-benign JSON/upload/i18n/large-body/streaming workflows, bounded slow-HTTP and
-availability probes, a pinned k6 v2.3.0 mixed availability load, and a
-pinned OWASP CRS 4.3.0 comparison. It measures request rejection, bounded
-exploit prevention, and availability on a fixed runner; the fixtures do not
-prove protection for arbitrary applications or capacity. The
+benign JSON/upload/i18n/large-body/streaming workflows, bounded slow-HTTP,
+availability, ban-recovery, and WebSocket lifecycle probes, a pinned k6 v2.3.0
+mixed availability load, and a pinned OWASP CRS 4.3.0 comparison. It measures
+request rejection, bounded exploit prevention, and availability on a fixed
+runner; the fixtures do not prove protection for arbitrary applications or
+capacity. The
 [testing model](../docs/security-lab-testing-model.md) explains the control and
-evidence flow, the verdict rules, and the sandbox suite diagrams. The ZAP 2.17 plan
-exits on the authenticated DVWA file-inclusion active scan, so active-injection
-coverage stays with sqlmap, Nuclei, and goTestWAF.
+evidence flow, the verdict rules, and the sandbox suite diagrams. ZAP active
+scanning is deferred: ZAP 2.17.0 exits at activeScan start even in a scoped plan
+(code 2, empty report), and no newer stable image is published, so
+active-injection coverage stays with sqlmap, Nuclei, and goTestWAF.
 
 ## Run locally
 
@@ -47,6 +49,8 @@ scripts/security-lab.sh run --sandbox-suite mutations
 scripts/security-lab.sh run --sandbox-suite protocol
 scripts/security-lab.sh run --sandbox-suite slow
 scripts/security-lab.sh run --sandbox-suite availability
+scripts/security-lab.sh run --sandbox-suite ban
+scripts/security-lab.sh run --sandbox-suite websocket
 scripts/security-lab.sh run --sandbox-suite load
 scripts/security-lab.sh run --sandbox-suite crs   # optional CRS comparison, observation only
 scripts/security-lab.sh run --sandbox-suite all
@@ -170,10 +174,12 @@ report. The direct control and the protected run must both discover the
 authenticated pages (at least 80% of the control count) and produce a report;
 the normal client must stay healthy and the protected run records any blocked
 requests. This verifies the authenticated workflow across the WAF; it does not
-claim active-scan defense. The plan intentionally omits `activeScan`: ZAP 2.17
-exits the plan on this authenticated DVWA file-inclusion active scan, and active
-injection defenses remain covered by the sqlmap, Nuclei, and goTestWAF
-sandbox suites.
+claim active-scan defense. The plan intentionally omits `activeScan`. A scoped
+observation-only plan was also attempted: it limited scope to SQLi and reflected
+XSS, excluded file-inclusion/setup/security/logout, and set `failOnError: false`,
+but ZAP 2.17.0 still exited at `Job activeScan started` with code 2 and no
+report. Active injection defenses remain covered by the sqlmap, Nuclei, and
+goTestWAF sandbox suites.
 
 ### Deterministic mutations
 
@@ -206,6 +212,17 @@ and 8 prevented. HTTP/2 frame-level regressions (Rapid Reset, a CONTINUATION
 flood, and an oversized HPACK header block) live in the Rust proxy tests rather
 than this container suite.
 
+### WebSocket lifecycle
+
+`--sandbox-suite websocket` runs a direct control and a protected WebSocket
+handshake. It sends a masked PING and requires the matching PONG, sends a
+fragmented text message and requires the origin's concatenated echo, and sends a
+close frame and requires the close handshake. The independent normal client must
+stay at `200`. This proves tunnel pass-through for control, fragmentation, and
+close frames; inspecting application payloads inside the tunnel remains a
+separate feature. The current result is 6 passed with PONG, the `echo:fragmented`
+response, and the close handshake on the protected path.
+
 ### Slow HTTP
 
 `--sandbox-suite slow` opens 8 bounded slow connections with partial headers,
@@ -215,7 +232,7 @@ after, and the containers run under the 256 MiB / 64-pid ceilings, but this
 suite does not assert resource thresholds or restarts; the mixed-load suite
 does. The probe is the lab's own raw-socket mode (`lab/probe.py slow`), not
 slowhttptest. The current result is 2 passed: 8 connections held, normal 200,
-CPU 0.00-0.02%, RSS 21.1-21.4 MiB.
+CPU 0.01-0.03%, RSS 21.1-21.4 MiB.
 
 ### Availability boundaries
 
@@ -226,7 +243,18 @@ response without reading it, fills the per-source connection budget (the next
 connection must get `503` while the independent normal client stays `200`),
 requests an origin that sleeps beyond the upstream timeout (expecting `504`),
 and asserts the normal probe, RSS, restarts, and the upstream-timeout metric.
-Ban recovery is not part of this suite yet.
+Slow upstream connect and multi-source exhaustion remain outside the suite.
+
+### Ban recovery
+
+`--sandbox-suite ban` uses `rules-ban.yaml` with one request per second, a burst
+of one, two ban violations, and a two-second ban. The probe sends ten requests
+from one source, requires a `429` ban, waits for the ban to expire, and requires
+a `200` recovery. The independent normal client must stay at `200`, and the
+`kunato_banned_total` counter must reflect the ban. A distinct probe suite keeps
+ban recovery separate from the availability boundaries. The current result is
+5 passed: the trigger statuses include `429`, recovery is `200`, and the normal
+client stays at `200`.
 
 ### Mixed load
 
@@ -239,9 +267,9 @@ the judge also requires the normal and recovery probes to return 200, no Kunato
 restart, and RSS under the 256 MiB ceiling. Recovery is checked immediately
 after the load stops. The `load-metrics` case also checks that Kunato's request
 counter covers the k6 workload and that no block, rate-limit, overload, or
-upstream-timeout counter moved. The current result is 6 passed: 3001 requests,
-p95 48.8 ms, p99 49.1 ms, 100% success, 8 slow connections held, normal and
-recovery 200, RSS 21.9 MiB, no restart, and matching metrics.
+upstream-timeout counter moved. The current result is 6 passed: 3000 requests,
+p95 49.9 ms, p99 53.2 ms, 100% success, 8 slow connections held, normal and
+recovery 200, RSS 21.8 MiB, no restart, and matching metrics.
 
 ### OWASP CRS comparison
 
@@ -286,6 +314,10 @@ Each run prints its directory under `target/security-lab/`. It retains:
   probes, metrics, and Kunato logs;
 - `availability/`: slow-body, slow-read, connection-cap, and slow-upstream
   probes, health probes, metrics, and Kunato logs;
+- `ban/`: ban-trigger statuses, recovery probe, health, metrics, and Kunato
+  logs;
+- `websocket-control/` and `websocket/`: direct and protected PING/PONG,
+  fragmented echo, close-handshake probes, and health;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
   diagnostics;
 - `commands.jsonl` and `cleanup.json`: executed commands and verification that
@@ -328,10 +360,14 @@ authenticated ZAP baseline covers login, spider, and passive discovery; active
 scanning is not part of the passing plan, and the active injection defenses
 remain the sqlmap/Nuclei/goTestWAF sandbox suites. The mutation corpus, the protocol
 cases, and the CRS comparison are bounded to the reviewed seeds, fixtures, and
-framing interpretations. The benign corpus has one case per workflow, and the
+framing interpretations. The benign corpus has one case per workflow, the
 availability suite covers body-read timeout, slow reads, the per-source
-connection cap, and upstream-response timeout; ban recovery, slow upstream
-connection establishment, and multi-source exhaustion are not covered.
+connection cap, and upstream-response timeout, and the ban suite covers ban
+recovery with a short window. Slow upstream connection establishment,
+multi-source exhaustion, and application payload inspection inside WebSocket
+tunnels are not covered. The Rust proxy tests add HTTP/3 malformed request
+streams, hot reload under load, and rules update plus reload under load; those
+paths are not part of this container suite.
 
 The fixtures and tools retain their upstream licenses and provenance: the DVWA
 image and source, MariaDB, Apache httpd 2.4.49, sqlmap, Nuclei, goTestWAF,

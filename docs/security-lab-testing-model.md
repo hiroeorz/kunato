@@ -123,12 +123,26 @@ handshake, reads the response headers, sends one masked frame, and requires a
 but not asserted. A handshake check does not imply inspection of later tunnel
 messages.
 
+### WebSocket lifecycle
+
+The `websocket` suite runs a direct control and a protected WebSocket handshake,
+then sends a masked PING and requires the matching PONG, a fragmented text
+message and requires the origin's concatenated echo, and a close frame and
+requires the close handshake. The independent normal client must stay at `200`.
+This covers tunnel pass-through for control, fragmentation, and close frames;
+inspecting application payloads inside the tunnel remains a separate feature.
+
 ### Pinned tools
 
 goTestWAF, sqlmap, Nuclei, ffuf, and ZAP run the same bounded scan against the
 direct control and through Kunato. Their reports, the origin receipts, and
 Kunato's block records are joined per case. ZAP runs the authenticated
-spider/passive baseline; its active scan is not part of the passing plan.
+spider/passive baseline; its active scan is not part of the passing plan. A
+scoped, observation-only active plan was attempted with SQLi and reflected XSS
+only, file-inclusion/setup/security/logout excluded, and `failOnError: false`;
+ZAP 2.17.0 still exited at `Job activeScan started` with code 2 and an empty
+report. The pinned image and Docker Hub `latest` share the same 2.17.0 digest,
+so active ZAP scanning stays deferred.
 
 ### Bounded slow HTTP
 
@@ -148,8 +162,16 @@ opens a large response without reading it, fills the per-source connection
 budget so the next connection gets `503` while the independent normal client
 stays `200`, and requests an origin that sleeps past the upstream timeout so the
 client gets `504`. The same suite checks RSS, restarts, the normal client, and
-the upstream-timeout metric. Ban recovery, slow upstream connect, and
-multi-source exhaustion remain outside the suite.
+the upstream-timeout metric. Slow upstream connect and multi-source exhaustion
+remain outside the suite.
+
+### Ban recovery
+
+The `ban` suite uses a dedicated configuration with one request per second, a
+burst of one, two ban violations, and a two-second ban. It sends ten requests
+from one source, requires a `429` ban, waits for the ban to expire, and requires
+a `200` recovery from the same source. The independent normal client must stay
+at `200`, and the `kunato_banned_total` counter must reflect the ban.
 
 ### Mixed availability load
 
@@ -198,13 +220,15 @@ to remain at zero.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The last `all` run, `20261024T234913-f07aeedc`, passed 12 sandbox suites:
-  replay, benign, mutations, protocol, slow, availability, load, goTestWAF,
-  sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001 requests, p95
-  48.8 ms, p99 49.1 ms, 100% success, normal/recovery `200`, RSS 21.9 MiB of
-  256 MiB, no restart, and matching metrics. The availability suite recorded a
-  slow-body `408`, slow-read `200`, connection-cap `503`, upstream `504`, and
-  23.6 MiB RSS.
+- The last `all` run, `20261025T003757-8e7d00e3`, passed 14 sandbox suites:
+  replay, benign, mutations, protocol, slow, availability, ban, websocket, load,
+  goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3000
+  requests, p95 49.9 ms, p99 53.2 ms, 100% success, normal/recovery `200`, RSS
+  21.8 MiB of 256 MiB, no restart, and matching metrics. The availability suite
+  recorded a slow-body `408`, slow-read `200`, connection-cap `503`, upstream
+  `504`, and 23.6 MiB RSS. The ban suite recorded a `429` ban and `200`
+  recovery; the websocket suite recorded PONG, the fragmented echo, and the
+  close handshake.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -225,9 +249,9 @@ current suites.
   and rule-bypass payloads as absent; JWT tampering and algorithm confusion are
   partial. HTTP request smuggling, desync, response splitting, upload
   inspection, and GraphQL abuse are partial.
-- The WebSocket suite proves the handshake and tunnel establishment; it does not
-  inspect frames after the upgrade, fragmentation, PING/PONG, or close
-  semantics. The 25 mutations and the tool corpora are reviewed samples, not the
+- The WebSocket suite now proves the handshake, PING/PONG, fragmented echo, and
+  close handshake; it still does not inspect application payloads after the
+  upgrade. The 25 mutations and the tool corpora are reviewed samples, not the
   full scanner catalogs.
 
 ### Protocol coverage
@@ -237,11 +261,13 @@ current suites.
   block; the lab does not exercise SETTINGS/CONTINUATION under load, HPACK
   resource pressure, stream-state abuse, GOAWAY, priority, or h2c.
 - HTTP/3, QUIC, and TLS termination/ACME are not exercised in the lab, although
-  the Rust proxy tests cover functional H3 requests. HTTP/1.0, pipelining,
-  CONNECT, chunked trailers, and very large chunks are not exercised beyond the
-  12 reviewed cases; the single obs-fold case has no variants.
-- The rules that would apply to WebSocket frames after the upgrade are not
-  tested; the suite only establishes the tunnel and echoes one frame.
+  the Rust proxy tests cover functional H3 requests and a malformed raw H3
+  request-stream case. HTTP/1.0, pipelining, CONNECT, chunked trailers, and very
+  large chunks are not exercised beyond the 12 reviewed cases; the single
+  obs-fold case has no variants.
+- The rules that would apply to WebSocket application payloads after the
+  upgrade are not tested; the suite covers control, fragmentation, and close
+  frames only.
 
 ### Availability coverage
 
@@ -249,7 +275,9 @@ current suites.
   availability suite adds a slow-body `408`, a slow-read probe, a per-source
   connection cap with `503`, and an upstream-response timeout with `504`. Slow
   upstream connect, multi-source and global exhaustion, queue/backpressure,
-  inspection-budget pressure, and ban recovery are not exercised.
+  and inspection-budget pressure are not exercised. The ban suite adds a
+  short-window ban trigger, a recovery request, a normal-client check, and the
+  `kunato_banned_total` counter.
 - The load suite is a fixed 50 requests/second run and now checks Kunato's
   request, block, rate-limit, overload, and upstream-timeout counters. H2 Rapid
   Reset, CONTINUATION floods, and HPACK bombs are not attempted in the lab;
@@ -259,8 +287,9 @@ current suites.
 
 ### Workflows and false positives
 
-- ZAP active scanning is still blocked by the authenticated DVWA fixture; only
-  the spider/passive baseline runs. The benign suite covers a JSON API request,
+- ZAP active scanning is deferred: a scoped plan still exited at activeScan
+  start with ZAP 2.17.0, and no newer stable image is published. Only the
+  spider/passive baseline runs. The benign suite covers a JSON API request,
   a multipart PDF upload, a percent-encoded Japanese query, a 16 KiB text body,
   and a chunked response. Authenticated API flows, GraphQL workflows, i18n edge
   cases, sustained streaming, and legitimate WebSocket workloads remain outside
@@ -270,29 +299,32 @@ current suites.
 
 ### Operations
 
-- Hot reload under load, rules-update failures and format compatibility,
-  `allowed_hosts`/`client_ip`/trusted-proxy combinations, logs/audit, restart
-  state, and multi-worker or HTTP/2/HTTP/3 upstream translation are not covered
-  by the suites; unit and proxy tests cover parts of these paths. The load suite
-  asserts request, block, rate-limit, overload, and upstream-timeout counters.
+- Rust proxy tests cover hot reload under load, rules update plus reload under
+  load, and HTTP/3 malformed request streams. Rules-update failures and format
+  compatibility have unit tests. `allowed_hosts`/`client_ip`/trusted-proxy
+  combinations, logs/audit, restart state, and multi-worker or HTTP/2/HTTP/3
+  upstream translation remain outside the suites. The load suite asserts
+  request, block, rate-limit, overload, and upstream-timeout counters.
 
 ### Priorities
 
-1. Availability: ban recovery, slow upstream connect, multi-source and global
-   exhaustion, and queue/backpressure. The slow-body, slow-read, per-source
-   connection-cap, and upstream-response-timeout cases are implemented.
+1. Availability: slow upstream connect, multi-source and global exhaustion, and
+   queue/backpressure. The slow-body, slow-read, per-source connection-cap,
+   upstream-response-timeout, and ban-recovery cases are implemented.
 2. Benign workflow breadth: authenticated APIs, GraphQL, upload variants, i18n
    edge cases, and sustained streaming. The initial JSON, upload, i18n,
    large-body, and streamed-response cases are implemented.
-3. HTTP/2 hardening and HTTP/3: Rapid Reset, CONTINUATION, and oversized HPACK
-   are covered by Rust integration tests; add lab resource variants and HTTP/3
-   after a TLS/QUIC fixture.
-4. Hot reload and rules updates under load, plus restart behavior. Load metrics
-   are already asserted.
-5. WebSocket fragmentation, close, and PING/PONG lifecycle. Frame inspection is
-   a separate feature, not a lab test.
-6. ZAP active scanning, scoped and observation-only, once the authenticated
-   fixture no longer aborts it.
+3. HTTP/2 hardening and HTTP/3: Rapid Reset, CONTINUATION, oversized HPACK, and
+   a malformed raw H3 request stream are covered by Rust integration tests; add
+   lab resource variants after a TLS/QUIC fixture.
+4. Restart behavior under load. Hot reload, rules update plus reload under load,
+   and load metrics are covered by Rust tests and the load suite.
+5. WebSocket application-payload inspection after the handshake. Fragmentation,
+   close, and PING/PONG lifecycle are covered by the websocket suite.
+6. ZAP active scanning, scoped and observation-only. A separate plan was
+   attempted but ZAP 2.17.0 exits at activeScan start even after scoping the
+   endpoints and setting `failOnError: false`; revisit when a fixed image or
+   add-on is available.
 7. Full scanner corpora on a nightly or weekly cadence.
 
 ### Limits

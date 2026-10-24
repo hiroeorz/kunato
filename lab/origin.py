@@ -113,12 +113,15 @@ class Recorder(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
         self.close_connection = True
+        fragmented = bytearray()
+        fragment_opcode = None
         try:
             while True:
                 header = self.rfile.read(2)
                 if len(header) != 2:
                     return
                 first, second = header
+                fin = bool(first & 0x80)
                 opcode = first & 0x0F
                 masked = second & 0x80
                 length = second & 0x7F
@@ -132,19 +135,42 @@ class Recorder(BaseHTTPRequestHandler):
                 payload = bytes(byte ^ mask[index % 4]
                                 for index, byte in enumerate(self.rfile.read(length)))
                 if opcode == 0x8:
+                    self.wfile.write(bytes([0x88, len(payload)]) + payload)
+                    self.wfile.flush()
                     return
                 if opcode == 0x9:
                     self.wfile.write(bytes([0x8A, len(payload)]) + payload)
                     self.wfile.flush()
                     continue
+                if opcode == 0xA:
+                    continue
                 if opcode in (0x1, 0x2):
-                    self.emit("websocket", case_id=self.headers.get("X-Kunato-Lab-Case", ""),
-                              method="GET", target=self.path[:8192], frame_bytes=len(payload))
-                    response = b"echo:" + payload
-                    if len(response) > 125:
+                    if fragment_opcode is not None:
                         return
-                    self.wfile.write(bytes([0x81, len(response)]) + response)
-                    self.wfile.flush()
+                    if not fin:
+                        fragmented = bytearray(payload)
+                        fragment_opcode = opcode
+                        continue
+                    response = b"echo:" + payload
+                    response_opcode = opcode
+                elif opcode == 0x0:
+                    if fragment_opcode is None:
+                        return
+                    fragmented.extend(payload)
+                    if not fin:
+                        continue
+                    response = b"echo:" + bytes(fragmented)
+                    response_opcode = fragment_opcode
+                    fragment_opcode = None
+                else:
+                    return
+                self.emit("websocket", case_id=self.headers.get("X-Kunato-Lab-Case", ""),
+                          method="GET", target=self.path[:8192],
+                          frame_bytes=len(response) - 5)
+                if len(response) > 125:
+                    return
+                self.wfile.write(bytes([0x80 | response_opcode, len(response)]) + response)
+                self.wfile.flush()
         except (OSError, socket.timeout, ValueError):
             return
 

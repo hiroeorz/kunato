@@ -10,10 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
-from evidence import (USER_AGENT, judge_availability, judge_crs, judge_ffuf,
-                      judge_ffuf_behavior, judge_gotestwaf, judge_mutations, judge_nuclei,
-                      judge_load, judge_protocol, judge_replay, judge_slow, judge_sqlmap,
-                      judge_zap, judge_zap_workflow, read_jsonl, summarize,
+from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_crs,
+                      judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_mutations,
+                      judge_nuclei, judge_load, judge_protocol, judge_replay, judge_slow,
+                      judge_sqlmap, judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
+                      read_jsonl, summarize,
                       validate_mutations, validate_protocol)
 
 class EvidenceTests(unittest.TestCase):
@@ -455,6 +456,49 @@ class AvailabilityTests(unittest.TestCase):
                                     {"response": "kunato_requests_total 10\n"})
         self.assertFalse(result["passed"])
         self.assertEqual(result["cases"][-1]["verdict"], "failed")
+
+
+class BanTests(unittest.TestCase):
+    def test_ban_recovery_requires_a_ban_and_a_recovered_source(self):
+        metrics = {"response": "kunato_requests_total 12\nkunato_banned_total 1\n"}
+        result = judge_ban_recovery(
+            {"statuses": [200, 429, 429, 429], "recovery_status": 200},
+            {"status": 200}, {}, {"MemUsage": "21MiB / 256MiB"}, 0, metrics)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["cases"][-1]["verdict"], "passed")
+
+    def test_ban_recovery_fails_without_a_ban_or_recovery(self):
+        metrics = {"response": "kunato_requests_total 12\nkunato_banned_total 0\n"}
+        result = judge_ban_recovery(
+            {"statuses": [200, 200], "recovery_status": 429},
+            {"status": 200}, {}, {"MemUsage": "21MiB / 256MiB"}, 0, metrics)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "failed")
+        self.assertEqual(result["cases"][1]["verdict"], "failed")
+
+
+class WebSocketTests(unittest.TestCase):
+    def complete(self):
+        return {"status": 101, "pong": True, "echo": "echo:fragmented", "closed": True}
+
+    def test_websocket_lifecycle_checks_ping_fragments_and_close(self):
+        result = judge_websocket_lifecycle(self.complete(), self.complete(),
+                                           {"status": 200})
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["echo"], "echo:fragmented")
+
+    def test_websocket_lifecycle_fails_closed_without_a_valid_control(self):
+        result = judge_websocket_lifecycle({"status": 101, "error": "reset"},
+                                           self.complete(), {"status": 200})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "failed")
+        self.assertEqual(result["cases"][1]["verdict"], "inconclusive")
+
+    def test_websocket_lifecycle_rejects_a_false_block(self):
+        result = judge_websocket_lifecycle(self.complete(), self.complete(),
+                                           {"status": 429})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][-1]["verdict"], "false-block")
 
 
 class ProtocolTests(unittest.TestCase):

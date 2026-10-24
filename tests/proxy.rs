@@ -154,6 +154,57 @@ async fn spawn_upstream(status: StatusCode, body: &'static str) -> SocketAddr {
     addr
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn spawn_rules_server(rules: Vec<u8>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind rules server");
+    let addr = listener.local_addr().expect("rules server address");
+    let rules = Arc::new(rules);
+    let checksum = Arc::new(sha256_hex(&rules).into_bytes());
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let rules = Arc::clone(&rules);
+            let checksum = Arc::clone(&checksum);
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |request: Request<Incoming>| {
+                    let rules = Arc::clone(&rules);
+                    let checksum = Arc::clone(&checksum);
+                    async move {
+                        let body = match request.uri().path() {
+                            "/rules.yaml" => Some(rules.as_ref().clone()),
+                            "/rules.yaml.sha256" => Some(checksum.as_ref().clone()),
+                            _ => None,
+                        };
+                        let found = body.is_some();
+                        let payload = body.map(Bytes::from).unwrap_or_else(Bytes::new);
+                        let mut response = Response::new(Full::new(payload));
+                        if !found {
+                            *response.status_mut() = StatusCode::NOT_FOUND;
+                        }
+                        Ok::<_, Infallible>(response)
+                    }
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_body_echo_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -5837,5 +5888,211 @@ async fn http2_continuation_flood_is_bounded() {
     let (status, _) = send_h2c(running.addr, Method::GET, "/", "").await;
     assert_eq!(status, StatusCode::OK);
     drop(raw);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_malformed_streams_keep_normal_requests_alive() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let running = start_http3_kunato(
+        upstream,
+        &cert_path,
+        &key_path,
+        "limits: { max_concurrent_streams: 100 }
+categories: []",
+    )
+    .await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(certificate.clone())
+        .expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h3".to_vec()];
+    let client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
+            .expect("QUIC client config"),
+    ));
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().expect("client address"))
+        .expect("create client endpoint");
+    endpoint.set_default_client_config(client_config);
+    let connection = endpoint
+        .connect(running.addr, "localhost")
+        .expect("start connection")
+        .await
+        .expect("QUIC handshake");
+    let (mut h3_connection, _send_request) =
+        h3::client::new(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .expect("HTTP/3 handshake");
+    let _connection_task = tokio::spawn(async move {
+        let _ = h3_connection.wait_idle().await;
+    });
+
+    for _ in 0..32 {
+        let (mut send, _recv) = connection.open_bi().await.expect("open request stream");
+        send.write_all(&[0x01, 0x08])
+            .await
+            .expect("write truncated HEADERS frame");
+        send.finish().expect("finish truncated stream");
+    }
+
+    let (status, body, _) = send_h3(running.addr, certificate, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+    drop(connection);
+    drop(endpoint);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn hot_reload_under_load_keeps_serving() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("kunato.yaml");
+    let config_text = |name: &str| {
+        format!(
+            "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection: {{ enabled: false }}
+categories:
+  - name: {name}
+    action: BLOCK
+    rules:
+      - name: union-select
+        match: {{ regex: '(?i)union\\s+select', in: [query] }}
+"
+        )
+    };
+    std::fs::write(&path, config_text("union-a")).expect("write initial config");
+    let running = start_kunato(&config_text("union-a")).await;
+    let addr = running.addr;
+
+    let mut workers = Vec::new();
+    for worker in 0..16 {
+        workers.push(tokio::spawn(async move {
+            let mut statuses = Vec::new();
+            for index in 0..10 {
+                let (status, _) = if (worker + index) % 2 == 0 {
+                    send(addr, Method::GET, "/safe", "").await
+                } else {
+                    send(addr, Method::GET, "/?q=union%20select", "").await
+                };
+                statuses.push(status);
+                tokio::task::yield_now().await;
+            }
+            statuses
+        }));
+    }
+
+    for index in 0..20 {
+        let name = if index % 2 == 0 { "union-a" } else { "union-b" };
+        let temporary = path.with_extension("tmp");
+        std::fs::write(&temporary, config_text(name)).expect("write replacement config");
+        std::fs::rename(&temporary, &path).expect("replace config");
+        assert!(
+            kunato::config::watcher::reload(&path, &running.config, &running.metrics, false)
+                .is_some(),
+            "reload {index} must succeed"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    for worker in workers {
+        for status in worker.await.expect("worker") {
+            assert!(
+                status == StatusCode::OK || status == StatusCode::FORBIDDEN,
+                "unexpected status under reload: {status}"
+            );
+        }
+    }
+    assert!(
+        running.metrics.reload_success.load(Ordering::Relaxed) >= 20,
+        "all reloads must be counted"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn rules_update_under_load_keeps_serving() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rules_path = dir.path().join("rules.yaml");
+    std::fs::write(&rules_path, "categories: []\n").expect("initial rules");
+    let updated_rules = b"categories:
+  - name: updated
+    action: BLOCK
+    rules:
+      - name: block-updated
+        match: { path: ^/updated$ }
+";
+    let rules_server = spawn_rules_server(updated_rules.to_vec()).await;
+    let main_path = dir.path().join("kunato.yaml");
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+rules_file: {}
+rules_update:
+  enabled: true
+  url: http://127.0.0.1:{port}/rules.yaml
+  checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  interval: 24h
+  jitter_percent: 0
+  max_bytes: 1048576
+protection: {{ enabled: false }}
+categories: []
+",
+        rules_path.display(),
+        port = rules_server.port()
+    );
+    std::fs::write(&main_path, &yaml).expect("write main config");
+    let running = start_kunato(&yaml).await;
+    let addr = running.addr;
+    let (status, _) = send(addr, Method::GET, "/updated", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        workers.push(tokio::spawn(async move {
+            let mut statuses = Vec::new();
+            for _ in 0..10 {
+                let (status, _) = send(addr, Method::GET, "/safe", "").await;
+                statuses.push(status);
+                tokio::task::yield_now().await;
+            }
+            statuses
+        }));
+    }
+
+    let settings = running.config.load().rules_update.clone();
+    let rules_file = running
+        .config
+        .load()
+        .rules_file
+        .clone()
+        .expect("rules file");
+    let state_file = kunato::rules_update::state_path(&rules_file);
+    let outcome =
+        kunato::rules_update::update_once(&main_path, &settings, &rules_file, &state_file)
+            .await
+            .expect("update rules");
+    assert_eq!(outcome, kunato::rules_update::UpdateOutcome::Updated);
+    assert!(
+        kunato::config::watcher::reload(&main_path, &running.config, &running.metrics, false)
+            .is_some()
+    );
+
+    for worker in workers {
+        for status in worker.await.expect("worker") {
+            assert_eq!(status, StatusCode::OK, "safe request under reload");
+        }
+    }
+    let (status, _) = send(addr, Method::GET, "/updated", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(running.metrics.reload_success.load(Ordering::Relaxed) >= 1);
     running.stop().await;
 }

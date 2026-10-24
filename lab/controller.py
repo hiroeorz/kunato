@@ -15,12 +15,13 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-from evidence import (USER_AGENT, judge_availability, judge_crs, judge_ffuf,
-                      judge_ffuf_behavior, judge_gotestwaf, judge_mutations, judge_load,
-                      judge_nuclei, judge_protocol, judge_replay, judge_slow,
-                      judge_sqlmap, judge_zap, judge_zap_workflow, origin_response,
-                      read_jsonl, summarize, validate_cases, validate_ffuf_cases,
-                      validate_mutations, validate_protocol, verify_origin)
+from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_crs,
+                      judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_mutations,
+                      judge_load, judge_nuclei, judge_protocol, judge_replay, judge_slow,
+                      judge_sqlmap, judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
+                      origin_response, read_jsonl, summarize,
+                      validate_cases, validate_ffuf_cases, validate_mutations,
+                      validate_protocol, verify_origin)
 
 ROOT = Path(__file__).resolve().parent.parent
 LAB = ROOT / "lab"
@@ -80,6 +81,24 @@ AVAILABILITY_PROTECTION = """protection:
     window: 60s
     duration: 1s
     max_duration: 1s
+  behavior:
+    enabled: false
+"""
+
+BAN_PROTECTION = """protection:
+  enabled: true
+  max_connections_per_ip: 64
+  max_connections: 256
+  requests_per_second: 1
+  burst: 1
+  global_requests_per_second: 10000
+  max_tracked_ips: 100
+  aggregate_ipv6_prefix: 64
+  ban:
+    violations: 2
+    window: 10s
+    duration: 2s
+    max_duration: 2s
   behavior:
     enabled: false
 """
@@ -556,6 +575,36 @@ class SandboxSuite:
                                   normal, before, after, self.restarts(),
                                   application_metrics)
 
+    def ban(self):
+        nonce = self.reset_origin("ban", config="rules-ban.yaml",
+                                  disable_protection=False)
+        self.preflight("origin")
+        self.compose("up", "-d", "normal")
+        before = self.stats()
+        probe = self.probe("client", "ban",
+                           extra=("--requests", "10", "--hold", "3"), check=False)
+        normal = self.healthy("ban", nonce=nonce, service="normal", exec=True)
+        after = self.stats()
+        metrics_path = self.run_dir / "ban/metrics.json"
+        application_metrics = (json.loads(metrics_path.read_text())
+                               if metrics_path.exists() else {"response": ""})
+        self.logs("ban")
+        return judge_ban_recovery(probe, normal, before, after, self.restarts(),
+                                  application_metrics)
+
+    def websocket(self):
+        self.reset_origin("websocket-control")
+        self.preflight("origin")
+        control = self.probe("control", "ws-lifecycle", check=False,
+                             log=self.run_dir / "websocket-control/probes.jsonl")
+        nonce = self.reset_origin("websocket")
+        self.compose("up", "-d", "normal")
+        protected = self.probe("client", "ws-lifecycle", check=False,
+                               log=self.run_dir / "websocket/probes.jsonl")
+        normal = self.healthy("websocket", nonce=nonce, service="normal", exec=True)
+        self.logs("websocket")
+        return judge_websocket_lifecycle(control, protected, normal)
+
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)
         service_name = self.project + "-tool"
@@ -959,6 +1008,8 @@ def new_run(suite):
     (config_dir / "rules-availability.yaml").write_text(
         make_config(original, "http://origin:8080", AVAILABILITY_PROTECTION,
                     timeouts=AVAILABILITY_TIMEOUTS))
+    (config_dir / "rules-ban.yaml").write_text(
+        make_config(original, "http://origin:8080", BAN_PROTECTION))
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
     cases = json.loads((LAB / "cases/smoke.json").read_text())
     validate_cases(cases)
@@ -1002,7 +1053,7 @@ def run(suite):
     try:
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
-                     "rules-ffuf.yaml", "rules-availability.yaml"):
+                     "rules-ffuf.yaml", "rules-availability.yaml", "rules-ban.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
         report["suites"]["replay"] = lab.replay()
@@ -1016,6 +1067,10 @@ def run(suite):
             report["suites"]["slow"] = lab.slow()
         if suite in {"availability", "all"}:
             report["suites"]["availability"] = lab.availability()
+        if suite in {"ban", "all"}:
+            report["suites"]["ban"] = lab.ban()
+        if suite in {"websocket", "all"}:
+            report["suites"]["websocket"] = lab.websocket()
         if suite in {"load", "all"}:
             report["suites"]["load"] = lab.load()
         if suite in {"gotestwaf", "all"}:
@@ -1085,7 +1140,7 @@ def main():
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "benign", "mutations", "protocol", "gotestwaf",
                                  "sqlmap", "nuclei", "ffuf", "zap", "crs", "slow",
-                                 "availability", "load", "all"],
+                                 "availability", "ban", "websocket", "load", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)

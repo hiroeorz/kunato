@@ -1,6 +1,7 @@
 """One-shot HTTP probes in a front-only or short-lived control container."""
 
 import argparse
+import base64
 import hashlib
 import http.client
 import json
@@ -234,6 +235,113 @@ def slow_upstream(host="app.test", port=8080):
     return result
 
 
+def ban_recovery(case, host="app.test", port=8080):
+    started = time.monotonic()
+    count = int(case.get("requests", 8))
+    hold = float(case.get("hold_seconds", 3))
+    result = {"id": "ban", "statuses": [], "recovery_status": None,
+              "held_seconds": hold}
+    for _ in range(count):
+        observation = request({"id": "ban-probe", "method": "GET",
+                               "target": "/health"}, host, port)
+        result["statuses"].append(observation.get("status") or observation.get("error"))
+    result["banned"] = any(status == 429 for status in result["statuses"])
+    time.sleep(hold)
+    recovery = request({"id": "ban-recovery", "method": "GET",
+                        "target": "/health"}, host, port)
+    result["recovery_status"] = recovery.get("status")
+    result["recovery_error"] = recovery.get("error")
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def ws_frame(opcode, payload, fin=True):
+    mask = b"\x01\x02\x03\x04"
+    first = (0x80 if fin else 0) | opcode
+    length = len(payload)
+    if length < 126:
+        header = bytes([first, 0x80 | length])
+    elif length < 65536:
+        header = bytes([first, 0x80 | 126]) + length.to_bytes(2, "big")
+    else:
+        header = bytes([first, 0x80 | 127]) + length.to_bytes(8, "big")
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return header + mask + masked
+
+
+def recv_exact(connection, length):
+    data = b""
+    while len(data) < length:
+        chunk = connection.recv(length - len(data))
+        if not chunk:
+            raise ValueError("WebSocket peer closed early")
+        data += chunk
+    return data
+
+
+def ws_read_frame(connection):
+    header = recv_exact(connection, 2)
+    first, second = header
+    length = second & 0x7F
+    if length == 126:
+        length = int.from_bytes(recv_exact(connection, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(recv_exact(connection, 8), "big")
+    mask = recv_exact(connection, 4) if second & 0x80 else b""
+    payload = recv_exact(connection, length)
+    if mask:
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return first & 0x0F, bool(first & 0x80), payload
+
+
+def websocket_lifecycle(host="app.test", port=8080):
+    started = time.monotonic()
+    connection = None
+    result = {"id": "ws-lifecycle", "status": None, "pong": False,
+              "echo": None, "closed": False}
+    try:
+        connection = socket.create_connection((host, port), timeout=4)
+        key = base64.b64encode(b"kunato-lab-ws-key").decode()
+        request = (f"GET /ws-lifecycle HTTP/1.1\r\nHost: app.test\r\n"
+                   f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                   f"X-Kunato-Lab-Case: ws-lifecycle\r\n\r\n")
+        connection.sendall(request.encode("latin-1"))
+        connection.settimeout(4)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        status, _ = status_of(data)
+        result["status"] = status
+        if status != 101:
+            return result
+        connection.sendall(ws_frame(0x9, b"ping"))
+        opcode, _, payload = ws_read_frame(connection)
+        result["pong"] = opcode == 0xA and payload == b"ping"
+        connection.sendall(ws_frame(0x1, b"frag", fin=False))
+        connection.sendall(ws_frame(0x0, b"ment", fin=False))
+        connection.sendall(ws_frame(0x0, b"ed", fin=True))
+        opcode, _, payload = ws_read_frame(connection)
+        if opcode == 0x1:
+            result["echo"] = payload.decode("utf-8", errors="replace")
+        connection.sendall(ws_frame(0x8, b"\x03\xe8"))
+        try:
+            opcode, _, _ = ws_read_frame(connection)
+            result["closed"] = opcode == 0x8
+        except (OSError, ValueError):
+            result["closed"] = True
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
 def isolation(hosts, addresses):
     failures = []
     routes = Path("/proc/net/route").read_text().splitlines()[1:]
@@ -264,8 +372,8 @@ def isolation(hosts, addresses):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
-                                          "slow-read", "exhaustion", "upstream", "isolation",
-                                          "metrics"])
+                                          "slow-read", "exhaustion", "upstream", "ban",
+                                          "ws-lifecycle", "isolation", "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -276,6 +384,7 @@ def main():
     parser.add_argument("--forbidden-ip", action="append", default=[])
     parser.add_argument("--cases", default="/lab/cases/smoke.json")
     parser.add_argument("--connections", type=int, default=8)
+    parser.add_argument("--requests", type=int, default=8)
     parser.add_argument("--hold", type=float, default=2.0)
     args = parser.parse_args()
     if args.mode == "cases":
@@ -304,6 +413,15 @@ def main():
         return 0
     elif args.mode == "upstream":
         result = slow_upstream(args.host, args.port)
+        print(json.dumps(result))
+        return 0
+    elif args.mode == "ban":
+        result = ban_recovery({"requests": args.requests, "hold_seconds": args.hold},
+                              args.host, args.port)
+        print(json.dumps(result))
+        return 0
+    elif args.mode == "ws-lifecycle":
+        result = websocket_lifecycle(args.host, args.port)
         print(json.dumps(result))
         return 0
     elif args.mode == "health":

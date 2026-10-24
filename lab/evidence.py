@@ -340,6 +340,99 @@ def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
     return result
 
 
+def judge_ban_recovery(probe, normal, before, after, restarts, application_metrics=None):
+    statuses = probe.get("statuses", [])
+    banned = any(status == 429 for status in statuses)
+    recovery = probe.get("recovery_status") == 200
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    restarts = restarts or 0
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    cases = [
+        {"id": "ban-trigger", "expect": "banned",
+         "verdict": "passed" if banned else "failed", "origin_receipts": 0},
+        {"id": "ban-recovery", "expect": "recovered",
+         "verdict": "passed" if recovery else "failed", "origin_receipts": 1},
+        {"id": "ban-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
+        {"id": "ban-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    metric_notes = {}
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+
+        def counter(name):
+            for line in text.splitlines():
+                if line.startswith(name + " "):
+                    try:
+                        return float(line.split(None, 1)[1])
+                    except (IndexError, ValueError):
+                        return None
+            return None
+
+        observed_requests = counter("kunato_requests_total")
+        banned_total = counter("kunato_banned_total")
+        metrics_ok = (observed_requests is not None and observed_requests > 0
+                      and banned_total is not None and banned_total >= 1)
+        cases.append({"id": "ban-metrics", "expect": "metrics",
+                      "verdict": "passed" if metrics_ok else "failed",
+                      "origin_receipts": 0})
+        metric_notes = {"metric_requests": observed_requests,
+                        "banned_total": banned_total}
+    result = summarize(cases)
+    result["notes"] = {"statuses": statuses,
+                       "recovery_status": probe.get("recovery_status"),
+                       "normal_status": normal.get("status"), "restarts": restarts,
+                       "mem_before": before.get("MemUsage"),
+                       "mem_after": after.get("MemUsage"), **metric_notes}
+    return result
+
+
+def judge_websocket_lifecycle(control, protected, normal):
+    def complete(result):
+        return (result.get("status") == 101 and result.get("pong")
+                and result.get("echo") == "echo:fragmented"
+                and result.get("closed") and not result.get("error"))
+
+    control_ok = complete(control)
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    cases = [
+        {"id": "ws-control", "expect": "control",
+         "verdict": "passed" if control_ok else "failed", "origin_receipts": 1},
+        {"id": "ws-handshake", "expect": "handshake",
+         "verdict": "passed" if control_ok and protected.get("status") == 101
+         else ("inconclusive" if not control_ok else "failed"), "origin_receipts": 0},
+        {"id": "ws-ping", "expect": "pong",
+         "verdict": "passed" if control_ok and protected.get("pong")
+         else ("inconclusive" if not control_ok else "failed"), "origin_receipts": 0},
+        {"id": "ws-fragmentation", "expect": "echo",
+         "verdict": "passed" if control_ok and protected.get("echo") == "echo:fragmented"
+         else ("inconclusive" if not control_ok else "failed"), "origin_receipts": 0},
+        {"id": "ws-close", "expect": "closed",
+         "verdict": "passed" if control_ok and protected.get("closed")
+         else ("inconclusive" if not control_ok else "failed"), "origin_receipts": 0},
+        {"id": "ws-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"control_status": control.get("status"),
+                       "protected_status": protected.get("status"),
+                       "pong": protected.get("pong"),
+                       "echo": protected.get("echo"),
+                       "closed": protected.get("closed"),
+                       "normal_status": normal.get("status"),
+                       "control_error": control.get("error"),
+                       "protected_error": protected.get("error")}
+    return result
+
+
 def judge_load(summary, slow, normal, recovery, before, mid, after, restarts,
                application_metrics=None):
     metrics = summary.get("metrics", {}) if isinstance(summary, dict) else {}
