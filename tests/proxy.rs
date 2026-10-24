@@ -5642,3 +5642,200 @@ categories:
     drop(stream);
     running.stop().await;
 }
+
+fn h2_frame(frame_type: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+    let length = payload.len();
+    let mut frame = Vec::with_capacity(9 + length);
+    frame.push((length >> 16) as u8);
+    frame.push((length >> 8) as u8);
+    frame.push(length as u8);
+    frame.push(frame_type);
+    frame.push(flags);
+    frame.extend_from_slice(&stream_id.to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn hpack_integer(mut value: usize, prefix_bits: u8) -> Vec<u8> {
+    let prefix_max = (1usize << prefix_bits) - 1;
+    if value < prefix_max {
+        return vec![value as u8];
+    }
+    let mut encoded = vec![prefix_max as u8];
+    value -= prefix_max;
+    while value >= 128 {
+        encoded.push(((value as u8) & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    encoded.push(value as u8);
+    encoded
+}
+
+fn h2_get_block(authority: &str) -> Vec<u8> {
+    let mut block = vec![0x82, 0x84, 0x86];
+    block.push(0x01);
+    block.extend_from_slice(&hpack_integer(authority.len(), 7));
+    block.extend_from_slice(authority.as_bytes());
+    block
+}
+
+async fn start_h2_raw(running: &Running) -> TcpStream {
+    let mut stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect raw HTTP/2 client");
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        .await
+        .expect("write HTTP/2 preface");
+    stream
+        .write_all(&h2_frame(4, 0, 0, &[]))
+        .await
+        .expect("write settings");
+    stream
+}
+
+async fn read_h2_frame(stream: &mut TcpStream) -> Option<(u8, u8, u32, Vec<u8>)> {
+    let mut header = [0u8; 9];
+    stream.read_exact(&mut header).await.ok()?;
+    let length =
+        (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
+    if length > 1 << 20 {
+        return None;
+    }
+    let stream_id = u32::from_be_bytes([header[5], header[6], header[7], header[8]]);
+    let mut payload = vec![0u8; length];
+    stream.read_exact(&mut payload).await.ok()?;
+    Some((header[3], header[4], stream_id, payload))
+}
+
+async fn finish_h2_handshake(stream: &mut TcpStream) {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(1), read_h2_frame(stream)).await {
+            Ok(Some((4, 0, _, _))) => break,
+            Ok(Some(_)) => continue,
+            _ => panic!("the server did not send its SETTINGS frame"),
+        }
+    }
+    stream
+        .write_all(&h2_frame(4, 1, 0, &[]))
+        .await
+        .expect("acknowledge server settings");
+}
+
+#[tokio::test]
+async fn http2_rapid_reset_keeps_normal_requests_alive() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_concurrent_streams: 100 }}\ncategories: []\n"
+    ))
+    .await;
+    let mut raw = start_h2_raw(&running).await;
+    finish_h2_handshake(&mut raw).await;
+    let block = h2_get_block("app.test");
+    for stream_id in (1u32..=199).step_by(2) {
+        if raw
+            .write_all(&h2_frame(1, 0x5, stream_id, &block))
+            .await
+            .is_err()
+        {
+            break;
+        }
+        if raw
+            .write_all(&h2_frame(3, 0, stream_id, &[0, 0, 0, 8]))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let (status, _) = send_h2c(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    drop(raw);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_oversized_header_block_is_bounded() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_header_bytes: 32768, max_headers: 100 }}\ncategories: []\n"
+    ))
+    .await;
+    let mut raw = start_h2_raw(&running).await;
+    finish_h2_handshake(&mut raw).await;
+    let value = vec![b'a'; 65536];
+    let mut block = vec![0x00, 7];
+    block.extend_from_slice(b"x-bomb");
+    block.extend_from_slice(&hpack_integer(value.len(), 7));
+    block.extend_from_slice(&value);
+    let (first, rest) = block.split_at(16000);
+    raw.write_all(&h2_frame(1, 0x1, 1, first))
+        .await
+        .expect("write headers");
+    let chunks = rest.chunks(16000).collect::<Vec<_>>();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let flags = if index + 1 == chunks.len() { 0x4 } else { 0 };
+        if raw.write_all(&h2_frame(9, flags, 1, chunk)).await.is_err() {
+            break;
+        }
+    }
+    let mut bounded = false;
+    for _ in 0..20 {
+        match tokio::time::timeout(Duration::from_millis(100), read_h2_frame(&mut raw)).await {
+            Ok(Some((3, _, _, _))) | Ok(Some((7, _, _, _))) | Ok(None) => {
+                bounded = true;
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Err(_) => continue,
+        }
+    }
+    assert!(
+        bounded,
+        "the server did not reject the oversized header block"
+    );
+    let (status, _) = send_h2c(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    drop(raw);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http2_continuation_flood_is_bounded() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_header_bytes: 32768, max_headers: 100 }}\ncategories: []\n"
+    ))
+    .await;
+    let mut raw = start_h2_raw(&running).await;
+    finish_h2_handshake(&mut raw).await;
+    raw.write_all(&h2_frame(1, 0x1, 1, &[0x00]))
+        .await
+        .expect("write headers");
+    for index in 0..200 {
+        let flags = if index == 199 { 0x4 } else { 0 };
+        if raw
+            .write_all(&h2_frame(9, flags, 1, &[0u8; 64]))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let mut bounded = false;
+    for _ in 0..20 {
+        match tokio::time::timeout(Duration::from_millis(100), read_h2_frame(&mut raw)).await {
+            Ok(Some((3, _, _, _))) | Ok(Some((7, _, _, _))) | Ok(None) => {
+                bounded = true;
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Err(_) => continue,
+        }
+    }
+    assert!(bounded, "the server did not bound the CONTINUATION flood");
+    let (status, _) = send_h2c(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    drop(raw);
+    running.stop().await;
+}

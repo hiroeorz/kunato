@@ -107,6 +107,133 @@ def slow_request(case, host="app.test", port=8080):
             "elapsed_ms": round((time.monotonic() - started) * 1000, 2)}
 
 
+def status_of(data):
+    text = data.decode("latin-1")
+    statuses = [int(match) for match in re.findall(r"HTTP/1\.[01] (\d{3})", text)]
+    return (statuses[0] if statuses else None), text
+
+
+def slow_body(case, host="app.test", port=8080):
+    started = time.monotonic()
+    hold = float(case.get("hold_seconds", 3))
+    length = int(case.get("length", 16))
+    connection = None
+    result = {"id": "slow-body", "sent": 0, "held_seconds": hold, "status": None}
+    try:
+        connection = socket.create_connection((host, port), timeout=4)
+        head = (f"POST /slow-body HTTP/1.1\r\nHost: app.test\r\n"
+                f"Content-Length: {length}\r\nX-Kunato-Lab-Case: slow-body\r\n\r\n")
+        connection.sendall(head.encode("latin-1"))
+        connection.sendall(b"x")
+        result["sent"] = 1
+        time.sleep(hold)
+        connection.settimeout(2)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        status, text = status_of(data)
+        result.update(status=status, response=text[:4096])
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def slow_read(case, host="app.test", port=8080):
+    started = time.monotonic()
+    hold = float(case.get("hold_seconds", 2))
+    connection = None
+    result = {"id": "slow-read", "status": None, "held_seconds": hold}
+    try:
+        connection = socket.create_connection((host, port), timeout=4)
+        connection.sendall(b"GET /large HTTP/1.1\r\nHost: app.test\r\n"
+                           b"X-Kunato-Lab-Case: slow-read\r\n\r\n")
+        connection.settimeout(4)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        status, _ = status_of(data)
+        result.update(status=status, headers_bytes=len(data))
+        time.sleep(hold)
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def exhaustion(case, host="app.test", port=8080):
+    started = time.monotonic()
+    count = int(case.get("connections", 8))
+    sockets = []
+    result = {"id": "exhaustion", "opened": 0, "status": None}
+    try:
+        for _ in range(count):
+            connection = socket.create_connection((host, port), timeout=4)
+            connection.sendall(b"GET /slow HTTP/1.1\r\nHost: app.test\r\n")
+            connection.settimeout(0.5)
+            sockets.append(connection)
+            result["opened"] += 1
+        time.sleep(0.3)
+        probe = socket.create_connection((host, port), timeout=4)
+        probe.sendall(b"GET /health HTTP/1.1\r\nHost: app.test\r\n"
+                      b"X-Kunato-Lab-Case: exhaustion\r\n\r\n")
+        probe.settimeout(2)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = probe.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        status, text = status_of(data)
+        result.update(status=status, response=text[:4096])
+        probe.close()
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        for connection in sockets:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def slow_upstream(host="app.test", port=8080):
+    started = time.monotonic()
+    connection = None
+    result = {"id": "slow-upstream", "status": None}
+    try:
+        connection = socket.create_connection((host, port), timeout=4)
+        connection.sendall(b"GET /slow-upstream HTTP/1.1\r\nHost: app.test\r\n"
+                           b"X-Kunato-Lab-Case: slow-upstream\r\n\r\n")
+        connection.settimeout(5)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        status, text = status_of(data)
+        result.update(status=status, response=text[:4096])
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
 def isolation(hosts, addresses):
     failures = []
     routes = Path("/proc/net/route").read_text().splitlines()[1:]
@@ -136,12 +263,15 @@ def isolation(hosts, addresses):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "isolation", "metrics"])
+    parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
+                                          "slow-read", "exhaustion", "upstream", "isolation",
+                                          "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
     parser.add_argument("--host", default="app.test")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--length", type=int, default=16)
     parser.add_argument("--forbidden-host", action="append", default=[])
     parser.add_argument("--forbidden-ip", action="append", default=[])
     parser.add_argument("--cases", default="/lab/cases/smoke.json")
@@ -159,6 +289,23 @@ def main():
                               args.host, args.port)
         print(json.dumps(result))
         return int("error" in result)
+    elif args.mode == "slow-body":
+        result = slow_body({"hold_seconds": args.hold, "length": args.length},
+                           args.host, args.port)
+        print(json.dumps(result))
+        return 0
+    elif args.mode == "slow-read":
+        result = slow_read({"hold_seconds": args.hold}, args.host, args.port)
+        print(json.dumps(result))
+        return 0
+    elif args.mode == "exhaustion":
+        result = exhaustion({"connections": args.connections}, args.host, args.port)
+        print(json.dumps(result))
+        return 0
+    elif args.mode == "upstream":
+        result = slow_upstream(args.host, args.port)
+        print(json.dumps(result))
+        return 0
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},
                          args.host, args.port)

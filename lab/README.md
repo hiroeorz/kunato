@@ -1,13 +1,14 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and eleven bounded
+an isolated recording origin, direct receipt controls, and thirteen bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
 baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
-a bounded slow-HTTP run, a pinned k6 v2.3.0 mixed availability load, and a
+benign JSON/upload/i18n/large-body/streaming workflows, bounded slow-HTTP and
+availability probes, a pinned k6 v2.3.0 mixed availability load, and a
 pinned OWASP CRS 4.3.0 comparison. It measures request rejection, bounded
 exploit prevention, and availability on a fixed runner; the fixtures do not
 prove protection for arbitrary applications or capacity. The
@@ -36,6 +37,7 @@ scripts/security-lab.sh verify
 scripts/security-lab.sh run
 
 # Add one sandbox suite, or run every sandbox suite in sequence.
+scripts/security-lab.sh run --sandbox-suite benign
 scripts/security-lab.sh run --sandbox-suite gotestwaf
 scripts/security-lab.sh run --sandbox-suite sqlmap
 scripts/security-lab.sh run --sandbox-suite nuclei
@@ -44,6 +46,7 @@ scripts/security-lab.sh run --sandbox-suite zap
 scripts/security-lab.sh run --sandbox-suite mutations
 scripts/security-lab.sh run --sandbox-suite protocol
 scripts/security-lab.sh run --sandbox-suite slow
+scripts/security-lab.sh run --sandbox-suite availability
 scripts/security-lab.sh run --sandbox-suite load
 scripts/security-lab.sh run --sandbox-suite crs   # optional CRS comparison, observation only
 scripts/security-lab.sh run --sandbox-suite all
@@ -111,6 +114,16 @@ ordinary fixed User-Agent; scanner-fingerprint recognition is deliberately not
 claimed here. The lab removes the whole private-source `trusted-sources`
 category and disables automatic protection.
 
+### Benign workflows
+
+`cases/benign.json` adds a legitimate JSON API request, a multipart PDF upload,
+a percent-encoded Japanese query, a 16 KiB text body, and a chunked response.
+The direct control must receive every case, and the protected run must forward
+it with the exact origin metadata, status, and body hash. These cases exercise
+the default form guard, upload inspection, content-type decoding, and chunked
+response forwarding without relying on an attack signature. They are included
+in `all` and fail the suite on any false block.
+
 ### sqlmap
 
 `sqlmap` compares a direct DVWA SQL-injection dump with the same bounded dump
@@ -177,40 +190,58 @@ seed, transform, and interpretation through `report.json`.
 ### Protocol boundaries
 
 `cases/protocol.json` contains 12 reviewed raw HTTP/1.1 and WebSocket cases: a
-valid keep-alive exchange, chunked framing, CL+TE and TE+CL ambiguity, duplicate
-Content-Length, obs-fold, a benign CRLF pair, duplicate Host, an invalid chunk,
-an oversized header, an HTTP/2 preface, and a WebSocket handshake plus echo.
-Each case has a WAF-less direct control and a protected run. The direct controls
-use the origin framing modes (`reject`, `cl`, `te`) to prove how the origin
-parses the bytes; the protected run must not deliver a smuggled request, must
-block or reject malformed framing, and must allow the benign and WebSocket
-exchanges. The WebSocket check sends the handshake, waits for `101`, sends one
-masked frame, and requires the origin `websocket` event and echo. Kunato's
+valid request with `Connection: close`, a chunked body, CL+TE and TE+CL
+ambiguity, duplicate Content-Length, obs-fold, a benign CRLF pair, duplicate
+Host, an invalid chunk, an oversized header, an HTTP/2 preface, and a WebSocket
+handshake plus echo. Each case has a WAF-less direct control and a protected
+run. The direct controls use the origin framing modes (`reject`, `cl`, `te`) to
+prove how the origin parses the bytes; the protected run must not deliver a
+smuggled request, must block or reject malformed framing, and must allow the
+benign and WebSocket exchanges. The WebSocket check sends the handshake, reads
+the response headers, sends one masked frame, and requires a `101` status plus
+the origin `websocket` event; the echo is recorded but not asserted. Kunato's
 request-head checks reject duplicate Host, duplicate Content-Length, CL+TE, and
 non-chunked Transfer-Encoding before forwarding. The current result is 4 passed
-and 8 prevented.
+and 8 prevented. HTTP/2 frame-level regressions (Rapid Reset, a CONTINUATION
+flood, and an oversized HPACK header block) live in the Rust proxy tests rather
+than this container suite.
 
 ### Slow HTTP
 
-`--sandbox-suite slow` opens 8 bounded slow connections with partial headers, holds
-them for 2 seconds, and checks that the independent normal client still receives
-`200`, that Kunato stays up, and that its CPU/RSS stay within the configured
-256 MiB / 64-pid ceilings. The probe is the lab's own raw-socket mode
-(`lab/probe.py slow`), not slowhttptest. The current result is 2 passed: 8
-connections held, normal 200, CPU 0.00-0.01%, RSS 21.1-21.4 MiB.
+`--sandbox-suite slow` opens 8 bounded slow connections with partial headers,
+holds them for 2 seconds, and checks that the independent normal client still
+receives `200` and that Kunato stays up. CPU and RSS are recorded before and
+after, and the containers run under the 256 MiB / 64-pid ceilings, but this
+suite does not assert resource thresholds or restarts; the mixed-load suite
+does. The probe is the lab's own raw-socket mode (`lab/probe.py slow`), not
+slowhttptest. The current result is 2 passed: 8 connections held, normal 200,
+CPU 0.00-0.02%, RSS 21.1-21.4 MiB.
+
+### Availability boundaries
+
+`--sandbox-suite availability` uses `rules-availability.yaml` with a 2-second
+body-read timeout, a 1-second upstream-response timeout, and an 8-connection
+per-source cap. It holds partial request bodies (expecting `408`), opens a large
+response without reading it, fills the per-source connection budget (the next
+connection must get `503` while the independent normal client stays `200`),
+requests an origin that sleeps beyond the upstream timeout (expecting `504`),
+and asserts the normal probe, RSS, restarts, and the upstream-timeout metric.
+Ban recovery is not part of this suite yet.
 
 ### Mixed load
 
 `--sandbox-suite load` runs a pinned k6 v2.3.0 constant-arrival-rate scenario
 (50 requests/second for 60 seconds) from the `load` service, concurrently opens
 the bounded slow connections from the `client` service, and probes the normal
-path from the same independent client. The k6 thresholds are p95 < 200 ms,
-p99 < 500 ms, failed requests < 1%, and checks > 99%; the judge also requires
-the normal and recovery probes to return 200, no Kunato restart, and RSS under
-the 256 MiB ceiling. Recovery is checked immediately after the load stops. The
-current result is 5 passed: 3001 requests, p95 47.4 ms, p99 47.6 ms, 100%
-success, 8 slow connections held, normal and recovery 200, RSS 21.8 MiB, and no
-restart.
+path from the same independent client. The k6 thresholds are at least 1,000
+requests, p95 < 200 ms, p99 < 500 ms, failed requests < 1%, and checks > 99%;
+the judge also requires the normal and recovery probes to return 200, no Kunato
+restart, and RSS under the 256 MiB ceiling. Recovery is checked immediately
+after the load stops. The `load-metrics` case also checks that Kunato's request
+counter covers the k6 workload and that no block, rate-limit, overload, or
+upstream-timeout counter moved. The current result is 6 passed: 3001 requests,
+p95 48.8 ms, p99 49.1 ms, 100% success, 8 slow connections held, normal and
+recovery 200, RSS 21.9 MiB, no restart, and matching metrics.
 
 ### OWASP CRS comparison
 
@@ -233,6 +264,8 @@ Each run prints its directory under `target/security-lab/`. It retains:
   code, and binary;
 - `control/` and `replay/`: fresh attempt IDs, health probes, client exchanges,
   origin events, Kunato JSON logs, and metrics;
+- `benign-control/` and `benign/`: direct and protected JSON, upload, i18n,
+  large-body, and streamed-response exchanges;
 - `gotestwaf-control/` and `gotestwaf/`: direct/protected scanner reports and
   origin observations;
 - `sqlmap-control/` and `sqlmap/`: dump output, exit codes, DVWA access logs,
@@ -251,6 +284,8 @@ Each run prints its directory under `target/security-lab/`. It retains:
   per-framing origin receipts, and Kunato logs;
 - `slow/` and `load/`: slow-connection probes, k6 summary and logs, health
   probes, metrics, and Kunato logs;
+- `availability/`: slow-body, slow-read, connection-cap, and slow-upstream
+  probes, health probes, metrics, and Kunato logs;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
   diagnostics;
 - `commands.jsonl` and `cleanup.json`: executed commands and verification that
@@ -293,7 +328,10 @@ authenticated ZAP baseline covers login, spider, and passive discovery; active
 scanning is not part of the passing plan, and the active injection defenses
 remain the sqlmap/Nuclei/goTestWAF sandbox suites. The mutation corpus, the protocol
 cases, and the CRS comparison are bounded to the reviewed seeds, fixtures, and
-framing interpretations.
+framing interpretations. The benign corpus has one case per workflow, and the
+availability suite covers body-read timeout, slow reads, the per-source
+connection cap, and upstream-response timeout; ban recovery, slow upstream
+connection establishment, and multi-source exhaustion are not covered.
 
 The fixtures and tools retain their upstream licenses and provenance: the DVWA
 image and source, MariaDB, Apache httpd 2.4.49, sqlmap, Nuclei, goTestWAF,

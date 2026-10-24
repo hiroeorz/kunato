@@ -10,11 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
-from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
-                      judge_gotestwaf, judge_mutations, judge_nuclei,
-                      judge_load, judge_protocol, judge_replay, judge_slow, judge_sqlmap, judge_zap,
-                      judge_zap_workflow, summarize, validate_mutations,
-                      validate_protocol)
+from evidence import (USER_AGENT, judge_availability, judge_crs, judge_ffuf,
+                      judge_ffuf_behavior, judge_gotestwaf, judge_mutations, judge_nuclei,
+                      judge_load, judge_protocol, judge_replay, judge_slow, judge_sqlmap,
+                      judge_zap, judge_zap_workflow, read_jsonl, summarize,
+                      validate_mutations, validate_protocol)
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -27,6 +27,13 @@ class EvidenceTests(unittest.TestCase):
 
     def verdict(self):
         return judge_replay([self.case], [self.control], [self.response], self.events, self.waf, "attempt")[0]["verdict"]
+
+    def test_read_jsonl_skips_non_json_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            path.write_text("Traceback (most recent call last):\n"
+                            '{"event": "ready", "nonce": "attempt"}\n')
+            self.assertEqual(read_jsonl(path), [{"event": "ready", "nonce": "attempt"}])
 
     def test_known_rule_block_requires_origin_and_rule_evidence(self):
         self.assertEqual(self.verdict(), "prevented")
@@ -380,6 +387,31 @@ class LoadTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["cases"][0]["verdict"], "failed")
 
+    def test_load_metrics_must_match_and_show_no_false_blocks(self):
+        metrics = {"response": "\n".join([
+            "# HELP kunato_requests_total Total HTTP requests handled.",
+            "kunato_requests_total 3001",
+            "kunato_blocked_total 0",
+            "kunato_rate_limited_total 0",
+            "kunato_overloaded_total 0",
+            "kunato_upstream_timeouts_total 0",
+        ])}
+        result = judge_load(self.summary(50, 120), {"sent": 8, "closed": 8},
+                            {"status": 200}, {"status": 200}, {}, {}, {}, 0, metrics)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["cases"][-1]["verdict"], "passed")
+        self.assertEqual(result["notes"]["metric_requests"], 3001)
+        metrics["response"] = metrics["response"].replace(
+            "kunato_blocked_total 0", "kunato_blocked_total 1")
+        result = judge_load(self.summary(50, 120), {"sent": 8, "closed": 8},
+                            {"status": 200}, {"status": 200}, {}, {}, {}, 0, metrics)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][-1]["verdict"], "failed")
+        missing = judge_load(self.summary(50, 120), {"sent": 8, "closed": 8},
+                             {"status": 200}, {"status": 200}, {}, {}, {}, 0, {})
+        self.assertFalse(missing["passed"])
+        self.assertEqual(missing["cases"][-1]["verdict"], "failed")
+
 
 class SlowTests(unittest.TestCase):
     def test_slow_suite_requires_normal_health(self):
@@ -392,6 +424,37 @@ class SlowTests(unittest.TestCase):
         self.assertEqual(result["cases"][1]["verdict"], "passed")
         blocked = judge_slow(slow, {"status": 429}, before, after)
         self.assertEqual(blocked["cases"][1]["verdict"], "false-block")
+
+
+class AvailabilityTests(unittest.TestCase):
+    def payloads(self):
+        return ({"sent": 8, "closed": 0}, {"status": 408}, {"status": 200},
+                {"status": 503}, {"status": 504}, {"status": 200},
+                {"CPUPerc": "1.0%", "MemUsage": "10MiB / 256MiB"},
+                {"CPUPerc": "2.0%", "MemUsage": "21MiB / 256MiB"}, 0)
+
+    def test_availability_suite_bounds_each_probe(self):
+        metrics = {"response": "kunato_requests_total 42\n"
+                               "kunato_upstream_timeouts_total 1\n"}
+        result = judge_availability(*self.payloads(), metrics)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["connection_cap_status"], 503)
+        self.assertEqual(result["notes"]["upstream_timeouts"], 1)
+
+    def test_availability_suite_rejects_an_unbounded_body(self):
+        slow, _, slow_read, exhaustion, upstream, normal, before, after, restarts = self.payloads()
+        result = judge_availability(slow, {"status": 200}, slow_read, exhaustion,
+                                    upstream, normal, before, after, restarts)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][1]["verdict"], "failed")
+
+    def test_availability_suite_requires_a_upstream_timeout(self):
+        slow, slow_body, slow_read, exhaustion, _, normal, before, after, restarts = self.payloads()
+        result = judge_availability(slow, slow_body, slow_read, exhaustion, {"status": 504},
+                                    normal, before, after, restarts,
+                                    {"response": "kunato_requests_total 10\n"})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][-1]["verdict"], "failed")
 
 
 class ProtocolTests(unittest.TestCase):

@@ -4,9 +4,11 @@ Status: design selected on 2026-10-24. The recording origin, curated goTestWAF,
 DVWA/sqlmap, the CVE-2021-41773/Nuclei fixture, ffuf path discovery and
 enumeration behavior, an authenticated ZAP spider/passive baseline, 25
 deterministic mutation variants, and a pinned OWASP CRS 4.3.0 comparison are
-available, together with 12 raw protocol/WebSocket cases, a bounded slow-HTTP
-run, and a pinned k6 v2.3.0 mixed availability load; see
-[lab usage](../lab/README.md) and the
+available, together with 12 raw protocol/WebSocket cases, benign
+JSON/upload/i18n/large-body/streamed-response workflows, slow-HTTP and
+availability-boundary probes, and a pinned k6 v2.3.0 mixed availability load;
+Rust proxy tests cover HTTP/2 Rapid Reset, CONTINUATION, and an oversized HPACK
+header block. See [lab usage](../lab/README.md) and the
 [testing model](security-lab-testing-model.md). ZAP active scanning is blocked by a ZAP 2.17 plan
 exit on the authenticated DVWA file-inclusion page. This document describes the
 complete target design and the implemented evidence, not achieved coverage for
@@ -336,15 +338,17 @@ Milestones 1-4 are implemented with one ZAP limitation: recording origin,
 goTestWAF, DVWA/sqlmap, the CVE-2021-41773 canary, ffuf
 discovery/enumeration, the authenticated ZAP spider/passive baseline, 25
 deterministic mutation variants, the optional OWASP CRS comparison, 12
-protocol/WebSocket cases, the slow-HTTP run, and the k6 mixed load pass. ZAP
-active scanning remains blocked by the authenticated fixture.
+protocol/WebSocket cases, benign workflows, the slow-HTTP and availability
+probes, and the k6 mixed load pass. Rust proxy tests cover HTTP/2 Rapid Reset,
+CONTINUATION, and oversized HPACK handling. ZAP active scanning remains blocked
+by the authenticated fixture.
 
 | Milestone | Deliverable and acceptance evidence |
 | --- | --- |
 | 1. Evidence foundation | Networks, version lock, reset/preflight, recording origin, case report. Valid requests are observed, known blocks are absent, private-source ALLOW is removed, and broken controls/collection fail the run. |
 | 2. Initial attack loop | goTestWAF, DVWA/sqlmap, one selected high-severity HTTP CVE fixture/Nuclei template. Direct controls succeed; ordinary-UA results have evidence; confirmed failures become attack/benign regression pairs, or a bounded no-gap result is recorded. |
 | 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. Implemented: ffuf discovery/enumeration, the authenticated ZAP spider/passive baseline, and 25 mutation variants whose 15 attacks are blocked and 10 benign cases pass; the CRS 4.3.0 comparison agrees on all 25. ZAP active scanning is blocked on the authenticated DVWA file-inclusion page. |
-| 4. Protocol/availability | Implemented: 12 raw HTTP/1.1/WebSocket cases with per-framing direct controls (4 passed, 8 prevented), a bounded 8-connection/2-second slow run (2 passed), and a 50 rps/60-second k6 mixed run (5 passed: p95 47.4 ms, p99 47.6 ms, 100% success, normal/recovery 200, RSS 21.8 MiB, no restart). Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
+| 4. Protocol/availability | Implemented: 12 raw HTTP/1.1/WebSocket cases with per-framing direct controls (4 passed, 8 prevented), benign JSON/upload/i18n/large-body/streamed-response workflows (5 passed), a bounded 8-connection/2-second slow run (2 passed), availability probes for slow body, slow read, the per-source connection cap, and upstream-response timeout (8 passed), and a 50 rps/60-second k6 mixed run (6 passed: p95 48.8 ms, p99 49.1 ms, 100% success, normal/recovery 200, RSS 21.9 MiB, no restart, metrics matched). Rust proxy tests cover HTTP/2 Rapid Reset, CONTINUATION, and oversized HPACK. Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
 | 5. Continuous regression | Fast PR gates, scheduled discovery, release smoke tests. Mandatory cases cannot silently skip and reports reproduce locally. |
 
 | Cadence | Workload and gate |

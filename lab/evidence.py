@@ -35,8 +35,15 @@ def is_sqli_probe(target):
 
 
 def read_jsonl(path):
-    lines = Path(path).read_text().splitlines()
-    return [json.loads(line) for line in lines if line.strip()]
+    events = []
+    for line in Path(path).read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue
+    return events
 
 
 def verify_origin(events, nonce, allow_errors=False):
@@ -253,7 +260,88 @@ def judge_slow(slow, normal, before, after):
     return result
 
 
-def judge_load(summary, slow, normal, recovery, before, mid, after, restarts):
+def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
+                       before, after, restarts, application_metrics=None):
+    def status(case):
+        return case.get("status")
+
+    sent = slow.get("sent", 0)
+    slow_ok = sent >= 1 and not slow.get("error")
+    body_status = status(slow_body)
+    body_ok = body_status in {400, 408, 413}
+    body_bad = body_status == 200
+    read_status = status(slow_read)
+    read_ok = read_status == 200 and not slow_read.get("error")
+    exhausted_status = status(exhaustion)
+    exhausted_ok = exhausted_status in {429, 503}
+    exhausted_bad = exhausted_status == 200
+    upstream_status = status(upstream)
+    upstream_ok = upstream_status == 504
+    upstream_bad = upstream_status == 200
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    restarts = restarts or 0
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    cases = [
+        {"id": "slow-headers", "expect": "survive",
+         "verdict": "passed" if slow_ok else "inconclusive", "origin_receipts": 0},
+        {"id": "slow-body", "expect": "bounded",
+         "verdict": "passed" if body_ok else ("failed" if body_bad else "inconclusive"),
+         "origin_receipts": 0},
+        {"id": "slow-read", "expect": "survive",
+         "verdict": "passed" if read_ok else "inconclusive", "origin_receipts": 1},
+        {"id": "connection-cap", "expect": "bounded",
+         "verdict": "passed" if exhausted_ok else ("failed" if exhausted_bad else "inconclusive"),
+         "origin_receipts": 0},
+        {"id": "slow-upstream", "expect": "bounded",
+         "verdict": "passed" if upstream_ok else ("failed" if upstream_bad else "inconclusive"),
+         "origin_receipts": 1},
+        {"id": "availability-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
+        {"id": "availability-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    metric_notes = {}
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+
+        def counter(name):
+            for line in text.splitlines():
+                if line.startswith(name + " "):
+                    try:
+                        return float(line.split(None, 1)[1])
+                    except (IndexError, ValueError):
+                        return None
+            return None
+
+        observed_requests = counter("kunato_requests_total")
+        upstream_timeouts = counter("kunato_upstream_timeouts_total")
+        metrics_ok = (observed_requests is not None and observed_requests > 0
+                      and upstream_timeouts is not None and upstream_timeouts >= 1)
+        cases.append({"id": "availability-metrics", "expect": "metrics",
+                      "verdict": "passed" if metrics_ok else "failed",
+                      "origin_receipts": 0})
+        metric_notes = {"metric_requests": observed_requests,
+                        "upstream_timeouts": upstream_timeouts}
+    result = summarize(cases)
+    result["notes"] = {"slow_connections": sent, "slow_body_status": body_status,
+                       "slow_read_status": read_status,
+                       "connection_cap_status": exhausted_status,
+                       "upstream_status": upstream_status,
+                       "normal_status": normal.get("status"), "restarts": restarts,
+                       "mem_before": before.get("MemUsage"), "mem_after": after.get("MemUsage"),
+                       **metric_notes}
+    return result
+
+
+def judge_load(summary, slow, normal, recovery, before, mid, after, restarts,
+               application_metrics=None):
     metrics = summary.get("metrics", {}) if isinstance(summary, dict) else {}
 
     def value(name, key="value"):
@@ -293,6 +381,33 @@ def judge_load(summary, slow, normal, recovery, before, mid, after, restarts):
         {"id": "load-resources", "expect": "resources",
          "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
     ]
+    metric_notes = {}
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+
+        def counter(name):
+            for line in text.splitlines():
+                if line.startswith(name + " "):
+                    try:
+                        return float(line.split(None, 1)[1])
+                    except (IndexError, ValueError):
+                        return None
+            return None
+
+        observed_requests = counter("kunato_requests_total")
+        blocked = counter("kunato_blocked_total")
+        rate_limited = counter("kunato_rate_limited_total")
+        overloaded = counter("kunato_overloaded_total")
+        upstream_timeouts = counter("kunato_upstream_timeouts_total")
+        metrics_ok = (observed_requests is not None and observed_requests >= requests
+                      and blocked == 0 and rate_limited == 0 and overloaded == 0
+                      and upstream_timeouts == 0)
+        cases.append({"id": "load-metrics", "expect": "metrics",
+                      "verdict": "passed" if metrics_ok else "failed",
+                      "origin_receipts": 0})
+        metric_notes = {"metric_requests": observed_requests, "blocked": blocked,
+                        "rate_limited": rate_limited, "overloaded": overloaded,
+                        "upstream_timeouts": upstream_timeouts}
     result = summarize(cases)
     result["notes"] = {"requests": requests, "failed_rate": failed, "checks": checks,
                        "p95_ms": p95, "p99_ms": p99,
@@ -302,7 +417,7 @@ def judge_load(summary, slow, normal, recovery, before, mid, after, restarts):
                        "cpu_before": before.get("CPUPerc"), "cpu_mid": mid.get("CPUPerc"),
                        "cpu_after": after.get("CPUPerc"),
                        "mem_before": before.get("MemUsage"), "mem_mid": mid.get("MemUsage"),
-                       "mem_after": after.get("MemUsage")}
+                       "mem_after": after.get("MemUsage"), **metric_notes}
     return result
 
 

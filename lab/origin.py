@@ -5,10 +5,12 @@ import hashlib
 import json
 import os
 import socket
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY = 65536
 MAX_EVENTS = 10000
+LARGE_BODY = 8 << 20
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -23,6 +25,12 @@ class Recorder(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+
     def emit(self, event, **fields):
         Recorder.events += 1
         print(json.dumps({"event": event, "nonce": os.environ["LAB_NONCE"], **fields}), flush=True)
@@ -31,6 +39,8 @@ class Recorder(BaseHTTPRequestHandler):
         if self.headers.get("Upgrade", "").lower() == "websocket":
             self.websocket()
             return
+        if self.path == "/slow-upstream":
+            time.sleep(float(os.environ.get("LAB_SLOW_UPSTREAM", "3")))
         self.record()
 
     def do_POST(self):
@@ -160,16 +170,53 @@ class Recorder(BaseHTTPRequestHandler):
                   "body_sha256": hashlib.sha256(body).hexdigest()}
         payload = json.dumps(result).encode()
         self.emit("completed", **result, debug_id=debug_id, status=status, body_bytes=len(body))
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Connection", "keep-alive" if not self.close_connection else "close")
-        if status == 302:
-            self.send_header("Location", "/status/200")
-        self.end_headers()
+        if self.path == "/stream":
+            self.send_chunked(payload)
+            return
+        if self.path == "/large":
+            self.send_large()
+            return
         try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "keep-alive" if not self.close_connection else "close")
+            if status == 302:
+                self.send_header("Location", "/status/200")
+            self.end_headers()
             self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def send_chunked(self, payload):
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for start in range(0, len(payload), 2048):
+                part = payload[start:start + 2048]
+                self.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def send_large(self):
+        self.close_connection = True
+        chunk = b"x" * 8192
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
+            self.send_header("Content-Length", str(LARGE_BODY))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for _ in range(LARGE_BODY // len(chunk)):
+                self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass
 

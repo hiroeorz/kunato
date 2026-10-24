@@ -70,19 +70,24 @@ no project containers, networks, or volumes remain.
   is the test valid?     did the attack arrive?   did the WAF prevent it?
 ```
 
-| Direct control | Kunato result | Origin receipt via Kunato | Verdict |
-| --- | --- | --- | --- |
-| valid | blocked | no | **prevented** |
-| valid | allowed | yes | **passed** |
-| valid | allowed | no | **gap / failed** |
-| invalid | - | - | **inconclusive** |
-| - | blocked | - | **false-block** |
+| Direct control | Case `expect` | Kunato result | Origin receipt via Kunato | Verdict |
+| --- | --- | --- | --- | --- |
+| valid | `block` | any | yes | **gap** |
+| valid | `block` | blocked with evidence | no | **prevented** |
+| valid | `block` | allowed | no | **inconclusive** |
+| valid | `allow` | allowed | yes | **passed** |
+| valid | `allow` | blocked or no receipt | any | **false-block** |
+| invalid | any | - | - | **inconclusive** |
 
 A protected result is never trusted unless the direct control proved the case
-is valid. The `summarize()` helper marks a sandbox suite passed only when every case
-is `passed` or `prevented`; `inconclusive`, `false-block`, `gap`, and `failed`
-all fail the run. This fail-closed rule prevents missing evidence from being
-reported as defense success.
+is valid. For a `block` case, `prevented` requires corroborating block evidence
+(status, log, or rule record), not merely a failed or timed-out request. In a
+protocol smuggling case, a forwarded first request is still `prevented` when the
+origin records no smuggled second request. The `summarize()` helper marks a
+sandbox suite passed only when every case is `passed` or `prevented`;
+`inconclusive`, `false-block`, `gap`, and `failed` all fail the run. This
+fail-closed rule prevents missing evidence from being reported as defense
+success.
 
 ## Sandbox suite measurements
 
@@ -95,16 +100,27 @@ format, parameter pollution, tag, padding, shell-metacharacter, and header-value
 variants. Each case is sent directly to the origin and then through Kunato; the
 origin proves receipt, method, target, body hash, and nonce.
 
+### Benign workflows
+
+The `benign` suite sends a JSON API request, a multipart PDF upload, a
+percent-encoded Japanese query, a 16 KiB text body, and a chunked response
+through the same direct-control and protected path. Every case must preserve the
+origin's case ID, method, target, body hash, and nonce, and the protected run
+must return the expected status without a block. These cases exercise the form
+guard, upload inspection, content-type decoding, and chunked response
+forwarding; they are not a full application workflow corpus.
+
 ### Raw protocol and WebSocket
 
-Twelve reviewed cases cover valid keep-alive and chunked exchanges, CL+TE and
-TE+CL ambiguity, duplicate Content-Length, obs-fold, a benign CRLF pair,
-duplicate Host, an invalid chunk, an oversized header, an HTTP/2 preface, and a
-WebSocket handshake. Direct controls use the origin framing modes (`reject`,
-`cl`, `te`) to show what the origin would parse; the protected run must not
-deliver a smuggled second request. The WebSocket probe sends the handshake,
-waits for `101`, sends one masked frame, and requires the origin's `websocket`
-event and echo. A handshake check does not imply inspection of later tunnel
+Twelve reviewed cases cover a valid request with `Connection: close`, a chunked
+body, CL+TE and TE+CL ambiguity, duplicate Content-Length, obs-fold, a benign
+CRLF pair, duplicate Host, an invalid chunk, an oversized header, an HTTP/2
+preface, and a WebSocket handshake. Direct controls use the origin framing modes
+(`reject`, `cl`, `te`) to show what the origin would parse; the protected run
+must not deliver a smuggled second request. The WebSocket probe sends the
+handshake, reads the response headers, sends one masked frame, and requires a
+`101` status plus the origin's `websocket` event; the origin's echo is recorded
+but not asserted. A handshake check does not imply inspection of later tunnel
 messages.
 
 ### Pinned tools
@@ -116,10 +132,24 @@ spider/passive baseline; its active scan is not part of the passing plan.
 
 ### Bounded slow HTTP
 
-`--sandbox-suite slow` opens 8 partial-header connections, holds them for 2 seconds,
-and checks that the independent normal client still receives `200`. Kunato's
-CPU, RSS, restarts, and response are measured against the configured 256 MiB and
-64-pid ceilings. The probe is the lab's own raw-socket mode, not slowhttptest.
+`--sandbox-suite slow` opens 8 partial-header connections, holds them for
+2 seconds, and checks that the independent normal client still receives `200`.
+Kunato's CPU and RSS are recorded before and after, and the containers run under
+the 256 MiB and 64-pid ceilings, but this suite does not assert resource
+thresholds or restarts; the mixed-load suite does. The probe is the lab's own
+raw-socket mode, not slowhttptest.
+
+### Availability boundaries
+
+`--sandbox-suite availability` runs against a dedicated configuration with a
+2-second body-read timeout, a 1-second upstream-response timeout, and an
+8-connection per-source cap. It sends a partial request body and expects `408`,
+opens a large response without reading it, fills the per-source connection
+budget so the next connection gets `503` while the independent normal client
+stays `200`, and requests an origin that sleeps past the upstream timeout so the
+client gets `504`. The same suite checks RSS, restarts, the normal client, and
+the upstream-timeout metric. Ban recovery, slow upstream connect, and
+multi-source exhaustion remain outside the suite.
 
 ### Mixed availability load
 
@@ -132,11 +162,14 @@ CPU, RSS, restarts, and response are measured against the configured 256 MiB and
 ```
 
 The k6 constant-arrival-rate scenario runs 50 requests per second for 60
-seconds. Its thresholds are p95 < 200 ms, p99 < 500 ms, failed requests < 1%,
-and checks > 99%. While it runs, the slow connections and the normal probe are
-executed from separate containers. The judge also requires the normal and
-recovery probes to return `200`, no Kunato restart, and RSS under the 256 MiB
-ceiling. Recovery is checked immediately after the load stops.
+seconds. Its thresholds are at least 1,000 requests, p95 < 200 ms,
+p99 < 500 ms, failed requests < 1%, and checks > 99%. While it runs, the slow
+connections and the normal probe are executed from separate containers. The
+judge also requires the normal and recovery probes to return `200`, no Kunato
+restart, and RSS under the 256 MiB ceiling. Recovery is checked immediately
+after the load stops. A metrics case requires the request counter to cover the
+k6 workload and the block, rate-limit, overload, and upstream-timeout counters
+to remain at zero.
 
 ## Why this design
 
@@ -161,13 +194,17 @@ ceiling. Recovery is checked immediately after the load stops.
 
 - `scripts/security-lab.sh prepare` pins images, builds the CVE fixture and the
   current release binary, and writes `prepared/manifest.json`.
-- The bounded sandbox suites (`all`, `crs`, `protocol`, `slow`, `load`) are run
-  locally before committing and pushing. CI runs only the lab observation unit
-  tests and the shellcheck wrappers.
-- The last `all` run, `20261024T224332-cd8f6f28`, passed 10 sandbox suites: replay,
-  mutations, protocol, slow, load, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP.
-  The mixed load recorded 3001 requests, p95 51.4 ms, p99 54.9 ms, 100%
-  success, normal/recovery `200`, RSS 21.9 MiB of 256 MiB, and no restart.
+- The `all` sandbox suite is run locally before committing and pushing, together
+  with the optional, observation-only `crs` comparison; individual suites can
+  also be run separately. CI runs only the lab observation unit tests and the
+  shellcheck wrappers.
+- The last `all` run, `20261024T234913-f07aeedc`, passed 12 sandbox suites:
+  replay, benign, mutations, protocol, slow, availability, load, goTestWAF,
+  sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001 requests, p95
+  48.8 ms, p99 49.1 ms, 100% success, normal/recovery `200`, RSS 21.9 MiB of
+  256 MiB, no restart, and matching metrics. The availability suite recorded a
+  slow-body `408`, slow-read `200`, connection-cap `503`, upstream `504`, and
+  23.6 MiB RSS.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -184,9 +221,10 @@ current suites.
 ### Attack and engine coverage
 
 - The tracker lists HPP, Content-Type spoofing, API version/schema abuse,
-  session/JWT anomalies, business-logic classes (IDOR, coupon/carding, scalping),
-  and rule-bypass payloads as absent. HTTP request smuggling, desync, response
-  splitting, upload inspection, and GraphQL abuse are partial.
+  session-ID anomalies, business-logic classes (IDOR, coupon/carding, scalping),
+  and rule-bypass payloads as absent; JWT tampering and algorithm confusion are
+  partial. HTTP request smuggling, desync, response splitting, upload
+  inspection, and GraphQL abuse are partial.
 - The WebSocket suite proves the handshake and tunnel establishment; it does not
   inspect frames after the upgrade, fragmentation, PING/PONG, or close
   semantics. The 25 mutations and the tool corpora are reviewed samples, not the
@@ -194,50 +232,67 @@ current suites.
 
 ### Protocol coverage
 
-- HTTP/2 is limited to the connection preface. SETTINGS/CONTINUATION, Rapid
-  Reset, HPACK bombs, stream-state abuse, GOAWAY, priority, and h2c are not
-  exercised.
-- HTTP/3, QUIC, and TLS termination/ACME are not exercised in the lab. HTTP/1.0,
-  pipelining, CONNECT, obs-fold, chunked trailers, and very large chunks are not
-  exercised beyond the 12 reviewed cases.
-- WebSocket frames after the upgrade, and the rules that would apply to them,
-  are not tested.
+- The lab's HTTP/2 client coverage is limited to the connection preface. Rust
+  integration tests add Rapid Reset, CONTINUATION, and an oversized HPACK header
+  block; the lab does not exercise SETTINGS/CONTINUATION under load, HPACK
+  resource pressure, stream-state abuse, GOAWAY, priority, or h2c.
+- HTTP/3, QUIC, and TLS termination/ACME are not exercised in the lab, although
+  the Rust proxy tests cover functional H3 requests. HTTP/1.0, pipelining,
+  CONNECT, chunked trailers, and very large chunks are not exercised beyond the
+  12 reviewed cases; the single obs-fold case has no variants.
+- The rules that would apply to WebSocket frames after the upgrade are not
+  tested; the suite only establishes the tunnel and echoes one frame.
 
 ### Availability coverage
 
-- The slow suite holds 8 partial-header connections for 2 seconds. Slow bodies,
-  slow reads, slow upstreams, connection exhaustion, max-connection limits,
-  queue/backpressure, and inspection-budget pressure are not exercised.
-- The load suite is a fixed 50 requests/second run. H2 Rapid Reset, CONTINUATION
-  floods, and HPACK bombs are not attempted; ban/rate-limit recovery windows and
-  distributed sources (impossible in one lab) remain untested. OOM, restart, and
-  graceful-shutdown behavior under pressure are not part of the passing suites.
+- The slow suite holds 8 partial-header connections for 2 seconds. The
+  availability suite adds a slow-body `408`, a slow-read probe, a per-source
+  connection cap with `503`, and an upstream-response timeout with `504`. Slow
+  upstream connect, multi-source and global exhaustion, queue/backpressure,
+  inspection-budget pressure, and ban recovery are not exercised.
+- The load suite is a fixed 50 requests/second run and now checks Kunato's
+  request, block, rate-limit, overload, and upstream-timeout counters. H2 Rapid
+  Reset, CONTINUATION floods, and HPACK bombs are not attempted in the lab;
+  ban/rate-limit recovery windows and distributed sources (impossible in one
+  lab) remain untested. OOM, restart, and graceful-shutdown behavior under
+  pressure are not part of the passing suites.
 
 ### Workflows and false positives
 
 - ZAP active scanning is still blocked by the authenticated DVWA fixture; only
-  the spider/passive baseline runs. Authenticated APIs, JSON/GraphQL workflows,
-  multipart and streaming bodies, i18n, large legitimate bodies, and legitimate
-  WebSocket traffic are not in the benign corpus.
+  the spider/passive baseline runs. The benign suite covers a JSON API request,
+  a multipart PDF upload, a percent-encoded Japanese query, a 16 KiB text body,
+  and a chunked response. Authenticated API flows, GraphQL workflows, i18n edge
+  cases, sustained streaming, and legitimate WebSocket workloads remain outside
+  the corpus.
 - goTestWAF, sqlmap, Nuclei, ffuf, ZAP, and CRS run bounded plans. The full
   scanner corpora and additional tamper/template/paranoia variants are not.
 
 ### Operations
 
 - Hot reload under load, rules-update failures and format compatibility,
-  `allowed_hosts`/`client_ip`/trusted-proxy combinations, metrics/logs/audit,
-  restart state, and multi-worker or HTTP/2/HTTP/3 upstream translation are not
-  covered by the suites; unit and proxy tests cover parts of these paths.
+  `allowed_hosts`/`client_ip`/trusted-proxy combinations, logs/audit, restart
+  state, and multi-worker or HTTP/2/HTTP/3 upstream translation are not covered
+  by the suites; unit and proxy tests cover parts of these paths. The load suite
+  asserts request, block, rate-limit, overload, and upstream-timeout counters.
 
 ### Priorities
 
-1. ZAP active scanning, once the authenticated fixture no longer aborts it.
-2. HTTP/2 frame-level cases and HTTP/3; extend the Rust integration fixtures
-   before adding external clients.
-3. WebSocket frame inspection and fragmentation/close behavior.
-4. Slow body/read, connection exhaustion, slow upstream, and ban/recovery.
-5. A broader benign corpus for APIs, uploads, i18n, and streaming.
-6. Hot reload and rules updates under load; metrics and restart behavior.
+1. Availability: ban recovery, slow upstream connect, multi-source and global
+   exhaustion, and queue/backpressure. The slow-body, slow-read, per-source
+   connection-cap, and upstream-response-timeout cases are implemented.
+2. Benign workflow breadth: authenticated APIs, GraphQL, upload variants, i18n
+   edge cases, and sustained streaming. The initial JSON, upload, i18n,
+   large-body, and streamed-response cases are implemented.
+3. HTTP/2 hardening and HTTP/3: Rapid Reset, CONTINUATION, and oversized HPACK
+   are covered by Rust integration tests; add lab resource variants and HTTP/3
+   after a TLS/QUIC fixture.
+4. Hot reload and rules updates under load, plus restart behavior. Load metrics
+   are already asserted.
+5. WebSocket fragmentation, close, and PING/PONG lifecycle. Frame inspection is
+   a separate feature, not a lab test.
+6. ZAP active scanning, scoped and observation-only, once the authenticated
+   fixture no longer aborts it.
 7. Full scanner corpora on a nightly or weekly cadence.
 
 ### Limits

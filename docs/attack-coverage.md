@@ -82,9 +82,9 @@ body coverage on those routes and does not change the bundled verdicts.
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
 | Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Head limits are enforced before body ingestion and inspection-memory reservation on HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes, including when a declared body never arrives. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
-| HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
-| Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
-| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, and immediate recovery checks (p95 47.4 ms, p99 47.6 ms, 100% success). Fixed-runner trend, not a capacity claim |
+| HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either). Rust proxy tests replay Rapid Reset, a CONTINUATION flood, and an oversized HPACK header block while a normal HTTP/2 request still succeeds |
+| Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. The `availability` suite adds a slow-body `408`, a slow-read probe, a per-source connection cap with `503`, and an upstream-response timeout with `504`. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
+| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, immediate recovery, and metrics checks (p95 48.8 ms, p99 49.1 ms, 100% success, no block/rate-limit/overload/upstream-timeout movement). Fixed-runner trend, not a capacity claim |
 | HTTP Desync | 🔶 | Same handling as smuggling |
 
 Protocol compatibility: before HTTP/1.1 forwarding, split request `Cookie`
@@ -345,7 +345,7 @@ their status and body length. The behavior phase enables
 `protection.behavior.enumeration` with `BLOCK`; the enumeration source is banned
 (403/429) and the separate normal client stays at 200.
 
-The authenticated ZAP baseline logs in, spiders 176 control and 224 protected
+The authenticated ZAP baseline logs in, spiders 193 control and 215 protected
 authenticated URLs, and runs the passive scan through the WAF while the normal
 client stays healthy. ZAP active scanning is not part of a passing plan: ZAP
 2.17 exits on the authenticated DVWA file-inclusion active scan. Active
@@ -359,6 +359,16 @@ case, block comments, newlines, JSON and form bodies, parameter pollution,
 alternative XSS tags, dot padding, shell separators, command substitution, and
 header values. The pinned OWASP CRS 4.3.0 comparison agreed on all 25 decisions
 (`agree-block` 15, `agree-allow` 10); it is an observation, not a gate.
+
+The 2026-10-24 benign and availability suites add five benign workflows and eight
+availability checks. The benign cases (JSON API, multipart PDF upload,
+percent-encoded Japanese query, 16 KiB body, chunked response) all forwarded
+unchanged. The availability cases held a partial body to `408`, survived a
+slow read, enforced the per-source connection cap with `503` while the normal
+client stayed `200`, and timed out a slow origin with `504`; RSS, restarts, and
+the upstream-timeout metric stayed within bounds. Ban recovery remains untested.
+The Rust proxy tests add HTTP/2 Rapid Reset, CONTINUATION-flood, and oversized
+HPACK regressions; a normal HTTP/2 request still succeeds afterward.
 
 ## Notable Gaps
 

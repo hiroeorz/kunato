@@ -15,12 +15,12 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
-                      judge_gotestwaf, judge_mutations, judge_load, judge_nuclei,
-                      judge_protocol, judge_replay, judge_slow, judge_sqlmap, judge_zap,
-                      judge_zap_workflow, origin_response, read_jsonl, summarize,
-                      validate_cases, validate_ffuf_cases, validate_mutations,
-                      validate_protocol, verify_origin)
+from evidence import (USER_AGENT, judge_availability, judge_crs, judge_ffuf,
+                      judge_ffuf_behavior, judge_gotestwaf, judge_mutations, judge_load,
+                      judge_nuclei, judge_protocol, judge_replay, judge_slow,
+                      judge_sqlmap, judge_zap, judge_zap_workflow, origin_response,
+                      read_jsonl, summarize, validate_cases, validate_ffuf_cases,
+                      validate_mutations, validate_protocol, verify_origin)
 
 ROOT = Path(__file__).resolve().parent.parent
 LAB = ROOT / "lab"
@@ -55,6 +55,33 @@ FFUF_PROTECTION = """protection:
       enabled: false
     global_auth:
       enabled: false
+"""
+
+AVAILABILITY_TIMEOUTS = """timeouts:
+  header_read: 5s
+  body_read: 2s
+  upstream_connect: 1s
+  upstream_response: 1s
+  shutdown_grace: 10s
+  connection_idle: 60s
+"""
+
+AVAILABILITY_PROTECTION = """protection:
+  enabled: true
+  max_connections_per_ip: 8
+  max_connections: 64
+  requests_per_second: 1000
+  burst: 1000
+  global_requests_per_second: 10000
+  max_tracked_ips: 100
+  aggregate_ipv6_prefix: 64
+  ban:
+    violations: 1000
+    window: 60s
+    duration: 1s
+    max_duration: 1s
+  behavior:
+    enabled: false
 """
 
 
@@ -202,7 +229,7 @@ def prepared_inputs():
     return manifest
 
 
-def make_config(source, upstream="http://origin:8080", protection=None):
+def make_config(source, upstream="http://origin:8080", protection=None, timeouts=None):
     # The example has a stable two-level category layout; fail if it changes.
     if source.count("  - name: trusted-sources\n") != 1:
         raise ValueError("Expected one trusted-sources category in the example")
@@ -219,6 +246,10 @@ def make_config(source, upstream="http://origin:8080", protection=None):
         source, count = re.subn(r"(?ms)^protection:\n.*?(?=^\S)", protection, source, count=1)
         if count != 1:
             raise ValueError("Expected one protection block")
+    if timeouts is not None:
+        source, count = re.subn(r"(?ms)^timeouts:\n(?:  [^\n]*\n)+", timeouts, source, count=1)
+        if count != 1:
+            raise ValueError("Expected one timeouts block")
     return source
 
 
@@ -302,12 +333,13 @@ class SandboxSuite:
         self.compose("logs", "--no-color", "--no-log-prefix", service, log=path)
         return path.read_text()
 
-    def reset_origin(self, phase, framing="reject"):
+    def reset_origin(self, phase, framing="reject", *, config="rules-origin.yaml",
+                     disable_protection=True):
         nonce = uuid.uuid4().hex
         self.env["LAB_NONCE"] = nonce
         self.env["LAB_ORIGIN_FRAMING"] = framing
-        self.env["LAB_CONFIG"] = "rules-origin.yaml"
-        self.env["LAB_DISABLE_PROTECTION"] = "1"
+        self.env["LAB_CONFIG"] = config
+        self.env["LAB_DISABLE_PROTECTION"] = "1" if disable_protection else "0"
         self.compose("up", "-d", "--force-recreate", "--pull", "never", "origin", "kunato")
         directory = self.run_dir / phase
         directory.mkdir(exist_ok=True)
@@ -403,6 +435,28 @@ class SandboxSuite:
         verdicts = judge_replay(cases, controls, results, origin, waf, nonce)
         return summarize(verdicts)
 
+    def benign(self):
+        cases = json.loads((self.input / "lab/cases/benign.json").read_text())
+        control_nonce = self.reset_origin("benign-control")
+        self.preflight("origin")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", "/lab/cases/benign.json"),
+                              log=self.run_dir / "benign-control/probes.jsonl")
+        control_origin, _ = self.logs("benign-control")
+        verify_origin(control_origin, control_nonce)
+        for case, observation in zip(cases, controls, strict=True):
+            observation["validated"] = origin_response(case, observation, control_nonce)
+        if not all(observation["validated"] for observation in controls):
+            raise ValueError("Direct benign controls failed")
+        write_json(self.run_dir / "benign-control/validated.json", controls)
+        nonce = self.reset_origin("benign")
+        results = self.probe("client", "cases",
+                             extra=("--cases", "/lab/cases/benign.json"),
+                             log=self.run_dir / "benign/probes.jsonl")
+        self.healthy("benign", nonce=nonce)
+        origin, waf = self.logs("benign")
+        return summarize(judge_replay(cases, controls, results, origin, waf, nonce))
+
     def mutations(self):
         cases = json.loads((self.input / "lab/plans/mutations.json").read_text())
         control_nonce = self.reset_origin("mutations-control")
@@ -474,6 +528,33 @@ class SandboxSuite:
         after = self.stats()
         origin, _ = self.logs("slow")
         return judge_slow(slow, normal, before, after)
+
+    def availability(self):
+        nonce = self.reset_origin("availability", config="rules-availability.yaml",
+                                  disable_protection=False)
+        self.preflight("origin")
+        before = self.stats()
+        slow = self.probe("client", "slow", extra=("--connections", "8", "--hold", "1"))
+        time.sleep(0.5)
+        slow_body = self.probe("client", "slow-body", extra=("--hold", "3"),
+                               check=False)
+        time.sleep(0.5)
+        slow_read = self.probe("client", "slow-read", extra=("--hold", "2"),
+                               check=False)
+        time.sleep(0.5)
+        exhaustion = self.probe("client", "exhaustion",
+                                extra=("--connections", "8"), check=False)
+        time.sleep(0.5)
+        upstream = self.probe("client", "upstream", check=False)
+        normal = self.healthy("availability", nonce=nonce)
+        after = self.stats()
+        metrics_path = self.run_dir / "availability/metrics.json"
+        application_metrics = (json.loads(metrics_path.read_text())
+                               if metrics_path.exists() else {"response": ""})
+        self.logs("availability")
+        return judge_availability(slow, slow_body, slow_read, exhaustion, upstream,
+                                  normal, before, after, self.restarts(),
+                                  application_metrics)
 
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)
@@ -836,8 +917,12 @@ class SandboxSuite:
         summary = json.loads((self.run_dir / "load/k6-summary.json").read_text())
         after = self.stats()
         recovery = self.healthy("load-recovery", nonce=nonce)
+        metrics_path = self.run_dir / "load-recovery/metrics.json"
+        application_metrics = (json.loads(metrics_path.read_text())
+                               if metrics_path.exists() else {"response": ""})
         self.logs("load")
-        return judge_load(summary, slow, normal, recovery, before, mid, after, self.restarts())
+        return judge_load(summary, slow, normal, recovery, before, mid, after,
+                          self.restarts(), application_metrics)
 
     def cleanup(self):
         self.compose("rm", "-s", "-f", "-v", "normal", check=False)
@@ -871,9 +956,13 @@ def new_run(suite):
         (config_dir / name).write_text(make_config(original, upstream))
     (config_dir / "rules-ffuf.yaml").write_text(
         make_config(original, "http://dvwa:80", FFUF_PROTECTION))
+    (config_dir / "rules-availability.yaml").write_text(
+        make_config(original, "http://origin:8080", AVAILABILITY_PROTECTION,
+                    timeouts=AVAILABILITY_TIMEOUTS))
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
     cases = json.loads((LAB / "cases/smoke.json").read_text())
     validate_cases(cases)
+    validate_cases(json.loads((LAB / "cases/benign.json").read_text()))
     ffuf_cases = json.loads((LAB / "cases/ffuf.json").read_text())
     validate_ffuf_cases(ffuf_cases)
     mutation_cases = json.loads((LAB / "cases/mutations.json").read_text())
@@ -912,16 +1001,21 @@ def run(suite):
     report = {"run_id": directory.name, "passed": False, "suites": {}}
     try:
         lab.compose("config", "--quiet")
-        for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml", "rules-ffuf.yaml"):
+        for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
+                     "rules-ffuf.yaml", "rules-availability.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
         report["suites"]["replay"] = lab.replay()
+        if suite in {"benign", "all"}:
+            report["suites"]["benign"] = lab.benign()
         if suite in {"mutations", "all"}:
             report["suites"]["mutations"] = lab.mutations()
         if suite in {"protocol", "all"}:
             report["suites"]["protocol"] = lab.protocol()
         if suite in {"slow", "all"}:
             report["suites"]["slow"] = lab.slow()
+        if suite in {"availability", "all"}:
+            report["suites"]["availability"] = lab.availability()
         if suite in {"load", "all"}:
             report["suites"]["load"] = lab.load()
         if suite in {"gotestwaf", "all"}:
@@ -989,8 +1083,9 @@ def main():
     subs.add_parser("verify", help="Check prepared inputs without downloads")
     runner = subs.add_parser("run", help="Run the isolated regression sandbox suites")
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
-                        choices=["replay", "mutations", "protocol", "gotestwaf", "sqlmap",
-                                 "nuclei", "ffuf", "zap", "crs", "slow", "load", "all"],
+                        choices=["replay", "benign", "mutations", "protocol", "gotestwaf",
+                                 "sqlmap", "nuclei", "ffuf", "zap", "crs", "slow",
+                                 "availability", "load", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)
