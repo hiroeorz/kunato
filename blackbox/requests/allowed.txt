@@ -576,3 +576,11 @@ GET /h/rest?packages=calendar,mail
 GET /viewer/iiif/auth/login?origin=https://viewer.example.com
 POST /api/v2.0/cmdb/system/admin?mkey=1 header="Content-Type: application/json" body="{\"data\":{\"q_type\":1,\"name\":\"admin\"}}"
 GET /goanywhere/lic/acceptance
+
+# --- Near-misses for the 2026-10-24 Camaleon, baserCMS, Cacti, and Part-DB
+#     signatures: the same endpoints and parameters with ordinary values must
+#     keep passing. ---
+POST /admin/media/actions header="Content-Type: application/x-www-form-urlencoded" body="authenticity_token=token&media_action=crop_url&url=data%3A%2F%2F8.8.8.8%2Fplain%2Cimage-bytes&name=page_1.html.erb"
+POST /baser/api/admin/bc-theme-file/theme_files/edit.json header="Content-Type: application/json" body="{\"theme\":\"BcThemeSample\",\"plugin\":\"\",\"type\":\"layout\",\"fullpath\":\"layout%2Fdefault.php\",\"contents\":\"<?php echo 1; ?>\"}"
+POST /cacti/data_input.php header="Content-Type: application/x-www-form-urlencoded" body="action=save&id=1&input_string=%2Fusr%2Fbin%2Frrdtool%20update"
+POST /part/1/attachments header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt

