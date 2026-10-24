@@ -32,8 +32,7 @@ its dependency edge is removed or replaced by in-tree code.
 
 ## Completed
 
-Changes 1-8 are committed. Change 9 is implemented in the working tree on
-branch `remove-granit-parser`; its commit is pending. Change 8 is `586234c`;
+Changes 1-9 are committed. Change 9 is `07f6028`; change 8 is `586234c`;
 change 5 is `b70f37c`, change 6 is `c4d23e8`, and change 7 is `bd73060`.
 
 | # | Change | Commit | KPI after | Removed from the Linux tree | Tradeoffs / notes |
@@ -46,7 +45,7 @@ change 5 is `b70f37c`, change 6 is `c4d23e8`, and change 7 is `bd73060`.
 | 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
 | 7 | ACME origin and order resilience | `bd73060` | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
 | 8 | `serde-saphyr` -> `granit-parser` + in-tree serde deserializer | `586234c` | 112 -> 101 (-11) | serde-saphyr, annotate-snippets, anstyle, unicode-width, encoding_rs_io, encoding_rs, core_detect, multiversion_no_op, scopeguard, simdutf8, num-traits | New [src/yaml/](src/yaml/); YAML 1.2 syntax from `granit-parser`, serde mapping in-tree. Anchors, aliases, merge keys, explicit tags, directives, and multiple documents are rejected; error rendering and locations differ from `serde-saphyr`. 514 unit tests and all integration tests pass; a typical 89 KB file parses in about 1.8 ms with a 3 MB peak. |
-| 9 | `granit-parser` -> in-tree YAML subset parser | pending | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. Flow collections and quoted scalars must be on one line; block scalars, multi-line plain scalars, comments, and compact block collections are supported. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. |
+| 9 | `granit-parser` -> in-tree YAML subset parser | `07f6028` | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. Flow collections and quoted scalars must be on one line; block scalars, multi-line plain scalars, comments, and compact block collections are supported. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -126,8 +125,7 @@ contains either crate. Priority 1 (`serde-saphyr`) and its follow-up
 
 ## Recommended next step
 
-1. Review and commit change 9 on branch `remove-granit-parser`; the KPI is 99.
-   The full test suite, clippy, and the dependency audit pass.
+1. Change 9 is committed as `07f6028`; the KPI is 99. No action.
 2. No further dependency work is recommended. Compression, regex, and `arc-swap`
    remain closed for the reasons above, and HTTP/3 is retained by product
    decision (2026-10-24).

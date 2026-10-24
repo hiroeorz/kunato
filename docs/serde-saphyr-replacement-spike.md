@@ -6,8 +6,9 @@ Status: implemented in commit `586234c`. This file is retained as the design
 and decision record.
 
 Follow-up (change 9): the retained `granit-parser` and `arraydeque` dependency
-was later removed by replacing the event parser with an in-tree parser in
-[`../src/yaml/parser.rs`](../src/yaml/parser.rs). The YAML subset is unchanged
+was later removed in commit `07f6028` by replacing the event parser with an
+in-tree parser in [`../src/yaml/parser.rs`](../src/yaml/parser.rs). The YAML
+subset is unchanged
 except that flow collections and quoted scalars are limited to one line. The
 KPI is now 99. The sections below describe the first step (change 8).
 
