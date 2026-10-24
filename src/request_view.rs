@@ -20,6 +20,11 @@ pub struct RequestView<'a> {
     /// because the raw body exceeded the limit or because decoding could not
     /// finish). ALLOW rules must not trust an incomplete body.
     pub body_truncated: bool,
+    /// True when the request path is a configured content route, where the body
+    /// is authored content rather than request parameters. Body targets are
+    /// skipped for every rule, so a body-only rule cannot match while other
+    /// targets of the same rule are still evaluated.
+    pub body_rules_exempt: bool,
     pub source_ip: IpAddr,
 }
 
@@ -54,6 +59,7 @@ impl<'a> RequestView<'a> {
                 Vec::new()
             },
             body_truncated: false,
+            body_rules_exempt: false,
             source_ip: normalize_ip(source_ip),
         }
     }
@@ -62,12 +68,17 @@ impl<'a> RequestView<'a> {
         self.body_truncated = body_truncated;
         self
     }
+
+    pub fn with_body_rules_exempt(mut self, body_rules_exempt: bool) -> Self {
+        self.body_rules_exempt = body_rules_exempt;
+        self
+    }
 }
 
 /// Percent-decoded variants of a path plus its normalized form, so rules see
 /// the same path an upstream server that merges slashes and resolves dot
 /// segments would route on.
-fn path_forms(path: &str) -> Vec<Cow<'_, str>> {
+pub(crate) fn path_forms(path: &str) -> Vec<Cow<'_, str>> {
     let mut forms = percent_decode_forms(path);
     let last = forms.last().map(|form| form.as_ref()).unwrap_or(path);
     if let Some(normalized) = normalize_path(last)

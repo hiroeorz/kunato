@@ -1409,6 +1409,7 @@ async fn process(
                 .is_some_and(|normalized| config.limits.graphql.matches_path(&normalized))
     };
     let body_rules = config.has_body_target_rules();
+    let body_rules_exempt = config.is_content_route(&parts.method, &parts.uri);
     let php_profile = config.php.matches(&parts);
     let form_body = crate::form::is_form(&parts.headers);
     let inspect_form = form_body && (config.limits.form.enabled || php_profile);
@@ -1422,7 +1423,7 @@ async fn process(
             "multipart is disabled by the PHP profile",
         ));
     }
-    let inspect_body = body_rules || graphql_path;
+    let inspect_body = (body_rules && !body_rules_exempt) || graphql_path;
     let inspect_uploads = config.limits.upload_inspection != UploadInspection::Off
         && crate::upload::is_multipart(&parts.headers)
         && !body.is_empty();
@@ -1617,9 +1618,10 @@ async fn process(
         &parts.headers,
         inspected_body.as_ref(),
         source.client_ip,
-        body_rules,
+        body_rules && !body_rules_exempt,
     )
-    .with_body_truncated(body_truncated);
+    .with_body_truncated(body_truncated)
+    .with_body_rules_exempt(body_rules_exempt);
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
 
     if !outcome.logs.is_empty() {

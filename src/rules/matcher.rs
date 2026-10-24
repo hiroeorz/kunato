@@ -210,7 +210,7 @@ impl PayloadMatcher {
             }
         }
 
-        if self.targets & TARGET_BODY != 0 {
+        if self.targets & TARGET_BODY != 0 && !view.body_rules_exempt {
             if allow_mode && view.body_truncated {
                 // The rest of the body has not been inspected, so an ALLOW
                 // rule must not treat the visible prefix as the whole message.
@@ -428,6 +428,49 @@ mod tests {
         assert!(
             block.matches(&view(&method, &uri, &headers, b"trusted").with_body_truncated(true))
         );
+    }
+
+    #[test]
+    fn exempt_body_is_skipped_for_blocks_and_never_trusted_by_allows() {
+        let method = Method::POST;
+        let uri: Uri = "/editor".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+
+        let block = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("payload")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+        let exempt = view(&method, &uri, &headers, b"payload").with_body_rules_exempt(true);
+        assert!(!block.matches(&exempt));
+        assert!(block.matches(&view(&method, &uri, &headers, b"payload")));
+
+        let mixed = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("payload")],
+                targets: TARGET_BODY | TARGET_QUERY,
+            }),
+            ..Matcher::default()
+        };
+        let query_uri: Uri = "/editor?q=payload".parse().expect("valid URI");
+        let exempt_query =
+            view(&method, &query_uri, &headers, b"payload").with_body_rules_exempt(true);
+        assert!(mixed.matches(&exempt_query));
+
+        // A body-only ALLOW rule cannot match when the body was skipped, while
+        // the same rule still matches an inspected body.
+        let allow = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("payload")],
+                targets: TARGET_BODY,
+            }),
+            allow_mode: true,
+            ..Matcher::default()
+        };
+        assert!(!allow.matches(&exempt));
+        assert!(allow.matches(&view(&method, &uri, &headers, b"payload")));
     }
 
     #[test]

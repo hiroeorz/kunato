@@ -157,6 +157,14 @@ rule-set updates.
   one address. Resolved IPs key request limits, rules, behavioral signals, bans,
   and request allowlists; connection caps use the transport peer. Upstream XFF
   contains only the resolved IP. The policy remains active without protection.
+- `content_routes` declares authoring endpoints (for example CMS article
+  editors) whose request body is authored content rather than parameters. Body
+  targets are skipped for matching requests; path, query, cookie, header,
+  form/upload, GraphQL, DoS, and response checks remain active. The path must
+  match every decoded and normalized form, methods default to all and use
+  uppercase tokens (an empty list is rejected), and up to 64 entries are
+  accepted. See `docs/development.md`, "Content routes"; the exemption is a
+  local policy and must not be used for public parameter endpoints.
 - `protection.behavior` enables per-source behavioral detection over upstream
   responses: enumeration (`404` ratio and distinct paths) and authentication
   failures (`401`/`403` on login/token/session/MFA/SSO paths), plus a global

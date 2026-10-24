@@ -29,6 +29,7 @@ use crate::yaml;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const MAX_PATTERN_BYTES: usize = 4096;
 const MAX_PATTERNS_PER_RULE: usize = 64;
+const MAX_CONTENT_ROUTES: usize = 64;
 const MAX_PATH_BYTES_LIMIT: usize = 64 * 1024;
 const MAX_HEADER_BYTES_LIMIT: usize = 1024 * 1024;
 const MAX_HEADERS_LIMIT: usize = 1000;
@@ -257,6 +258,18 @@ fn default_client_ip_header() -> String {
     "x-forwarded-for".to_owned()
 }
 
+/// A request route whose body is authored content (for example, a CMS article
+/// editor) rather than request parameters. Body-targeting rules are skipped for
+/// matching requests; every other target and every other protection stays
+/// active.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentRouteSpec {
+    pub path: String,
+    #[serde(default)]
+    pub methods: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSpec {
@@ -269,6 +282,8 @@ pub struct ConfigSpec {
     pub allowed_hosts: Option<Vec<String>>,
     #[serde(default)]
     pub client_ip: Option<ClientIpSpec>,
+    #[serde(default)]
+    pub content_routes: Vec<ContentRouteSpec>,
     #[serde(default)]
     pub categories: Vec<CategorySpec>,
     #[serde(default)]
@@ -1240,12 +1255,32 @@ impl Upstream {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ContentRoute {
+    path: Regex,
+    methods: Option<Vec<Method>>,
+}
+
+impl ContentRoute {
+    /// Every path form must match so a request cannot be normalized by the
+    /// upstream into a different endpoint after the body rules were skipped.
+    fn matches(&self, method: &Method, path_forms: &[std::borrow::Cow<'_, str>]) -> bool {
+        if let Some(methods) = &self.methods
+            && !methods.contains(method)
+        {
+            return false;
+        }
+        !path_forms.is_empty() && path_forms.iter().all(|form| self.path.is_match(form))
+    }
+}
+
 #[derive(Debug)]
 pub struct CompiledConfig {
     pub listen: SocketAddr,
     pub upstream: Upstream,
     pub allowed_hosts: Option<AllowedHosts>,
     pub client_ip: ClientIp,
+    pub content_routes: Vec<ContentRoute>,
     pub categories: Vec<CompiledCategory>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -1261,6 +1296,18 @@ pub struct CompiledConfig {
 }
 
 impl CompiledConfig {
+    /// Route check for callers that only have the request head, so body
+    /// inspection can be skipped before the body is collected.
+    pub fn is_content_route(&self, method: &Method, uri: &Uri) -> bool {
+        if self.content_routes.is_empty() {
+            return false;
+        }
+        let forms = crate::request_view::path_forms(uri.path());
+        self.content_routes
+            .iter()
+            .any(|route| route.matches(method, &forms))
+    }
+
     pub fn has_response_rules(&self) -> bool {
         self.categories
             .iter()
@@ -1560,6 +1607,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     validate_http3(&spec.http3, &spec.tls, &mut issues);
     let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
     let client_ip = compile_client_ip(spec.client_ip.as_ref(), &mut issues);
+    let content_routes = compile_content_routes(&spec.content_routes, &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
     let php = compile_php(&spec.php, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
@@ -1599,6 +1647,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         upstream,
         allowed_hosts,
         client_ip,
+        content_routes,
         categories,
         timeouts: Timeouts::from(&spec.timeouts),
         limits: Limits::from(&spec.limits),
@@ -1612,6 +1661,48 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         overrides_file: sources.overrides_file,
         rules_update,
     })
+}
+
+fn compile_content_routes(
+    routes: &[ContentRouteSpec],
+    issues: &mut Vec<String>,
+) -> Vec<ContentRoute> {
+    if routes.len() > MAX_CONTENT_ROUTES {
+        issues.push(format!(
+            "content_routes: too many entries (max {MAX_CONTENT_ROUTES})"
+        ));
+    }
+
+    let mut compiled = Vec::new();
+    for (index, route) in routes.iter().take(MAX_CONTENT_ROUTES).enumerate() {
+        let context = format!("content_routes[{index}]");
+        if route.path.trim().is_empty() {
+            issues.push(format!("{context}: `path` is required"));
+            continue;
+        }
+        let mut regexes = compile_regexes(std::slice::from_ref(&route.path), &context, issues);
+        let Some(path) = regexes.pop() else {
+            continue;
+        };
+        let methods = match &route.methods {
+            None => None,
+            Some(values) if values.is_empty() => {
+                issues.push(format!(
+                    "{context}: `methods` must not be empty; omit it for every method"
+                ));
+                continue;
+            }
+            Some(values) => {
+                let methods = compile_methods(values, &context, issues);
+                if methods.is_empty() {
+                    continue;
+                }
+                Some(methods)
+            }
+        };
+        compiled.push(ContentRoute { path, methods });
+    }
+    compiled
 }
 
 fn compile_client_ip(spec: Option<&ClientIpSpec>, issues: &mut Vec<String>) -> ClientIp {
@@ -3152,6 +3243,68 @@ mod tests {
         assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn content_routes_exempt_only_matching_methods_and_path_forms() {
+        let config = parse_with(
+            BASE,
+            "content_routes:
+  - path: ^/admin/posts(?:/|$)
+    methods: [POST, PUT]
+",
+        )
+        .expect("valid config");
+
+        let uri: Uri = "/admin/posts/waf-in-rust".parse().expect("uri");
+        assert!(config.is_content_route(&Method::POST, &uri));
+        assert!(!config.is_content_route(&Method::GET, &uri));
+
+        // The normalized form leaves the content route, so the exemption must
+        // not apply even though the raw path has the prefix.
+        let uri: Uri = "/admin/posts/../public".parse().expect("uri");
+        assert!(!config.is_content_route(&Method::POST, &uri));
+    }
+
+    #[test]
+    fn content_routes_without_methods_apply_to_every_method() {
+        let config =
+            parse_with(BASE, "content_routes:\n  - path: ^/editor(/|$)\n").expect("valid config");
+        let uri: Uri = "/editor/draft".parse().expect("uri");
+        for method in [Method::GET, Method::POST, Method::DELETE] {
+            assert!(config.is_content_route(&method, &uri));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_content_routes() {
+        for (rest, expected) in [
+            ("content_routes:\n  - path: '('\n", "invalid regex"),
+            (
+                "content_routes:\n  - path: ^/admin\n    methods: [post]\n",
+                "case-sensitive",
+            ),
+            ("content_routes:\n  - path: ''\n", "`path` is required"),
+            (
+                "content_routes:\n  - path: ^/admin\n    methods: []\n",
+                "must not be empty",
+            ),
+        ] {
+            let error = parse_with(BASE, rest).expect_err("must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected `{expected}` in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_too_many_content_routes() {
+        let routes: String = (0..=MAX_CONTENT_ROUTES)
+            .map(|index| format!("  - path: ^/route{index}$\n"))
+            .collect();
+        let error = parse_with(BASE, &format!("content_routes:\n{routes}")).expect_err("must fail");
+        assert!(error.to_string().contains("too many entries"));
     }
 
     #[test]

@@ -177,6 +177,9 @@ use a different file (for example `rules.example.yaml` when running from source)
 - `upstream` — base URL of the upstream HTTP server.
 - `allowed_hosts` — optional Host/authority allowlist; omit to disable, and list
   every name and IP address clients use (see [Host allowlist](#host-allowlist)).
+- `content_routes` — optional authoring routes whose request body is content
+  rather than parameters; body-targeting rules are skipped there (see
+  [Content routes](#content-routes)).
 - `categories` — ordered list of rule categories.
 - `rules_file` — optional categories-only file refreshed by the daily rules updater.
 - `overrides_file` — optional categories-only file with local exceptions,
@@ -389,6 +392,46 @@ The SHA256 digest guards against corrupted or truncated downloads; it is
 fetched over the same TLS connection as the rules file, so it does not add
 authenticity. Detached signatures (minisign) are planned as a hardening step.
 
+### Content routes
+
+Authoring endpoints such as a CMS article editor submit authored content
+(Markdown, HTML, code samples) in the request body. That content is
+byte-for-byte indistinguishable from an attack: a Markdown code fence or an
+inline code span such as ``` `curl | sudo sh` ``` is also a valid shell command
+substitution, and any rule that excludes prose can be evaded by padding a real
+payload the same way. Declare such endpoints as content routes instead of
+adding per-article or per-notation exceptions:
+
+```yaml
+content_routes:
+  - path: ^/admin/posts(?:/|$)
+    methods: [POST, PUT, PATCH]
+```
+
+The body targets of every rule are skipped for a matching request, so a
+body-only rule cannot match; a rule that targets both the body and the query
+still matches on the query. Every other check stays active: `allowed_hosts`,
+path, query, cookie, and header targets, the form guard, upload inspection,
+GraphQL limits, DoS protection, and response-phase rules. A body that exceeds
+`limits.max_body_bytes` is forwarded rather than rejected by the strict
+body-inspection rule because there is no body rule to satisfy, but the form and
+upload guards still apply.
+
+`path` is a regular expression matched against every decoded and normalized
+form of the request path. The route applies only when every form matches, so a
+request cannot be normalized by the upstream into a different endpoint after
+the body rules were skipped. `methods` is optional and defaults to every
+method; names are the case-sensitive uppercase tokens used by rule matches, and
+an explicitly empty list is rejected. Methods are matched on the wire, like rule
+methods, so a Rails form update that sends `POST` with `_method=patch` needs
+`POST`. Up to 64 routes are accepted, and the list hot-reloads with the rest of
+the configuration.
+
+Only declare routes that store the body as content and are protected by
+authentication and output encoding. Body-borne attacks sent to a content route
+are not inspected; never use a content route to exempt a public parameter
+endpoint. The exemption is a local policy, not a managed rule-set field.
+
 ### Rule set format compatibility
 
 `main` publishes the newest rule set to installs of every release, so the format
@@ -537,7 +580,8 @@ returns `415`, and a malformed stream returns `400` (counted in
 `kunato_request_decode_skipped_total`). Multipart parsing is
 bounded to 64 parts with 1 KiB names and file names; malformed multipart bodies
 are inspected raw only. No other normalization (Unicode folding, HTML entity
-decoding) is performed.
+decoding) is performed. Body targets are skipped entirely on configured
+[content routes](#content-routes).
 
 | Field              | Description                                                                                                             |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |

@@ -179,15 +179,18 @@ pub(crate) async fn inspect(
         }
     };
 
+    let body_rules_exempt = config.is_content_route(&request.method, &request.uri);
+    let request_body_targets = config.response_targets_request_body() && !body_rules_exempt;
     let view = RequestView::with_body_decoding(
         &request.method,
         &request.uri,
         &request.headers,
         inspected_request.body,
         source.client_ip,
-        config.response_targets_request_body(),
+        request_body_targets,
     )
-    .with_body_truncated(inspected_request.truncated);
+    .with_body_truncated(inspected_request.truncated)
+    .with_body_rules_exempt(body_rules_exempt);
     let response_view = ResponseView::new(
         buffered.parts.status,
         &buffered.parts.headers,

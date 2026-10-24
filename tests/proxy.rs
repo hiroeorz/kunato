@@ -1688,6 +1688,61 @@ async fn strict_body_inspection_applies_after_rule_evaluation() {
 }
 
 #[tokio::test]
+async fn content_route_skips_body_rules_but_keeps_query_rules() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ max_body_bytes: 8 }}\ncontent_routes:\n  - path: ^/admin/posts(?:/|$)\n    methods: [POST, PUT, PATCH]\ncategories:\n  - name: sig\n    action: BLOCK\n    rules:\n      - name: signature\n        match: {{ regex: 'BLOCKME', in: [query, body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(
+        running.addr,
+        Method::POST,
+        "/admin/posts/waf-in-rust",
+        "BLOCKME",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Exempting the body also exempts it from the strict-inspection limit.
+    let large = "x".repeat(64);
+    let (status, _) = send(
+        running.addr,
+        Method::POST,
+        "/admin/posts/waf-in-rust",
+        &large,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(running.addr, Method::POST, "/search", &large).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let (status, _) = send(running.addr, Method::POST, "/search", "BLOCKME").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send(
+        running.addr,
+        Method::POST,
+        "/admin/posts/waf-in-rust?q=BLOCKME",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send(
+        running.addr,
+        Method::DELETE,
+        "/admin/posts/waf-in-rust",
+        "BLOCKME",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn strict_body_inspection_allows_a_matching_allow_rule() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(

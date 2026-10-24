@@ -22,7 +22,9 @@ often means "no signature shipped", not "impossible". Engine checks outside that
 match language — GraphQL depth/complexity, strict body sizing,
 `limits.upload_inspection`, the `allowed_hosts` Host/authority policy, and the
 `protection.behavior` source/authentication signals — address classes no regex
-expresses.
+expresses. `content_routes` is an explicit local opt-out of body-targeting rules
+for authored-content endpoints rather than a coverage mechanism, so it removes
+body coverage on those routes and does not change the bundled verdicts.
 
 ## 1. Injection
 
