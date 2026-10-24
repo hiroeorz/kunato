@@ -19,3 +19,4 @@ pub mod rules_update;
 pub mod telemetry;
 pub mod upgrade;
 mod upload;
+mod yaml;

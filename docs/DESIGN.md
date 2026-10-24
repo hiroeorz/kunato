@@ -718,7 +718,8 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `hyper-rustls`            | HTTPS client                   | Upstream forwarding and ACME directory requests over rustls. |
 | `http`                    | Shared HTTP types              | Core request/response types used across the proxy.         |
 | `http-body-util`, `bytes` | Body utilities and buffers     | Companion crates for hyper; bounded-body helpers.          |
-| `serde`, `serde-saphyr`   | YAML deserialization           | Typed config with `deny_unknown_fields`; safe-Rust YAML 1.2 parser. |
+| `serde`                   | Config and rule schema         | Typed config with `deny_unknown_fields`; the YAML deserializer is in-tree (`src/yaml/`). |
+| `granit-parser`           | YAML 1.2 syntax parsing        | Pure-Rust event parser; already in the graph through the former `serde-saphyr` dependency. |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
 | `tracing`                 | Structured logging             | Event macros are shared with hyper and quinn; the subscriber, filter, and text/JSON formatters are in-tree. |

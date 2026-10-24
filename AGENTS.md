@@ -45,6 +45,7 @@ src/
   php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations
   upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
+  yaml/            # In-tree serde deserializer over granit-parser
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
@@ -100,6 +101,10 @@ rule-set updates.
 
 ## Configuration Schema
 
+- Configuration and rule files use a YAML subset: block/flow collections,
+  plain/quoted/block scalars, and comments. Anchors, aliases, merge keys,
+  explicit tags, directives, and multiple documents are rejected, as are
+  duplicate mapping keys. The in-tree deserializer lives in `src/yaml/`.
 - The YAML config uses a two-level model: `categories` → `rules`. A category's
   `action` and `response` are defaults that individual rules may override.
 - Rules can also come from `rules_file` (managed, refreshed by `rules_update`)

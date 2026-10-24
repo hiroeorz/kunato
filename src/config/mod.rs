@@ -24,6 +24,7 @@ use crate::rules::matcher::{
     Matcher, PayloadMatcher, StatusRange, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH,
     TARGET_QUERY, TARGET_RESPONSE_BODY,
 };
+use crate::yaml;
 
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const MAX_PATTERN_BYTES: usize = 4096;
@@ -1401,7 +1402,7 @@ fn load_candidate(path: &Path, candidate: Option<&str>) -> Result<CompiledConfig
         .as_deref()
         .map(|overrides| resolve_path(base, overrides));
     let rules = match candidate {
-        Some(text) => serde_saphyr::from_str(text)?,
+        Some(text) => yaml::from_str(text)?,
         None => load_rules_spec(&rules_file)?,
     };
     let overrides = load_rules_spec(&overrides_file)?;
@@ -1436,7 +1437,7 @@ pub fn load_settings(path: &Path) -> Result<CompiledConfig, Error> {
 
 fn read_spec(path: &Path) -> Result<ConfigSpec, Error> {
     let text = read_config_text(path)?;
-    Ok(serde_saphyr::from_str(&text)?)
+    Ok(yaml::from_str(&text)?)
 }
 
 pub(crate) fn read_config_text(path: &Path) -> Result<String, Error> {
@@ -1486,14 +1487,14 @@ fn load_rules_spec(path: &Option<PathBuf>) -> Result<RulesFileSpec, Error> {
     if text.trim().is_empty() {
         return Ok(RulesFileSpec::default());
     }
-    serde_saphyr::from_str(&text).map_err(|source| Error::RulesParse {
+    yaml::from_str(&text).map_err(|source| Error::RulesParse {
         path: path.clone(),
         source: Box::new(source),
     })
 }
 
 pub fn parse(text: &str) -> Result<CompiledConfig, Error> {
-    let spec: ConfigSpec = serde_saphyr::from_str(text)?;
+    let spec: ConfigSpec = yaml::from_str(text)?;
     let sources = RulesSources {
         rules_file: spec.rules_file.clone(),
         overrides_file: spec.overrides_file.clone(),
@@ -1514,7 +1515,7 @@ pub fn parse_rules(text: &str) -> Result<ParsedRules, Error> {
     if text.trim().is_empty() {
         return Ok(ParsedRules::default());
     }
-    let spec: RulesFileSpec = serde_saphyr::from_str(text)?;
+    let spec: RulesFileSpec = yaml::from_str(text)?;
     let disabled = normalize_disabled_rules(&spec.disabled_rules);
     let mut issues = Vec::new();
     let categories = compile_categories(

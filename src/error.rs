@@ -12,12 +12,12 @@ pub enum Error {
     ConfigRead { path: PathBuf, source: io::Error },
 
     #[error("failed to parse configuration: {0}")]
-    ConfigParse(#[from] serde_saphyr::Error),
+    ConfigParse(#[from] crate::yaml::Error),
 
     #[error("failed to parse rules file `{path}`: {source}")]
     RulesParse {
         path: PathBuf,
-        source: Box<serde_saphyr::Error>,
+        source: Box<crate::yaml::Error>,
     },
 
     #[error("invalid configuration:\n{}", format_issues(.0))]
@@ -60,21 +60,10 @@ impl Error {
     /// newer format, so callers use it to tell "upgrade Kunato" apart from
     /// transient or local failures.
     pub fn unsupported_construct(&self) -> Option<String> {
-        // `from_str` wraps a deserialization error in a `WithSnippet` for
-        // rustc-like rendering; the variant that carries the cause is inside.
-        fn schema(error: &serde_saphyr::Error) -> bool {
-            matches!(
-                error.without_snippet(),
-                serde_saphyr::Error::SerdeUnknownField { .. }
-                    | serde_saphyr::Error::SerdeUnknownVariant { .. }
-                    | serde_saphyr::Error::SerdeMissingField { .. }
-            )
-        }
-
         match self {
-            Self::ConfigParse(error) if schema(error) => Some(error.without_snippet().to_string()),
-            Self::RulesParse { source, .. } if schema(source) => {
-                Some(source.without_snippet().to_string())
+            Self::ConfigParse(error) if error.is_unsupported_construct() => Some(error.summary()),
+            Self::RulesParse { source, .. } if source.is_unsupported_construct() => {
+                Some(source.summary())
             }
             Self::ConfigInvalid(issues) => issues
                 .iter()
