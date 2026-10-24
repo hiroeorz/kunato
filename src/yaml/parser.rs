@@ -10,6 +10,9 @@ use crate::yaml::value::{MapBuilder, Scalar, Value};
 
 const MAX_DEPTH: usize = 128;
 const MAX_NODES: usize = 1_000_000;
+/// Bound the line table. A 16 MiB document of very short lines would otherwise
+/// allocate tens of millions of line entries before the node limit applies.
+const MAX_LINES: usize = 1_000_000;
 
 pub(crate) fn parse(input: &str) -> Result<Value, Error> {
     Parser::new(input)?.parse_document()
@@ -90,6 +93,9 @@ impl<'a> Parser<'a> {
                     }
                     _ => break,
                 }
+            }
+            if lines.len() >= MAX_LINES {
+                return Err(Error::syntax("document has too many lines", number, indent));
             }
             lines.push(Line {
                 number,
