@@ -751,7 +751,7 @@ def judge_zap_workflow(control_log, protected_log, control_report, protected_rep
         "protected_origin_requests": protected_requests,
         "active_scan": ("not run: ZAP 2.17 exits the plan on the authenticated DVWA file-inclusion "
                         "active scan; injection defenses are covered by the sqlmap, Nuclei, and "
-                        "goTestWAF campaigns"),
+                        "goTestWAF sandbox suites"),
     }
     return result
 

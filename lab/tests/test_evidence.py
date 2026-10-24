@@ -366,7 +366,7 @@ class LoadTests(unittest.TestCase):
             "http_req_duration": {"p(95)": p95, "p(99)": p99},
         }}
 
-    def test_load_campaign_passes_within_ceilings(self):
+    def test_load_suite_passes_within_ceilings(self):
         result = judge_load(self.summary(50, 120), {"sent": 8, "closed": 8},
                             {"status": 200}, {"status": 200},
                             {"CPUPerc": "1.0%"}, {"CPUPerc": "50.0%"},
@@ -374,7 +374,7 @@ class LoadTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["notes"]["p95_ms"], 50)
 
-    def test_load_campaign_fails_on_latency(self):
+    def test_load_suite_fails_on_latency(self):
         result = judge_load(self.summary(500, 900), {"sent": 8, "closed": 8},
                             {"status": 200}, {"status": 200}, {}, {}, {}, 0)
         self.assertFalse(result["passed"])
@@ -382,7 +382,7 @@ class LoadTests(unittest.TestCase):
 
 
 class SlowTests(unittest.TestCase):
-    def test_slow_campaign_requires_normal_health(self):
+    def test_slow_suite_requires_normal_health(self):
         slow = {"sent": 8, "closed": 8, "held_seconds": 2}
         normal = {"status": 200}
         before = {"CPUPerc": "1.0%", "MemUsage": "10MiB / 1GiB"}

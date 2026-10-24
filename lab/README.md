@@ -2,7 +2,7 @@
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
 an isolated recording origin, direct receipt controls, and eleven bounded
-campaigns (the optional CRS comparison is not part of `all`). It runs curated
+sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
@@ -10,7 +10,9 @@ baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
 a bounded slow-HTTP run, a pinned k6 v2.3.0 mixed availability load, and a
 pinned OWASP CRS 4.3.0 comparison. It measures request rejection, bounded
 exploit prevention, and availability on a fixed runner; the fixtures do not
-prove protection for arbitrary applications or capacity. The ZAP 2.17 plan
+prove protection for arbitrary applications or capacity. The
+[testing model](../docs/security-lab-testing-model.md) explains the control and
+evidence flow, the verdict rules, and the sandbox suite diagrams. The ZAP 2.17 plan
 exits on the authenticated DVWA file-inclusion active scan, so active-injection
 coverage stays with sqlmap, Nuclei, and goTestWAF.
 
@@ -33,18 +35,18 @@ scripts/security-lab.sh verify
 # Direct controls, followed by WAF inspection of attacks and benign guards.
 scripts/security-lab.sh run
 
-# Add one campaign, or run every campaign in sequence.
-scripts/security-lab.sh run --campaign gotestwaf
-scripts/security-lab.sh run --campaign sqlmap
-scripts/security-lab.sh run --campaign nuclei
-scripts/security-lab.sh run --campaign ffuf
-scripts/security-lab.sh run --campaign zap
-scripts/security-lab.sh run --campaign mutations
-scripts/security-lab.sh run --campaign protocol
-scripts/security-lab.sh run --campaign slow
-scripts/security-lab.sh run --campaign load
-scripts/security-lab.sh run --campaign crs   # optional CRS comparison, observation only
-scripts/security-lab.sh run --campaign all
+# Add one sandbox suite, or run every sandbox suite in sequence.
+scripts/security-lab.sh run --sandbox-suite gotestwaf
+scripts/security-lab.sh run --sandbox-suite sqlmap
+scripts/security-lab.sh run --sandbox-suite nuclei
+scripts/security-lab.sh run --sandbox-suite ffuf
+scripts/security-lab.sh run --sandbox-suite zap
+scripts/security-lab.sh run --sandbox-suite mutations
+scripts/security-lab.sh run --sandbox-suite protocol
+scripts/security-lab.sh run --sandbox-suite slow
+scripts/security-lab.sh run --sandbox-suite load
+scripts/security-lab.sh run --sandbox-suite crs   # optional CRS comparison, observation only
+scripts/security-lab.sh run --sandbox-suite all
 ```
 
 Execution always uses local image IDs with `pull_policy: never`; it does not
@@ -95,7 +97,7 @@ and writes a per-attempt canary under `/opt/kunato-lab/`. The Nuclei template in
 upstream CVE template; it is not an upstream-signed template. The fixture keeps
 the Apache event MPM inside a 64-pid budget.
 
-## Campaigns
+## Sandbox suites
 
 ### Replay and goTestWAF
 
@@ -158,7 +160,7 @@ requests. This verifies the authenticated workflow across the WAF; it does not
 claim active-scan defense. The plan intentionally omits `activeScan`: ZAP 2.17
 exits the plan on this authenticated DVWA file-inclusion active scan, and active
 injection defenses remain covered by the sqlmap, Nuclei, and goTestWAF
-campaigns.
+sandbox suites.
 
 ### Deterministic mutations
 
@@ -190,7 +192,7 @@ and 8 prevented.
 
 ### Slow HTTP
 
-`--campaign slow` opens 8 bounded slow connections with partial headers, holds
+`--sandbox-suite slow` opens 8 bounded slow connections with partial headers, holds
 them for 2 seconds, and checks that the independent normal client still receives
 `200`, that Kunato stays up, and that its CPU/RSS stay within the configured
 256 MiB / 64-pid ceilings. The probe is the lab's own raw-socket mode
@@ -199,7 +201,7 @@ connections held, normal 200, CPU 0.00-0.01%, RSS 21.1-21.4 MiB.
 
 ### Mixed load
 
-`--campaign load` runs a pinned k6 v2.3.0 constant-arrival-rate scenario
+`--sandbox-suite load` runs a pinned k6 v2.3.0 constant-arrival-rate scenario
 (50 requests/second for 60 seconds) from the `load` service, concurrently opens
 the bounded slow connections from the `client` service, and probes the normal
 path from the same independent client. The k6 thresholds are p95 < 200 ms,
@@ -212,7 +214,7 @@ restart.
 
 ### OWASP CRS comparison
 
-`--campaign crs` runs the same 25 mutation cases directly through a pinned
+`--sandbox-suite crs` runs the same 25 mutation cases directly through a pinned
 OWASP CRS 4.3.0 reverse proxy and through Kunato, then reports the per-case
 agreement. The 2026-10-24 comparison agreed on all 15 attacks (`agree-block`)
 and all 10 benign cases (`agree-allow`). This is an observation, not a gate:
@@ -261,7 +263,7 @@ scripts/security-lab.sh down target/security-lab/<run-id>
 
 Reports exit with failure when a required control or observation is missing, a
 tool fails, an attack reaches the origin in a replay case, a legitimate exchange
-changes, or a campaign is inconclusive. Containers and project networks are
+changes, or a sandbox suite is inconclusive. Containers and project networks are
 removed after the run, including on ordinary failure. `down` cleans only the
 identified lab project if a controller was forcibly interrupted; evidence is
 retained.
@@ -273,9 +275,9 @@ python3 -m unittest discover -s lab/tests -v
 ```
 
 The separate security-lab workflow runs these observation tests and the
-shellcheck wrappers. Run the `all` campaign and the optional CRS comparison
+shellcheck wrappers. Run the `all` sandbox suite and the optional CRS comparison
 locally before committing and pushing; CI does not execute the bounded
-campaigns. The daily CVE publishing workflow is unchanged. The CVE-2021-41773
+sandbox suites. The daily CVE publishing workflow is unchanged. The CVE-2021-41773
 canary rows are also in `blackbox/requests/` so the ordinary black-box gate
 retains the request shapes.
 
@@ -289,7 +291,7 @@ sources, Internet link saturation, or capacity; the slow and load results are
 fixed-runner trends with explicit ceilings, not proof against a botnet. The
 authenticated ZAP baseline covers login, spider, and passive discovery; active
 scanning is not part of the passing plan, and the active injection defenses
-remain the sqlmap/Nuclei/goTestWAF campaigns. The mutation corpus, the protocol
+remain the sqlmap/Nuclei/goTestWAF sandbox suites. The mutation corpus, the protocol
 cases, and the CRS comparison are bounded to the reviewed seeds, fixtures, and
 framing interpretations.
 

@@ -1,4 +1,4 @@
-"""Prepare frozen inputs and run isolated, observable local WAF campaigns."""
+"""Prepare frozen inputs and run isolated, observable local WAF suites."""
 
 import argparse
 import hashlib
@@ -238,7 +238,7 @@ def write_gotestwaf_cases(destination, cases):
         write_json(directory / (case["id"] + ".yml"), data)
 
 
-class Campaign:
+class SandboxSuite:
     def __init__(self, run_dir):
         self.run_dir = run_dir
         self.input = run_dir / "input"
@@ -377,7 +377,7 @@ class Campaign:
         (self.run_dir / phase).mkdir(parents=True, exist_ok=True)
         write_json(self.run_dir / phase / "health-after.json", health)
         if health.get("status") != status or (body and body not in health.get("response", "")):
-            raise ValueError("Normal probe failed after campaign")
+            raise ValueError("Normal probe failed after suite")
         if nonce and health.get("origin") != nonce:
             raise ValueError("Normal probe used another origin attempt")
         metrics = self.compose("exec", "-T", "kunato", "python3", "-B", "/lab/probe.py", "metrics")
@@ -498,7 +498,7 @@ class Campaign:
                     raise ValueError("Tool container exited before recording its status")
                 time.sleep(0.2)
             else:
-                raise ValueError("goTestWAF exceeded the campaign deadline")
+                raise ValueError("goTestWAF exceeded the suite deadline")
             command(["docker", "logs", service_name], log=self.run_dir / phase / "tool.log")
             (self.run_dir / phase / "tool-exit-code.txt").write_text(result.stdout)
             if result.stdout.strip() != "0":
@@ -801,7 +801,7 @@ class Campaign:
                 time.sleep(0.2)
             else:
                 collect()
-                raise ValueError(f"{service} exceeded the campaign deadline")
+                raise ValueError(f"{service} exceeded the suite deadline")
             collect()
             (directory / (name + ".exit-code")).write_text(exit_status.stdout)
             if exit_status.stdout.strip() != "0":
@@ -852,7 +852,7 @@ class Campaign:
             raise ValueError("Lab resources remain after cleanup")
 
 
-def new_run(campaign):
+def new_run(suite):
     manifest = prepared_inputs()
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
     directory = WORK / run_id
@@ -897,46 +897,46 @@ def new_run(campaign):
                    [case for case in protocol_cases
                     if case.get("direct_framing", "reject") == framing])
     hashes = {str(path.relative_to(input_dir)): sha256(path) for path in sorted(input_dir.rglob("*")) if path.is_file()}
-    manifest.update(run_id=run_id, project="kunato-lab-" + run_id.lower(), campaign=campaign,
+    manifest.update(run_id=run_id, project="kunato-lab-" + run_id.lower(), suite=suite,
                     commit=command(["git", "rev-parse", "HEAD"]).stdout.strip(), inputs=hashes)
     write_json(directory / "manifest.json", manifest)
     print(f"Run artifacts: {directory}", flush=True)
     return directory
 
 
-def run(campaign):
+def run(suite):
     global COMMAND_JOURNAL
-    directory = new_run(campaign)
+    directory = new_run(suite)
     COMMAND_JOURNAL = directory / "commands.jsonl"
-    lab = Campaign(directory)
-    report = {"run_id": directory.name, "passed": False, "campaigns": {}}
+    lab = SandboxSuite(directory)
+    report = {"run_id": directory.name, "passed": False, "suites": {}}
     try:
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml", "rules-ffuf.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
-        report["campaigns"]["replay"] = lab.replay()
-        if campaign in {"mutations", "all"}:
-            report["campaigns"]["mutations"] = lab.mutations()
-        if campaign in {"protocol", "all"}:
-            report["campaigns"]["protocol"] = lab.protocol()
-        if campaign in {"slow", "all"}:
-            report["campaigns"]["slow"] = lab.slow()
-        if campaign in {"load", "all"}:
-            report["campaigns"]["load"] = lab.load()
-        if campaign in {"gotestwaf", "all"}:
-            report["campaigns"]["gotestwaf"] = lab.gotestwaf()
-        if campaign in {"sqlmap", "all"}:
-            report["campaigns"]["sqlmap"] = lab.sqlmap()
-        if campaign in {"nuclei", "all"}:
-            report["campaigns"]["nuclei"] = lab.nuclei()
-        if campaign in {"ffuf", "all"}:
-            report["campaigns"]["ffuf"] = lab.ffuf()
-        if campaign in {"zap", "all"}:
-            report["campaigns"]["zap"] = lab.zap()
-        if campaign == "crs":
-            report["campaigns"]["crs"] = lab.crs()
-        report["passed"] = all(result["passed"] for result in report["campaigns"].values())
+        report["suites"]["replay"] = lab.replay()
+        if suite in {"mutations", "all"}:
+            report["suites"]["mutations"] = lab.mutations()
+        if suite in {"protocol", "all"}:
+            report["suites"]["protocol"] = lab.protocol()
+        if suite in {"slow", "all"}:
+            report["suites"]["slow"] = lab.slow()
+        if suite in {"load", "all"}:
+            report["suites"]["load"] = lab.load()
+        if suite in {"gotestwaf", "all"}:
+            report["suites"]["gotestwaf"] = lab.gotestwaf()
+        if suite in {"sqlmap", "all"}:
+            report["suites"]["sqlmap"] = lab.sqlmap()
+        if suite in {"nuclei", "all"}:
+            report["suites"]["nuclei"] = lab.nuclei()
+        if suite in {"ffuf", "all"}:
+            report["suites"]["ffuf"] = lab.ffuf()
+        if suite in {"zap", "all"}:
+            report["suites"]["zap"] = lab.zap()
+        if suite == "crs":
+            report["suites"]["crs"] = lab.crs()
+        report["passed"] = all(result["passed"] for result in report["suites"].values())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, TypeError) as error:
         report["error"] = str(error)
         try:
@@ -963,7 +963,8 @@ def render_report(directory):
     report = json.loads((directory / "report.json").read_text())
     lines = ["# Local security lab report", "", f"Run: `{report['run_id']}`", "",
              f"Result: {'PASS' if report['passed'] else 'FAIL'}", ""]
-    for name, result in report["campaigns"].items():
+    suites = report.get("suites", report.get("campaigns", {}))
+    for name, result in suites.items():
         lines += [f"## {name}", "", "| Case | Expectation | Verdict | Origin receipts |",
                   "| --- | --- | --- | --- |"]
         lines += [f"| {case['id']} | {case['expect']} | {case['verdict']} | {case['origin_receipts']} |"
@@ -986,8 +987,8 @@ def main():
     subs = parser.add_subparsers(dest="operation", required=True)
     subs.add_parser("prepare", help="Pull frozen images, download tools, build the CVE fixture, and build the local Kunato revision")
     subs.add_parser("verify", help="Check prepared inputs without downloads")
-    runner = subs.add_parser("run", help="Run the isolated regression campaigns")
-    runner.add_argument("--campaign",
+    runner = subs.add_parser("run", help="Run the isolated regression sandbox suites")
+    runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "mutations", "protocol", "gotestwaf", "sqlmap",
                                  "nuclei", "ffuf", "zap", "crs", "slow", "load", "all"],
                         default="replay")
@@ -1002,7 +1003,7 @@ def main():
             prepared_inputs()
             print("Prepared inputs verified")
         elif args.operation == "run":
-            return run(args.campaign)
+            return run(args.suite)
         else:
             directory = args.run_directory.resolve()
             if directory.parent != WORK or not re.fullmatch(r"[0-9]{8}T[0-9]{6}-[a-f0-9]{8}", directory.name):
@@ -1010,7 +1011,7 @@ def main():
             if args.operation == "report":
                 return int(not render_report(directory))
             else:
-                Campaign(directory).cleanup()
+                SandboxSuite(directory).cleanup()
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, TypeError) as error:
         print(f"security-lab: {error}", file=sys.stderr)

@@ -6,7 +6,8 @@ enumeration behavior, an authenticated ZAP spider/passive baseline, 25
 deterministic mutation variants, and a pinned OWASP CRS 4.3.0 comparison are
 available, together with 12 raw protocol/WebSocket cases, a bounded slow-HTTP
 run, and a pinned k6 v2.3.0 mixed availability load; see
-[lab usage](../lab/README.md). ZAP active scanning is blocked by a ZAP 2.17 plan
+[lab usage](../lab/README.md) and the
+[testing model](security-lab-testing-model.md). ZAP active scanning is blocked by a ZAP 2.17 plan
 exit on the authenticated DVWA file-inclusion page. This document describes the
 complete target design and the implemented evidence, not achieved coverage for
 arbitrary applications.
@@ -16,7 +17,7 @@ arbitrary applications.
 Use a disposable local Linux VM with Docker Engine and Compose for vulnerable
 applications and attack tools. Start with **goTestWAF, Nuclei, and sqlmap**, plus
 Kunato's existing black-box runner. Add ZAP, ffuf, deterministic mutation, the
-optional OWASP CRS comparison, and protocol/availability campaigns after
+optional OWASP CRS comparison, and protocol/availability sandbox suites after
 per-case evidence collection works. The implemented ZAP plan covers form login,
 spidering, and passive discovery; the active-scan plan must be revisited when
 the authenticated fixture no longer aborts ZAP 2.17, and the passing
@@ -154,13 +155,13 @@ using observed runner and target resource use.
 
 Reset database/files/uploads, sessions, callback events, and Kunato state between
 control/protected attempts and state-mutating cases. Do not compare concurrent
-campaigns that modify the same fixture. Keep application authority, settings,
+sandbox suites that modify the same fixture. Keep application authority, settings,
 authenticated role, and protocol prerequisites equivalent; use runner-local
 DNS/connection routing changes rather than a different application virtual host.
 Use local test certificates and record actual ALPN/HTTP version. Silent protocol
 fallback does not count as an H2/H3 test.
 
-## Campaign profiles
+## Sandbox suite profiles
 
 | Profile | Configuration and claim |
 | --- | --- |
@@ -203,7 +204,7 @@ separate instead of presenting one overall security percentage.
 | Selected case does not execute or lacks a supported fixture | `skipped` with a reason, not passed |
 
 For stateful tools, prove the direct exploit, reset, and run the same bounded
-campaign through Kunato. Discovery sequences can diverge after a block; preserve
+sandbox suite through Kunato. Discovery sequences can diverge after a block; preserve
 the directly successful exchange and minimize it into an exact replay for causal
 comparison. Repeat controls afterward to detect fixture drift.
 
@@ -229,7 +230,7 @@ Show misses over completed valid block cases and false blocks over completed
 valid benign cases. Report skips/errors/inconclusive cases alongside both
 denominators, broken down by family, placement, encoding, fixture, and protocol.
 Missing or inconclusive mandatory regressions fail the gate. Broad discovery
-campaigns can have open gaps; preserve and triage them rather than redefining
+sandbox suites can have open gaps; preserve and triage them rather than redefining
 the expected result to improve a score.
 
 ## Measure, fix, and retain the regression
@@ -240,8 +241,8 @@ the expected result to improve a score.
 2. Freeze tool/template/fixture/rule revisions, seed, and request/time budgets.
    Verify routing, health, identity, and direct controls. A recording origin needs
    receipt controls; an exploit fixture needs an actual exploit outcome.
-3. Reset and run the protected ordinary-UA campaign, then the separate default
-   fingerprint campaign if useful. Maintain a normal-client probe for availability.
+3. Reset and run the protected ordinary-UA sandbox suite, then the separate default
+   fingerprint sandbox suite if useful. Maintain a normal-client probe for availability.
 4. Triage: missing/overbroad signature, normalization/decoding error, protocol or
    resource bug, opt-in policy, fixture/tool defect, application-only issue, or
    inconclusive evidence. A base64 variant that the application never decodes is
@@ -254,7 +255,7 @@ the expected result to improve a score.
    scoped local configuration. Authorization/business-logic flaws need application
    fixes; blocking normal object IDs does not solve them.
 7. Re-run the small case, benign guards, full corpus, relevant integration tests,
-   and original bounded tool campaign. A single hard-coded sample is insufficient.
+   and original bounded tool sandbox suite. A single hard-coded sample is insufficient.
 8. Update `docs/attack-coverage.md` when coverage/evidence changes and
    `docs/cve-coverage.md` for reviewed CVEs. Keep conditional mitigations Partial
    and application patch requirements visible. Scanner scores cannot promote an
@@ -277,7 +278,7 @@ encoded values, valid JSON/GraphQL, multipart uploads, and legitimate 302/401/40
 responses. Test SQL/tutorial text in explicitly configured content routes while
 ensuring the exemption cannot bypass checks on public parameter endpoints.
 
-## Protocol and availability campaigns
+## Protocol and availability sandbox suites
 
 Cover HTTP/1.1 CL/TE conflicts and connection reuse, H2 HPACK/CONTINUATION and
 reset behavior, H2/H3-to-origin translation, H3 malformed heads/bodies, and
@@ -348,9 +349,9 @@ active scanning remains blocked by the authenticated fixture.
 
 | Cadence | Workload and gate |
 | --- | --- |
-| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, slow, load, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline campaigns, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded campaigns. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
+| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, slow, load, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline sandbox suites, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded sandbox suites. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
 | Daily/on demand | Existing CVE intake plus selected template/fixture smoke tests with pinned inputs. Promote confirmed findings into reviewed regressions; do not demand 100% of an unreviewed public scanner catalog. |
-| Weekly/on demand | Larger ZAP/ffuf/mutation campaigns and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
+| Weekly/on demand | Larger ZAP/ffuf/mutation sandbox suites and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
 | Before release | Stable regressions, representative fixture controls, protocol/availability on a fixed runner, rule compatibility, and archived evidence. |
 
 Update images/templates as separate reviewed input changes. Account for added,

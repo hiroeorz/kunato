@@ -1,6 +1,6 @@
 #!/bin/sh
 # Run the local Kunato binary with protection disabled for the signature
-# campaigns, and with the protection profile for the behavior campaign.
+# sandbox suites, and with the protection profile for the behavior suite.
 set -eu
 for argument in "$@"; do
     if [ "$argument" = "--validate" ]; then

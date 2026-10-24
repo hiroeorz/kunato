@@ -57,7 +57,7 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
-lab/               # Isolated WAF lab with fixtures, pinned tools, and protocol/slow/load campaigns
+lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox protocol/slow/load suites
   cases/           # Replay, ffuf discovery, and deterministic mutation cases
   fixtures/        # DVWA bootstrap and the lab-only CVE fixture
   templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
@@ -77,6 +77,7 @@ docs/
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
+  security-lab-testing-model.md # Lab control/evidence model, verdicts, and diagrams
   security-testing.md # Local attack-tool lab design and verification process
 packaging/
   kunato.service   # systemd unit
@@ -215,10 +216,10 @@ cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
 ./scripts/security-lab.sh prepare             # Prepare pinned lab images and fixtures
-./scripts/security-lab.sh run --campaign all  # Isolated WAF campaigns with evidence
-./scripts/security-lab.sh run --campaign protocol  # Raw protocol and WebSocket cases
-./scripts/security-lab.sh run --campaign slow     # Bounded slow-HTTP availability
-./scripts/security-lab.sh run --campaign load     # k6 mixed load with recovery
+./scripts/security-lab.sh run --sandbox-suite all  # Isolated WAF sandbox suites with evidence
+./scripts/security-lab.sh run --sandbox-suite protocol  # Raw protocol and WebSocket cases
+./scripts/security-lab.sh run --sandbox-suite slow     # Bounded slow-HTTP availability
+./scripts/security-lab.sh run --sandbox-suite load     # k6 mixed load with recovery
 ./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ```

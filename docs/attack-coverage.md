@@ -83,8 +83,8 @@ body coverage on those routes and does not change the bundled verdicts.
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
 | Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Head limits are enforced before body ingestion and inspection-memory reservation on HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes, including when a declared body never arrives. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
 | HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either) |
-| Slow HTTP / Connection Exhaustion | 🔶 | The lab `slow` campaign holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
-| Sustained Load / Throughput | 🔶 | The lab `load` campaign runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, and immediate recovery checks (p95 47.4 ms, p99 47.6 ms, 100% success). Fixed-runner trend, not a capacity claim |
+| Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
+| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, and immediate recovery checks (p95 47.4 ms, p99 47.6 ms, 100% success). Fixed-runner trend, not a capacity claim |
 | HTTP Desync | 🔶 | Same handling as smuggling |
 
 Protocol compatibility: before HTTP/1.1 forwarding, split request `Cookie`
@@ -336,7 +336,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 
 ## Local security lab evidence
 
-The 2026-10-24 ffuf campaign confirms the current discovery verdicts on DVWA:
+The 2026-10-24 ffuf sandbox suite confirms the current discovery verdicts on DVWA:
 `/.git/config`, `/.env`, `/.svn/entries`, `/.htaccess`, `/.DS_Store`,
 `/backup.sql`, `/config.php.bak`, `/phpinfo.php`, and `/wp-config.php` are
 blocked without origin receipts, `/admin` is blocked by
@@ -352,7 +352,7 @@ client stays healthy. ZAP active scanning is not part of a passing plan: ZAP
 injection controls therefore remain the sqlmap UNION dump, the Nuclei
 CVE-2021-41773 canary, and goTestWAF.
 
-The 2026-10-24 mutation campaign ran 15 reviewed attacks and 10 benign
+The 2026-10-24 mutation sandbox suite ran 15 reviewed attacks and 10 benign
 near-misses: all 15 attacks were blocked with no origin receipt and all 10
 benign cases reached the origin unchanged. The transforms covered keyword
 case, block comments, newlines, JSON and form bodies, parameter pollution,
