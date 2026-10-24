@@ -102,10 +102,12 @@ rule-set updates.
 ## Configuration Schema
 
 - Configuration and rule files use a YAML subset: block/flow collections,
-  plain/quoted/block scalars, and comments. Anchors, aliases, merge keys,
-  explicit tags, directives, and multiple documents are rejected, as are
-  duplicate mapping keys. The in-tree parser and deserializer live in
-  `src/yaml/`; flow collections and quoted scalars must be on one line.
+  plain/quoted/block scalars, comments, explicit `?` mapping keys, flow pairs,
+  and multi-line flow/quoted scalars. Anchors, aliases, merge keys, explicit
+  tags, directives, multiple documents, and complex mapping keys are rejected,
+  as are tabs used for indentation or inside plain scalars and duplicate mapping
+  keys. Tabs are allowed in quoted scalars and block scalar content. The
+  in-tree parser and deserializer live in `src/yaml/`.
 - The YAML config uses a two-level model: `categories` → `rules`. A category's
   `action` and `response` are defaults that individual rules may override.
 - Rules can also come from `rules_file` (managed, refreshed by `rules_update`)

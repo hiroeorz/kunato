@@ -63,28 +63,6 @@ enum Key {
     Str(String),
 }
 
-fn same_key(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Scalar(left), Value::Scalar(right)) => key_of(left) == key_of(right),
-        (Value::Seq { items: left, .. }, Value::Seq { items: right, .. }) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right.iter())
-                    .all(|(left, right)| same_key(left, right))
-        }
-        (Value::Map { entries: left, .. }, Value::Map { entries: right, .. }) => {
-            left.len() == right.len()
-                && left.iter().all(|(left_key, left_value)| {
-                    right.iter().any(|(right_key, right_value)| {
-                        same_key(left_key, right_key) && same_key(left_value, right_value)
-                    })
-                })
-        }
-        _ => false,
-    }
-}
-
 fn key_of(scalar: &Scalar) -> Key {
     if scalar.is_null() {
         return Key::Null;
@@ -104,13 +82,6 @@ fn key_of(scalar: &Scalar) -> Key {
         }
     }
     Key::Str(scalar.text.clone())
-}
-
-fn display_key(value: &Value) -> String {
-    match value {
-        Value::Scalar(scalar) => scalar.text.clone(),
-        _ => "a complex key".to_owned(),
-    }
 }
 
 /// Builds a mapping while rejecting duplicate and merge keys.
@@ -138,26 +109,23 @@ impl MapBuilder {
         line: usize,
         column: usize,
     ) -> Result<(), Error> {
-        if let Value::Scalar(scalar) = &key
-            && scalar.plain
-            && scalar.text == "<<"
-        {
+        let Value::Scalar(scalar) = &key else {
+            return Err(Error::syntax(
+                "complex mapping keys are not supported",
+                line,
+                column,
+            ));
+        };
+        if scalar.plain && scalar.text == "<<" {
             return Err(Error::syntax(
                 "YAML merge keys are not supported",
                 line,
                 column,
             ));
         }
-        let duplicate = if let Value::Scalar(scalar) = &key {
-            !self.keys.insert(key_of(scalar))
-        } else {
-            self.entries
-                .iter()
-                .any(|(existing, _)| same_key(existing, &key))
-        };
-        if duplicate {
+        if !self.keys.insert(key_of(scalar)) {
             return Err(Error::syntax(
-                format!("duplicate mapping key `{}`", display_key(&key)),
+                format!("duplicate mapping key `{}`", scalar.text),
                 line,
                 column,
             ));

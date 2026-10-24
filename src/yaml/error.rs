@@ -57,6 +57,19 @@ fn current_location() -> (usize, usize) {
     CURRENT_LOCATION.with(Cell::get)
 }
 
+fn sanitize_char(ch: char) -> char {
+    match ch {
+        '\t' => ' ',
+        '\u{2028}' | '\u{2029}' => '\u{fffd}',
+        ch if ch.is_control() => '\u{fffd}',
+        _ => ch,
+    }
+}
+
+fn sanitize(text: &str) -> String {
+    text.chars().map(sanitize_char).collect()
+}
+
 impl Error {
     pub(crate) fn new(
         kind: ErrorKind,
@@ -64,9 +77,10 @@ impl Error {
         line: usize,
         column: usize,
     ) -> Self {
+        let message = message.into();
         Self {
             kind,
-            message: message.into(),
+            message: sanitize(&message),
             line,
             column,
             snippet: None,
@@ -113,7 +127,11 @@ impl Error {
         let column = self.column.min(chars.len());
         let start = column.saturating_sub(64);
         let end = (column + 64).min(chars.len());
-        let cropped: String = chars[start..end].iter().collect();
+        let cropped: String = chars[start..end]
+            .iter()
+            .copied()
+            .map(sanitize_char)
+            .collect();
         let caret = " ".repeat(2 + (column - start));
         let width = self.line.to_string().len();
         let line_label = format!("{:>width$} | ", self.line, width = width);
@@ -211,6 +229,23 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("needle"), "{rendered}");
         assert!(rendered.contains('^'), "{rendered}");
+    }
+
+    #[test]
+    fn control_characters_are_sanitized() {
+        let mut error = Error::new(
+            ErrorKind::UnknownField,
+            "unknown field `bad\u{1b}[31m`",
+            1,
+            0,
+        );
+        error.attach_source("bad\tkey\u{1b}[31m: value\n");
+        let rendered = error.to_string();
+        assert!(
+            !rendered.chars().any(|ch| ch.is_control() && ch != '\n'),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("bad"), "{rendered:?}");
     }
 
     #[test]

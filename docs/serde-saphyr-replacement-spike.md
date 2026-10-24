@@ -7,10 +7,11 @@ and decision record.
 
 Follow-up (change 9): the retained `granit-parser` and `arraydeque` dependency
 was later removed in commit `07f6028` by replacing the event parser with an
-in-tree parser in [`../src/yaml/parser.rs`](../src/yaml/parser.rs). The YAML
-subset is unchanged
-except that flow collections and quoted scalars are limited to one line. The
-KPI is now 99. The sections below describe the first step (change 8).
+in-tree parser in [`../src/yaml/parser.rs`](../src/yaml/parser.rs). The KPI is
+now 99. A post-review hardening pass added multi-line flow collections and
+quoted scalars, flow pairs, and explicit mapping keys; complex mapping keys and
+tabs used for indentation or inside plain scalars are rejected. The sections
+below describe the first step (change 8).
 
 ## Summary
 

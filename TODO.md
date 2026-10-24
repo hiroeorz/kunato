@@ -45,7 +45,7 @@ change 5 is `b70f37c`, change 6 is `c4d23e8`, and change 7 is `bd73060`.
 | 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
 | 7 | ACME origin and order resilience | `bd73060` | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
 | 8 | `serde-saphyr` -> `granit-parser` + in-tree serde deserializer | `586234c` | 112 -> 101 (-11) | serde-saphyr, annotate-snippets, anstyle, unicode-width, encoding_rs_io, encoding_rs, core_detect, multiversion_no_op, scopeguard, simdutf8, num-traits | New [src/yaml/](src/yaml/); YAML 1.2 syntax from `granit-parser`, serde mapping in-tree. Anchors, aliases, merge keys, explicit tags, directives, and multiple documents are rejected; error rendering and locations differ from `serde-saphyr`. 514 unit tests and all integration tests pass; a typical 89 KB file parses in about 1.8 ms with a 3 MB peak. |
-| 9 | `granit-parser` -> in-tree YAML subset parser | `07f6028` | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. Flow collections and quoted scalars must be on one line; block scalars, multi-line plain scalars, comments, and compact block collections are supported. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. |
+| 9 | `granit-parser` -> in-tree YAML subset parser | `07f6028` | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. A later review-hardening pass added multi-line flow/quoted scalars, flow pairs, explicit keys, tab handling, complex-key rejection, error sanitization, and a 16 MiB cap. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -78,10 +78,11 @@ change 8 had retained.
   not used.
 - Configuration and rule files are parsed by the in-tree YAML parser and
   deserializer in [src/yaml/](src/yaml/). Anchors, aliases, merge keys, explicit
-  tags, directives, and multiple documents are rejected; block scalars,
-  multi-line plain scalars, and comments are supported. Flow collections and
-  quoted scalars must be on one line, and document markers must be on their own
-  line.
+  tags, directives, multiple documents, and complex mapping keys are rejected;
+  block scalars, multi-line plain scalars, comments, multi-line flow/quoted
+  scalars, flow pairs, and explicit `? key` entries are supported. Tabs are
+  allowed in quoted scalars and block scalar content, but not for indentation or
+  inside plain scalars. Document markers must be on their own line.
 - YAML parse errors keep serde's unknown-field, unknown-variant, and
   missing-field classification for rule-set compatibility, but the wording and
   snippet rendering are in-tree.

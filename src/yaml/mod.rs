@@ -3,8 +3,9 @@
 //! The parser builds a small [`value::Value`] tree and [`de`] implements
 //! [`serde::Deserializer`] for it. The supported YAML subset is documented in
 //! `docs/development.md`: block and flow collections, plain/quoted/block
-//! scalars, and comments. Anchors, aliases, merge keys, explicit tags,
-//! directives, and multiple documents are rejected.
+//! scalars, comments, explicit mapping keys, and multi-line flow/quoted
+//! scalars. Anchors, aliases, merge keys, explicit tags, directives, complex
+//! mapping keys, and multiple documents are rejected.
 
 mod de;
 mod error;
@@ -26,6 +27,9 @@ where
     T: DeserializeOwned,
 {
     error::reset_location();
+    if input.len() > parser::MAX_INPUT_BYTES {
+        return Err(Error::syntax("document exceeds the 16 MiB limit", 1, 0));
+    }
     let result = parser::parse(input).and_then(T::deserialize);
     error::reset_location();
     result.map_err(|mut error| {
@@ -174,5 +178,21 @@ mod tests {
                 let _ = from_str::<serde_json::Value>(&text);
             }
         }
+    }
+
+    #[test]
+    fn sanitizes_control_characters_in_schema_errors() {
+        let error = from_str::<ConfigSpec>(
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n\u{1b}[31mowned: true\n",
+        )
+        .expect_err("unknown field");
+        let summary = error.summary();
+        assert!(!summary.chars().any(char::is_control), "{summary:?}");
+        let rendered = error.to_string();
+        assert!(
+            !rendered.chars().any(|ch| ch.is_control() && ch != '\n'),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains('\u{fffd}'), "{rendered:?}");
     }
 }
