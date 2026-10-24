@@ -11,9 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
 from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
-                      judge_gotestwaf, judge_mutations, judge_nuclei, judge_replay,
-                      judge_sqlmap, judge_zap, judge_zap_workflow, summarize,
-                      validate_mutations)
+                      judge_gotestwaf, judge_mutations, judge_nuclei,
+                      judge_protocol, judge_replay, judge_sqlmap, judge_zap,
+                      judge_zap_workflow, summarize, validate_mutations,
+                      validate_protocol)
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -354,6 +355,59 @@ class MutationAndCrsTests(unittest.TestCase):
                                 kunato, [{"event": "ready", "nonce": nonce}], nonce)
         self.assertEqual(false_block["counts"], {"agree-block": 1, "crs-false-block": 1})
         self.assertTrue(false_block["passed"])
+
+
+class ProtocolTests(unittest.TestCase):
+    @staticmethod
+    def case(case_id, expect, framing="reject", smuggled=None):
+        case = {"id": case_id, "expect": expect, "interpretation": "test",
+                "direct_framing": framing, "raw": "GET / HTTP/1.1\r\n\r\n"}
+        if smuggled:
+            case["smuggled_case"] = smuggled
+        return case
+
+    def judged(self, protected_extra=None, direct_smuggled=True):
+        cases = [self.case("valid", "allow"),
+                 self.case("smuggle", "block", "te", "smuggle-2")]
+        controls = [{"id": "valid", "status": 200}, {"id": "smuggle", "status": 200}]
+        results = [{"id": "valid", "status": 200}, {"id": "smuggle", "status": 400}]
+        direct = {
+            "reject": [{"event": "ready", "nonce": "a"},
+                       {"event": "received", "nonce": "a", "case_id": "valid"},
+                       {"event": "completed", "nonce": "a", "case_id": "valid"}],
+            "te": [{"event": "ready", "nonce": "b"},
+                   {"event": "received", "nonce": "b", "case_id": "smuggle"}]
+            + ([{"event": "received", "nonce": "b", "case_id": "smuggle-2"}]
+               if direct_smuggled else []),
+        }
+        protected = [{"event": "ready", "nonce": "c"},
+                     {"event": "received", "nonce": "c", "case_id": "valid"},
+                     {"event": "completed", "nonce": "c", "case_id": "valid"}]
+        if protected_extra:
+            protected.append({"event": "received", "nonce": "c", "case_id": protected_extra})
+        return judge_protocol(cases, controls, results, direct, protected,
+                              {"reject": "a", "te": "b"}, "c")
+
+    def test_protocol_smuggling_requires_direct_second_request(self):
+        result = self.judged()
+        self.assertEqual([case["verdict"] for case in result["cases"]],
+                         ["passed", "prevented"])
+        self.assertTrue(result["passed"])
+
+    def test_protocol_protected_smuggled_receipt_is_gap(self):
+        result = self.judged(protected_extra="smuggle-2")
+        self.assertEqual(result["cases"][1]["verdict"], "gap")
+        self.assertFalse(result["passed"])
+
+    def test_protocol_direct_without_smuggled_is_inconclusive(self):
+        result = self.judged(direct_smuggled=False)
+        self.assertEqual(result["cases"][1]["verdict"], "inconclusive")
+        self.assertFalse(result["passed"])
+
+    def test_protocol_requires_interpretation(self):
+        cases = [{"id": "valid", "expect": "allow", "raw": "GET / HTTP/1.1\r\n\r\n"}]
+        with self.assertRaises(ValueError):
+            validate_protocol(cases)
 
 
 if __name__ == "__main__":

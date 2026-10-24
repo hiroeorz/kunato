@@ -1,5 +1,6 @@
 """Bounded recording origin; no vulnerability or exploit-success claims."""
 
+import base64
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_BODY = 65536
 MAX_EVENTS = 10000
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class Recorder(BaseHTTPRequestHandler):
@@ -26,13 +28,117 @@ class Recorder(BaseHTTPRequestHandler):
         print(json.dumps({"event": event, "nonce": os.environ["LAB_NONCE"], **fields}), flush=True)
 
     def do_GET(self):
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            self.websocket()
+            return
         self.record()
 
     def do_POST(self):
         self.record()
 
-    def record(self):
+    def do_PRI(self):
+        self.record()
+
+    def read_chunked(self):
+        body = b""
+        while True:
+            line = self.rfile.readline(128)
+            if not line or len(line) > 127:
+                raise ValueError("Invalid chunk line")
+            size_text = line.split(b";", 1)[0].strip()
+            try:
+                size = int(size_text, 16)
+            except ValueError as error:
+                raise ValueError("Invalid chunk size") from error
+            if size < 0 or size > MAX_BODY:
+                raise ValueError("Oversized chunk")
+            if size == 0:
+                while True:
+                    trailer = self.rfile.readline(1024)
+                    if trailer in (b"\r\n", b"\n", b""):
+                        break
+                return body
+            data = self.rfile.read(size)
+            if len(data) != size:
+                raise ValueError("Incomplete chunk")
+            body += data
+            if len(body) > MAX_BODY:
+                raise ValueError("Oversized body")
+            if self.rfile.read(2) != b"\r\n":
+                raise ValueError("Invalid chunk terminator")
+
+    def read_body(self):
+        transfer = self.headers.get("Transfer-Encoding")
+        length = self.headers.get("Content-Length")
+        framing = "cl"
+        if transfer and length:
+            framing = os.environ.get("LAB_ORIGIN_FRAMING", "reject")
+            if framing not in {"cl", "te"}:
+                raise ValueError("Ambiguous request framing")
+        elif transfer:
+            if transfer.strip().lower() != "chunked":
+                raise ValueError("Unsupported transfer encoding")
+            framing = "te"
+        if framing == "te":
+            return self.read_chunked()
+        if length is None:
+            return b""
+        size = int(length)
+        if not 0 <= size <= MAX_BODY:
+            raise ValueError("Unsupported or oversized body")
+        body = self.rfile.read(size)
+        if len(body) != size:
+            raise ValueError("Incomplete body")
+        return body
+
+    def websocket(self):
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key or self.headers.get("Sec-WebSocket-Version") != "13":
+            self.send_error(400, "Invalid WebSocket handshake")
+            return
+        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
         self.close_connection = True
+        try:
+            while True:
+                header = self.rfile.read(2)
+                if len(header) != 2:
+                    return
+                first, second = header
+                opcode = first & 0x0F
+                masked = second & 0x80
+                length = second & 0x7F
+                if length == 126:
+                    length = int.from_bytes(self.rfile.read(2), "big")
+                elif length == 127:
+                    length = int.from_bytes(self.rfile.read(8), "big")
+                if length > MAX_BODY or not masked:
+                    return
+                mask = self.rfile.read(4)
+                payload = bytes(byte ^ mask[index % 4]
+                                for index, byte in enumerate(self.rfile.read(length)))
+                if opcode == 0x8:
+                    return
+                if opcode == 0x9:
+                    self.wfile.write(bytes([0x8A, len(payload)]) + payload)
+                    self.wfile.flush()
+                    continue
+                if opcode in (0x1, 0x2):
+                    self.emit("websocket", case_id=self.headers.get("X-Kunato-Lab-Case", ""),
+                              method="GET", target=self.path[:8192], frame_bytes=len(payload))
+                    response = b"echo:" + payload
+                    if len(response) > 125:
+                        return
+                    self.wfile.write(bytes([0x81, len(response)]) + response)
+                    self.wfile.flush()
+        except (OSError, socket.timeout, ValueError):
+            return
+
+    def record(self):
         if Recorder.events >= MAX_EVENTS:
             self.send_error(503, "Recorder event budget exhausted")
             return
@@ -42,12 +148,7 @@ class Recorder(BaseHTTPRequestHandler):
                   method=self.command, target=self.path[:8192],
                   user_agent=self.headers.get("User-Agent", "")[:512])
         try:
-            size = int(self.headers.get("Content-Length", "0"))
-            if not 0 <= size <= MAX_BODY or self.headers.get("Transfer-Encoding"):
-                raise ValueError("Unsupported or oversized body")
-            body = self.rfile.read(size)
-            if len(body) != size:
-                raise ValueError("Incomplete body")
+            body = self.read_body()
         except (ValueError, OSError, socket.timeout) as error:
             self.emit("error", case_id=case_id, debug_id=debug_id, error=str(error))
             self.send_error(400)
@@ -63,7 +164,7 @@ class Recorder(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Connection", "close")
+        self.send_header("Connection", "keep-alive" if not self.close_connection else "close")
         if status == 302:
             self.send_header("Location", "/status/200")
         self.end_headers()

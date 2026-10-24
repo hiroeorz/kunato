@@ -39,12 +39,12 @@ def read_jsonl(path):
     return [json.loads(line) for line in lines if line.strip()]
 
 
-def verify_origin(events, nonce):
+def verify_origin(events, nonce, allow_errors=False):
     if not events or not any(event.get("event") == "ready" for event in events):
         raise ValueError("Origin startup evidence is missing")
     if any(event.get("nonce") != nonce for event in events):
         raise ValueError("Origin evidence belongs to another attempt")
-    if any(event.get("event") == "error" for event in events):
+    if not allow_errors and any(event.get("event") == "error" for event in events):
         raise ValueError("Origin failed to consume a request")
 
 
@@ -139,6 +139,100 @@ def judge_mutations(cases, controls, results, origin, waf_events, nonce):
         "transforms": sorted({case["transform"] for case in cases}),
     }
     return result
+
+
+PROTOCOL_BLOCK_STATUSES = {400, 403, 431, 501}
+
+
+def validate_protocol(cases):
+    ids = [case["id"] for case in cases]
+    if not cases or len(ids) != len(set(ids)):
+        raise ValueError("Protocol cases must be nonempty with unique IDs")
+    for case in cases:
+        if case["expect"] not in {"allow", "block"}:
+            raise ValueError("Invalid protocol expectation")
+        if not isinstance(case.get("raw"), str) and "raw_repeat" not in case:
+            raise ValueError("Protocol case lacks raw bytes")
+        if not isinstance(case.get("interpretation"), str) or not case["interpretation"].strip():
+            raise ValueError("Protocol case lacks an interpretation")
+        if case.get("direct_framing", "reject") not in {"reject", "cl", "te"}:
+            raise ValueError("Invalid direct origin framing")
+        if not isinstance(case.get("read_timeout", 1.0), (int, float)):
+            raise ValueError("Invalid protocol read timeout")
+
+
+def judge_protocol(cases, controls, results, direct_origins, protected_origin,
+                   direct_nonces, nonce):
+    validate_protocol(cases)
+    for framing, events in direct_origins.items():
+        verify_origin(events, direct_nonces[framing], allow_errors=True)
+    verify_origin(protected_origin, nonce, allow_errors=True)
+    expected = {case["id"] for case in cases}
+    for observations in (controls, results):
+        ids = [result["id"] for result in observations]
+        if len(ids) != len(set(ids)) or set(ids) != expected:
+            raise ValueError("Missing, duplicate, or unexpected protocol probe results")
+    controls = {result["id"]: result for result in controls}
+    results = {result["id"]: result for result in results}
+    protected_receipts = Counter(event.get("case_id") for event in protected_origin
+                                 if event.get("event") in {"received", "completed", "websocket"})
+    verdicts = []
+    for case in cases:
+        result = results[case["id"]]
+        control = controls[case["id"]]
+        direct = direct_origins.get(case.get("direct_framing", "reject"), [])
+        direct_received = [event for event in direct if event.get("case_id") == case["id"]
+                           and event.get("event") in {"received", "completed", "websocket"}]
+        smuggled = case.get("smuggled_case")
+        direct_smuggled = [event for event in direct if smuggled
+                           and event.get("case_id") == smuggled
+                           and event.get("event") == "received"]
+        protected_events = [event for event in protected_origin
+                            if event.get("case_id") == case["id"]
+                            and event.get("event") in {"received", "completed", "websocket"}]
+        if control.get("error") or result.get("error"):
+            verdict = "inconclusive"
+        elif case["expect"] == "block":
+            direct_ok = ((bool(direct_smuggled) if smuggled else bool(direct_received))
+                         or control.get("status") in PROTOCOL_BLOCK_STATUSES
+                         or (case.get("method") == "PRI" and not control.get("error")))
+            if not direct_ok:
+                verdict = "inconclusive"
+            elif smuggled:
+                if protected_receipts[smuggled]:
+                    verdict = "gap"
+                elif result.get("status") in PROTOCOL_BLOCK_STATUSES or result.get("status") == 200:
+                    verdict = "prevented"
+                else:
+                    verdict = "inconclusive"
+            elif protected_receipts[case["id"]]:
+                verdict = "gap"
+            elif result.get("status") in PROTOCOL_BLOCK_STATUSES:
+                verdict = "prevented"
+            else:
+                verdict = "inconclusive"
+        elif result.get("status") == 101:
+            direct_ws = any(event.get("event") == "websocket" for event in direct_received)
+            protected_ws = any(event.get("event") == "websocket" for event in protected_events)
+            if direct_ws and protected_ws:
+                verdict = "passed"
+            elif direct_ws:
+                verdict = "false-block"
+            else:
+                verdict = "inconclusive"
+        elif result.get("status") == control.get("status") and protected_events:
+            verdict = "passed"
+        else:
+            verdict = "false-block"
+        verdicts.append({"id": case["id"], "expect": case["expect"], "verdict": verdict,
+                         "status": result.get("status"), "direct_status": control.get("status"),
+                         "origin_receipts": protected_receipts[case["id"]],
+                         "smuggled_receipts": protected_receipts[smuggled] if smuggled else 0})
+    judged = summarize(verdicts)
+    judged["notes"] = {"planned": len(cases),
+                       "framings": sorted({case.get("direct_framing", "reject")
+                                           for case in cases})}
+    return judged
 
 
 def judge_crs(cases, crs_results, kunato_verdicts, crs_origin, crs_nonce,

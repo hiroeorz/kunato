@@ -1,0 +1,128 @@
+[
+  {
+    "id": "proto-valid",
+    "expect": "allow",
+    "interpretation": "A well-framed HTTP/1.1 request reaches the origin and returns the recorded response.",
+    "method": "GET",
+    "target": "/proto-valid",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "GET /proto-valid HTTP/1.1\r\nHost: app.test\r\nX-Kunato-Lab-Case: proto-valid\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-chunked-valid",
+    "expect": "allow",
+    "interpretation": "A valid chunked body is forwarded without losing the body or the request boundary.",
+    "method": "POST",
+    "target": "/proto-chunked-valid",
+    "body": "hello",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "POST /proto-chunked-valid HTTP/1.1\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\nX-Kunato-Lab-Case: proto-chunked-valid\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+  },
+  {
+    "id": "proto-cl-te",
+    "expect": "block",
+    "interpretation": "A CL-TE conflict lets a front end stop at the chunk terminator while the origin reads the declared length; the origin must not receive the smuggled request.",
+    "method": "POST",
+    "target": "/proto-cl-te",
+    "smuggled_case": "proto-cl-te-smuggled",
+    "direct_framing": "te",
+    "read_timeout": 1.5,
+    "raw": "POST /proto-cl-te HTTP/1.1\r\nHost: app.test\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\nX-Kunato-Lab-Case: proto-cl-te\r\nConnection: keep-alive\r\n\r\n0\r\n\r\nGET /proto-cl-te-smuggled HTTP/1.1\r\nHost: app.test\r\nX-Kunato-Lab-Case: proto-cl-te-smuggled\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-te-cl",
+    "expect": "block",
+    "interpretation": "A TE-CL conflict lets the front end read the chunked body while the origin reads the declared length and then another request; the origin must not receive the smuggled request.",
+    "method": "POST",
+    "target": "/proto-te-cl",
+    "smuggled_case": "proto-te-cl-smuggled",
+    "direct_framing": "cl",
+    "read_timeout": 1.5,
+    "raw": "POST /proto-te-cl HTTP/1.1\r\nHost: app.test\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\nX-Kunato-Lab-Case: proto-te-cl\r\nConnection: keep-alive\r\n\r\n0\r\n\r\nGET /proto-te-cl-smuggled HTTP/1.1\r\nHost: app.test\r\nX-Kunato-Lab-Case: proto-te-cl-smuggled\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-duplicate-cl",
+    "expect": "block",
+    "interpretation": "Two Content-Length values are an ambiguous message boundary and must not be forwarded.",
+    "method": "POST",
+    "target": "/proto-duplicate-cl",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "POST /proto-duplicate-cl HTTP/1.1\r\nHost: app.test\r\nContent-Length: 5\r\nContent-Length: 6\r\nX-Kunato-Lab-Case: proto-duplicate-cl\r\nConnection: close\r\n\r\nhello"
+  },
+  {
+    "id": "proto-obs-fold",
+    "expect": "block",
+    "interpretation": "An obsolete line-folded header is ambiguous across parsers and must not be forwarded.",
+    "method": "GET",
+    "target": "/proto-obs-fold",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "GET /proto-obs-fold HTTP/1.1\r\nHost: app.test\r\nX-Lab: first\r\n second\r\nX-Kunato-Lab-Case: proto-obs-fold\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-crlf-header",
+    "expect": "allow",
+    "interpretation": "A second header line after the first is a normal HTTP header, not CRLF injection; both the origin and the WAF must forward it.",
+    "method": "GET",
+    "target": "/proto-crlf-header",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "GET /proto-crlf-header HTTP/1.1\r\nHost: app.test\r\nX-Lab: first\r\nInjected: yes\r\nX-Kunato-Lab-Case: proto-crlf-header\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-duplicate-host",
+    "expect": "block",
+    "interpretation": "Two Host headers are an ambiguous authority and must not be forwarded.",
+    "method": "GET",
+    "target": "/proto-duplicate-host",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "GET /proto-duplicate-host HTTP/1.1\r\nHost: app.test\r\nHost: evil.test\r\nX-Kunato-Lab-Case: proto-duplicate-host\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-invalid-chunk",
+    "expect": "block",
+    "interpretation": "A non-hex chunk size is malformed framing and must be rejected before forwarding.",
+    "method": "POST",
+    "target": "/proto-invalid-chunk",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "POST /proto-invalid-chunk HTTP/1.1\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\nX-Kunato-Lab-Case: proto-invalid-chunk\r\nConnection: close\r\n\r\nzz\r\n"
+  },
+  {
+    "id": "proto-large-header",
+    "expect": "block",
+    "interpretation": "A header far beyond the configured header budget must be rejected rather than buffered.",
+    "method": "GET",
+    "target": "/proto-large-header",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw_prefix": "GET /proto-large-header HTTP/1.1\r\nHost: app.test\r\nX-Big: ",
+    "raw_repeat": 40000,
+    "raw_suffix": "\r\nX-Kunato-Lab-Case: proto-large-header\r\nConnection: close\r\n\r\n"
+  },
+  {
+    "id": "proto-http2-preface",
+    "expect": "block",
+    "interpretation": "An HTTP/2 connection preface on a plain HTTP/1.1 listener is a protocol mismatch and must not be treated as a valid request.",
+    "method": "PRI",
+    "target": "*",
+    "direct_framing": "reject",
+    "read_timeout": 1.0,
+    "raw": "PRI * HTTP/2.0\r\nX-Kunato-Lab-Case: proto-http2-preface\r\n\r\nSM\r\n\r\n"
+  },
+  {
+    "id": "proto-ws",
+    "expect": "allow",
+    "interpretation": "A valid WebSocket upgrade is tunneled and a client text frame is echoed; this checks the handshake and tunnel lifecycle, not inspection of subsequent messages.",
+    "method": "GET",
+    "target": "/proto-ws",
+    "direct_framing": "reject",
+    "read_timeout": 1.5,
+    "raw": "GET /proto-ws HTTP/1.1\r\nHost: app.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nX-Kunato-Lab-Case: proto-ws\r\n\r\n",
+    "ws_frame": "\u0081\u0085\u0001\u0002\u0003\u0004igonh"
+  }
+]

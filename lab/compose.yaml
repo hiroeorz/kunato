@@ -45,6 +45,7 @@ services:
     entrypoint: [python3, -B, /lab/origin.py]
     environment:
       LAB_NONCE: ${LAB_NONCE}
+      LAB_ORIGIN_FRAMING: ${LAB_ORIGIN_FRAMING:-reject}
       PYTHONUNBUFFERED: "1"
     volumes:
       - ${LAB_INPUT}/lab:/lab:ro

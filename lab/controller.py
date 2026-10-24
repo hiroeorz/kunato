@@ -16,10 +16,11 @@ from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
-                      judge_gotestwaf, judge_mutations, judge_nuclei, judge_replay,
-                      judge_sqlmap, judge_zap, judge_zap_workflow, origin_response,
-                      read_jsonl, summarize, validate_cases, validate_ffuf_cases,
-                      validate_mutations, verify_origin)
+                      judge_gotestwaf, judge_mutations, judge_nuclei,
+                      judge_protocol, judge_replay, judge_sqlmap, judge_zap,
+                      judge_zap_workflow, origin_response, read_jsonl, summarize,
+                      validate_cases, validate_ffuf_cases, validate_mutations,
+                      validate_protocol, verify_origin)
 
 ROOT = Path(__file__).resolve().parent.parent
 LAB = ROOT / "lab"
@@ -268,7 +269,7 @@ class Campaign:
     def probe(self, service, mode, log=None, check=True, extra=()):
         result = self.compose("run", "--rm", "--no-deps", "-T", service, mode, *extra,
                               check=check, log=log)
-        if mode == "cases":
+        if mode in {"cases", "raw"}:
             return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         if not result.stdout.strip():
             return {"probe_error": result.stderr[-1000:] or f"probe exited {result.returncode}"}
@@ -296,9 +297,10 @@ class Campaign:
         self.compose("logs", "--no-color", "--no-log-prefix", service, log=path)
         return path.read_text()
 
-    def reset_origin(self, phase):
+    def reset_origin(self, phase, framing="reject"):
         nonce = uuid.uuid4().hex
         self.env["LAB_NONCE"] = nonce
+        self.env["LAB_ORIGIN_FRAMING"] = framing
         self.env["LAB_CONFIG"] = "rules-origin.yaml"
         self.env["LAB_DISABLE_PROTECTION"] = "1"
         self.compose("up", "-d", "--force-recreate", "--pull", "never", "origin", "kunato")
@@ -309,7 +311,7 @@ class Campaign:
                                 extra=("--path", "/health", "--status", "200", "--nonce", nonce))
             if health.get("status") == 200 and health.get("origin") == nonce:
                 write_json(directory / "health-before.json", health)
-                write_json(directory / "attempt.json", {"nonce": nonce})
+                write_json(directory / "attempt.json", {"nonce": nonce, "framing": framing})
                 return nonce
             time.sleep(0.2)
         raise RuntimeError("Kunato/origin did not become ready")
@@ -416,6 +418,34 @@ class Campaign:
         self.healthy("mutations", nonce=nonce)
         origin, waf = self.logs("mutations")
         return judge_mutations(cases, controls, results, origin, waf, nonce)
+
+    def protocol(self):
+        cases = json.loads((self.input / "lab/plans/protocol.json").read_text())
+        controls = []
+        direct_origins = {}
+        direct_nonces = {}
+        for framing in ("reject", "cl", "te"):
+            if not any(case.get("direct_framing", "reject") == framing for case in cases):
+                continue
+            phase = f"protocol-control-{framing}"
+            nonce = self.reset_origin(phase, framing=framing)
+            self.preflight("origin")
+            results = self.probe("control", "raw",
+                                 extra=("--cases", f"/lab/plans/protocol-{framing}.json"),
+                                 log=self.run_dir / phase / "probes.jsonl")
+            origin, _ = self.logs(phase)
+            verify_origin(origin, nonce, allow_errors=True)
+            controls.extend(results)
+            direct_origins[framing] = origin
+            direct_nonces[framing] = nonce
+        nonce = self.reset_origin("protocol", framing="reject")
+        results = self.probe("client", "raw",
+                             extra=("--cases", "/lab/plans/protocol.json"),
+                             log=self.run_dir / "protocol/probes.jsonl")
+        self.healthy("protocol", nonce=nonce)
+        origin, _ = self.logs("protocol")
+        return judge_protocol(cases, controls, results, direct_origins, origin,
+                              direct_nonces, nonce)
 
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)
@@ -788,6 +818,8 @@ def new_run(campaign):
     validate_ffuf_cases(ffuf_cases)
     mutation_cases = json.loads((LAB / "cases/mutations.json").read_text())
     validate_mutations(mutation_cases)
+    protocol_cases = json.loads((LAB / "cases/protocol.json").read_text())
+    validate_protocol(protocol_cases)
     plans = input_dir / "lab/plans"
     plans.mkdir(exist_ok=True)
     write_gotestwaf_cases(plans / "gotestwaf", cases)
@@ -799,6 +831,11 @@ def new_run(campaign):
     (plans / "zap.yaml").write_text(
         zap_template.replace("__TARGET__", "http://app.test:8080"))
     write_json(plans / "mutations.json", mutation_cases)
+    write_json(plans / "protocol.json", protocol_cases)
+    for framing in ("reject", "cl", "te"):
+        write_json(plans / f"protocol-{framing}.json",
+                   [case for case in protocol_cases
+                    if case.get("direct_framing", "reject") == framing])
     hashes = {str(path.relative_to(input_dir)): sha256(path) for path in sorted(input_dir.rglob("*")) if path.is_file()}
     manifest.update(run_id=run_id, project="kunato-lab-" + run_id.lower(), campaign=campaign,
                     commit=command(["git", "rev-parse", "HEAD"]).stdout.strip(), inputs=hashes)
@@ -821,6 +858,8 @@ def run(campaign):
         report["campaigns"]["replay"] = lab.replay()
         if campaign in {"mutations", "all"}:
             report["campaigns"]["mutations"] = lab.mutations()
+        if campaign == "protocol":
+            report["campaigns"]["protocol"] = lab.protocol()
         if campaign in {"gotestwaf", "all"}:
             report["campaigns"]["gotestwaf"] = lab.gotestwaf()
         if campaign in {"sqlmap", "all"}:
@@ -885,8 +924,8 @@ def main():
     subs.add_parser("verify", help="Check prepared inputs without downloads")
     runner = subs.add_parser("run", help="Run the isolated regression campaigns")
     runner.add_argument("--campaign",
-                        choices=["replay", "mutations", "gotestwaf", "sqlmap", "nuclei",
-                                 "ffuf", "zap", "crs", "all"],
+                        choices=["replay", "mutations", "protocol", "gotestwaf", "sqlmap",
+                                 "nuclei", "ffuf", "zap", "crs", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)

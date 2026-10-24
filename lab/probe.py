@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import re
 import socket
 import time
 from pathlib import Path
@@ -31,6 +32,46 @@ def request(case, host="app.test", port=8080):
         result["error"] = str(error)
     finally:
         connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def raw_request(case, host="app.test", port=8080):
+    started = time.monotonic()
+    result = {"id": case["id"], "method": case.get("method", "RAW"),
+              "target": case.get("target", ""), "bytes": 0, "status": None,
+              "responses": []}
+    raw = case.get("raw", "")
+    if "raw_repeat" in case:
+        raw = (case.get("raw_prefix", "") + "a" * int(case["raw_repeat"])
+               + case.get("raw_suffix", ""))
+    try:
+        connection = socket.create_connection((host, port), timeout=4)
+        connection.sendall(raw.encode("latin-1"))
+        connection.settimeout(float(case.get("read_timeout", 1.0)))
+        data = b""
+        if "ws_frame" in case:
+            while b"\r\n\r\n" not in data:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            connection.sendall(case["ws_frame"].encode("latin-1"))
+        while len(data) < 262144:
+            try:
+                chunk = connection.recv(65536)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            data += chunk
+        connection.close()
+        text = data.decode("latin-1")
+        statuses = [int(match) for match in re.findall(r"HTTP/1\.[01] (\d{3})", text)]
+        result.update(bytes=len(data), response=text, responses=statuses,
+                      status=statuses[0] if statuses else None)
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
     result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
     return result
 
@@ -64,7 +105,7 @@ def isolation(hosts, addresses):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["health", "cases", "isolation", "metrics"])
+    parser.add_argument("mode", choices=["health", "cases", "raw", "isolation", "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -77,6 +118,9 @@ def main():
     if args.mode == "cases":
         for case in json.loads(Path(args.cases).read_text()):
             print(json.dumps(request(case)), flush=True)
+    elif args.mode == "raw":
+        for case in json.loads(Path(args.cases).read_text()):
+            print(json.dumps(raw_request(case, args.host, args.port)), flush=True)
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},
                          args.host, args.port)
