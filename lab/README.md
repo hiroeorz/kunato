@@ -1,17 +1,18 @@
 # Local security lab
 
-This covers the first three milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and eight bounded
+This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
+an isolated recording origin, direct receipt controls, and eleven bounded
 campaigns (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
-baseline, 25 deterministic mutation variants, and a pinned OWASP CRS 4.3.0
-comparison. It measures request rejection and bounded exploit prevention; the
-fixtures do not prove protection for arbitrary applications. ZAP active
-scanning, protocol fuzzing, and load campaigns remain subsequent work: the
-current ZAP 2.17 plan exits on the authenticated DVWA file-inclusion active
-scan, so active-injection coverage stays with sqlmap, Nuclei, and goTestWAF.
+baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
+a bounded slow-HTTP run, a pinned k6 v2.3.0 mixed availability load, and a
+pinned OWASP CRS 4.3.0 comparison. It measures request rejection, bounded
+exploit prevention, and availability on a fixed runner; the fixtures do not
+prove protection for arbitrary applications or capacity. The ZAP 2.17 plan
+exits on the authenticated DVWA file-inclusion active scan, so active-injection
+coverage stays with sqlmap, Nuclei, and goTestWAF.
 
 ## Run locally
 
@@ -39,6 +40,9 @@ scripts/security-lab.sh run --campaign nuclei
 scripts/security-lab.sh run --campaign ffuf
 scripts/security-lab.sh run --campaign zap
 scripts/security-lab.sh run --campaign mutations
+scripts/security-lab.sh run --campaign protocol
+scripts/security-lab.sh run --campaign slow
+scripts/security-lab.sh run --campaign load
 scripts/security-lab.sh run --campaign crs   # optional CRS comparison, observation only
 scripts/security-lab.sh run --campaign all
 ```
@@ -80,6 +84,7 @@ The prepared inputs are pinned in `artifacts.lock.json`:
 | `nuclei` image | CVE-2021-41773 template execution |
 | `ffuf` v2.3.0 binary | bounded path discovery and enumeration behavior |
 | `zap` image | authenticated spider/passive baseline |
+| `grafana/k6` image | pinned k6 v2.3.0 mixed availability load |
 | `crs` image | optional OWASP CRS 4.3.0 reference comparison |
 | `httpd` image | base for the lab-only CVE-2021-41773 fixture |
 
@@ -167,6 +172,44 @@ body formats, parameter pollution, alternative XSS tags, dot padding, shell
 metacharacters, and header values. The mutation table in the report retains the
 seed, transform, and interpretation through `report.json`.
 
+### Protocol boundaries
+
+`cases/protocol.json` contains 12 reviewed raw HTTP/1.1 and WebSocket cases: a
+valid keep-alive exchange, chunked framing, CL+TE and TE+CL ambiguity, duplicate
+Content-Length, obs-fold, a benign CRLF pair, duplicate Host, an invalid chunk,
+an oversized header, an HTTP/2 preface, and a WebSocket handshake plus echo.
+Each case has a WAF-less direct control and a protected run. The direct controls
+use the origin framing modes (`reject`, `cl`, `te`) to prove how the origin
+parses the bytes; the protected run must not deliver a smuggled request, must
+block or reject malformed framing, and must allow the benign and WebSocket
+exchanges. The WebSocket check sends the handshake, waits for `101`, sends one
+masked frame, and requires the origin `websocket` event and echo. Kunato's
+request-head checks reject duplicate Host, duplicate Content-Length, CL+TE, and
+non-chunked Transfer-Encoding before forwarding. The current result is 4 passed
+and 8 prevented.
+
+### Slow HTTP
+
+`--campaign slow` opens 8 bounded slow connections with partial headers, holds
+them for 2 seconds, and checks that the independent normal client still receives
+`200`, that Kunato stays up, and that its CPU/RSS stay within the configured
+256 MiB / 64-pid ceilings. The probe is the lab's own raw-socket mode
+(`lab/probe.py slow`), not slowhttptest. The current result is 2 passed: 8
+connections held, normal 200, CPU 0.00-0.01%, RSS 21.1-21.4 MiB.
+
+### Mixed load
+
+`--campaign load` runs a pinned k6 v2.3.0 constant-arrival-rate scenario
+(50 requests/second for 60 seconds) from the `load` service, concurrently opens
+the bounded slow connections from the `client` service, and probes the normal
+path from the same independent client. The k6 thresholds are p95 < 200 ms,
+p99 < 500 ms, failed requests < 1%, and checks > 99%; the judge also requires
+the normal and recovery probes to return 200, no Kunato restart, and RSS under
+the 256 MiB ceiling. Recovery is checked immediately after the load stops. The
+current result is 5 passed: 3001 requests, p95 47.4 ms, p99 47.6 ms, 100%
+success, 8 slow connections held, normal and recovery 200, RSS 21.8 MiB, and no
+restart.
+
 ### OWASP CRS comparison
 
 `--campaign crs` runs the same 25 mutation cases directly through a pinned
@@ -202,6 +245,10 @@ Each run prints its directory under `target/security-lab/`. It retains:
   origin logs, and Kunato logs;
 - `crs-control/`, `crs-kunato/`, and `crs/`: CRS-comparison direct control,
   Kunato baseline, CRS probe results, origin logs, and the ModSecurity audit;
+- `protocol-control-*/` and `protocol/`: direct and protected protocol probes,
+  per-framing origin receipts, and Kunato logs;
+- `slow/` and `load/`: slow-connection probes, k6 summary and logs, health
+  probes, metrics, and Kunato logs;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
   diagnostics;
 - `commands.jsonl` and `cleanup.json`: executed commands and verification that
@@ -225,10 +272,12 @@ Validate collector and verdict failures locally:
 python3 -m unittest discover -s lab/tests -v
 ```
 
-The separate security-lab workflow runs these checks, the isolated `all`
-campaign, and the optional CRS comparison for relevant pull requests and
-supports manual execution. The daily CVE publishing workflow is unchanged. The CVE-2021-41773 canary rows are also in
-`blackbox/requests/` so the ordinary black-box gate retains the request shapes.
+The separate security-lab workflow runs these observation tests and the
+shellcheck wrappers. Run the `all` campaign and the optional CRS comparison
+locally before committing and pushing; CI does not execute the bounded
+campaigns. The daily CVE publishing workflow is unchanged. The CVE-2021-41773
+canary rows are also in `blackbox/requests/` so the ordinary black-box gate
+retains the request shapes.
 
 ## Limits
 
@@ -236,11 +285,13 @@ The recording origin cannot prove exploit prevention, and the DVWA/CVE fixtures
 prove only their bounded scenarios. A missing signature, a fixture mismatch, a
 blocked tool, or an inconclusive collection fails the run; it is never counted
 as defense success. The lab does not test arbitrary applications, distributed
-sources, or availability. The authenticated ZAP baseline covers login, spider,
-and passive discovery; active scanning is not yet part of the passing plan, and
-the active injection defenses remain the sqlmap/Nuclei/goTestWAF campaigns. The
-mutation corpus and the CRS comparison are bounded to the reviewed seeds and
-fixtures; protocol and load campaigns are the next milestones.
+sources, Internet link saturation, or capacity; the slow and load results are
+fixed-runner trends with explicit ceilings, not proof against a botnet. The
+authenticated ZAP baseline covers login, spider, and passive discovery; active
+scanning is not part of the passing plan, and the active injection defenses
+remain the sqlmap/Nuclei/goTestWAF campaigns. The mutation corpus, the protocol
+cases, and the CRS comparison are bounded to the reviewed seeds, fixtures, and
+framing interpretations.
 
 The fixtures and tools retain their upstream licenses and provenance: the DVWA
 image and source, MariaDB, Apache httpd 2.4.49, sqlmap, Nuclei, goTestWAF,

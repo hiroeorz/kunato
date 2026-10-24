@@ -4,17 +4,19 @@ Status: design selected on 2026-10-24. The recording origin, curated goTestWAF,
 DVWA/sqlmap, the CVE-2021-41773/Nuclei fixture, ffuf path discovery and
 enumeration behavior, an authenticated ZAP spider/passive baseline, 25
 deterministic mutation variants, and a pinned OWASP CRS 4.3.0 comparison are
-available; see [lab usage](../lab/README.md). ZAP active scanning is currently
-blocked by a ZAP 2.17 plan exit on the authenticated DVWA file-inclusion page;
-protocol/load campaigns remain planned. This document describes the complete
-target design, not achieved attack coverage.
+available, together with 12 raw protocol/WebSocket cases, a bounded slow-HTTP
+run, and a pinned k6 v2.3.0 mixed availability load; see
+[lab usage](../lab/README.md). ZAP active scanning is blocked by a ZAP 2.17 plan
+exit on the authenticated DVWA file-inclusion page. This document describes the
+complete target design and the implemented evidence, not achieved coverage for
+arbitrary applications.
 
 ## Decision
 
 Use a disposable local Linux VM with Docker Engine and Compose for vulnerable
 applications and attack tools. Start with **goTestWAF, Nuclei, and sqlmap**, plus
-Kunato's existing black-box runner. Add ZAP, ffuf, deterministic mutation, and
-the optional OWASP CRS comparison next, then protocol/load campaigns after
+Kunato's existing black-box runner. Add ZAP, ffuf, deterministic mutation, the
+optional OWASP CRS comparison, and protocol/availability campaigns after
 per-case evidence collection works. The implemented ZAP plan covers form login,
 spidering, and passive discovery; the active-scan plan must be revisited when
 the authenticated fixture no longer aborts ZAP 2.17, and the passing
@@ -35,7 +37,7 @@ with nearby legitimate requests decide whether a change can ship.
 
 | Component | Reuse and extension |
 | --- | --- |
-| `lab/` | Isolated recording/DVWA/CVE fixtures, pinned attack tools, direct controls, fail-closed verdicts, and retained evidence for the first two milestones. |
+| `lab/` | Isolated recording/DVWA/CVE fixtures, pinned attack tools and k6, direct controls, fail-closed verdicts, and retained evidence for the implemented milestones. |
 | `scripts/blackbox-test.sh` | Already builds binaries, removes `trusted-sources`, starts Kunato/upstream, replays both corpora, and retains logs. Add case-level evidence around this foundation. |
 | `blackbox/src/main.rs`, `h2c.rs`, `hpack.rs` | Dependency-free HTTP/1.1 and h2c replay with selected HPACK/header probes. Keep simple replay cases here. |
 | `examples/upstream.rs` | Useful forwarded-request inspector. Introduce a separate bounded recording fixture for lab observations. |
@@ -64,8 +66,8 @@ daily CVE workflow already runs the script.
 | [ffuf](https://github.com/ffuf/ffuf) | Second: bounded path/parameter discovery and enumeration behavior | Distinguish origin 404s from blocks, and retain planned/sent accounting rather than only filtered discoveries. |
 | Existing corpus plus bounded mutations | Second: encoding, case, delimiter, and placement variants | Use deterministic seeds and bounded expansion. Confirm that a variant still represents an attack or label it only a signature probe. |
 | Raw clients and existing Rust protocol helpers | Third: framing, request smuggling, H2/H3 translation, and connection isolation | Observe actual bytes and origin boundaries; ordinary clients can repair malformed requests. |
-| [k6](https://grafana.com/docs/k6/latest/using-k6/thresholds/) | Third: normal baseline and mixed attack/normal availability | Assert successful normal workflows, latency, and recovery. Throughput alone is not a DoS verdict. |
-| [slowhttptest](https://github.com/shekyan/slowhttptest) | Third: slow HTTP/1.x headers/body/read scenarios | Check timeouts and connection budgets with an independent normal probe. The classic binary does not cover H2/H3 attacks. |
+| [k6](https://grafana.com/docs/k6/latest/using-k6/thresholds/) | Implemented: normal baseline and mixed attack/normal availability | Assert successful normal workflows, latency, and recovery. Throughput alone is not a DoS verdict. |
+| [slowhttptest](https://github.com/shekyan/slowhttptest) | Optional reference: slow HTTP/1.x headers/body/read scenarios | The lab's bounded raw-socket probe (`lab/probe.py slow`) covers the required slow run; slowhttptest is not part of pinned execution. The classic binary does not cover H2/H3 attacks. |
 
 Configure goTestWAF to save JSON/HTML locally with `--noEmailReport`. Use the
 normal Go client initially and `--addDebugHeader` for correlation where valid.
@@ -292,10 +294,12 @@ normal source. Collect normal semantic success, p95/p99 latency, Kunato CPU/RSS,
 connections/file descriptors, target health, ban/recovery timing, and generator
 saturation. Separate intended attack 403/429 responses from normal-client errors.
 
-Proposed exploratory defaults are 10 requests/second and concurrency 2 for scans,
-then a 50 requests/second, 60-second mixed availability run with separately capped
-slow connections. These are starting budgets, not capacity claims. Sweep only
-after calibration; scanner caps are not substitutes for deliberate DoS workloads.
+The implemented defaults are a 50 requests/second, 60-second k6 mixed
+availability run with 8 separately capped slow connections, concurrent normal
+probes, and immediate recovery checks. The k6 thresholds are p95 < 200 ms,
+p99 < 500 ms, failed requests < 1%, and checks > 99%; the judge also requires
+200 from the normal and recovery probes, no Kunato restart, and RSS under the
+256 MiB ceiling. These are fixed-runner starting budgets, not capacity claims.
 
 Set deadlines and hard resource ceilings before execution. Abort and retain
 diagnostics for OOM, restarts, sustained normal-source failure, or lost observation.
@@ -327,24 +331,24 @@ existing reporting. Check `Cargo.toml` before justifying any new crate. Keep
 downloaded third-party corpora outside Git and preserve provenance/licenses when
 importing reviewed samples into repository regressions.
 
-Milestones 1-3 are implemented with one ZAP limitation: recording origin,
+Milestones 1-4 are implemented with one ZAP limitation: recording origin,
 goTestWAF, DVWA/sqlmap, the CVE-2021-41773 canary, ffuf
 discovery/enumeration, the authenticated ZAP spider/passive baseline, 25
-deterministic mutation variants, and the optional OWASP CRS comparison pass.
-ZAP active scanning remains blocked by the authenticated fixture, and protocol
-and load campaigns remain planned.
+deterministic mutation variants, the optional OWASP CRS comparison, 12
+protocol/WebSocket cases, the slow-HTTP run, and the k6 mixed load pass. ZAP
+active scanning remains blocked by the authenticated fixture.
 
 | Milestone | Deliverable and acceptance evidence |
 | --- | --- |
 | 1. Evidence foundation | Networks, version lock, reset/preflight, recording origin, case report. Valid requests are observed, known blocks are absent, private-source ALLOW is removed, and broken controls/collection fail the run. |
 | 2. Initial attack loop | goTestWAF, DVWA/sqlmap, one selected high-severity HTTP CVE fixture/Nuclei template. Direct controls succeed; ordinary-UA results have evidence; confirmed failures become attack/benign regression pairs, or a bounded no-gap result is recorded. |
 | 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. Implemented: ffuf discovery/enumeration, the authenticated ZAP spider/passive baseline, and 25 mutation variants whose 15 attacks are blocked and 10 benign cases pass; the CRS 4.3.0 comparison agrees on all 25. ZAP active scanning is blocked on the authenticated DVWA file-inclusion page. |
-| 4. Protocol/availability | Raw/H2/H3/WS cases, k6, slow HTTP. Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
+| 4. Protocol/availability | Implemented: 12 raw HTTP/1.1/WebSocket cases with per-framing direct controls (4 passed, 8 prevented), a bounded 8-connection/2-second slow run (2 passed), and a 50 rps/60-second k6 mixed run (5 passed: p95 47.4 ms, p99 47.6 ms, 100% success, normal/recovery 200, RSS 21.8 MiB, no restart). Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
 | 5. Continuous regression | Fast PR gates, scheduled discovery, release smoke tests. Mandatory cases cannot silently skip and reports reproduce locally. |
 
 | Cadence | Workload and gate |
 | --- | --- |
-| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline campaigns, plus the optional CRS comparison. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
+| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, slow, load, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline campaigns, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded campaigns. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
 | Daily/on demand | Existing CVE intake plus selected template/fixture smoke tests with pinned inputs. Promote confirmed findings into reviewed regressions; do not demand 100% of an unreviewed public scanner catalog. |
 | Weekly/on demand | Larger ZAP/ffuf/mutation campaigns and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
 | Before release | Stable regressions, representative fixture controls, protocol/availability on a fixed runner, rule compatibility, and archived evidence. |

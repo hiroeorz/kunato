@@ -149,6 +149,21 @@ services:
       - ${LAB_INPUT}/lab:/lab:ro
     networks: [front]
 
+  load:
+    <<: *runtime
+    image: ${LAB_K6_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [/bin/sh, /lab/tool-runner-k6.sh]
+    environment:
+      HOME: /tmp
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+      - /reports:size=33554432,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
   control:
     <<: *runtime
     image: ${LAB_PYTHON_IMAGE}

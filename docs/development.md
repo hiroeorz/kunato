@@ -73,8 +73,9 @@ and the discovery-to-regression process, see the
 goTestWAF, DVWA/sqlmap, one CVE/Nuclei campaign, ffuf path discovery and
 enumeration behavior, the authenticated ZAP spider/passive baseline, and 25
 deterministic mutation variants with an optional OWASP CRS comparison are
-available through the [lab entrypoint](../lab/README.md). ZAP active scanning,
-protocol, and load campaigns remain planned.
+available through the [lab entrypoint](../lab/README.md). ZAP active scanning
+remains out of the passing plan; the protocol/WebSocket, slow-HTTP, and k6 mixed
+load campaigns are implemented.
 
 ## Dependency Audit
 

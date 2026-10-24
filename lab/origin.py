@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import socket
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY = 65536
 MAX_EVENTS = 10000
@@ -176,4 +176,4 @@ class Recorder(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(json.dumps({"event": "ready", "nonce": os.environ["LAB_NONCE"]}), flush=True)
-    HTTPServer(("0.0.0.0", 8080), Recorder).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 8080), Recorder).serve_forever()

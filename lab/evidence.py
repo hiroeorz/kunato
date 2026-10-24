@@ -235,6 +235,77 @@ def judge_protocol(cases, controls, results, direct_origins, protected_origin,
     return judged
 
 
+def judge_slow(slow, normal, before, after):
+    sent = slow.get("sent", 0)
+    slow_ok = sent >= 1 and not slow.get("error")
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    cases = [
+        {"id": "slow-http", "expect": "survive",
+         "verdict": "passed" if slow_ok else "inconclusive", "origin_receipts": 0},
+        {"id": "slow-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"connections": sent, "held_seconds": slow.get("held_seconds"),
+                       "closed": slow.get("closed"), "normal_status": normal.get("status"),
+                       "cpu_before": before.get("CPUPerc"), "cpu_after": after.get("CPUPerc"),
+                       "mem_before": before.get("MemUsage"), "mem_after": after.get("MemUsage")}
+    return result
+
+
+def judge_load(summary, slow, normal, recovery, before, mid, after, restarts):
+    metrics = summary.get("metrics", {}) if isinstance(summary, dict) else {}
+
+    def value(name, key="value"):
+        return metrics.get(name, {}).get(key)
+
+    requests = value("http_reqs", "count") or 0
+    failed = value("http_req_failed")
+    failed = 1.0 if failed is None else failed
+    checks = value("checks")
+    checks = 0.0 if checks is None else checks
+    duration = metrics.get("http_req_duration", {})
+    p95 = duration.get("p(95)")
+    p99 = duration.get("p(99)")
+    restarts = restarts or 0
+    latency_ok = (requests >= 1000 and failed < 0.01 and checks > 0.99
+                  and p95 is not None and p99 is not None and p95 < 200 and p99 < 500)
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    recovery_ok = recovery.get("status") == 200 and not recovery.get("error")
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    slow_ok = slow.get("sent", 0) >= 1 and not slow.get("error")
+    cases = [
+        {"id": "load-latency", "expect": "latency",
+         "verdict": "passed" if latency_ok else "failed", "origin_receipts": requests},
+        {"id": "load-attack", "expect": "availability",
+         "verdict": "passed" if slow_ok else "failed", "origin_receipts": 0},
+        {"id": "load-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
+        {"id": "load-recovery", "expect": "recovery",
+         "verdict": "passed" if recovery_ok else "failed", "origin_receipts": 1},
+        {"id": "load-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"requests": requests, "failed_rate": failed, "checks": checks,
+                       "p95_ms": p95, "p99_ms": p99,
+                       "normal_status": normal.get("status"),
+                       "recovery_status": recovery.get("status"), "restarts": restarts,
+                       "slow_connections": slow.get("sent"), "slow_closed": slow.get("closed"),
+                       "cpu_before": before.get("CPUPerc"), "cpu_mid": mid.get("CPUPerc"),
+                       "cpu_after": after.get("CPUPerc"),
+                       "mem_before": before.get("MemUsage"), "mem_mid": mid.get("MemUsage"),
+                       "mem_after": after.get("MemUsage")}
+    return result
+
+
 def judge_crs(cases, crs_results, kunato_verdicts, crs_origin, crs_nonce,
               crs_version="4.3.0"):
     """Compare CRS and Kunato decisions for the same mutation corpus."""

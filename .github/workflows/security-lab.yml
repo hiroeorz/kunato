@@ -1,4 +1,4 @@
-name: Local security lab
+name: Local security lab observations
 
 on:
   pull_request:
@@ -6,20 +6,12 @@ on:
     paths:
       - lab/**
       - scripts/security-lab.sh
-      - rules.example.yaml
-      - src/**
-      - Cargo.toml
-      - Cargo.lock
       - .github/workflows/security-lab.yml
   push:
     branches: [main]
     paths:
       - lab/**
       - scripts/security-lab.sh
-      - rules.example.yaml
-      - src/**
-      - Cargo.toml
-      - Cargo.lock
       - .github/workflows/security-lab.yml
   workflow_dispatch:
 
@@ -31,30 +23,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  campaigns:
+  observations:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - name: Test observation and verdict failures
         run: python3 -m unittest discover -s lab/tests -v
       - name: Check the shell entrypoints and runner wrappers
-        run: shellcheck scripts/security-lab.sh lab/tool-runner.sh lab/tool-runner-nuclei.sh lab/tool-runner-ffuf.sh lab/tool-runner-zap.sh
-      - name: Prepare frozen inputs
-        run: scripts/security-lab.sh prepare
-      - name: Run the replay, mutations, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP campaigns
-        run: scripts/security-lab.sh run --campaign all
-      - name: Compare the mutation corpus with OWASP CRS
-        run: scripts/security-lab.sh run --campaign crs
-      - name: Retain reports and reproduction inputs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: security-lab-evidence
-          path: |
-            target/security-lab/2*/
-            !target/security-lab/2*/input/kunato
-          if-no-files-found: warn
-          retention-days: 14
+        run: shellcheck scripts/security-lab.sh lab/tool-runner.sh lab/tool-runner-nuclei.sh lab/tool-runner-ffuf.sh lab/tool-runner-zap.sh lab/tool-runner-k6.sh

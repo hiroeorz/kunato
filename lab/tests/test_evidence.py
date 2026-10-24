@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from controller import make_config, write_gotestwaf_cases
 from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
                       judge_gotestwaf, judge_mutations, judge_nuclei,
-                      judge_protocol, judge_replay, judge_sqlmap, judge_zap,
+                      judge_load, judge_protocol, judge_replay, judge_slow, judge_sqlmap, judge_zap,
                       judge_zap_workflow, summarize, validate_mutations,
                       validate_protocol)
 
@@ -355,6 +355,43 @@ class MutationAndCrsTests(unittest.TestCase):
                                 kunato, [{"event": "ready", "nonce": nonce}], nonce)
         self.assertEqual(false_block["counts"], {"agree-block": 1, "crs-false-block": 1})
         self.assertTrue(false_block["passed"])
+
+
+class LoadTests(unittest.TestCase):
+    def summary(self, p95, p99, failed=0.0, checks=1.0, requests=3000):
+        return {"metrics": {
+            "http_reqs": {"count": requests},
+            "http_req_failed": {"value": failed},
+            "checks": {"value": checks},
+            "http_req_duration": {"p(95)": p95, "p(99)": p99},
+        }}
+
+    def test_load_campaign_passes_within_ceilings(self):
+        result = judge_load(self.summary(50, 120), {"sent": 8, "closed": 8},
+                            {"status": 200}, {"status": 200},
+                            {"CPUPerc": "1.0%"}, {"CPUPerc": "50.0%"},
+                            {"CPUPerc": "1.0%", "MemUsage": "21.4MiB / 256MiB"}, 0)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["p95_ms"], 50)
+
+    def test_load_campaign_fails_on_latency(self):
+        result = judge_load(self.summary(500, 900), {"sent": 8, "closed": 8},
+                            {"status": 200}, {"status": 200}, {}, {}, {}, 0)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "failed")
+
+
+class SlowTests(unittest.TestCase):
+    def test_slow_campaign_requires_normal_health(self):
+        slow = {"sent": 8, "closed": 8, "held_seconds": 2}
+        normal = {"status": 200}
+        before = {"CPUPerc": "1.0%", "MemUsage": "10MiB / 1GiB"}
+        after = {"CPUPerc": "2.0%", "MemUsage": "12MiB / 1GiB"}
+        result = judge_slow(slow, normal, before, after)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["cases"][1]["verdict"], "passed")
+        blocked = judge_slow(slow, {"status": 429}, before, after)
+        self.assertEqual(blocked["cases"][1]["verdict"], "false-block")
 
 
 class ProtocolTests(unittest.TestCase):

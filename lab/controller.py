@@ -16,8 +16,8 @@ from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from evidence import (USER_AGENT, judge_crs, judge_ffuf, judge_ffuf_behavior,
-                      judge_gotestwaf, judge_mutations, judge_nuclei,
-                      judge_protocol, judge_replay, judge_sqlmap, judge_zap,
+                      judge_gotestwaf, judge_mutations, judge_load, judge_nuclei,
+                      judge_protocol, judge_replay, judge_slow, judge_sqlmap, judge_zap,
                       judge_zap_workflow, origin_response, read_jsonl, summarize,
                       validate_cases, validate_ffuf_cases, validate_mutations,
                       validate_protocol, verify_origin)
@@ -259,6 +259,7 @@ class Campaign:
                     "LAB_NUCLEI_IMAGE": self.manifest["images"]["nuclei"]["id"],
                     "LAB_ZAP_IMAGE": self.manifest["images"]["zap"]["id"],
                     "LAB_CRS_IMAGE": self.manifest["images"]["crs"]["id"],
+                    "LAB_K6_IMAGE": self.manifest["images"]["k6"]["id"],
                     "LAB_CVE_IMAGE": self.manifest["fixtures"]["httpd_cve_2021_41773"]["id"]}
         self.base = ["docker", "compose", "--project-name", self.project,
                      "--file", str(self.input / "lab/compose.yaml")]
@@ -273,7 +274,11 @@ class Campaign:
             return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         if not result.stdout.strip():
             return {"probe_error": result.stderr[-1000:] or f"probe exited {result.returncode}"}
-        return json.loads(result.stdout)
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            return {"probe_error": result.stdout[-1000:] or result.stderr[-1000:]
+                    or f"probe exited {result.returncode}"}
 
     def probe_exec(self, service, mode, extra=()):
         result = self.compose("exec", "-T", service, "python3", "-B", "/lab/probe.py",
@@ -369,6 +374,7 @@ class Campaign:
                  *(("--nonce", nonce) if nonce else ()))
         health = (self.probe_exec(service, "health", extra=extra) if exec
                   else self.probe(service, "health", extra=extra))
+        (self.run_dir / phase).mkdir(parents=True, exist_ok=True)
         write_json(self.run_dir / phase / "health-after.json", health)
         if health.get("status") != status or (body and body not in health.get("response", "")):
             raise ValueError("Normal probe failed after campaign")
@@ -446,6 +452,28 @@ class Campaign:
         origin, _ = self.logs("protocol")
         return judge_protocol(cases, controls, results, direct_origins, origin,
                               direct_nonces, nonce)
+
+    def stats(self):
+        container = self.compose("ps", "-q", "kunato").stdout.strip()
+        if not container:
+            return {}
+        result = command(["docker", "stats", "--no-stream", "--format", "json", container],
+                         check=False)
+        line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+        try:
+            return json.loads(line) if line else {}
+        except ValueError:
+            return {}
+
+    def slow(self):
+        nonce = self.reset_origin("slow")
+        self.preflight("origin")
+        before = self.stats()
+        slow = self.probe("client", "slow", extra=("--connections", "8", "--hold", "2"))
+        normal = self.healthy("slow", nonce=nonce)
+        after = self.stats()
+        origin, _ = self.logs("slow")
+        return judge_slow(slow, normal, before, after)
 
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)
@@ -742,9 +770,15 @@ class Campaign:
             raise RuntimeError(f"{service} exited {result.returncode}; inspect {directory / name}")
         return result
 
-    def tool_detached(self, phase, service, args, name, timeout, result="nuclei.jsonl"):
+    def start_tool(self, phase, service, args, name):
+        (self.run_dir / phase).mkdir(exist_ok=True)
+        # Detached tools block reading stdin when Compose leaves it open; the
+        # runners have no interactive input.
+        self.compose("run", "-d", "-T", "--interactive=false", "--no-deps",
+                     "--name", self.project + "-" + service, service, *args)
+
+    def finish_tool(self, phase, service, name, timeout, result):
         directory = self.run_dir / phase
-        directory.mkdir(exist_ok=True)
         service_name = self.project + "-" + service
 
         def collect():
@@ -752,10 +786,6 @@ class Campaign:
             command(["docker", "exec", service_name, "cat", f"/reports/{result}"],
                     check=False, log=directory / result)
 
-        # Detached tools block reading stdin when Compose leaves it open; the
-        # runners have no interactive input.
-        self.compose("run", "-d", "-T", "--interactive=false", "--no-deps",
-                     "--name", service_name, service, *args)
         try:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -778,6 +808,36 @@ class Campaign:
                 raise ValueError(f"{service} failed; inspect {directory / name}")
         finally:
             command(["docker", "rm", "--force", "--volumes", service_name], check=False)
+
+    def tool_detached(self, phase, service, args, name, timeout, result="nuclei.jsonl"):
+        self.start_tool(phase, service, args, name)
+        self.finish_tool(phase, service, name, timeout, result)
+
+    def restarts(self):
+        result = command(["docker", "inspect", "--format", "{{.RestartCount}}",
+                          self.project + "-kunato"], check=False)
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            return 0
+
+    def load(self):
+        nonce = self.reset_origin("load")
+        self.preflight("origin")
+        before = self.stats()
+        self.start_tool("load", "load", [], "k6")
+        try:
+            time.sleep(2)
+            slow = self.probe("client", "slow", extra=("--connections", "8", "--hold", "2"))
+            normal = self.healthy("load", nonce=nonce)
+            mid = self.stats()
+        finally:
+            self.finish_tool("load", "load", "k6", 240, "k6-summary.json")
+        summary = json.loads((self.run_dir / "load/k6-summary.json").read_text())
+        after = self.stats()
+        recovery = self.healthy("load-recovery", nonce=nonce)
+        self.logs("load")
+        return judge_load(summary, slow, normal, recovery, before, mid, after, self.restarts())
 
     def cleanup(self):
         self.compose("rm", "-s", "-f", "-v", "normal", check=False)
@@ -858,8 +918,12 @@ def run(campaign):
         report["campaigns"]["replay"] = lab.replay()
         if campaign in {"mutations", "all"}:
             report["campaigns"]["mutations"] = lab.mutations()
-        if campaign == "protocol":
+        if campaign in {"protocol", "all"}:
             report["campaigns"]["protocol"] = lab.protocol()
+        if campaign in {"slow", "all"}:
+            report["campaigns"]["slow"] = lab.slow()
+        if campaign in {"load", "all"}:
+            report["campaigns"]["load"] = lab.load()
         if campaign in {"gotestwaf", "all"}:
             report["campaigns"]["gotestwaf"] = lab.gotestwaf()
         if campaign in {"sqlmap", "all"}:
@@ -925,7 +989,7 @@ def main():
     runner = subs.add_parser("run", help="Run the isolated regression campaigns")
     runner.add_argument("--campaign",
                         choices=["replay", "mutations", "protocol", "gotestwaf", "sqlmap",
-                                 "nuclei", "ffuf", "zap", "crs", "all"],
+                                 "nuclei", "ffuf", "zap", "crs", "slow", "load", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)

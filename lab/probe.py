@@ -76,6 +76,37 @@ def raw_request(case, host="app.test", port=8080):
     return result
 
 
+def slow_request(case, host="app.test", port=8080):
+    started = time.monotonic()
+    count = int(case.get("connections", 8))
+    hold = float(case.get("hold_seconds", 2))
+    sockets = []
+    sent = 0
+    responses = []
+    try:
+        for _ in range(count):
+            connection = socket.create_connection((host, port), timeout=4)
+            connection.sendall(b"GET /slow HTTP/1.1\r\nHost: app.test\r\n")
+            connection.settimeout(0.5)
+            sockets.append(connection)
+            sent += 1
+        time.sleep(hold)
+        for connection in sockets:
+            try:
+                responses.append(len(connection.recv(4096)))
+            except socket.timeout:
+                responses.append(0)
+            finally:
+                connection.close()
+    except OSError as error:
+        return {"id": "slow", "error": str(error), "sent": sent,
+                "responses": responses, "held_seconds": hold,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 2)}
+    return {"id": "slow", "sent": sent, "responses": responses,
+            "closed": sum(1 for size in responses if size), "held_seconds": hold,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 2)}
+
+
 def isolation(hosts, addresses):
     failures = []
     routes = Path("/proc/net/route").read_text().splitlines()[1:]
@@ -105,7 +136,7 @@ def isolation(hosts, addresses):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["health", "cases", "raw", "isolation", "metrics"])
+    parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "isolation", "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -114,6 +145,8 @@ def main():
     parser.add_argument("--forbidden-host", action="append", default=[])
     parser.add_argument("--forbidden-ip", action="append", default=[])
     parser.add_argument("--cases", default="/lab/cases/smoke.json")
+    parser.add_argument("--connections", type=int, default=8)
+    parser.add_argument("--hold", type=float, default=2.0)
     args = parser.parse_args()
     if args.mode == "cases":
         for case in json.loads(Path(args.cases).read_text()):
@@ -121,6 +154,11 @@ def main():
     elif args.mode == "raw":
         for case in json.loads(Path(args.cases).read_text()):
             print(json.dumps(raw_request(case, args.host, args.port)), flush=True)
+    elif args.mode == "slow":
+        result = slow_request({"connections": args.connections, "hold_seconds": args.hold},
+                              args.host, args.port)
+        print(json.dumps(result))
+        return int("error" in result)
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},
                          args.host, args.port)
