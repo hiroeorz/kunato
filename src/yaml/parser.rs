@@ -511,7 +511,7 @@ impl<'a> Parser<'a> {
                 if plain.is_empty() {
                     return self.null_scalar(line, column);
                 }
-                if plain.contains(": ") {
+                if plain.contains(": ") || plain.ends_with(':') {
                     return Err(Error::syntax(
                         "mapping values are not allowed in a plain scalar",
                         line,
@@ -1469,5 +1469,10 @@ mod tests {
     #[test]
     fn rejects_mapping_values_inside_plain_scalars() {
         assert!(error("a: b: c\n").contains("mapping values are not allowed"));
+        assert!(error("a: b:\n").contains("mapping values are not allowed"));
+        assert_eq!(
+            json("a: http://127.0.0.1:3000\n")["a"],
+            "http://127.0.0.1:3000"
+        );
     }
 }
