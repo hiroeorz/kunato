@@ -24,8 +24,8 @@ cargo tree --offline -e normal --target x86_64-unknown-linux-gnu --prefix none \
 ```
 
 - Start: **205**
-- Final: **95** (-110): v0.10.0 shipped 99, and the post-release cleanup removed
-  four more names.
+- Final: **95** (-110): v0.10.0 shipped 99, and the post-release cleanup shipped
+  in v0.10.1.
 - Reference only: `Cargo.lock` contains 162 package entries (283 at the start).
   This counts all platforms and duplicate versions and is not the KPI.
 
@@ -80,7 +80,8 @@ it remains in the production tree through `h3`, so the KPI is unchanged.
 | `http-body-util` -> in-tree body helpers | 96 -> 95 (-1) | http-body-util | [src/proxy/body.rs](src/proxy/body.rs); `Full`, `BoxBody`, `BodyExt`, `Collect`, and `FrameFuture`. |
 | `serde_json` | not done | - | Not a log-only codec: it is the serde JSON layer for ACME/JOSE, GraphQL, telemetry, and `kunato log`. An in-tree replacement is L/XL and security-sensitive, so it is deferred. |
 
-The post-release cleanup is part of v0.10.1.
+The post-release cleanup shipped in v0.10.1: cleanup commit `0e6e4fb`, release
+commit `de14f3f`.
 
 ### Behavior changes to remember
 
