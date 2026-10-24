@@ -1,4 +1,6 @@
-# Dependency Reduction TODO
+# Dependency Reduction Program
+
+Status: **Complete** — shipped in v0.10.0 (`15d18e6`).
 
 Last updated: 2026-10-24
 
@@ -22,9 +24,12 @@ cargo tree --offline -e normal --target x86_64-unknown-linux-gnu --prefix none \
 ```
 
 - Start: **205**
-- Current: **99** (-106).
+- Final: **99** (-106), shipped in v0.10.0.
 - Reference only: `Cargo.lock` contains 165 package entries (283 at the start).
   This counts all platforms and duplicate versions and is not the KPI.
+
+The previous release, v0.9.1, shipped changes 1-7 at KPI 112. The YAML
+replacements in v0.10.0 removed the remaining 13 names.
 
 `deny.toml` uses `[graph] all-features = true`, so Cargo feature-gating alone
 does not reduce the set of monitored crates. A crate leaves the KPI only when
@@ -34,6 +39,8 @@ its dependency edge is removed or replaced by in-tree code.
 
 Changes 1-9 are committed. Change 9 is `07f6028`; change 8 is `586234c`;
 change 5 is `b70f37c`, change 6 is `c4d23e8`, and change 7 is `bd73060`.
+The follow-up YAML parser hardening is `33fb79e` (with `e762f88`, `57e5b77`,
+and `8b40c8a`). The program shipped in v0.10.0 (`15d18e6`).
 
 | # | Change | Commit | KPI after | Removed from the Linux tree | Tradeoffs / notes |
 |---|--------|--------|----------:|-----------------------------|-------------------|
@@ -45,7 +52,7 @@ change 5 is `b70f37c`, change 6 is `c4d23e8`, and change 7 is `bd73060`.
 | 6 | ACME review hardening | `c4d23e8` | 112 -> 112 (0) | none | Hardened cache temp files against symlink redirection, validated cached certificates against domains, directory, and expiry, accepted private-CA critical extensions through the SPKI fallback, honoured `Retry-After`, batched multi-domain authorization polling, rejected duplicate domains, bounded HTTP bodies/log strings/chain size, and added unit and multi-domain Pebble tests plus a nightly Pebble workflow. |
 | 7 | ACME origin and order resilience | `bd73060` | 112 -> 112 (0) | none | Restricted response-supplied ACME URLs to the directory origin plus an optional `tls.acme.allowed_origins` list; transient order failures are retried against the same order before starting a new one. |
 | 8 | `serde-saphyr` -> `granit-parser` + in-tree serde deserializer | `586234c` | 112 -> 101 (-11) | serde-saphyr, annotate-snippets, anstyle, unicode-width, encoding_rs_io, encoding_rs, core_detect, multiversion_no_op, scopeguard, simdutf8, num-traits | New [src/yaml/](src/yaml/); YAML 1.2 syntax from `granit-parser`, serde mapping in-tree. Anchors, aliases, merge keys, explicit tags, directives, and multiple documents are rejected; error rendering and locations differ from `serde-saphyr`. 514 unit tests and all integration tests pass; a typical 89 KB file parses in about 1.8 ms with a 3 MB peak. |
-| 9 | `granit-parser` -> in-tree YAML subset parser | `07f6028` | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. A later review-hardening pass added multi-line flow/quoted scalars, flow pairs, explicit keys, tab handling, complex-key rejection, error sanitization, and a 16 MiB cap. |
+| 9 | `granit-parser` -> in-tree YAML subset parser | `07f6028` | 101 -> 99 (-2) | granit-parser, arraydeque | New [src/yaml/parser.rs](src/yaml/parser.rs); YAML syntax parsing is now fully in-tree. The new parser matched the previous parser on 89 corpus documents before removal. 520 unit tests and all integration tests pass. A later review-hardening pass (`33fb79e`) added multi-line flow/quoted scalars, flow pairs, explicit keys, tab handling, complex-key rejection, error sanitization, and a 16 MiB cap. |
 
 Platform-specific crates also disappear from `Cargo.lock` (for example
 `fsevent-sys`, `kqueue`, `anstyle-wincon`, `once_cell_polyfill`, and
@@ -59,6 +66,9 @@ Change 8 removes 11 names from the production tree. `num-traits` remains in
 `Cargo.lock` as a dev-only dependency of `rcgen`/`x509-parser`, like those two
 crates. Change 9 removes `granit-parser` and its `arraydeque` dependency, which
 change 8 had retained.
+
+`futures-util` is used only by tests and is a dev-dependency after this cleanup;
+it remains in the production tree through `h3`, so the KPI is unchanged.
 
 ### Behavior changes to remember
 
@@ -100,7 +110,8 @@ starting each item: removing one dependency can change the savings of another.
 | 5 | `ruzstd` -> in-house Zstandard | -2 | XL | High | Not recommended. |
 | 6 | `arc-swap` -> `RwLock<Arc<T>>` wrapper | -2 | S-M | Medium | Defer; conflicts with the lock-free config snapshot design. |
 | 7 | `regex` -> in-house regex engine | -3 | XL | Very high | Not worth it. |
-| - | Direct-only crates: `thiserror`, `futures-util`, `ipnet`, `rustls-native-certs`, `serde_json`, `regex-syntax`, `hyper-rustls` | 0 | S-L | Low-medium | Out of KPI scope; they remain transitive through other dependencies. |
+| - | Transitive-only in the production tree: `thiserror`, `futures-util`, `regex-syntax` | 0 | - | - | Removing them requires replacing a parent crate; out of scope. |
+| - | Remaining direct-only crates: `ipnet`, `serde_json`, `http-body-util` | -3 | M | Low-medium | Each needs a small in-tree implementation; not recommended as a program. `hyper-rustls` is also direct-only; `rustls-native-certs` is reached both directly and through it, and replacing the TLS client or trust store is higher risk. |
 | - | Dev-only edges: `tempfile`, `brotli`, `rcgen`, `x509-parser`, `rustix`, `linux-raw-sys` | 0 | S-M | Low | Not KPI; do not prioritize. |
 
 `rcgen` and `x509-parser` are now dev-only; the production tree no longer
@@ -120,16 +131,26 @@ contains either crate. Priority 1 (`serde-saphyr`) and its follow-up
 - **`arc-swap` (-2):** a `std::sync::RwLock<Arc<T>>` wrapper is simple, but it
   adds a lock to the request hot path and contradicts the documented lock-free
   snapshot design.
-- **Direct-only removals:** these crates would remain in the tree through other
-  dependencies (mostly `quinn`, `hyper-util`, and `hyper-rustls`), so the KPI
-  would not move.
+- **Direct-only removals:** the earlier version of this section incorrectly
+  treated every direct-only crate as transitive. `cargo tree -i` shows that
+  `ipnet`, `serde_json`, and `http-body-util` are reachable only from `kunato`,
+  so replacing them would lower the KPI by 3. Each needs a small in-tree
+  implementation (CIDR matching, JSON parsing/serialization, and body plumbing),
+  and the return on that effort is below the compression work already rejected.
+  `hyper-rustls` is also direct-only, but replacing the HTTPS client is riskier
+  than its -1. `thiserror`, `futures-util`, and `regex-syntax` are genuinely
+  transitive.
 
-## Recommended next step
+## Outcome
 
-1. Change 9 is committed as `07f6028`; the KPI is 99. No action.
-2. No further dependency work is recommended. Compression, regex, and `arc-swap`
-   remain closed for the reasons above, and HTTP/3 is retained by product
-   decision (2026-10-24).
+The program is complete and shipped in v0.10.0 (`15d18e6`). The KPI moved from
+205 to 99 (-106). No further dependency work is recommended: compression, regex,
+and `arc-swap` remain closed for the reasons above, HTTP/3 is retained by
+product decision (2026-10-24), and the remaining direct-only crates are a -3
+opportunity at medium effort with low ROI.
+
+The next development program is behavioral detection Phase 3 (design spike).
+See [the behavioral detection design](docs/behavioral-detection.md).
 
 ## Definition of done (per item)
 

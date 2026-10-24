@@ -1,11 +1,12 @@
 # Kunato Design
 
-Status: **Draft** — milestones M0 through M10 are implemented and covered by unit
-and integration tests. TLS termination is provided through `rustls`; HTTP/2 is
-served over TLS (ALPN) and cleartext (h2c prior knowledge), HTTP/3 is served
-over QUIC when enabled, and HTTP/1.1 WebSocket upgrades are tunneled. Rules can
-also run in a response phase that inspects upstream responses (status, headers,
-body prefix). Certificate rotation remains future work.
+Status: **Implemented** — milestones M0 through M12 are implemented and covered
+by unit and integration tests. TLS termination is provided through `rustls`;
+HTTP/2 is served over TLS (ALPN) and cleartext (h2c prior knowledge), HTTP/3 is
+served over QUIC when enabled, and HTTP/1.1 WebSocket upgrades are tunneled.
+Rules can also run in a response phase that inspects upstream responses (status,
+headers, body prefix). ACME-managed certificates rotate automatically; hot
+reload of static certificate files remains future work.
 
 Audience: contributors and AI coding agents. The YAML field reference lives in
 `docs/development.md`; this document covers the system as a whole.
@@ -707,7 +708,7 @@ packaging/
 rules.example.yaml # Example configuration
 ```
 
-## 12. Dependencies (proposed)
+## 12. Dependencies
 
 Every dependency must be justified in its commit message, per AGENTS.md.
 
@@ -720,6 +721,8 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `http-body-util`, `bytes` | Body utilities and buffers     | Companion crates for hyper; bounded-body helpers.          |
 | `serde`                   | Config and rule schema         | Typed config with `deny_unknown_fields`; YAML parsing and the serde deserializer are in-tree (`src/yaml/`). |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
+| `regex-syntax`            | Regex HIR analysis             | Validates that ALLOW patterns are fully anchored.          |
+| `serde_json`              | JSON logs and GraphQL bodies   | Structured `kunato log` records/parsing and GraphQL request inspection. |
 | `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
 | `tracing`                 | Structured logging             | Event macros are shared with hyper and quinn; the subscriber, filter, and text/JSON formatters are in-tree. |
 | `log`                     | Dependency log bridge          | Already present via rustls; forwards dependency records to the in-tree subscriber. |
@@ -733,6 +736,7 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `quinn`, `h3`, `h3-quinn` | HTTP/3 over QUIC               | Mature Rust QUIC stack and the hyperium HTTP/3 implementation. |
 | `thiserror`               | Error types                    | Explicit, low-boilerplate error enums.                     |
 | `tempfile` (dev)          | Test fixtures                  | Writing config files for reload tests.                     |
+| `futures-util` (dev)      | Async test streams             | Builds pending and iterating bodies in proxy tests.        |
 | `rcgen` (dev)             | Test certificates              | Self-signed certificates for TLS integration tests and parsing generated CSRs. |
 | `brotli` (dev)            | Compressed test fixtures       | Encoder used to build brotli payloads in tests.            |
 

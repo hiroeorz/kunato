@@ -11,7 +11,6 @@ arc-swap = "1"
 brotli-decompressor = { version = "6", default-features = false, features = ["std"] }
 bytes = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 http = "1"
@@ -38,6 +37,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 brotli = "9"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", features = ["x509-parser"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
