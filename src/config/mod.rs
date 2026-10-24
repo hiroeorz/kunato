@@ -9,7 +9,6 @@ use std::time::Duration;
 use http::Method;
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
-use ipnet::IpNet;
 use regex::{Regex, RegexBuilder, RegexSet};
 use regex_syntax::hir::{Hir, HirKind, Look};
 use serde::de::Error as DeError;
@@ -18,6 +17,7 @@ use serde::{Deserialize, Deserializer};
 pub mod watcher;
 
 use crate::allowed_hosts::AllowedHosts;
+use crate::cidr::IpNet;
 use crate::client_ip::ClientIp;
 use crate::error::{Error, UNKNOWN_TARGET_ISSUE};
 use crate::rules::matcher::{
@@ -1627,16 +1627,7 @@ fn compile_client_ip(spec: Option<&ClientIpSpec>, issues: &mut Vec<String>) -> C
     for value in spec.trusted_proxies.iter().take(64) {
         match parse_ip_net(value) {
             Ok(network) => {
-                let network = match network {
-                    IpNet::V6(net) if net.prefix_len() >= 96 => net
-                        .addr()
-                        .to_ipv4_mapped()
-                        .and_then(|ip| ipnet::Ipv4Net::new(ip, net.prefix_len() - 96).ok())
-                        .map(IpNet::V4)
-                        .unwrap_or(network),
-                    _ => network,
-                };
-                networks.push(network);
+                networks.push(network.to_ipv4_mapped().unwrap_or(network));
             }
             Err(error) => issues.push(format!("client_ip.trusted_proxies: {error}")),
         }

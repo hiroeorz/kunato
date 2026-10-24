@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
@@ -24,6 +23,7 @@ use kunato::config;
 use kunato::config::Acme;
 use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
+use kunato::snapshot::Snapshot;
 
 const PEBBLE_DIRECTORY: &str = "https://localhost:14000/dir";
 const DOMAIN: &str = "localhost";
@@ -201,7 +201,7 @@ async fn pebble_server_manages_certificates() {
         .as_ref()
         .and_then(|tls| tls.acme.clone())
         .expect("acme settings");
-    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let metrics = Arc::new(Metrics::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -258,7 +258,7 @@ async fn pebble_issues_a_multi_domain_certificate() {
         .as_ref()
         .and_then(|tls| tls.acme.clone())
         .expect("acme settings");
-    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let metrics = Arc::new(Metrics::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -316,7 +316,7 @@ async fn pebble_service_reuses_cache() {
     );
     let compiled = config::parse(&yaml).expect("valid config");
     let listen = compiled.listen;
-    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let server = Server::bind(listen, config, metrics.clone(), Some(&service))
         .await
         .expect("bind kunato");

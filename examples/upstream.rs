@@ -5,13 +5,14 @@ use std::time::Instant;
 use bytes::Bytes;
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tracing::{error, info};
+
+use kunato::proxy::{BodyExt, Full};
 
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BODY_DISPLAY: usize = 4096;
@@ -91,21 +92,32 @@ async fn handle(
         .unwrap_or_else(|| "/".to_owned());
     let headers = request.headers().clone();
 
-    let body = match Limited::new(request.into_body(), MAX_BODY_BYTES)
-        .collect()
-        .await
-    {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            let status = StatusCode::PAYLOAD_TOO_LARGE;
-            log_request(peer, &method, &target, status, 0, started);
-            return Ok(build_response(
-                status,
-                "payload too large".to_owned(),
-                is_head,
-            ));
+    let mut body = Vec::new();
+    let mut too_large = false;
+    let mut incoming = request.into_body();
+    while let Some(frame) = incoming.frame().await {
+        let Ok(frame) = frame else {
+            too_large = true;
+            break;
+        };
+        if let Some(chunk) = frame.data_ref() {
+            if body.len() + chunk.len() > MAX_BODY_BYTES {
+                too_large = true;
+                break;
+            }
+            body.extend_from_slice(chunk);
         }
-    };
+    }
+    if too_large {
+        let status = StatusCode::PAYLOAD_TOO_LARGE;
+        log_request(peer, &method, &target, status, 0, started);
+        return Ok(build_response(
+            status,
+            "payload too large".to_owned(),
+            is_head,
+        ));
+    }
+    let body = Bytes::from(body);
 
     let report = format_report(peer, &method, &target, &headers, &body);
     let status = StatusCode::OK;

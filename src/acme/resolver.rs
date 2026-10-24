@@ -10,14 +10,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwapOption;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
 use super::ACME_TLS_ALPN;
+use crate::snapshot::SnapshotOption;
 
 pub(crate) struct AcmeResolver {
-    current: ArcSwapOption<CertifiedKey>,
+    current: SnapshotOption<CertifiedKey>,
     challenges: Mutex<HashMap<String, ChallengeEntry>>,
 }
 
@@ -29,7 +29,7 @@ struct ChallengeEntry {
 impl AcmeResolver {
     pub(crate) fn new() -> Self {
         Self {
-            current: ArcSwapOption::empty(),
+            current: SnapshotOption::empty(),
             challenges: Mutex::new(HashMap::new()),
         }
     }
@@ -73,7 +73,7 @@ impl ResolvesServerCert for AcmeResolver {
             .map(|mut protocols| protocols.any(|protocol| protocol == ACME_TLS_ALPN))
             .unwrap_or(false);
         if !wants_acme {
-            return self.current.load_full();
+            return self.current.load();
         }
 
         let domain = hello.server_name()?.to_ascii_lowercase();

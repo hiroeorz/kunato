@@ -1,3 +1,4 @@
+pub mod body;
 pub mod client;
 pub mod forward;
 pub mod http3;
@@ -11,9 +12,9 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
-use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
+
+pub use body::{BodyExt, BoxBody, Collected, Full};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
@@ -33,7 +34,7 @@ pub(crate) async fn settle_body_end<B>(
     pending: &mut Vec<Frame<Bytes>>,
 ) -> bool
 where
-    B: Body<Data = Bytes> + Unpin,
+    B: Body<Data = Bytes> + Unpin + Send,
 {
     let frame = match deadline {
         Some(deadline) => match tokio::time::timeout_at(deadline, body.frame()).await {
@@ -60,9 +61,7 @@ where
 }
 
 pub fn full_body(data: impl Into<Bytes>) -> ProxyBody {
-    Full::new(data.into())
-        .map_err(|never| match never {})
-        .boxed()
+    Full::new(data.into()).boxed()
 }
 
 /// Follow a buffered allocation through body frames, clones, and slices.

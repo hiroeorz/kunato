@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderName, HeaderValue};
 use http::{Request, Response, StatusCode, Version};
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use tracing::debug;
 
 use crate::client_ip::ClientSource;
 use crate::config::{CompiledConfig, ResponseSpec};
 use crate::protection::normalize_ip;
+use crate::proxy::BodyExt;
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::{BoxError, ProxyBody, full_body};
 

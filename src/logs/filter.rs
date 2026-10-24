@@ -1,8 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
 
-use ipnet::IpNet;
 use regex::Regex;
 
+use crate::cidr::IpNet;
 use crate::cli::LogArgs;
 use crate::error::Error;
 
@@ -38,7 +38,7 @@ impl IpMatcher {
         let address = normalize_ip(address);
         match self {
             Self::Exact(expected) => normalize_ip(*expected) == address,
-            Self::Network(network) => network.contains(&address),
+            Self::Network(network) => network.contains(address),
         }
     }
 }

@@ -501,7 +501,7 @@ policy is immutable for the lifetime of a compiled configuration, so it needs no
 lock.
 
 A configuration reload swaps the compiled `Protection` (and therefore the static
-policy) atomically through the existing `ArcSwap`; in-flight requests keep the
+policy) atomically through the existing `Snapshot`; in-flight requests keep the
 old policy until they finish, which is the same behavior as rule reloads.
 
 ## 10. Testing

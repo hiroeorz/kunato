@@ -4,12 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use bytes::{Buf, Bytes};
 use http::header::{HeaderName, HeaderValue};
 use http::{Method, Request, Response, StatusCode, Version};
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::client::legacy::Client;
@@ -24,6 +22,36 @@ use kunato::admin::AdminServer;
 use kunato::config;
 use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
+use kunato::proxy::{BodyExt, Full};
+use kunato::snapshot::Snapshot;
+
+struct PendingBody;
+
+impl Body for PendingBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Pending
+    }
+}
+
+struct OneShotBody(Option<Frame<Bytes>>);
+
+impl Body for OneShotBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Ready(self.get_mut().0.take().map(Ok))
+    }
+}
 
 async fn spawn_header_echo_upstream(header: &'static str) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -385,7 +413,7 @@ async fn websocket_handshake_with_headers(
 struct Running {
     addr: SocketAddr,
     metrics: Arc<Metrics>,
-    config: Arc<ArcSwap<config::CompiledConfig>>,
+    config: Arc<Snapshot<config::CompiledConfig>>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -400,7 +428,7 @@ impl Running {
 async fn start_kunato(yaml: &str) -> Running {
     let compiled = config::parse(yaml).expect("valid config");
     let listen = compiled.listen;
-    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let metrics = Arc::new(Metrics::new());
     let server = Server::bind(listen, config.clone(), metrics.clone(), None)
         .await
@@ -3739,7 +3767,7 @@ categories:
 
     let compiled = config::parse(&yaml).expect("valid config");
     let admin_config = compiled.admin.clone();
-    let config = Arc::new(ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let metrics = Arc::new(Metrics::new());
     let server = Server::bind(
         "127.0.0.1:0".parse().expect("address"),
@@ -4689,9 +4717,7 @@ async fn http2_rejects_request_heads_before_reading_bodies() {
                 builder = builder.header(name, "value");
             }
         }
-        let body = http_body_util::StreamBody::new(futures_util::stream::pending::<
-            Result<hyper::body::Frame<Bytes>, Infallible>,
-        >());
+        let body = PendingBody;
         let request = builder.body(body).expect("request");
         let response = tokio::time::timeout(Duration::from_secs(2), sender.send_request(request))
             .await
@@ -4904,9 +4930,7 @@ async fn form_checks_cover_chunked_and_lengthless_http2_bodies() {
     let task = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let body = http_body_util::StreamBody::new(futures_util::stream::iter([Ok::<_, Infallible>(
-        hyper::body::Frame::data(Bytes::from(body)),
-    )]));
+    let body = OneShotBody(Some(Frame::data(Bytes::from(body))));
     let request = Request::builder()
         .method(Method::POST)
         .uri("http://kunato.test/upload")
@@ -5128,7 +5152,7 @@ async fn php2shell_bundled_response_rules_block_short_disclosure_and_keep_rails_
             .categories
             .retain(|category| category.name != "trusted-sources");
         compiled.protection.enabled = false;
-        let config = Arc::new(ArcSwap::from_pointee(compiled));
+        let config = Arc::new(Snapshot::new(compiled));
         let metrics = Arc::new(Metrics::new());
         let server = Server::bind(
             "127.0.0.1:0".parse().expect("listen"),

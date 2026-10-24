@@ -4,13 +4,13 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use http::{Response, StatusCode};
-use http_body_util::BodyExt;
 use hyper::body::{Body, Frame};
 use tracing::{debug, info, warn};
 
 use crate::client_ip::ClientSource;
 use crate::config::CompiledConfig;
 use crate::metrics::Metrics;
+use crate::proxy::BodyExt;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::server::InspectionGuard;
 use crate::proxy::{BoxError, PrefixBody, ProxyBody, settle_body_end};

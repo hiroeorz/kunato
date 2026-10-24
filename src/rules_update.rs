@@ -5,11 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http::header::{ETAG, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION};
 use http::{Method, Request, StatusCode, Uri};
-use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
@@ -22,6 +20,8 @@ use crate::config::watcher;
 use crate::config::{self, CompiledConfig, RulesUpdate};
 use crate::error::Error;
 use crate::metrics::Metrics;
+use crate::proxy::{BodyExt, Full};
+use crate::snapshot::Snapshot;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const FAILURE_RETRY: Duration = Duration::from_secs(600);
@@ -46,7 +46,7 @@ pub enum UpdateOutcome {
 /// Background task that refreshes the managed rules file on the configured
 /// interval. Errors never terminate the loop: the previous rules stay active.
 pub async fn run(
-    config: Arc<ArcSwap<CompiledConfig>>,
+    config: Arc<Snapshot<CompiledConfig>>,
     main_config: PathBuf,
     metrics: Arc<Metrics>,
     disable_protection: bool,
@@ -464,8 +464,6 @@ fn build_client() -> Result<RulesClient, Error> {
 }
 
 async fn read_body(mut body: Incoming, max_bytes: usize, what: &str) -> Result<Vec<u8>, Error> {
-    use http_body_util::BodyExt;
-
     let mut bytes = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame =

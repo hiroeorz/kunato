@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use http::StatusCode;
-use ipnet::IpNet;
 use regex::RegexSet;
 use tokio::time::Instant;
 
+use crate::cidr::IpNet;
 use crate::config::{BehaviorAction, BehaviorConfig, Protection, RuleLimit, RuleLimitKey};
 use crate::decoding::{normalize_path, percent_decode_forms};
 
@@ -927,7 +927,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn is_allowlisted(ip: IpAddr, allowlist: &[IpNet]) -> bool {
-    allowlist.iter().any(|network| network.contains(&ip))
+    allowlist.iter().any(|network| network.contains(ip))
 }
 
 pub(crate) fn normalize_ip(ip: IpAddr) -> IpAddr {

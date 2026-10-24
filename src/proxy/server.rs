@@ -7,11 +7,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http::header::{CONNECTION, CONTENT_ENCODING, HeaderMap, HeaderValue, UPGRADE};
 use http::{Request, Response, StatusCode};
-use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -30,10 +28,13 @@ use crate::protection::{BehaviorSignal, ConnectionGuard, Decision, ProtectionSta
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
-use crate::proxy::{BoxError, PrefixBody, ProxyBody, full_body, settle_body_end, with_bytes_guard};
+use crate::proxy::{
+    BodyExt, BoxError, PrefixBody, ProxyBody, full_body, settle_body_end, with_bytes_guard,
+};
 use crate::proxy::{http3, tls};
 use crate::request_view::RequestView;
 use crate::rules::eval;
+use crate::snapshot::Snapshot;
 
 const RAW_503: &[u8] =
     b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
@@ -274,8 +275,8 @@ enum TlsMode {
 
 #[derive(Clone)]
 pub struct Context {
-    config: Arc<ArcSwap<CompiledConfig>>,
-    client: Arc<ArcSwap<UpstreamClient>>,
+    config: Arc<Snapshot<CompiledConfig>>,
+    client: Arc<Snapshot<UpstreamClient>>,
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
     inspection: Arc<InspectionBudget>,
@@ -286,7 +287,7 @@ pub struct Context {
 
 impl Context {
     pub fn config(&self) -> Arc<CompiledConfig> {
-        self.config.load_full()
+        self.config.load()
     }
 
     /// Return an upstream client built for the snapshot's connect timeout,
@@ -345,7 +346,7 @@ pub struct Server {
 impl Server {
     pub async fn bind(
         addr: SocketAddr,
-        config: Arc<ArcSwap<CompiledConfig>>,
+        config: Arc<Snapshot<CompiledConfig>>,
         metrics: Arc<Metrics>,
         acme: Option<&AcmeService>,
     ) -> Result<Self, Error> {
@@ -399,7 +400,7 @@ impl Server {
             listener,
             context: Context {
                 config,
-                client: Arc::new(ArcSwap::from_pointee(UpstreamClient::new(connect_timeout))),
+                client: Arc::new(Snapshot::new(UpstreamClient::new(connect_timeout))),
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
                 inspection: Arc::new(InspectionBudget::new()),
@@ -1805,6 +1806,21 @@ async fn process(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::Full;
+
+    struct PendingBody;
+
+    impl Body for PendingBody {
+        type Data = Bytes;
+        type Error = BoxError;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Pending
+        }
+    }
 
     async fn connected_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -1913,10 +1929,7 @@ mod tests {
     async fn prefix_reservation_follows_emitted_frames_instead_of_the_stream_tail() {
         let budget = Arc::new(InspectionBudget::new());
         let inspection = Arc::new(budget.reserve(INSPECTION_BUDGET_BYTES).expect("fits"));
-        let tail = http_body_util::StreamBody::new(futures_util::stream::pending::<
-            Result<Frame<Bytes>, BoxError>,
-        >())
-        .boxed();
+        let tail = PendingBody.boxed();
         let mut body = PrefixBody::new(
             Bytes::from_static(b"prefix"),
             vec![Frame::data(Bytes::from_static(b"pending"))],
@@ -1952,12 +1965,12 @@ mod tests {
     async fn test_request_status(addr: SocketAddr, path: &str) -> StatusCode {
         let client: hyper_util::client::legacy::Client<
             hyper_util::client::legacy::connect::HttpConnector,
-            http_body_util::Full<Bytes>,
+            Full<Bytes>,
         > = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build_http();
         let request = Request::builder()
             .method(http::Method::POST)
             .uri(format!("http://{addr}{path}"))
-            .body(http_body_util::Full::new(Bytes::from_static(b"payload")))
+            .body(Full::new(Bytes::from_static(b"payload")))
             .expect("request");
         let response = tokio::time::timeout(Duration::from_secs(3), client.request(request))
             .await
@@ -2001,7 +2014,7 @@ mod tests {
                 });
             }
         });
-        let config = Arc::new(ArcSwap::from_pointee(
+        let config = Arc::new(Snapshot::new(
             crate::config::parse(&format!(
                 "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
             ))
@@ -2050,7 +2063,7 @@ mod tests {
 
     #[tokio::test]
     async fn response_prefix_keeps_its_inspection_reservation() {
-        let config = Arc::new(ArcSwap::from_pointee(
+        let config = Arc::new(Snapshot::new(
             crate::config::parse(
                 "listen: 127.0.0.1:0
 upstream: http://127.0.0.1:1
@@ -2074,7 +2087,7 @@ categories:
         )
         .await
         .expect("server");
-        let config = config.load_full();
+        let config = config.load();
         let budget = Arc::clone(&server.context.inspection);
         let _occupied = budget
             .reserve(INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION)

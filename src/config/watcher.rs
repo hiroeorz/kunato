@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
-use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::config::{self, CompiledConfig};
 use crate::metrics::Metrics;
+use crate::snapshot::Snapshot;
 
 #[cfg(not(test))]
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -35,7 +35,7 @@ fn absolute(path: &Path) -> PathBuf {
 
 pub async fn watch(
     path: PathBuf,
-    config: Arc<ArcSwap<CompiledConfig>>,
+    config: Arc<Snapshot<CompiledConfig>>,
     metrics: Arc<Metrics>,
     disable_protection: bool,
     mut shutdown: watch::Receiver<bool>,
@@ -98,7 +98,7 @@ fn source_stamps(paths: &[PathBuf]) -> BTreeMap<PathBuf, Option<(SystemTime, u64
 
 pub fn reload(
     path: &Path,
-    config: &ArcSwap<CompiledConfig>,
+    config: &Snapshot<CompiledConfig>,
     metrics: &Metrics,
     disable_protection: bool,
 ) -> Option<Vec<PathBuf>> {
@@ -188,7 +188,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -209,9 +209,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
         );
-        let config = Arc::new(ArcSwap::from_pointee(
-            config::load(&path).expect("initial config"),
-        ));
+        let config = Arc::new(Snapshot::new(config::load(&path).expect("initial config")));
         let (shutdown, shutdown_rx) = watch::channel(false);
         let watcher = tokio::spawn(watch(
             path.clone(),
@@ -247,7 +245,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -268,7 +266,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nallowed_hosts: [example.com]\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
         assert!(
             config
                 .load()
@@ -308,7 +306,7 @@ mod tests {
         let path = dir.path().join("rules.yaml");
         let base = "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n";
         write(&path, base);
-        let config = ArcSwap::from_pointee(config::load(&path).expect("config"));
+        let config = Snapshot::new(config::load(&path).expect("config"));
         let peer = "127.0.0.1:443".parse().expect("peer");
         let headers = http::HeaderMap::new();
         assert!(config.load().client_ip.resolve(peer, &headers).is_ok());
@@ -337,7 +335,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nlimits: { max_body_bytes: 42 }\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(&path, "this is not: [valid\n");
         reload(&path, &config, &Metrics::new(), false);
@@ -353,7 +351,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nlimits: { max_body_bytes: 42 }\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -378,7 +376,7 @@ mod tests {
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
         assert!(config.load().protection.enabled);
 
         reload(&path, &config, &Metrics::new(), true);
@@ -397,7 +395,7 @@ upstream: http://127.0.0.1:3000
 tls: { cert_file: old-cert.pem, key_file: old-key.pem }
 ",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -424,7 +422,7 @@ tls: { cert_file: cert.pem, key_file: key.pem }
 http3: { enabled: true, listen: 127.0.0.1:443 }
 ",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -452,7 +450,7 @@ upstream: http://127.0.0.1:3000
 admin: { enabled: true, listen: 127.0.0.1:9090 }
 ",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -474,7 +472,7 @@ admin: { enabled: true, listen: 127.0.0.1:9999 }
             &path,
             "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
         );
-        let config = ArcSwap::from_pointee(config::load(&path).expect("initial config"));
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
 
         write(
             &path,
@@ -507,7 +505,7 @@ upstream: http://127.0.0.1:3000
 rules_file: rules.yaml
 ",
         );
-        let config = ArcSwap::from_pointee(config::load(&main).expect("initial config"));
+        let config = Snapshot::new(config::load(&main).expect("initial config"));
         assert_eq!(config.load().categories.len(), 1);
 
         write(&rules, "categories: []\n");
@@ -539,7 +537,7 @@ upstream: http://127.0.0.1:3000
 rules_file: rules.yaml
 ",
         );
-        let config = ArcSwap::from_pointee(config::load(&main).expect("initial config"));
+        let config = Snapshot::new(config::load(&main).expect("initial config"));
 
         std::fs::remove_file(&rules).expect("remove rules file");
         assert!(reload(&main, &config, &Metrics::new(), false).is_none());

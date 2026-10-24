@@ -24,8 +24,9 @@ cargo tree --offline -e normal --target x86_64-unknown-linux-gnu --prefix none \
 ```
 
 - Start: **205**
-- Final: **99** (-106), shipped in v0.10.0.
-- Reference only: `Cargo.lock` contains 165 package entries (283 at the start).
+- Final: **95** (-110): v0.10.0 shipped 99, and the post-release cleanup removed
+  four more names.
+- Reference only: `Cargo.lock` contains 162 package entries (283 at the start).
   This counts all platforms and duplicate versions and is not the KPI.
 
 The previous release, v0.9.1, shipped changes 1-7 at KPI 112. The YAML
@@ -70,6 +71,17 @@ change 8 had retained.
 `futures-util` is used only by tests and is a dev-dependency after this cleanup;
 it remains in the production tree through `h3`, so the KPI is unchanged.
 
+### Post-release cleanup
+
+| Change | KPI after | Removed from the Linux tree | Notes |
+| --- | ---: | --- | --- |
+| `arc-swap` -> in-tree `Snapshot` | 99 -> 97 (-2) | arc-swap, rustversion | [src/snapshot.rs](src/snapshot.rs) uses `RwLock<Arc<T>>`; readers clone the Arc and never hold a guard across an await. Reloads briefly block readers, so DESIGN §3 no longer claims a lock-free snapshot. |
+| `ipnet` -> in-tree CIDR | 97 -> 96 (-1) | ipnet | [src/cidr.rs](src/cidr.rs); IPv4/IPv6 parsing, masking, matching, and IPv4-mapped conversion. |
+| `http-body-util` -> in-tree body helpers | 96 -> 95 (-1) | http-body-util | [src/proxy/body.rs](src/proxy/body.rs); `Full`, `BoxBody`, `BodyExt`, `Collect`, and `FrameFuture`. |
+| `serde_json` | not done | - | Not a log-only codec: it is the serde JSON layer for ACME/JOSE, GraphQL, telemetry, and `kunato log`. An in-tree replacement is L/XL and security-sensitive, so it is deferred. |
+
+The post-release cleanup is part of v0.10.1.
+
 ### Behavior changes to remember
 
 - Configuration reload is polling-based (2 s), not event-based.
@@ -96,6 +108,9 @@ it remains in the production tree through `h3`, so the KPI is unchanged.
 - YAML parse errors keep serde's unknown-field, unknown-variant, and
   missing-field classification for rule-set compatibility, but the wording and
   snippet rendering are in-tree.
+- Configuration snapshots use `RwLock<Arc<T>>` (`src/snapshot.rs`). Readers
+  clone the Arc; a reload takes a short write lock, so new readers can briefly
+  block where the previous `arc-swap` snapshot was lock-free.
 
 ## Backlog
 
@@ -104,14 +119,15 @@ starting each item: removing one dependency can change the savings of another.
 
 | Priority | Candidate | KPI impact | Effort | Risk | Decision |
 |----------|-----------|-----------:|--------|------|----------|
-| 2 | Drop HTTP/3 (`h3`, `h3-quinn`, `quinn`) | -16 | M | Product regression | **Retained** by product decision (2026-10-24); do not remove. |
+| 2 | Drop HTTP/3 (`h3`, `h3-quinn`, `quinn`) | -18 | M | Product regression | **Retained** by product decision (2026-10-24); do not remove. |
+| - | Implement HTTP/3 in-house (`h3`, `h3-quinn`, `quinn`) | -18 | XXL | Very high | **Not recommended**; see [the assessment](docs/http3-in-house-spike.md). The stack is ~59k source LOC and the adapter is 406 lines. |
 | 3 | `flate2` -> in-house DEFLATE | -5 | L | High | Not recommended. A partial replacement (`miniz_oxide` plus in-house gzip/zlib framing) would save roughly 3, not 5. |
 | 4 | `brotli-decompressor` -> in-house Brotli | -3 | XL | High | Not recommended. |
 | 5 | `ruzstd` -> in-house Zstandard | -2 | XL | High | Not recommended. |
-| 6 | `arc-swap` -> `RwLock<Arc<T>>` wrapper | -2 | S-M | Medium | Defer; conflicts with the lock-free config snapshot design. |
+| 6 | `arc-swap` -> `RwLock<Arc<T>>` wrapper | -2 | S-M | Medium | **Done** in the post-release cleanup; `arc-swap` and `rustversion` removed. |
 | 7 | `regex` -> in-house regex engine | -3 | XL | Very high | Not worth it. |
 | - | Transitive-only in the production tree: `thiserror`, `futures-util`, `regex-syntax` | 0 | - | - | Removing them requires replacing a parent crate; out of scope. |
-| - | Remaining direct-only crates: `ipnet`, `serde_json`, `http-body-util` | -3 | M | Low-medium | Each needs a small in-tree implementation; not recommended as a program. `hyper-rustls` is also direct-only; `rustls-native-certs` is reached both directly and through it, and replacing the TLS client or trust store is higher risk. |
+| - | Remaining direct-only crate: `serde_json` | -1 | L/XL | Medium | Deferred; it is the serde JSON codec for ACME/JOSE, GraphQL, telemetry, and `kunato log`, not a small log formatter. `hyper-rustls` is also direct-only; `rustls-native-certs` is reached both directly and through it, and replacing the TLS client or trust store is higher risk. |
 | - | Dev-only edges: `tempfile`, `brotli`, `rcgen`, `x509-parser`, `rustix`, `linux-raw-sys` | 0 | S-M | Low | Not KPI; do not prioritize. |
 
 `rcgen` and `x509-parser` are now dev-only; the production tree no longer
@@ -123,34 +139,55 @@ contains either crate. Priority 1 (`serde-saphyr`) and its follow-up
 - **YAML (done):** see changes 8 and 9. The supported subset is documented in
   [docs/development.md](docs/development.md); the design record is in
   [docs/serde-saphyr-replacement-spike.md](docs/serde-saphyr-replacement-spike.md).
-- **HTTP/3 (-16):** retained by product decision on 2026-10-24. The measured
-  saving is 16 names, not 14; the item stays closed unless the decision changes.
+- **HTTP/3 (-18):** retained by product decision on 2026-10-24. The measured
+  saving is 18 names; an earlier measurement said 16 and missed the
+  feature-unified `futures-io` and `futures-macro` drops. The item stays closed
+  unless the decision changes.
+- **HTTP/3 in-house (-18):** measured. The full stack is ~59k lines (`h3` 19.4k,
+  `h3-quinn` 0.65k, `quinn` 5.7k, `quinn-proto` 31.2k, `quinn-udp` 2.3k) versus
+  31.6k for all of `src/`; the HTTP/3 layer alone is 7 names for ~20k lines and
+  the QUIC layer 11 names for ~39k. The earlier ACME replacement removed 61
+  names with ~3.3k lines. This is a new security-critical protocol
+  implementation, not a dependency cleanup. See
+  [the assessment](docs/http3-in-house-spike.md).
 - **Compression (-10 total):** decompression handles untrusted request bodies.
   An in-house decoder must preserve the existing size limits, streaming
   behavior, and malformed-input handling. High risk, low KPI gain.
-- **`arc-swap` (-2):** a `std::sync::RwLock<Arc<T>>` wrapper is simple, but it
-  adds a lock to the request hot path and contradicts the documented lock-free
-  snapshot design.
-- **Direct-only removals:** the earlier version of this section incorrectly
-  treated every direct-only crate as transitive. `cargo tree -i` shows that
-  `ipnet`, `serde_json`, and `http-body-util` are reachable only from `kunato`,
-  so replacing them would lower the KPI by 3. Each needs a small in-tree
-  implementation (CIDR matching, JSON parsing/serialization, and body plumbing),
-  and the return on that effort is below the compression work already rejected.
+- **`arc-swap` (done):** replaced by [src/snapshot.rs](src/snapshot.rs), a
+  `RwLock<Arc<T>>` wrapper, removing `arc-swap` and `rustversion` (-2). Readers
+  clone the Arc and never hold a read guard across an await. Reloads briefly
+  block new readers, so DESIGN §3 no longer claims a lock-free snapshot. No
+  throughput benchmark was run; the target workload is personal-scale.
+- **`serde_json` (-1):** not attempted. It is not a log-only formatter: it is
+  the serde JSON codec for ACME/JOSE (canonical JWK and protected-header
+  serialization, plus order/problem deserialization), GraphQL query extraction
+  including duplicate-key handling, telemetry JSON logs, and `kunato log` JSON.
+  Replacing it needs an in-tree serde JSON serializer and deserializer (L/XL)
+  plus RFC 7638/ACME test vectors. That is a separate security-sensitive
+  program, not a -1/M cleanup.
+- **Direct-only removals:** `ipnet` and `http-body-util` were removed in the
+  post-release cleanup (-2 total). `serde_json` remains; see the note above.
   `hyper-rustls` is also direct-only, but replacing the HTTPS client is riskier
   than its -1. `thiserror`, `futures-util`, and `regex-syntax` are genuinely
   transitive.
 
 ## Outcome
 
-The program is complete and shipped in v0.10.0 (`15d18e6`). The KPI moved from
-205 to 99 (-106). No further dependency work is recommended: compression, regex,
-and `arc-swap` remain closed for the reasons above, HTTP/3 is retained by
-product decision (2026-10-24), and the remaining direct-only crates are a -3
-opportunity at medium effort with low ROI.
+The original program is complete and shipped in v0.10.0 (`15d18e6`). The KPI
+moved from 205 to 99 (-106). The post-release cleanup then removed four more
+names (`arc-swap`, `rustversion`, `ipnet`, and `http-body-util`), bringing the
+KPI to **95 (-110)**.
+
+`serde_json` remains. It is an L/XL serde JSON codec project rather than a -1/M
+cleanup, so it is deferred pending a separate decision. Compression and regex
+remain closed for the reasons above, and HTTP/3 is retained by product decision
+(2026-10-24).
 
 The next development program is behavioral detection Phase 3 (design spike).
 See [the behavioral detection design](docs/behavioral-detection.md).
+
+An in-house HTTP/3 stack was evaluated and rejected; see
+[the assessment](docs/http3-in-house-spike.md).
 
 ## Definition of done (per item)
 

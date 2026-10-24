@@ -12,7 +12,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use http::header::{CONTENT_TYPE, USER_AGENT};
 use http::{HeaderMap, Method, Request, StatusCode};
-use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -24,6 +23,7 @@ use tracing::{debug, warn};
 use super::AcmeError;
 use super::base64;
 use super::jose::AccountKey;
+use crate::proxy::{BodyExt, Full};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_INLINE_RETRY_AFTER: Duration = Duration::from_secs(30);

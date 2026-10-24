@@ -1,7 +1,6 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
@@ -15,6 +14,7 @@ use kunato::error::Error;
 use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
 use kunato::rules_update::{self, UpdateOutcome};
+use kunato::snapshot::Snapshot;
 use kunato::telemetry;
 
 #[tokio::main]
@@ -68,7 +68,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let listen = initial.listen;
     let admin_config = initial.admin.clone();
     let acme_spec = initial.tls.as_ref().and_then(|tls| tls.acme.clone());
-    let config = Arc::new(ArcSwap::from_pointee(initial));
+    let config = Arc::new(Snapshot::new(initial));
     let metrics = Arc::new(Metrics::new());
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -231,7 +231,7 @@ async fn run_update_rules(config_path: &std::path::Path) -> Result<(), Error> {
 #[cfg(unix)]
 fn spawn_sighup_reload(
     path: std::path::PathBuf,
-    config: Arc<ArcSwap<CompiledConfig>>,
+    config: Arc<Snapshot<CompiledConfig>>,
     metrics: Arc<Metrics>,
     disable_protection: bool,
 ) {

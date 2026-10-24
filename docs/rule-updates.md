@@ -9,7 +9,7 @@ sees, and how a new rule construct is released.
 
 ```text
 rules.example.yaml ──► dist/rules.yaml ──► download ──► validate ──► atomic swap ──► hot reload
-   (daily agent,           (+ .sha256)      rules_update  whole set   /var/lib/kunato   ArcSwap
+   (daily agent,           (+ .sha256)      rules_update  whole set   /var/lib/kunato   Snapshot
     coverage work)          on main                        │           /rules.yaml
                                       ▲                     └─ reject: keep previous rules,
                         scripts/check-rules-compat.sh         log + counters, retry in

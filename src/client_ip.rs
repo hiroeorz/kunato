@@ -1,8 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
 
 use http::header::{HeaderMap, HeaderName};
-use ipnet::IpNet;
 
+use crate::cidr::IpNet;
 use crate::protection::normalize_ip;
 
 const MAX_HEADER_BYTES: usize = 4096;
@@ -44,7 +44,7 @@ impl ClientIp {
     }
 
     fn is_trusted(&self, ip: IpAddr) -> bool {
-        self.trusted_proxies.iter().any(|net| net.contains(&ip))
+        self.trusted_proxies.iter().any(|net| net.contains(ip))
     }
 
     /// Validate the bounded list, then walk trusted hops from the direct peer

@@ -2,9 +2,9 @@ use std::borrow::Cow;
 
 use http::Method;
 use http::header::HeaderName;
-use ipnet::IpNet;
 use regex::Regex;
 
+use crate::cidr::IpNet;
 use crate::request_view::{RequestView, ResponseView, cookie_pairs};
 
 pub const TARGET_PATH: u8 = 1 << 0;
@@ -124,7 +124,7 @@ impl Matcher {
         if let Some(networks) = &self.source_ips
             && !networks
                 .iter()
-                .any(|network| network.contains(&view.source_ip))
+                .any(|network| network.contains(view.source_ip))
         {
             return false;
         }

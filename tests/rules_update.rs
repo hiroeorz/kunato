@@ -9,7 +9,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use http::header::{ETAG, HeaderName, HeaderValue, IF_NONE_MATCH, LOCATION};
 use http::{Request, Response, StatusCode};
-use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -17,7 +16,9 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use kunato::config::{self, RulesUpdate};
+use kunato::proxy::Full;
 use kunato::rules_update::{self, UpdateOutcome};
+use kunato::snapshot::Snapshot;
 
 const RULES: &str = "categories:
   - name: auto
@@ -645,7 +646,7 @@ rules_update:
     );
     std::fs::write(&main, &text).expect("write config");
     let compiled = config::load(&main).expect("load config");
-    let config = Arc::new(arc_swap::ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let metrics = Arc::new(kunato::metrics::Metrics::new());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(rules_update::run(
@@ -724,7 +725,7 @@ rules_update:
     );
     std::fs::write(&main, &text).expect("write config");
     let compiled = config::load(&main).expect("load config");
-    let config = Arc::new(arc_swap::ArcSwap::from_pointee(compiled));
+    let config = Arc::new(Snapshot::new(compiled));
     let metrics = Arc::new(kunato::metrics::Metrics::new());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(rules_update::run(config, main, metrics, false, shutdown_rx));

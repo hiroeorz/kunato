@@ -78,8 +78,11 @@ Components:
   the upstream TCP connection is opened per tunnel and the connection guard is
   transferred from the HTTP connection task to the tunnel so budgets stay
   accurate. Tunnels are closed by an idle watchdog or by the shutdown signal.
-- Active configuration: `ArcSwap<CompiledConfig>`. The request path performs one
-  lock-free `load()`; reloads swap the whole immutable snapshot atomically.
+- Active configuration: `Snapshot<CompiledConfig>` (`src/snapshot.rs`), an
+  `RwLock<Arc<CompiledConfig>>`. The request path clones the `Arc`; reloads
+  swap the whole immutable snapshot under a short write lock. A reload can
+  briefly block new readers; the previous `ArcSwap` implementation was
+  lock-free.
 - Response inspection is opt-in per configuration: when no response-phase rules
   exist, upstream responses stream through untouched. Rules without response-body
   targets run on arrival of the response head. If response-body targets exist,
@@ -310,7 +313,7 @@ file and the optional overrides file) for mtime/size changes every 2 s. Polling
 the path itself also catches rename-based replacements, which editors use for
 atomic saves. A reload re-runs the
 parse → validate → compile pipeline; on success the snapshot is swapped with
-`ArcSwap::store`; on failure the previous snapshot stays active and the error is
+`Snapshot::store`; on failure the previous snapshot stays active and the error is
 logged. In-flight requests keep using the snapshot they loaded.
 
 Reloadable: categories/rules, protection, timeouts, limits, `allowed_hosts`, `client_ip`,
@@ -718,15 +721,13 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `hyper`, `hyper-util`     | HTTP server and client         | Streaming-friendly HTTP/1.1 and HTTP/2; no framework overhead. |
 | `hyper-rustls`            | HTTPS client                   | Upstream forwarding and ACME directory requests over rustls. |
 | `http`                    | Shared HTTP types              | Core request/response types used across the proxy.         |
-| `http-body-util`, `bytes` | Body utilities and buffers     | Companion crates for hyper; bounded-body helpers.          |
+| `bytes`                   | Body buffers                   | Shared buffers for request/response bodies; body helpers (`Full`, `BoxBody`, `BodyExt`) are in-tree in `src/proxy/body.rs`. |
 | `serde`                   | Config and rule schema         | Typed config with `deny_unknown_fields`; YAML parsing and the serde deserializer are in-tree (`src/yaml/`). |
 | `regex`                   | Signature matching             | Linear-time engine; immune to catastrophic backtracking.   |
 | `regex-syntax`            | Regex HIR analysis             | Validates that ALLOW patterns are fully anchored.          |
 | `serde_json`              | JSON logs and GraphQL bodies   | Structured `kunato log` records/parsing and GraphQL request inspection. |
-| `arc-swap`                | Lock-free config snapshot      | Hot-path reads without locks or reference counting churn.  |
 | `tracing`                 | Structured logging             | Event macros are shared with hyper and quinn; the subscriber, filter, and text/JSON formatters are in-tree. |
 | `log`                     | Dependency log bridge          | Already present via rustls; forwards dependency records to the in-tree subscriber. |
-| `ipnet`                   | IP / CIDR parsing and matching | Correct IPv4/IPv6 CIDR semantics.                          |
 | `flate2` (rust backend)   | gzip / deflate decoding        | Pure-Rust backend; no C toolchain for musl builds.         |
 | `brotli-decompressor`     | Brotli decoding                | Pure-Rust decompressor; the encoder is not needed.         |
 | `ruzstd`                  | Zstandard decoding             | Pure-Rust decoder; frames with a window over 8 MiB fall back to raw inspection. |
@@ -739,6 +740,11 @@ Every dependency must be justified in its commit message, per AGENTS.md.
 | `futures-util` (dev)      | Async test streams             | Builds pending and iterating bodies in proxy tests.        |
 | `rcgen` (dev)             | Test certificates              | Self-signed certificates for TLS integration tests and parsing generated CSRs. |
 | `brotli` (dev)            | Compressed test fixtures       | Encoder used to build brotli payloads in tests.            |
+
+Configuration snapshots, CIDR matching, and HTTP body helpers are in-tree:
+`src/snapshot.rs` (`RwLock<Arc<T>>`), `src/cidr.rs`, and `src/proxy/body.rs`.
+These replaced `arc-swap`, `ipnet`, and `http-body-util` in the post-v0.10.0
+cleanup.
 
 The ACME client (RFC 8555) is implemented in `src/acme/` on top of `rustls`,
 `ring`, `hyper`, and `hyper-rustls`. It registers an account, orders

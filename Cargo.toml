@@ -7,18 +7,15 @@ repository = "https://github.com/hiroeorz/kunato"
 publish = false
 
 [dependencies]
-arc-swap = "1"
 brotli-decompressor = { version = "6", default-features = false, features = ["std"] }
 bytes = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 http = "1"
-http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "rustls-native-certs", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
-ipnet = "2"
 log = "0.4"
 quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 regex = "1"
