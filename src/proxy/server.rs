@@ -813,6 +813,25 @@ async fn handle_request(
         Err(err)
     } else if let Some(err) = request_head_error(&config, &parts) {
         Err(err)
+    } else if upgrade.is_some()
+        && !parts.headers.contains_key(CONTENT_LENGTH)
+        && !parts.headers.contains_key(TRANSFER_ENCODING)
+    {
+        if let Some(inspection) = context.reserve_request_inspection() {
+            let payload = RequestPayload {
+                prefix: Bytes::new(),
+                pending: Vec::new(),
+                rest: None,
+                truncated: false,
+            };
+            process(
+                parts, payload, source, &config, &context, upgrade, inspection,
+            )
+            .await
+        } else {
+            context.record_overloaded();
+            Err(inspection_capacity_error())
+        }
     } else if let Some(inspection) = context.reserve_request_inspection() {
         match read_body(body, &config, inspection, &context).await {
             Ok((body, inspection)) => {
