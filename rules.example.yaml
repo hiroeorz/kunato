@@ -968,8 +968,10 @@ categories:
     action: BLOCK
     response: { status: 403, body: Forbidden }
     rules:
+      # Whitespace or SQL comments may separate UNION and SELECT. A fixed gap
+      # let a padded /*...*/ comment bypass the rule in the local lab.
       - name: union-select
-        match: { regex: '(?i)\bunion\b[^;]{0,20}\bselect\b', in: [query, body, cookies] }
+        match: { regex: '(?i)\bunion\b(?:\s|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)*(?:all\b|distinct\b)?(?:\s|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)*\bselect\b', in: [query, body, cookies] }
       - name: boolean-taunts
         match: { regex: '(?i)\b(or|and)\b[\s+]+[\x27"\(\)]?\d+[\x27"\(\)]?[\s+]*=[\s+]*[\x27"\(\)]?\d+[\x27"\(\)]?', in: [query, body, cookies] }
       - name: stacked-queries
