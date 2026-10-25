@@ -10,10 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
-from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_crs,
-                      judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_mutations,
-                      judge_nuclei, judge_load, judge_protocol, judge_replay, judge_slow,
-                      judge_sqlmap, judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
+from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
+                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf,
+                      judge_mutations, judge_nuclei, judge_load, judge_protocol,
+                      judge_replay, judge_restart, judge_slow, judge_sqlmap,
+                      judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
                       read_jsonl, summarize,
                       validate_mutations, validate_protocol)
 
@@ -414,6 +415,31 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(missing["cases"][-1]["verdict"], "failed")
 
 
+class RestartTests(unittest.TestCase):
+    def summary(self, requests=400, checks=0.9):
+        return {"metrics": {"http_reqs": {"count": requests},
+                            "checks": {"value": checks}}}
+
+    def test_restart_suite_requires_graceful_exit_and_recovery(self):
+        result = judge_restart(self.summary(), 0, 1200, {"status": 200},
+                               {"status": 200}, {},
+                               {"MemUsage": "22MiB / 256MiB"})
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["exit_code"], 0)
+
+    def test_restart_suite_fails_on_a_signal_exit(self):
+        result = judge_restart(self.summary(), 143, 100, {"status": 200},
+                               {"status": 200}, {}, {})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "failed")
+
+    def test_restart_suite_fails_without_recovery(self):
+        result = judge_restart(self.summary(), 0, 1200, {"status": 503},
+                               {"status": 200}, {}, {})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][2]["verdict"], "failed")
+
+
 class SlowTests(unittest.TestCase):
     def test_slow_suite_requires_normal_health(self):
         slow = {"sent": 8, "closed": 8, "held_seconds": 2}
@@ -456,6 +482,49 @@ class AvailabilityTests(unittest.TestCase):
                                     {"response": "kunato_requests_total 10\n"})
         self.assertFalse(result["passed"])
         self.assertEqual(result["cases"][-1]["verdict"], "failed")
+
+    def test_availability_suite_bounds_global_exhaustion(self):
+        metrics = {"response": "kunato_requests_total 42\n"
+                               "kunato_upstream_timeouts_total 1\n"}
+        result = judge_availability(*self.payloads(), metrics,
+                                    global_cap={"status": 503, "active_connections": 16})
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["global_cap_status"], 503)
+        self.assertEqual(result["notes"]["global_active_connections"], 16)
+        self.assertEqual([case["id"] for case in result["cases"]].count("global-connection-cap"), 1)
+
+    def test_availability_suite_rejects_global_exhaustion_without_active_connections(self):
+        metrics = {"response": "kunato_requests_total 42\n"
+                               "kunato_upstream_timeouts_total 1\n"}
+        result = judge_availability(*self.payloads(), metrics,
+                                    global_cap={"status": 503, "active_connections": 8})
+        self.assertFalse(result["passed"])
+        case = next(case for case in result["cases"] if case["id"] == "global-connection-cap")
+        self.assertEqual(case["verdict"], "inconclusive")
+
+
+class ConnectTests(unittest.TestCase):
+    def test_connect_suite_requires_a_connect_timeout_and_metric(self):
+        metrics = {"response": "kunato_upstream_connect_errors_total 1\n"}
+        result = judge_connect({"status": 502}, {},
+                               {"MemUsage": "21MiB / 256MiB"}, 0, metrics)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["connect_status"], 502)
+        self.assertEqual(result["notes"]["upstream_connect_errors"], 1)
+
+    def test_connect_suite_rejects_a_forwarded_request(self):
+        metrics = {"response": "kunato_upstream_connect_errors_total 1\n"}
+        result = judge_connect({"status": 200}, {},
+                               {"MemUsage": "21MiB / 256MiB"}, 0, metrics)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "failed")
+
+    def test_connect_suite_requires_the_connect_error_metric(self):
+        metrics = {"response": "kunato_upstream_connect_errors_total 0\n"}
+        result = judge_connect({"status": 502}, {},
+                               {"MemUsage": "21MiB / 256MiB"}, 0, metrics)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][1]["verdict"], "failed")
 
 
 class BanTests(unittest.TestCase):

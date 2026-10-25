@@ -25,8 +25,10 @@ ground truth. The model below is implemented by `lab/controller.py`,
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-- **front** carries attack clients, the independent normal client, and the k6
-  load generator. It is the untrusted side of Kunato.
+- **front** carries attack clients, the independent normal client, the k6 load
+  generator, and the scalable `exhaust` probes used to fill the global
+  connection budget from independent source addresses. It is the untrusted side
+  of Kunato.
 - **back** carries Kunato's upstream path. The recording origin listens there
   as `app.test` and writes one JSONL event per request.
 - **control** is a WAF-less client on the back network. It sends the same bytes
@@ -34,6 +36,9 @@ ground truth. The model below is implemented by `lab/controller.py`,
   protected result is trusted.
 - **data** is reserved for database fixtures (DVWA and the SQL-injection
   sandbox suite).
+- A dedicated internal `blackhole` network gives the slow-connect suite an
+  unassigned upstream address; Kunato's TCP connect times out without a
+  reachable peer.
 - No lab service publishes ports. Containers are read-only where possible,
   have CPU, memory, and pid ceilings, and use internal Docker networks.
 
@@ -137,12 +142,15 @@ inspecting application payloads inside the tunnel remains a separate feature.
 goTestWAF, sqlmap, Nuclei, ffuf, and ZAP run the same bounded scan against the
 direct control and through Kunato. Their reports, the origin receipts, and
 Kunato's block records are joined per case. ZAP runs the authenticated
-spider/passive baseline; its active scan is not part of the passing plan. A
-scoped, observation-only active plan was attempted with SQLi and reflected XSS
-only, file-inclusion/setup/security/logout excluded, and `failOnError: false`;
-ZAP 2.17.0 still exited at `Job activeScan started` with code 2 and an empty
-report. The pinned image and Docker Hub `latest` share the same 2.17.0 digest,
-so active ZAP scanning stays deferred.
+spider/passive baseline; its active scan is not part of the passing plan. An
+endpoint-scoped, observation-only active plan was attempted (SQLi and reflected
+XSS paths; file-inclusion/setup/security/logout excluded; `failOnError: false`),
+and ZAP 2.17.0 exited at `Job activeScan started` with code 2 and an empty
+report. A further attempt to restrict active rules to SQL injection and
+reflected XSS supplied `policyDefinition` to the `activeScan` job; ZAP 2.17
+rejected it as an unrecognised parameter, so rule-level scoping was not applied.
+The plan is not kept in the tree. The pinned image and Docker Hub `latest` share
+the same 2.17.0 digest, so active ZAP scanning stays deferred.
 
 ### Bounded slow HTTP
 
@@ -156,14 +164,25 @@ raw-socket mode, not slowhttptest.
 ### Availability boundaries
 
 `--sandbox-suite availability` runs against a dedicated configuration with a
-2-second body-read timeout, a 1-second upstream-response timeout, and an
-8-connection per-source cap. It sends a partial request body and expects `408`,
-opens a large response without reading it, fills the per-source connection
-budget so the next connection gets `503` while the independent normal client
-stays `200`, and requests an origin that sleeps past the upstream timeout so the
-client gets `504`. The same suite checks RSS, restarts, the normal client, and
-the upstream-timeout metric. Slow upstream connect and multi-source exhaustion
-remain outside the suite.
+2-second body-read timeout, a 1-second upstream-response timeout, an
+8-connection per-source cap, and a 16-connection global cap. It sends a partial
+request body and expects `408`, opens a large response without reading it, fills
+the per-source connection budget so the next connection gets `503`, then fills
+the global budget from two independent `exhaust` sources and requires a third
+source to get `503` while `kunato_active_connections` is 16. The fillers are
+stopped and the independent normal client must recover to `200`. It then
+requests an origin that sleeps past the upstream timeout so the client gets
+`504`. The same suite checks RSS, restarts, the normal client, the global
+rejection, and the upstream-timeout metric.
+
+### Slow upstream connect
+
+`--sandbox-suite connect` starts Kunato with a dedicated configuration whose
+upstream is an unassigned address on the internal `blackhole` network. The TCP
+connect exceeds `timeouts.upstream_connect` (1 second), so the client gets `502`
+and `kunato_upstream_connect_errors_total` increments. The suite checks RSS and
+restarts and requires no origin receipt. This is a connect timeout, not the
+upstream-response timeout covered by `availability`.
 
 ### Ban recovery
 
@@ -193,6 +212,16 @@ after the load stops. A metrics case requires the request counter to cover the
 k6 workload and the block, rate-limit, overload, and upstream-timeout counters
 to remain at zero.
 
+### Restart under load
+
+`--sandbox-suite restart` runs the k6 restart scenario at 20 requests per
+second for 25 seconds, sends SIGTERM to Kunato after 5 seconds, and requires
+exit code 0 within 12 seconds. It restarts the same container and requires a
+`200` recovery from the independent normal client; the k6 summary must retain at
+least 100 requests and a check rate above 50%. The report records the exit code,
+shutdown time, request count, check rate, recovery, RSS, and normal status. OOM
+and forced-kill behavior are not exercised.
+
 ## Why this design
 
 1. **Differential testing.** The same bytes are sent with and without Kunato, so
@@ -220,15 +249,18 @@ to remain at zero.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The last `all` run, `20261025T003757-8e7d00e3`, passed 14 sandbox suites:
-  replay, benign, mutations, protocol, slow, availability, ban, websocket, load,
-  goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3000
-  requests, p95 49.9 ms, p99 53.2 ms, 100% success, normal/recovery `200`, RSS
-  21.8 MiB of 256 MiB, no restart, and matching metrics. The availability suite
-  recorded a slow-body `408`, slow-read `200`, connection-cap `503`, upstream
-  `504`, and 23.6 MiB RSS. The ban suite recorded a `429` ban and `200`
-  recovery; the websocket suite recorded PONG, the fragmented echo, and the
-  close handshake.
+- The last `all` run, `20261025T144621-a435a74f`, passed 16 sandbox suites:
+  replay, benign, mutations, protocol, slow, availability, connect, ban,
+  websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed
+  load recorded 3001 requests, p95 47.9 ms, p99 48.2 ms, 100% success,
+  normal/recovery `200`, RSS 21.8 MiB of 256 MiB, no restart, and matching
+  metrics. The availability suite recorded a slow-body `408`, slow-read `200`,
+  per-source and global connection caps at `503` with 16 active connections,
+  upstream `504`, and 23.2 MiB RSS. The connect suite recorded `502` and one
+  upstream connect error. The restart suite recorded exit code 0, a 397 ms
+  shutdown, 501 requests, a 98.6% check rate, and `200` recovery. The ban suite
+  recorded a `429` ban and `200` recovery; the websocket suite recorded PONG,
+  the fragmented echo, and the close handshake.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -273,27 +305,30 @@ current suites.
 
 - The slow suite holds 8 partial-header connections for 2 seconds. The
   availability suite adds a slow-body `408`, a slow-read probe, a per-source
-  connection cap with `503`, and an upstream-response timeout with `504`. Slow
-  upstream connect, multi-source and global exhaustion, queue/backpressure,
-  and inspection-budget pressure are not exercised. The ban suite adds a
-  short-window ban trigger, a recovery request, a normal-client check, and the
-  `kunato_banned_total` counter.
+  connection cap with `503`, a two-source global cap with `503`, and an
+  upstream-response timeout with `504`. The connect suite adds a slow upstream
+  TCP connect with `502` and the connect-error metric. Queue/backpressure,
+  true distributed-source exhaustion, and inspection-budget pressure are not
+  exercised. The ban suite adds a short-window ban trigger, a recovery request,
+  a normal-client check, and the `kunato_banned_total` counter. The restart
+  suite adds SIGTERM under load, graceful exit, restart, and recovery.
 - The load suite is a fixed 50 requests/second run and now checks Kunato's
   request, block, rate-limit, overload, and upstream-timeout counters. H2 Rapid
   Reset, CONTINUATION floods, and HPACK bombs are not attempted in the lab;
-  ban/rate-limit recovery windows and distributed sources (impossible in one
-  lab) remain untested. OOM, restart, and graceful-shutdown behavior under
+  rate-limit window recovery, longer ban windows, and distributed sources
+  (impossible in one lab) remain untested. OOM and forced-kill behavior under
   pressure are not part of the passing suites.
 
 ### Workflows and false positives
 
-- ZAP active scanning is deferred: a scoped plan still exited at activeScan
-  start with ZAP 2.17.0, and no newer stable image is published. Only the
-  spider/passive baseline runs. The benign suite covers a JSON API request,
+- ZAP active scanning is deferred: an endpoint-scoped plan still exited at
+  activeScan start with ZAP 2.17.0, and no newer stable image is published. Only
+  the spider/passive baseline runs. The benign suite covers a JSON API request,
   a multipart PDF upload, a percent-encoded Japanese query, a 16 KiB text body,
-  and a chunked response. Authenticated API flows, GraphQL workflows, i18n edge
-  cases, sustained streaming, and legitimate WebSocket workloads remain outside
-  the corpus.
+  a chunked response, a GraphQL query with variables, an authenticated API
+  request, and a slow chunked stream. Upload variants, i18n edge cases, longer
+  streams, authenticated journeys beyond one request, and legitimate WebSocket
+  workloads remain outside the corpus.
 - goTestWAF, sqlmap, Nuclei, ffuf, ZAP, and CRS run bounded plans. The full
   scanner corpora and additional tamper/template/paranoia variants are not.
 
@@ -308,22 +343,24 @@ current suites.
 
 ### Priorities
 
-1. Availability: slow upstream connect, multi-source and global exhaustion, and
-   queue/backpressure. The slow-body, slow-read, per-source connection-cap,
-   upstream-response-timeout, and ban-recovery cases are implemented.
-2. Benign workflow breadth: authenticated APIs, GraphQL, upload variants, i18n
-   edge cases, and sustained streaming. The initial JSON, upload, i18n,
-   large-body, and streamed-response cases are implemented.
+1. Availability: queue/backpressure and true multi-source exhaustion. The
+   slow-body, slow-read, per-source and global connection caps, slow upstream
+   connect, upstream-response-timeout, ban-recovery, and restart cases are
+   implemented.
+2. Benign workflow breadth: upload variants, i18n edge cases, and longer
+   streams. The JSON, upload, i18n, large-body, streamed-response, GraphQL,
+   authenticated-API, and slow-stream cases are implemented.
 3. HTTP/2 hardening and HTTP/3: Rapid Reset, CONTINUATION, oversized HPACK, and
    a malformed raw H3 request stream are covered by Rust integration tests; add
    lab resource variants after a TLS/QUIC fixture.
-4. Restart behavior under load. Hot reload, rules update plus reload under load,
-   and load metrics are covered by Rust tests and the load suite.
+4. Restart behavior under load: SIGTERM, graceful exit, restart, and recovery
+   are covered by the restart suite; OOM and forced-kill behavior remain
+   outside.
 5. WebSocket application-payload inspection after the handshake. Fragmentation,
    close, and PING/PONG lifecycle are covered by the websocket suite.
-6. ZAP active scanning, scoped and observation-only. A separate plan was
-   attempted but ZAP 2.17.0 exits at activeScan start even after scoping the
-   endpoints and setting `failOnError: false`; revisit when a fixed image or
+6. ZAP active scanning, endpoint-scoped and observation-only. A separate plan
+   was attempted but ZAP 2.17.0 exits at activeScan start even after scoping
+   the endpoints and setting `failOnError: false`; revisit when a fixed image or
    add-on is available.
 7. Full scanner corpora on a nightly or weekly cadence.
 

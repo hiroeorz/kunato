@@ -15,10 +15,11 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_crs,
-                      judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_mutations,
-                      judge_load, judge_nuclei, judge_protocol, judge_replay, judge_slow,
-                      judge_sqlmap, judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
+from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
+                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf,
+                      judge_mutations, judge_load, judge_nuclei, judge_protocol,
+                      judge_replay, judge_restart, judge_slow, judge_sqlmap,
+                      judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
                       origin_response, read_jsonl, summarize,
                       validate_cases, validate_ffuf_cases, validate_mutations,
                       validate_protocol, verify_origin)
@@ -59,6 +60,15 @@ FFUF_PROTECTION = """protection:
 """
 
 AVAILABILITY_TIMEOUTS = """timeouts:
+  header_read: 15s
+  body_read: 2s
+  upstream_connect: 1s
+  upstream_response: 1s
+  shutdown_grace: 10s
+  connection_idle: 60s
+"""
+
+CONNECT_TIMEOUTS = """timeouts:
   header_read: 5s
   body_read: 2s
   upstream_connect: 1s
@@ -70,7 +80,7 @@ AVAILABILITY_TIMEOUTS = """timeouts:
 AVAILABILITY_PROTECTION = """protection:
   enabled: true
   max_connections_per_ip: 8
-  max_connections: 64
+  max_connections: 16
   requests_per_second: 1000
   burst: 1000
   global_requests_per_second: 10000
@@ -564,6 +574,15 @@ class SandboxSuite:
         exhaustion = self.probe("client", "exhaustion",
                                 extra=("--connections", "8"), check=False)
         time.sleep(0.5)
+        self.wait_active_connections(0, above=False)
+        self.compose("--profile", "tools", "up", "-d", "--scale", "exhaust=2", "exhaust")
+        active = self.wait_active_connections(16)
+        global_cap = self.probe("client", "health", check=False,
+                                extra=("--path", "/health", "--status", "503"))
+        global_cap["active_connections"] = active
+        self.compose("stop", "exhaust")
+        self.compose("rm", "-f", "exhaust")
+        self.wait_active_connections(0, above=False)
         upstream = self.probe("client", "upstream", check=False)
         normal = self.healthy("availability", nonce=nonce)
         after = self.stats()
@@ -573,7 +592,45 @@ class SandboxSuite:
         self.logs("availability")
         return judge_availability(slow, slow_body, slow_read, exhaustion, upstream,
                                   normal, before, after, self.restarts(),
-                                  application_metrics)
+                                  application_metrics, global_cap=global_cap)
+
+    def active_connections(self):
+        result = self.probe_exec("kunato", "metrics")
+        for line in result.get("response", "").splitlines():
+            if line.startswith("kunato_active_connections "):
+                try:
+                    return int(float(line.split(None, 1)[1]))
+                except ValueError:
+                    return None
+        return None
+
+    def wait_active_connections(self, target, above=True):
+        for _ in range(100):
+            active = self.active_connections()
+            if active is not None and (active >= target if above else active <= target):
+                return active
+            time.sleep(0.1)
+        raise RuntimeError(f"Kunato active connections did not reach {target}")
+
+    def connect(self):
+        self.env["LAB_CONFIG"] = "rules-connect.yaml"
+        self.env["LAB_DISABLE_PROTECTION"] = "1"
+        self.compose("up", "-d", "--force-recreate", "--pull", "never", "kunato")
+        self.wait_tcp()
+        before = self.stats()
+        result = self.probe("client", "upstream", check=False)
+        after = self.stats()
+        metrics = self.probe_exec("kunato", "metrics")
+        self.logs("connect")
+        return judge_connect(result, before, after, self.restarts(), metrics)
+
+    def wait_tcp(self):
+        for _ in range(50):
+            result = self.probe("client", "connect", check=False)
+            if result.get("connected"):
+                return
+            time.sleep(0.2)
+        raise RuntimeError("Kunato did not start listening")
 
     def ban(self):
         nonce = self.reset_origin("ban", config="rules-ban.yaml",
@@ -921,7 +978,7 @@ class SandboxSuite:
             while time.monotonic() < deadline:
                 exit_status = command(["docker", "exec", service_name, "cat", "/reports/exit-code"],
                                       check=False, quiet=True)
-                if exit_status.returncode == 0:
+                if exit_status.returncode == 0 and exit_status.stdout.strip():
                     break
                 running = command(["docker", "inspect", "--format", "{{.State.Running}}", service_name],
                                   quiet=True)
@@ -944,8 +1001,11 @@ class SandboxSuite:
         self.finish_tool(phase, service, name, timeout, result)
 
     def restarts(self):
-        result = command(["docker", "inspect", "--format", "{{.RestartCount}}",
-                          self.project + "-kunato"], check=False)
+        container = self.compose("ps", "-q", "kunato").stdout.strip()
+        if not container:
+            return 0
+        result = command(["docker", "inspect", "--format", "{{.RestartCount}}", container],
+                         check=False)
         try:
             return int(result.stdout.strip())
         except ValueError:
@@ -972,6 +1032,43 @@ class SandboxSuite:
         self.logs("load")
         return judge_load(summary, slow, normal, recovery, before, mid, after,
                           self.restarts(), application_metrics)
+
+    def restart(self):
+        nonce = self.reset_origin("restart")
+        self.preflight("origin")
+        self.compose("up", "-d", "normal")
+        before = self.stats()
+        self.start_tool("restart", "restart-load", [], "k6")
+        container = self.compose("ps", "-q", "kunato").stdout.strip()
+        if not container:
+            raise ValueError("Kunato container is not running")
+        try:
+            time.sleep(5)
+            started = time.monotonic()
+            command(["docker", "kill", "--signal=TERM", container])
+            while True:
+                state = command(["docker", "inspect", "--format",
+                                 "{{.State.Running}} {{.State.ExitCode}}", container],
+                                check=False).stdout.strip()
+                running, _, exit_code = state.partition(" ")
+                if running == "false":
+                    break
+                if time.monotonic() - started > 20:
+                    raise ValueError("Kunato did not exit after SIGTERM")
+                time.sleep(0.1)
+            shutdown_ms = round((time.monotonic() - started) * 1000, 2)
+            exit_code = int(exit_code or "1")
+            command(["docker", "start", container])
+            recovery = self.wait_health("restart-recovery", "client",
+                                        ("--path", "/health"), nonce=nonce)
+        finally:
+            self.finish_tool("restart", "restart-load", "k6", 120, "k6-summary.json")
+        summary = json.loads((self.run_dir / "restart/k6-summary.json").read_text())
+        after = self.stats()
+        normal = self.healthy("restart", nonce=nonce, service="normal", exec=True)
+        self.logs("restart")
+        return judge_restart(summary, exit_code, shutdown_ms, recovery, normal,
+                             before, after)
 
     def cleanup(self):
         self.compose("rm", "-s", "-f", "-v", "normal", check=False)
@@ -1008,6 +1105,9 @@ def new_run(suite):
     (config_dir / "rules-availability.yaml").write_text(
         make_config(original, "http://origin:8080", AVAILABILITY_PROTECTION,
                     timeouts=AVAILABILITY_TIMEOUTS))
+    (config_dir / "rules-connect.yaml").write_text(
+        make_config(original, "http://172.30.250.250:8080",
+                    timeouts=CONNECT_TIMEOUTS))
     (config_dir / "rules-ban.yaml").write_text(
         make_config(original, "http://origin:8080", BAN_PROTECTION))
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
@@ -1053,7 +1153,8 @@ def run(suite):
     try:
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
-                     "rules-ffuf.yaml", "rules-availability.yaml", "rules-ban.yaml"):
+                     "rules-ffuf.yaml", "rules-availability.yaml", "rules-connect.yaml",
+                     "rules-ban.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
         report["suites"]["replay"] = lab.replay()
@@ -1067,12 +1168,16 @@ def run(suite):
             report["suites"]["slow"] = lab.slow()
         if suite in {"availability", "all"}:
             report["suites"]["availability"] = lab.availability()
+        if suite in {"connect", "all"}:
+            report["suites"]["connect"] = lab.connect()
         if suite in {"ban", "all"}:
             report["suites"]["ban"] = lab.ban()
         if suite in {"websocket", "all"}:
             report["suites"]["websocket"] = lab.websocket()
         if suite in {"load", "all"}:
             report["suites"]["load"] = lab.load()
+        if suite in {"restart", "all"}:
+            report["suites"]["restart"] = lab.restart()
         if suite in {"gotestwaf", "all"}:
             report["suites"]["gotestwaf"] = lab.gotestwaf()
         if suite in {"sqlmap", "all"}:
@@ -1140,7 +1245,8 @@ def main():
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "benign", "mutations", "protocol", "gotestwaf",
                                  "sqlmap", "nuclei", "ffuf", "zap", "crs", "slow",
-                                 "availability", "ban", "websocket", "load", "all"],
+                                 "availability", "connect", "ban", "websocket", "load",
+                                 "restart", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)

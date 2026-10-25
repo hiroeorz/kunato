@@ -261,7 +261,8 @@ def judge_slow(slow, normal, before, after):
 
 
 def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
-                       before, after, restarts, application_metrics=None):
+                       before, after, restarts, application_metrics=None,
+                       global_cap=None):
     def status(case):
         return case.get("status")
 
@@ -275,6 +276,16 @@ def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
     exhausted_status = status(exhaustion)
     exhausted_ok = exhausted_status in {429, 503}
     exhausted_bad = exhausted_status == 200
+    global_status = None
+    global_active = None
+    global_ok = False
+    global_bad = False
+    if global_cap is not None:
+        global_status = status(global_cap)
+        global_active = global_cap.get("active_connections")
+        global_ok = (global_status in {429, 503}
+                     and isinstance(global_active, int) and global_active >= 16)
+        global_bad = global_status == 200
     upstream_status = status(upstream)
     upstream_ok = upstream_status == 504
     upstream_bad = upstream_status == 200
@@ -307,6 +318,11 @@ def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
         {"id": "availability-resources", "expect": "resources",
          "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
     ]
+    if global_cap is not None:
+        cases.insert(4, {"id": "global-connection-cap", "expect": "bounded",
+                         "verdict": "passed" if global_ok
+                         else ("failed" if global_bad else "inconclusive"),
+                         "origin_receipts": 0})
     metric_notes = {}
     if application_metrics is not None:
         text = application_metrics.get("response", "")
@@ -336,7 +352,53 @@ def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
                        "upstream_status": upstream_status,
                        "normal_status": normal.get("status"), "restarts": restarts,
                        "mem_before": before.get("MemUsage"), "mem_after": after.get("MemUsage"),
+                       **({"global_cap_status": global_status,
+                           "global_active_connections": global_active}
+                          if global_cap is not None else {}),
                        **metric_notes}
+    return result
+
+
+def judge_connect(probe, before, after, restarts, application_metrics=None):
+    status = probe.get("status")
+    connect_ok = status in {502, 504}
+    connect_bad = status == 200
+    restarts = restarts or 0
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    connect_errors = None
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+        for line in text.splitlines():
+            if line.startswith("kunato_upstream_connect_errors_total "):
+                try:
+                    connect_errors = float(line.split(None, 1)[1])
+                except (IndexError, ValueError):
+                    connect_errors = None
+                break
+    metrics_ok = connect_errors is not None and connect_errors >= 1
+    cases = [
+        {"id": "slow-connect", "expect": "bounded",
+         "verdict": "passed" if connect_ok
+         else ("failed" if connect_bad else "inconclusive"),
+         "origin_receipts": 0},
+        {"id": "connect-metrics", "expect": "metrics",
+         "verdict": "passed" if metrics_ok else "failed", "origin_receipts": 0},
+        {"id": "connect-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"connect_status": status,
+                       "upstream_connect_errors": connect_errors,
+                       "restarts": restarts,
+                       "mem_before": before.get("MemUsage"),
+                       "mem_after": after.get("MemUsage")}
     return result
 
 
@@ -511,6 +573,44 @@ def judge_load(summary, slow, normal, recovery, before, mid, after, restarts,
                        "cpu_after": after.get("CPUPerc"),
                        "mem_before": before.get("MemUsage"), "mem_mid": mid.get("MemUsage"),
                        "mem_after": after.get("MemUsage"), **metric_notes}
+    return result
+
+
+def judge_restart(summary, exit_code, shutdown_ms, recovery, normal, before, after):
+    metrics = summary.get("metrics", {}) if isinstance(summary, dict) else {}
+    requests = metrics.get("http_reqs", {}).get("count") or 0
+    checks = metrics.get("checks")
+    checks = 0.0 if checks is None else checks.get("value", checks.get("rate", 0.0))
+    shutdown_ok = exit_code == 0 and shutdown_ms <= 12000
+    load_ok = requests >= 100 and checks > 0.5
+    recovery_ok = recovery.get("status") == 200 and not recovery.get("error")
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = mem_used is None or mem_used < 256
+    cases = [
+        {"id": "restart-shutdown", "expect": "bounded",
+         "verdict": "passed" if shutdown_ok else "failed", "origin_receipts": 0},
+        {"id": "restart-load", "expect": "availability",
+         "verdict": "passed" if load_ok else "failed", "origin_receipts": requests},
+        {"id": "restart-recovery", "expect": "recovery",
+         "verdict": "passed" if recovery_ok and normal_ok
+         else ("false-block" if recovery_ok else "failed"), "origin_receipts": 0},
+        {"id": "restart-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"exit_code": exit_code, "shutdown_ms": shutdown_ms,
+                       "requests": requests, "checks": checks,
+                       "recovery_status": recovery.get("status"),
+                       "normal_status": normal.get("status"),
+                       "mem_before": before.get("MemUsage"),
+                       "mem_after": after.get("MemUsage")}
     return result
 
 

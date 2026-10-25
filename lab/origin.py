@@ -190,6 +190,10 @@ class Recorder(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         status = {"/status/302": 302, "/status/401": 401, "/status/404": 404}.get(self.path, 200)
+        if self.path == "/api/private" and (
+                "session=lab-session" not in self.headers.get("Cookie", "")
+                or self.headers.get("Authorization", "") != "Bearer lab-token"):
+            status = 401
         result = {"origin": os.environ["LAB_NONCE"], "case_id": case_id,
                   "method": self.command, "target": self.path,
                   "user_agent": self.headers.get("User-Agent", ""),
@@ -198,6 +202,9 @@ class Recorder(BaseHTTPRequestHandler):
         self.emit("completed", **result, debug_id=debug_id, status=status, body_bytes=len(body))
         if self.path == "/stream":
             self.send_chunked(payload)
+            return
+        if self.path == "/stream-slow":
+            self.send_chunked_slow(payload)
             return
         if self.path == "/large":
             self.send_large()
@@ -227,6 +234,24 @@ class Recorder(BaseHTTPRequestHandler):
             for start in range(0, len(payload), 2048):
                 part = payload[start:start + 2048]
                 self.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def send_chunked_slow(self, payload):
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for start in range(0, len(payload), 64):
+                part = payload[start:start + 64]
+                self.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+                self.wfile.flush()
+                time.sleep(0.2)
             self.wfile.write(b"0\r\n\r\n")
         except (BrokenPipeError, ConnectionResetError):
             pass

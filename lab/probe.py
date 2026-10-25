@@ -174,6 +174,28 @@ def slow_read(case, host="app.test", port=8080):
     return result
 
 
+def hold_connections(case, host="app.test", port=8080):
+    started = time.monotonic()
+    count = int(case.get("connections", 8))
+    hold = float(case.get("hold_seconds", 20))
+    sockets = []
+    result = {"id": "hold", "opened": 0, "held_seconds": hold}
+    try:
+        for _ in range(count):
+            connection = socket.create_connection((host, port), timeout=4)
+            connection.sendall(b"GET /slow HTTP/1.1\r\nHost: app.test\r\n")
+            sockets.append(connection)
+            result["opened"] += 1
+        time.sleep(hold)
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        for connection in sockets:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
 def exhaustion(case, host="app.test", port=8080):
     started = time.monotonic()
     count = int(case.get("connections", 8))
@@ -207,6 +229,15 @@ def exhaustion(case, host="app.test", port=8080):
             connection.close()
     result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
     return result
+
+
+def connect(host="app.test", port=8080):
+    try:
+        connection = socket.create_connection((host, port), timeout=2)
+    except OSError as error:
+        return {"id": "connect", "connected": False, "error": str(error)}
+    connection.close()
+    return {"id": "connect", "connected": True}
 
 
 def slow_upstream(host="app.test", port=8080):
@@ -372,8 +403,9 @@ def isolation(hosts, addresses):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
-                                          "slow-read", "exhaustion", "upstream", "ban",
-                                          "ws-lifecycle", "isolation", "metrics"])
+                                          "slow-read", "exhaustion", "hold", "connect",
+                                          "upstream", "ban", "ws-lifecycle", "isolation",
+                                          "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -389,7 +421,7 @@ def main():
     args = parser.parse_args()
     if args.mode == "cases":
         for case in json.loads(Path(args.cases).read_text()):
-            print(json.dumps(request(case)), flush=True)
+            print(json.dumps(request(case, args.host, args.port)), flush=True)
     elif args.mode == "raw":
         for case in json.loads(Path(args.cases).read_text()):
             print(json.dumps(raw_request(case, args.host, args.port)), flush=True)
@@ -411,6 +443,15 @@ def main():
         result = exhaustion({"connections": args.connections}, args.host, args.port)
         print(json.dumps(result))
         return 0
+    elif args.mode == "hold":
+        result = hold_connections({"connections": args.connections,
+                                   "hold_seconds": args.hold}, args.host, args.port)
+        print(json.dumps(result))
+        return int("error" in result)
+    elif args.mode == "connect":
+        result = connect(args.host, args.port)
+        print(json.dumps(result))
+        return int(not result["connected"])
     elif args.mode == "upstream":
         result = slow_upstream(args.host, args.port)
         print(json.dumps(result))

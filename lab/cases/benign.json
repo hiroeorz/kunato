@@ -40,5 +40,31 @@
     "expect": "allow",
     "method": "GET",
     "target": "/stream"
+  },
+  {
+    "id": "benign-graphql",
+    "expect": "allow",
+    "method": "POST",
+    "target": "/graphql",
+    "body": "{\"query\":\"query Items($page: Int) { items(page: $page) { id name } }\",\"variables\":{\"page\":2},\"operationName\":\"Items\"}",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  },
+  {
+    "id": "benign-auth",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/api/private",
+    "headers": {
+      "Cookie": "session=lab-session",
+      "Authorization": "Bearer lab-token"
+    }
+  },
+  {
+    "id": "benign-stream-slow",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/stream-slow"
   }
 ]

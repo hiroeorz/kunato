@@ -75,6 +75,7 @@ services:
       front:
         aliases: [app.test]
       back: {}
+      blackhole: {}
 
   db:
     <<: *fixture
@@ -149,6 +150,17 @@ services:
       - ${LAB_INPUT}/lab:/lab:ro
     networks: [front]
 
+  exhaust:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, -B, /lab/probe.py, hold]
+    command: ["--connections", "8", "--hold", "20"]
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
   load:
     <<: *runtime
     image: ${LAB_K6_IMAGE:?Run prepare first}
@@ -157,6 +169,22 @@ services:
     entrypoint: [/bin/sh, /lab/tool-runner-k6.sh]
     environment:
       HOME: /tmp
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+      - /reports:size=33554432,mode=1777
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks: [front]
+
+  restart-load:
+    <<: *runtime
+    image: ${LAB_K6_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [/bin/sh, /lab/tool-runner-k6.sh]
+    environment:
+      HOME: /tmp
+      K6_SCRIPT: /lab/restart.js
     tmpfs:
       - /tmp:size=67108864,mode=1777
       - /reports:size=33554432,mode=1777
@@ -328,3 +356,8 @@ networks:
     internal: true
   data:
     internal: true
+  blackhole:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24

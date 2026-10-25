@@ -1,21 +1,22 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and fifteen bounded
+an isolated recording origin, direct receipt controls, and sixteen bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
 baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
 benign JSON/upload/i18n/large-body/streaming workflows, bounded slow-HTTP,
-availability, ban-recovery, and WebSocket lifecycle probes, a pinned k6 v2.3.0
-mixed availability load, and a pinned OWASP CRS 4.3.0 comparison. It measures
+availability, slow-connect, ban-recovery, and WebSocket lifecycle probes, a pinned
+k6 v2.3.0 mixed availability load, a restart-under-load probe, and a pinned
+OWASP CRS 4.3.0 comparison. It measures
 request rejection, bounded exploit prevention, and availability on a fixed
 runner; the fixtures do not prove protection for arbitrary applications or
 capacity. The
 [testing model](../docs/security-lab-testing-model.md) explains the control and
 evidence flow, the verdict rules, and the sandbox suite diagrams. ZAP active
-scanning is deferred: ZAP 2.17.0 exits at activeScan start even in a scoped plan
+scanning is deferred: ZAP 2.17.0 exits at activeScan start even in an endpoint-scoped plan
 (code 2, empty report), and no newer stable image is published, so
 active-injection coverage stays with sqlmap, Nuclei, and goTestWAF.
 
@@ -49,9 +50,11 @@ scripts/security-lab.sh run --sandbox-suite mutations
 scripts/security-lab.sh run --sandbox-suite protocol
 scripts/security-lab.sh run --sandbox-suite slow
 scripts/security-lab.sh run --sandbox-suite availability
+scripts/security-lab.sh run --sandbox-suite connect
 scripts/security-lab.sh run --sandbox-suite ban
 scripts/security-lab.sh run --sandbox-suite websocket
 scripts/security-lab.sh run --sandbox-suite load
+scripts/security-lab.sh run --sandbox-suite restart
 scripts/security-lab.sh run --sandbox-suite crs   # optional CRS comparison, observation only
 scripts/security-lab.sh run --sandbox-suite all
 ```
@@ -121,12 +124,14 @@ category and disables automatic protection.
 ### Benign workflows
 
 `cases/benign.json` adds a legitimate JSON API request, a multipart PDF upload,
-a percent-encoded Japanese query, a 16 KiB text body, and a chunked response.
-The direct control must receive every case, and the protected run must forward
-it with the exact origin metadata, status, and body hash. These cases exercise
-the default form guard, upload inspection, content-type decoding, and chunked
-response forwarding without relying on an attack signature. They are included
-in `all` and fail the suite on any false block.
+a percent-encoded Japanese query, a 16 KiB text body, a chunked response, a
+GraphQL query with variables, an authenticated API request, and a slow chunked
+stream. The direct control must receive every case, and the protected run must
+forward it with the exact origin metadata, status, and body hash. These cases
+exercise the default form guard, upload inspection, content-type decoding,
+GraphQL limits, auth header/cookie forwarding, chunked response forwarding, and a
+sustained chunked stream without relying on an attack signature. They are
+included in `all` and fail the suite on any false block.
 
 ### sqlmap
 
@@ -237,13 +242,29 @@ CPU 0.01-0.03%, RSS 21.1-21.4 MiB.
 ### Availability boundaries
 
 `--sandbox-suite availability` uses `rules-availability.yaml` with a 2-second
-body-read timeout, a 1-second upstream-response timeout, and an 8-connection
-per-source cap. It holds partial request bodies (expecting `408`), opens a large
-response without reading it, fills the per-source connection budget (the next
-connection must get `503` while the independent normal client stays `200`),
-requests an origin that sleeps beyond the upstream timeout (expecting `504`),
-and asserts the normal probe, RSS, restarts, and the upstream-timeout metric.
-Slow upstream connect and multi-source exhaustion remain outside the suite.
+body-read timeout, a 1-second upstream-response timeout, an 8-connection
+per-source cap, and a 16-connection global cap. It holds partial request bodies
+(expecting `408`), opens a large response without reading it, fills the
+per-source connection budget (the next connection must get `503` while the
+independent normal client stays `200`), fills the global budget from two
+independent `exhaust` sources (a third source must get `503` with
+`kunato_active_connections` at 16), requests an origin that sleeps beyond the
+upstream timeout (expecting `504`), and asserts the normal probe, RSS, restarts,
+the global rejection, and the upstream-timeout metric. The fillers are stopped
+and the normal client must recover to `200`. The current result is 9 passed:
+slow-body `408`, slow-read `200`, per-source and global caps at `503` (16 active
+connections), upstream `504`, normal `200`, no restart, and RSS 23.2 MiB.
+
+### Slow upstream connect
+
+`--sandbox-suite connect` uses `rules-connect.yaml`, whose upstream is an
+unassigned address on the internal `blackhole` network. Kunato's TCP connect
+exceeds `timeouts.upstream_connect` (1 second), so the client gets `502` and
+`kunato_upstream_connect_errors_total` increments. The suite checks RSS and
+restarts and requires no origin receipt. This is a connect timeout; the
+upstream-response timeout remains covered by `availability`. The current result
+is 3 passed: status `502`, one upstream connect error, no restart, and RSS
+21.0 MiB.
 
 ### Ban recovery
 
@@ -267,9 +288,21 @@ the judge also requires the normal and recovery probes to return 200, no Kunato
 restart, and RSS under the 256 MiB ceiling. Recovery is checked immediately
 after the load stops. The `load-metrics` case also checks that Kunato's request
 counter covers the k6 workload and that no block, rate-limit, overload, or
-upstream-timeout counter moved. The current result is 6 passed: 3000 requests,
-p95 49.9 ms, p99 53.2 ms, 100% success, 8 slow connections held, normal and
+upstream-timeout counter moved. The current result is 6 passed: 3001 requests,
+p95 47.9 ms, p99 48.2 ms, 100% success, 8 slow connections held, normal and
 recovery 200, RSS 21.8 MiB, no restart, and matching metrics.
+
+### Restart under load
+
+`--sandbox-suite restart` starts a 20 requests/second k6 run for 25 seconds,
+sends SIGTERM to Kunato after 5 seconds, and requires a graceful exit (code 0)
+within 12 seconds. It restarts the same container and requires a `200` recovery
+from the independent normal client; the k6 summary must retain at least 100
+requests and a check rate above 50%. The report records the exit code, shutdown
+time, request count, check rate, recovery, RSS, and normal status. OOM and
+forced-kill behavior are not exercised. The current result is 4 passed: exit
+code 0, a 397 ms shutdown, 501 requests, a 98.6% check rate, recovery and normal
+`200`, and RSS 21.4 MiB.
 
 ### OWASP CRS comparison
 
@@ -293,7 +326,8 @@ Each run prints its directory under `target/security-lab/`. It retains:
 - `control/` and `replay/`: fresh attempt IDs, health probes, client exchanges,
   origin events, Kunato JSON logs, and metrics;
 - `benign-control/` and `benign/`: direct and protected JSON, upload, i18n,
-  large-body, and streamed-response exchanges;
+  large-body, streamed-response, GraphQL, authenticated-API, and slow-stream
+  exchanges;
 - `gotestwaf-control/` and `gotestwaf/`: direct/protected scanner reports and
   origin observations;
 - `sqlmap-control/` and `sqlmap/`: dump output, exit codes, DVWA access logs,
@@ -312,12 +346,17 @@ Each run prints its directory under `target/security-lab/`. It retains:
   per-framing origin receipts, and Kunato logs;
 - `slow/` and `load/`: slow-connection probes, k6 summary and logs, health
   probes, metrics, and Kunato logs;
-- `availability/`: slow-body, slow-read, connection-cap, and slow-upstream
-  probes, health probes, metrics, and Kunato logs;
+- `availability/`: slow-body, slow-read, per-source connection-cap,
+  global-connection-cap, and slow-upstream probes, health probes, metrics, and
+  Kunato logs;
+- `connect/`: the blackhole-upstream request, connect-error metrics, health
+  checks, and Kunato logs;
 - `ban/`: ban-trigger statuses, recovery probe, health, metrics, and Kunato
   logs;
 - `websocket-control/` and `websocket/`: direct and protected PING/PONG,
   fragmented echo, close-handshake probes, and health;
+- `restart/` and `restart-recovery/`: SIGTERM shutdown, k6 summary and logs,
+  restart exit code, recovery probes, and normal-client health;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
   diagnostics;
 - `commands.jsonl` and `cleanup.json`: executed commands and verification that
@@ -360,11 +399,13 @@ authenticated ZAP baseline covers login, spider, and passive discovery; active
 scanning is not part of the passing plan, and the active injection defenses
 remain the sqlmap/Nuclei/goTestWAF sandbox suites. The mutation corpus, the protocol
 cases, and the CRS comparison are bounded to the reviewed seeds, fixtures, and
-framing interpretations. The benign corpus has one case per workflow, the
-availability suite covers body-read timeout, slow reads, the per-source
-connection cap, and upstream-response timeout, and the ban suite covers ban
-recovery with a short window. Slow upstream connection establishment,
-multi-source exhaustion, and application payload inspection inside WebSocket
+framing interpretations. The benign corpus has one case per selected workflow
+(eight total), the availability suite covers body-read timeout, slow reads, the
+per-source and global connection caps, and upstream-response timeout, the
+connect suite covers slow upstream connection establishment, the ban suite
+covers ban recovery with a short window, and the restart suite covers graceful
+SIGTERM under load. Queue/backpressure, true distributed-source exhaustion, OOM
+or forced-kill behavior, and application payload inspection inside WebSocket
 tunnels are not covered. The Rust proxy tests add HTTP/3 malformed request
 streams, hot reload under load, and rules update plus reload under load; those
 paths are not part of this container suite.
