@@ -2459,7 +2459,10 @@ GET /jQuery-File-Upload/server/php/index.php/files/poc.txt.php
 GET /files/poc.txt.php
 
 # --- CVE-2018-9845 (Nuclei: Etherpad Lite <1.6.4 - Admin Authentication Bypass) ---
-GET /Admin
+# The attack is a plain GET of the admin page; the Nuclei template confirms
+# Etherpad from the response body, so the request line carries no signature.
+# `etherpad-admin-bypass` stays opt-in because blocking `/admin` locks out
+# unrelated admin panels. Patch Etherpad to 1.6.4 or later.
 
 # --- CVE-2018-9995 (Nuclei: TBK DVR4104/DVR4216 Devices - Authentication Bypass) ---
 GET /device.rsp?opt=user&cmd=list

@@ -229,6 +229,7 @@ GET /phpmyadmin/index.php
 GET /adminer.php
 GET /manager/html
 GET /solr/
+GET /admin
 GET /admin/dashboard
 GET /administrator/
 GET /admin/settings

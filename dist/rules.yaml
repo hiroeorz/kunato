@@ -429,7 +429,13 @@ categories:
         match: { path: '(?i)^/user/scripts/login_par\.js$' }
       - name: jquery-file-upload-webshell
         match: { regex: '(?i)^(?:/jquery-file-upload/|/files/[^?]*\.php(?:/|$))', in: [path] }
+      # CVE-2018-9845 (Etherpad): the bypass is a plain GET of the admin page,
+      # and the Nuclei template confirms Etherpad from the response body. The
+      # bare path is not Etherpad-specific, so blocking it locks out unrelated
+      # admin panels; keep this signature in a local rule set for Etherpad-only
+      # hosts, and upgrade to 1.6.4 or later.
       - name: etherpad-admin-bypass
+        enabled: false
         match: { path: '(?i)^/admin$' }
       - name: tbk-dvr-device-rsp
         match: { path: '(?i)^/device\.rsp$' }
@@ -1370,6 +1376,8 @@ categories:
     rules:
       - name: common-admin-paths
         match: { regex: '(?i)(^|/)(wp-admin(/|$)|wp-login\.php|xmlrpc\.php|phpmyadmin|pma(/|$)|adminer\.php|manager/html|solr(/|$)|sidekiq(/|$)|pghero(/|$)|flipper(/|$)|blazer(/|$)|delayed_job(/|$)|good_job(/|$)|horizon(/|$))', in: [path] }
+      - name: bare-admin-path
+        match: { path: '(?i)^/admin(?:/|$)' }
 
   # JSON Web Token attacks: unsecured (alg=none) headers, tokens whose signature
   # segment is missing, and key-lookup headers (kid/jku/jwk/x5u/x5c) that point

@@ -8,7 +8,7 @@
   {"path": "/config.php.bak", "expect": "block"},
   {"path": "/phpinfo.php", "expect": "block"},
   {"path": "/wp-config.php", "expect": "block"},
-  {"path": "/admin", "expect": "block"},
+  {"path": "/admin", "expect": "log"},
   {"path": "/wp-admin/", "expect": "log"},
   {"path": "/login.php", "expect": "allow"},
   {"path": "/index.php", "expect": "allow"},

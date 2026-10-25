@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-25; the managed set carried 492 rules then.
+2026-10-25; the managed set carried 493 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -337,12 +337,14 @@ are integration-tested rather than claimed as request-corpus coverage.
 
 ## Local security lab evidence
 
-The 2026-10-24 ffuf sandbox suite confirms the current discovery verdicts on DVWA:
-`/.git/config`, `/.env`, `/.svn/entries`, `/.htaccess`, `/.DS_Store`,
-`/backup.sql`, `/config.php.bak`, `/phpinfo.php`, and `/wp-config.php` are
-blocked without origin receipts, `/admin` is blocked by
-`etherpad-admin-bypass`, `/wp-admin/` is logged, and 18 legitimate paths retain
-their status and body length. The behavior phase enables
+The ffuf sandbox suite checks the discovery verdicts on DVWA: `/.git/config`,
+`/.env`, `/.svn/entries`, `/.htaccess`, `/.DS_Store`, `/backup.sql`,
+`/config.php.bak`, `/phpinfo.php`, and `/wp-config.php` are blocked without
+origin receipts, `/admin` is logged by `bare-admin-path`, `/wp-admin/` is
+logged, and 18 legitimate paths retain their status and body length. The
+2026-10-24 run confirmed the remaining verdicts; the `/admin` case changed on
+2026-10-25 when `etherpad-admin-bypass` became opt-in. The behavior phase
+enables
 `protection.behavior.enumeration` with `BLOCK`; the enumeration source is banned
 (403/429) and the separate normal client stays at 200.
 
@@ -399,6 +401,12 @@ session-cookie disclosures. Application-dependent allocations, other lifecycle
 consumers, alternate disclosure channels, and shared OPcache/heap state remain
 below the WAF. Patching PHP is the only complete fix.
 
+CVE-2018-9845 (Etherpad admin bypass) has no request-level signature: the
+attack is a plain `GET` of the admin page, and the Nuclei template confirms
+Etherpad from the response body. The bundled `etherpad-admin-bypass` rule is
+therefore opt-in (`enabled: false`); `/admin` is logged by `bare-admin-path`
+instead. Patch Etherpad to 1.6.4 or later.
+
 Behavioral detection (Phase 1) covers `404` probing, per-source authentication
 failure bursts, and a global authentication-failure log. It defaults to `LOG`;
 a class becomes `Covered` only when the bundled default stops the attack, not
@@ -411,5 +419,5 @@ and upstream canonical XFF use the same resolved IP; connection caps remain
 transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
-changing category verdicts or the bundled 492-rule count; behavioral actions
+changing category verdicts or the bundled 493-rule count; behavioral actions
 still default to LOG. The snapshot date is 2026-10-25.
