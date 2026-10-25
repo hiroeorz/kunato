@@ -36,6 +36,7 @@ src/
   error.rs         # Error types
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
+  admin_client.rs  # `kunato metrics`: raw fetch from the admin /metrics endpoint
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching

@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 mod parse;
@@ -13,6 +13,10 @@ pub const DEFAULT_RULES_URL: &str =
     "https://raw.githubusercontent.com/hiroeorz/kunato/main/dist/rules.yaml";
 pub const DEFAULT_RULES_FILE: &str = "/var/lib/kunato/rules.yaml";
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
+
+/// Admin listener queried by `kunato metrics`.
+pub const DEFAULT_METRICS_LISTEN: SocketAddr =
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9090));
 
 #[derive(Debug)]
 pub struct Cli {
@@ -57,6 +61,9 @@ pub enum Command {
 
     /// Read the systemd journal for the Kunato service.
     Log(Box<LogArgs>),
+
+    /// Print the Prometheus metrics served by the admin listener.
+    Metrics(MetricsArgs),
 }
 
 #[derive(Debug)]
@@ -66,6 +73,15 @@ pub struct UpgradeArgs {
 
     /// Print what would be downloaded and run without changing anything.
     pub dry_run: bool,
+}
+
+#[derive(Debug)]
+pub struct MetricsArgs {
+    /// Admin listener address serving `GET /metrics`.
+    ///
+    /// Only loopback addresses are accepted; the admin listener never binds a
+    /// public interface.
+    pub listen: SocketAddr,
 }
 
 #[derive(Debug)]

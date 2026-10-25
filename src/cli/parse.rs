@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use super::{
-    Cli, Command, DEFAULT_CONFIG_PATH, DEFAULT_RULES_FILE, DEFAULT_RULES_URL, InitArgs, LogArgs,
-    LogFormat, LogOutputFormat, UpgradeArgs,
+    Cli, Command, DEFAULT_CONFIG_PATH, DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE,
+    DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat, LogOutputFormat, MetricsArgs, UpgradeArgs,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -84,6 +84,7 @@ enum Kind {
     UpdateRules,
     Upgrade,
     Log,
+    Metrics,
 }
 
 fn kind_from_name(name: &str) -> Option<Kind> {
@@ -93,6 +94,7 @@ fn kind_from_name(name: &str) -> Option<Kind> {
         "update-rules" => Some(Kind::UpdateRules),
         "upgrade" => Some(Kind::Upgrade),
         "log" => Some(Kind::Log),
+        "metrics" => Some(Kind::Metrics),
         _ => None,
     }
 }
@@ -142,6 +144,11 @@ struct LogState {
     list_attacks: bool,
 }
 
+#[derive(Default)]
+struct MetricsState {
+    listen: Option<SocketAddr>,
+}
+
 struct Parser {
     tokens: Vec<OsString>,
     index: usize,
@@ -154,6 +161,7 @@ struct Parser {
     init: InitState,
     upgrade: UpgradeState,
     log: LogState,
+    metrics: MetricsState,
 }
 
 impl Parser {
@@ -170,6 +178,7 @@ impl Parser {
             init: InitState::default(),
             upgrade: UpgradeState::default(),
             log: LogState::default(),
+            metrics: MetricsState::default(),
         }
     }
 
@@ -249,6 +258,7 @@ impl Parser {
             Some(Kind::Init) => self.parse_init_long(name, inline),
             Some(Kind::Log) => self.parse_log_long(name, inline),
             Some(Kind::Upgrade) => self.parse_upgrade_long(name, inline),
+            Some(Kind::Metrics) => self.parse_metrics_long(name, inline),
             Some(Kind::Validate | Kind::UpdateRules) | None => {
                 Err(self.unexpected(format!("--{name}")))
             }
@@ -330,6 +340,18 @@ impl Parser {
             "dry-run" => {
                 self.no_value(inline, "--dry-run")?;
                 self.upgrade.dry_run = true;
+            }
+            _ => return Err(self.unexpected(format!("--{name}"))),
+        }
+        Ok(())
+    }
+
+    fn parse_metrics_long(&mut self, name: &str, inline: Option<&str>) -> Result<(), ParseError> {
+        match name {
+            "listen" => {
+                let value = self.value_string(inline, "--listen <ADDR>")?;
+                let address = parse_loopback_address(&value)?;
+                set_once(&mut self.metrics.listen, address, "--listen <ADDR>")?;
             }
             _ => return Err(self.unexpected(format!("--{name}"))),
         }
@@ -497,6 +519,9 @@ impl Parser {
             Some(Kind::Upgrade) => Some(Command::Upgrade(UpgradeArgs {
                 version: self.upgrade.version,
                 dry_run: self.upgrade.dry_run,
+            })),
+            Some(Kind::Metrics) => Some(Command::Metrics(MetricsArgs {
+                listen: self.metrics.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
             })),
             Some(Kind::Log) => Some(Command::Log(Box::new(LogArgs {
                 follow: self.log.follow,
@@ -693,6 +718,20 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, ParseError> {
         .map_err(|_| invalid_value(value, option, "a non-negative integer"))
 }
 
+fn parse_loopback_address(value: &str) -> Result<SocketAddr, ParseError> {
+    let address = value
+        .parse::<SocketAddr>()
+        .map_err(|_| invalid_value(value, "--listen <ADDR>", "an IP address and port"))?;
+    if !address.ip().is_loopback() {
+        return Err(invalid_value(
+            value,
+            "--listen <ADDR>",
+            "a loopback address",
+        ));
+    }
+    Ok(address)
+}
+
 fn parse_log_format(value: &str) -> Result<LogFormat, ParseError> {
     match value {
         "text" => Ok(LogFormat::Text),
@@ -736,6 +775,7 @@ fn help_for(kind: Option<Kind>) -> String {
         Some(Kind::UpdateRules) => update_rules_help(),
         Some(Kind::Upgrade) => upgrade_help(),
         Some(Kind::Log) => log_help(),
+        Some(Kind::Metrics) => metrics_help(),
     }
 }
 
@@ -751,6 +791,7 @@ Commands:
   update-rules  Download the rules file once and exit
   upgrade       Upgrade the installed binary and systemd unit from a release
   log           Read the systemd journal for the Kunato service
+  metrics       Print the Prometheus metrics served by the admin listener
   help          Print this message or the help of the given subcommand(s)
 
 Options:
@@ -836,6 +877,23 @@ Options:
 
 {}"#,
         GLOBAL_OPTIONS
+    )
+}
+
+fn metrics_help() -> String {
+    format!(
+        r#"Print the Prometheus metrics served by the admin listener.
+
+The response body of `GET /metrics` is written to stdout unchanged, so it can
+be scraped, diffed, or piped like a direct HTTP request.
+
+Usage: kunato metrics [OPTIONS]
+
+Options:
+      --listen <ADDR>  Admin listener address serving /metrics [default: {}]
+
+{}"#,
+        DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
     )
 }
 
@@ -1025,6 +1083,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_metrics_defaults_and_listen() {
+        let cli = parse(&["kunato", "metrics"]).expect("parse");
+        let Some(Command::Metrics(args)) = cli.command else {
+            panic!("expected the metrics command");
+        };
+        assert_eq!(args.listen, DEFAULT_METRICS_LISTEN);
+
+        let cli = parse(&["kunato", "metrics", "--listen", "127.0.0.1:9100"]).expect("parse");
+        let Some(Command::Metrics(args)) = cli.command else {
+            panic!("expected the metrics command");
+        };
+        assert_eq!(args.listen, SocketAddr::from(([127, 0, 0, 1], 9100)));
+
+        let cli = parse(&["kunato", "metrics", "--listen", "[::1]:9100"]).expect("parse");
+        let Some(Command::Metrics(args)) = cli.command else {
+            panic!("expected the metrics command");
+        };
+        assert_eq!(
+            args.listen,
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 9100))
+        );
+    }
+
+    #[test]
+    fn metrics_requires_a_loopback_listener() {
+        let error =
+            parse(&["kunato", "metrics", "--listen", "0.0.0.0:9090"]).expect_err("public address");
+        assert!(error.to_string().contains("loopback"));
+        assert!(parse(&["kunato", "metrics", "--listen", "nope"]).is_err());
+        assert!(parse(&["kunato", "metrics", "--unknown"]).is_err());
+    }
+
+    #[test]
     fn help_and_version_are_distinguished() {
         let error = parse(&["kunato", "--help"]).expect_err("help exits");
         assert!(matches!(error, ParseError::Help(_)));
@@ -1047,6 +1138,18 @@ mod tests {
         let error = parse(&["kunato", "help", "upgrade"]).expect_err("help exits");
         match error {
             ParseError::Help(text) => assert!(text.contains("Usage: kunato upgrade")),
+            other => panic!("expected help, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metrics_help_mentions_the_default_listener() {
+        let error = parse(&["kunato", "help", "metrics"]).expect_err("help exits");
+        match error {
+            ParseError::Help(text) => {
+                assert!(text.contains("Usage: kunato metrics"));
+                assert!(text.contains("127.0.0.1:9090"));
+            }
             other => panic!("expected help, got {other:?}"),
         }
     }

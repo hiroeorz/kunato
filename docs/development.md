@@ -1142,6 +1142,19 @@ deployed ACME certificate. Non-loopback addresses are rejected at validation
 time, and if the port is already in use Kunato logs a warning and continues
 without the admin endpoint.
 
+`kunato metrics` prints the `GET /metrics` response body unchanged: no headers,
+no re-encoding, and no added newline, so the output is exactly what a direct
+request returns. It queries `127.0.0.1:9090` by default and accepts only a
+loopback address through `--listen`:
+
+```sh
+kunato metrics
+kunato metrics --listen 127.0.0.1:9100 | grep kunato_blocked_total
+```
+
+The command does not read the configuration file, so pass `--listen` when the
+`admin.listen` value differs from the default.
+
 ### Log viewer
 
 `kunato log` reads the systemd journal for the `kunato` unit through
