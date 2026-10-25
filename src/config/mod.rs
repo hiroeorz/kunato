@@ -406,6 +406,8 @@ pub struct LimitsSpec {
     pub max_headers: usize,
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    #[serde(default = "default_websocket_message_bytes")]
+    pub websocket_message_bytes: usize,
     #[serde(default = "default_max_response_body_bytes")]
     pub max_response_body_bytes: usize,
     #[serde(default)]
@@ -427,6 +429,7 @@ impl Default for LimitsSpec {
             max_header_bytes: default_max_header_bytes(),
             max_headers: default_max_headers(),
             max_body_bytes: default_max_body_bytes(),
+            websocket_message_bytes: default_websocket_message_bytes(),
             max_response_body_bytes: default_max_response_body_bytes(),
             body_inspection: BodyInspection::default(),
             upload_inspection: UploadInspection::default(),
@@ -902,6 +905,10 @@ fn default_max_body_bytes() -> usize {
     8 * 1024 * 1024
 }
 
+fn default_websocket_message_bytes() -> usize {
+    1024 * 1024
+}
+
 fn default_max_response_body_bytes() -> usize {
     1024 * 1024
 }
@@ -941,6 +948,7 @@ pub struct Limits {
     pub max_header_bytes: usize,
     pub max_headers: usize,
     pub max_body_bytes: usize,
+    pub websocket_message_bytes: usize,
     pub max_response_body_bytes: usize,
     pub body_inspection: BodyInspection,
     pub upload_inspection: UploadInspection,
@@ -956,6 +964,7 @@ impl From<&LimitsSpec> for Limits {
             max_header_bytes: spec.max_header_bytes,
             max_headers: spec.max_headers,
             max_body_bytes: spec.max_body_bytes,
+            websocket_message_bytes: spec.websocket_message_bytes,
             max_response_body_bytes: spec.max_response_body_bytes,
             body_inspection: spec.body_inspection,
             upload_inspection: spec.upload_inspection,
@@ -1933,6 +1942,11 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
         (
             "max_body_bytes",
             limits.max_body_bytes,
+            MAX_BODY_BYTES_LIMIT,
+        ),
+        (
+            "websocket_message_bytes",
+            limits.websocket_message_bytes,
             MAX_BODY_BYTES_LIMIT,
         ),
         (
@@ -4522,11 +4536,28 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
     fn defaults_keep_response_inspection_smaller_than_request_inspection() {
         let config = parse_with(BASE, "categories: []\n").expect("valid config");
         assert_eq!(config.limits.max_body_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.limits.websocket_message_bytes, 1024 * 1024);
         assert_eq!(config.limits.max_response_body_bytes, 1024 * 1024);
 
         let error =
             parse_with(BASE, "limits: { max_response_body_bytes: 0 }\n").expect_err("must fail");
         assert!(error.to_string().contains("max_response_body_bytes"));
+    }
+
+    #[test]
+    fn rejects_invalid_websocket_message_limits() {
+        for value in [0, MAX_BODY_BYTES_LIMIT + 1] {
+            let error = parse_with(
+                BASE,
+                &format!("limits: {{ websocket_message_bytes: {value} }}\n"),
+            )
+            .expect_err("invalid WebSocket message limit must fail");
+            assert!(error.to_string().contains("websocket_message_bytes"));
+        }
+
+        let config = parse_with(BASE, "limits: { websocket_message_bytes: 4096 }\n")
+            .expect("valid WebSocket message limit");
+        assert_eq!(config.limits.websocket_message_bytes, 4096);
     }
 
     #[test]

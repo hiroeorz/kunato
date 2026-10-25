@@ -7,6 +7,7 @@ import http.client
 import json
 import re
 import socket
+import ssl
 import time
 from pathlib import Path
 
@@ -373,6 +374,174 @@ def websocket_lifecycle(host="app.test", port=8080):
     return result
 
 
+def ws_open(host, port, case):
+    connection = socket.create_connection((host, port), timeout=4)
+    key = base64.b64encode(f"kunato-lab-{case}".encode()).decode()
+    request = (f"GET /ws-lifecycle HTTP/1.1\r\nHost: app.test\r\n"
+               f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+               f"X-Kunato-Lab-Case: {case}\r\n\r\n")
+    connection.sendall(request.encode("latin-1"))
+    connection.settimeout(4)
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    status, _ = status_of(data)
+    return connection, status
+
+
+def ws_payload(host="app.test", port=8080):
+    started = time.monotonic()
+    result = {"id": "ws-payload", "status": None, "blocked": False,
+              "close_code": None, "echo": None, "benign_echo": None}
+    for phase, payload in (("attack", b"<script>alert(1)</script>"),
+                           ("benign", b"benign payload")):
+        connection = None
+        try:
+            connection, status = ws_open(host, port, f"ws-payload-{phase}")
+            result["status"] = result["status"] or status
+            if status != 101:
+                continue
+            connection.sendall(ws_frame(0x1, payload))
+            opcode, _, data = ws_read_frame(connection)
+            if opcode == 0x8:
+                if phase == "attack":
+                    result["blocked"] = True
+                    result["close_code"] = int.from_bytes(data[:2], "big")
+            elif opcode == 0x1:
+                text = data.decode("utf-8", errors="replace")
+                if phase == "attack":
+                    result["echo"] = text
+                else:
+                    result["benign_echo"] = text
+        except (OSError, ValueError) as error:
+            result["error"] = str(error)
+        finally:
+            if connection is not None:
+                connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+
+H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+def h2_frame(frame_type, flags, stream_id, payload):
+    return (len(payload).to_bytes(3, "big") + bytes([frame_type, flags])
+            + (stream_id & 0x7FFFFFFF).to_bytes(4, "big") + payload)
+
+
+def h2_header_block(case_id, path="/health"):
+    block = bytearray(b"\x82\x87")
+    block += b"\x44" + bytes([len(path)]) + path.encode("ascii")
+    block += b"\x41" + bytes([len(b"app.test")]) + b"app.test"
+    name = b"x-kunato-lab-case"
+    value = case_id.encode("ascii")
+    block += b"\x00" + bytes([len(name)]) + name + bytes([len(value)]) + value
+    return bytes(block)
+
+
+def h2_connect(host, port):
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.set_alpn_protocols(["h2"])
+    raw = socket.create_connection((host, port), timeout=4)
+    connection = context.wrap_socket(raw, server_hostname=host)
+    if connection.selected_alpn_protocol() != "h2":
+        connection.close()
+        raise ValueError("ALPN did not select h2")
+    connection.settimeout(4)
+    connection.sendall(H2_PREFACE)
+    connection.sendall(h2_frame(0x4, 0, 0, b""))
+    connection.sendall(h2_frame(0x4, 0x1, 0, b""))
+    return connection
+
+
+def h2_read_frame(connection):
+    head = recv_exact(connection, 9)
+    length = int.from_bytes(head[:3], "big")
+    frame_type = head[3]
+    flags = head[4]
+    stream = int.from_bytes(head[5:9], "big") & 0x7FFFFFFF
+    payload = recv_exact(connection, length) if length else b""
+    return frame_type, flags, stream, payload
+
+
+def h2_wait_headers(connection, stream_id=1, limit=64):
+    for _ in range(limit):
+        frame_type, _, stream, _ = h2_read_frame(connection)
+        if frame_type == 0x1 and stream == stream_id:
+            return True
+        if frame_type == 0x7:
+            return False
+        if frame_type == 0x3 and stream == stream_id:
+            return False
+    return False
+
+
+def h2_normal(host, port, case_id):
+    connection = None
+    result = {"ok": False, "case": case_id}
+    try:
+        connection = h2_connect(host, port)
+        connection.sendall(h2_frame(0x1, 0x5, 1, h2_header_block(case_id)))
+        result["ok"] = h2_wait_headers(connection)
+    except (OSError, ValueError, ssl.SSLError) as error:
+        result["error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    return result
+
+
+def h2_attack(host, port, case):
+    result = {"case": case, "attack_closed": False, "normal": False}
+    connection = None
+    try:
+        connection = h2_connect(host, port)
+        if case == "rapid-reset":
+            for index in range(50):
+                stream = 1 + index * 2
+                connection.sendall(h2_frame(
+                    0x1, 0x4, stream, h2_header_block(f"h2-rapid-reset-{index}")))
+                connection.sendall(h2_frame(0x3, 0, stream, b"\x00\x00\x00\x08"))
+        elif case == "continuation":
+            block = h2_header_block("h2-continuation")
+            connection.sendall(h2_frame(0x1, 0, 1, block[:8]))
+            for _ in range(64):
+                connection.sendall(h2_frame(0x9, 0, 1, b"\x82" * 1024))
+        elif case == "hpack":
+            connection.sendall(h2_frame(0x1, 0x4, 1, b"\x82" * 16000))
+        else:
+            raise ValueError("unknown h2 case")
+        connection.settimeout(1)
+        try:
+            frame_type, _, _, _ = h2_read_frame(connection)
+            result["attack_closed"] = frame_type == 0x7
+        except (OSError, ValueError):
+            result["attack_closed"] = True
+    except (OSError, ValueError, ssl.SSLError) as error:
+        result["attack_error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    normal = h2_normal(host, port, f"h2-{case}-normal")
+    result["normal"] = normal.get("ok", False)
+    result["normal_error"] = normal.get("error")
+    return result
+
+
+def h2_probe(case, host, port, case_id=None):
+    if case == "normal":
+        return h2_normal(host, port, case_id or "h2-normal")
+    return h2_attack(host, port, case)
+
+
 def isolation(hosts, addresses):
     failures = []
     routes = Path("/proc/net/route").read_text().splitlines()[1:]
@@ -404,8 +573,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
                                           "slow-read", "exhaustion", "hold", "connect",
-                                          "upstream", "ban", "ws-lifecycle", "isolation",
-                                          "metrics"])
+                                          "upstream", "ban", "ws-lifecycle", "ws-payload",
+                                          "h2", "isolation", "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -418,6 +587,8 @@ def main():
     parser.add_argument("--connections", type=int, default=8)
     parser.add_argument("--requests", type=int, default=8)
     parser.add_argument("--hold", type=float, default=2.0)
+    parser.add_argument("--h2-case", default="normal")
+    parser.add_argument("--case-id")
     args = parser.parse_args()
     if args.mode == "cases":
         for case in json.loads(Path(args.cases).read_text()):
@@ -465,6 +636,14 @@ def main():
         result = websocket_lifecycle(args.host, args.port)
         print(json.dumps(result))
         return 0
+    elif args.mode == "ws-payload":
+        result = ws_payload(args.host, args.port)
+        print(json.dumps(result))
+        return int("error" in result)
+    elif args.mode == "h2":
+        result = h2_probe(args.h2_case, args.host, args.port, args.case_id)
+        print(json.dumps(result))
+        return int("error" in result)
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},
                          args.host, args.port)

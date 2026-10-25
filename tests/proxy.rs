@@ -397,15 +397,53 @@ async fn spawn_upgrade_upstream() -> SocketAddr {
                             return;
                         };
                         let mut upgraded = TokioIo::new(upgraded);
-                        let mut buf = [0u8; 1024];
                         loop {
-                            match upgraded.read(&mut buf).await {
-                                Ok(0) | Err(_) => break,
-                                Ok(read) => {
-                                    if upgraded.write_all(&buf[..read]).await.is_err() {
-                                        break;
-                                    }
+                            let mut head = [0u8; 2];
+                            if upgraded.read_exact(&mut head).await.is_err() {
+                                break;
+                            }
+                            let masked = head[1] & 0x80 != 0;
+                            let len7 = head[1] & 0x7f;
+                            let mut len = u64::from(len7);
+                            if len7 == 126 {
+                                let mut extended = [0u8; 2];
+                                if upgraded.read_exact(&mut extended).await.is_err() {
+                                    break;
                                 }
+                                len = u64::from(u16::from_be_bytes(extended));
+                            } else if len7 == 127 {
+                                let mut extended = [0u8; 8];
+                                if upgraded.read_exact(&mut extended).await.is_err() {
+                                    break;
+                                }
+                                len = u64::from_be_bytes(extended);
+                            }
+                            let mut mask = [0u8; 4];
+                            if masked && upgraded.read_exact(&mut mask).await.is_err() {
+                                break;
+                            }
+                            let mut payload = vec![0u8; len as usize];
+                            if upgraded.read_exact(&mut payload).await.is_err() {
+                                break;
+                            }
+                            if masked {
+                                for (index, byte) in payload.iter_mut().enumerate() {
+                                    *byte ^= mask[index % 4];
+                                }
+                            }
+                            let mut echoed = vec![head[0]];
+                            if len < 126 {
+                                echoed.push(len as u8);
+                            } else if len < 65536 {
+                                echoed.push(126);
+                                echoed.extend_from_slice(&(len as u16).to_be_bytes());
+                            } else {
+                                echoed.push(127);
+                                echoed.extend_from_slice(&len.to_be_bytes());
+                            }
+                            echoed.extend_from_slice(&payload);
+                            if upgraded.write_all(&echoed).await.is_err() {
+                                break;
                             }
                         }
                     });
@@ -430,6 +468,29 @@ fn upstream_error(status: StatusCode) -> Response<Full<Bytes>> {
 
 async fn websocket_handshake(addr: SocketAddr, path: &str) -> (String, TcpStream) {
     websocket_handshake_with_headers(addr, path, &[]).await
+}
+
+fn client_ws_frame(opcode: u8, payload: &[u8], fin: bool) -> Vec<u8> {
+    assert!(payload.len() <= 125, "test frame too large");
+    let mask = [0x01, 0x02, 0x03, 0x04];
+    let mut frame = vec![(if fin { 0x80 } else { 0 }) | opcode];
+    frame.push(0x80 | payload.len() as u8);
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % 4]),
+    );
+    frame
+}
+
+fn server_ws_frame(opcode: u8, payload: &[u8], fin: bool) -> Vec<u8> {
+    assert!(payload.len() <= 125, "test frame too large");
+    let mut frame = vec![(if fin { 0x80 } else { 0 }) | opcode];
+    frame.push(payload.len() as u8);
+    frame.extend_from_slice(payload);
+    frame
 }
 
 async fn websocket_handshake_with_headers(
@@ -3778,12 +3839,63 @@ async fn websocket_upgrade_is_tunneled() {
         "unexpected handshake: {handshake}"
     );
 
-    stream.write_all(b"ping").await.expect("write frame");
-    let mut echo = [0u8; 4];
+    let frame = client_ws_frame(0x1, b"ping", true);
+    let expected = server_ws_frame(0x1, b"ping", true);
+    stream.write_all(&frame).await.expect("write frame");
+    let mut echo = vec![0u8; expected.len()];
     stream.read_exact(&mut echo).await.expect("read echo");
-    assert_eq!(&echo, b"ping");
+    assert_eq!(echo, expected);
 
     drop(stream);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_application_payload_is_inspected() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: ws-payload
+    action: BLOCK
+    rules:
+      - name: block-script
+        match: {{ regex: '(?i)<script', in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let mut attack = client_ws_frame(0x1, b"<scr", false);
+    attack.extend(client_ws_frame(0x0, b"ipt>", true));
+    stream.write_all(&attack).await.expect("write attack");
+    let mut head = [0u8; 2];
+    stream.read_exact(&mut head).await.expect("read close");
+    assert_eq!(head[0], 0x88);
+    let mut payload = vec![0u8; usize::from(head[1])];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("read close payload");
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let benign = client_ws_frame(0x1, b"hello", true);
+    let expected = server_ws_frame(0x1, b"hello", true);
+    stream.write_all(&benign).await.expect("write benign");
+    let mut echoed = vec![0u8; expected.len()];
+    stream.read_exact(&mut echoed).await.expect("read echo");
+    assert_eq!(echoed, expected);
+
     running.stop().await;
 }
 
@@ -4662,13 +4774,15 @@ async fn websocket_strips_connection_options_in_both_directions() {
     assert!(!lower.contains("x-upstream-hop"), "{headers}");
     assert!(!lower.contains("connection-local-value"), "{headers}");
 
-    stream.write_all(b"hello").await.expect("write tunnel");
-    let mut echoed = [0u8; 5];
+    let frame = client_ws_frame(0x1, b"hello", true);
+    let expected = server_ws_frame(0x1, b"hello", true);
+    stream.write_all(&frame).await.expect("write tunnel");
+    let mut echoed = vec![0u8; expected.len()];
     tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut echoed))
         .await
         .expect("echo timeout")
         .expect("read echo");
-    assert_eq!(&echoed, b"hello");
+    assert_eq!(echoed, server_ws_frame(0x1, b"hello", true));
     drop(stream);
     running.stop().await;
 }

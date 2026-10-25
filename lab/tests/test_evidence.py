@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
-                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf,
+                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2,
                       judge_mutations, judge_nuclei, judge_load, judge_protocol,
                       judge_replay, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
@@ -440,6 +440,34 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(result["cases"][2]["verdict"], "failed")
 
 
+class H2Tests(unittest.TestCase):
+    def results(self):
+        normal = {"ok": True}
+        attack = {"normal": True}
+        origin = [{"event": "received", "case_id": case}
+                  for case in ("h2-normal", "h2-independent", "h2-rapid-reset-normal",
+                               "h2-continuation-normal", "h2-hpack-normal")]
+        return normal, attack, attack, attack, normal, origin
+
+    def test_h2_suite_requires_post_attack_normal_requests(self):
+        normal, rapid, continuation, hpack, independent, origin = self.results()
+        result = judge_h2(normal, rapid, continuation, hpack, independent, origin, {},
+                          {"MemUsage": "21MiB / 256MiB"}, 0,
+                          {"response": "kunato_requests_total 10\n"})
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["receipts"]["h2-rapid-reset-normal"], 1)
+
+    def test_h2_suite_fails_without_a_post_attack_normal_request(self):
+        normal, rapid, continuation, hpack, independent, origin = self.results()
+        origin = [event for event in origin
+                  if event.get("case_id") != "h2-continuation-normal"]
+        result = judge_h2(normal, rapid, continuation, hpack, independent, origin, {},
+                          {"MemUsage": "21MiB / 256MiB"}, 0,
+                          {"response": "kunato_requests_total 10\n"})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][2]["verdict"], "failed")
+
+
 class SlowTests(unittest.TestCase):
     def test_slow_suite_requires_normal_health(self):
         slow = {"sent": 8, "closed": 8, "held_seconds": 2}
@@ -568,6 +596,30 @@ class WebSocketTests(unittest.TestCase):
                                            {"status": 429})
         self.assertFalse(result["passed"])
         self.assertEqual(result["cases"][-1]["verdict"], "false-block")
+
+    def payloads(self):
+        return (
+            {"status": 101, "echo": "echo:<script>alert(1)</script>",
+             "benign_echo": "echo:benign payload"},
+            {"status": 101, "blocked": True, "close_code": 1008,
+             "benign_echo": "echo:benign payload"},
+        )
+
+    def test_websocket_payload_inspection_requires_a_controlled_block(self):
+        control, protected = self.payloads()
+        result = judge_websocket_lifecycle(self.complete(), self.complete(),
+                                           {"status": 200}, control, protected)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["payload_close_code"], 1008)
+
+    def test_websocket_payload_inspection_rejects_a_missed_block(self):
+        control, protected = self.payloads()
+        protected["blocked"] = False
+        result = judge_websocket_lifecycle(self.complete(), self.complete(),
+                                           {"status": 200}, control, protected)
+        self.assertFalse(result["passed"])
+        case = next(case for case in result["cases"] if case["id"] == "ws-payload-block")
+        self.assertEqual(case["verdict"], "failed")
 
 
 class ProtocolTests(unittest.TestCase):

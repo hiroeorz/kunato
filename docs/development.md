@@ -764,6 +764,7 @@ Defaults:
 | `max_header_bytes`        | 32 KiB  |
 | `max_headers`             | 100     |
 | `max_body_bytes`          | 8 MiB   |
+| `websocket_message_bytes` | 1 MiB   |
 | `max_response_body_bytes` | 1 MiB   |
 | `max_concurrent_streams`  | 100     |
 
@@ -771,7 +772,15 @@ Defaults:
 just the path. Request-target length, header size/count, and method-case checks
 run before inspection memory is reserved or the body is read on all transports,
 including WebSocket handshakes. An invalid head is rejected even if its declared
-body never arrives. `max_concurrent_streams` caps concurrent request streams per
+body never arrives. `websocket_message_bytes` bounds each reassembled
+client-to-server WebSocket message inspected after the `101` handshake; a larger
+message closes the tunnel with close code `1009`. Kunato does not negotiate
+WebSocket extensions, so frames remain uncompressed and inspectable. Only
+client-to-server messages are inspected: text messages must be valid UTF-8,
+binary messages are matched lossily, rules scoped to body targets apply, rules
+with per-rule limits are skipped, and server-to-client frames are forwarded
+without inspection.
+`max_concurrent_streams` caps concurrent request streams per
 HTTP/2 connection (and per QUIC connection for HTTP/3). HTTP/2 connections are
 pinged after 30 seconds without activity and closed when the ping is not
 acknowledged within 20 seconds. In addition, the first HTTP/2 request must

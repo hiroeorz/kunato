@@ -1,14 +1,15 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and sixteen bounded
+an isolated recording origin, direct receipt controls, and seventeen bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
 baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
-benign JSON/upload/i18n/large-body/streaming workflows, bounded slow-HTTP,
-availability, slow-connect, ban-recovery, and WebSocket lifecycle probes, a pinned
+TLS/HTTP/2 resource variants, benign JSON/upload/i18n/large-body/streaming
+workflows, bounded slow-HTTP, availability, slow-connect, ban-recovery, and
+WebSocket lifecycle and payload probes, a pinned
 k6 v2.3.0 mixed availability load, a restart-under-load probe, and a pinned
 OWASP CRS 4.3.0 comparison. It measures
 request rejection, bounded exploit prevention, and availability on a fixed
@@ -48,6 +49,7 @@ scripts/security-lab.sh run --sandbox-suite ffuf
 scripts/security-lab.sh run --sandbox-suite zap
 scripts/security-lab.sh run --sandbox-suite mutations
 scripts/security-lab.sh run --sandbox-suite protocol
+scripts/security-lab.sh run --sandbox-suite h2
 scripts/security-lab.sh run --sandbox-suite slow
 scripts/security-lab.sh run --sandbox-suite availability
 scripts/security-lab.sh run --sandbox-suite connect
@@ -213,20 +215,33 @@ the response headers, sends one masked frame, and requires a `101` status plus
 the origin `websocket` event; the echo is recorded but not asserted. Kunato's
 request-head checks reject duplicate Host, duplicate Content-Length, CL+TE, and
 non-chunked Transfer-Encoding before forwarding. The current result is 4 passed
-and 8 prevented. HTTP/2 frame-level regressions (Rapid Reset, a CONTINUATION
-flood, and an oversized HPACK header block) live in the Rust proxy tests rather
-than this container suite.
+and 8 prevented. The `h2` suite below adds TLS-level HTTP/2 resource variants;
+HTTP/3 remains in the Rust proxy tests.
 
-### WebSocket lifecycle
+### WebSocket lifecycle and payloads
 
 `--sandbox-suite websocket` runs a direct control and a protected WebSocket
 handshake. It sends a masked PING and requires the matching PONG, sends a
 fragmented text message and requires the origin's concatenated echo, and sends a
-close frame and requires the close handshake. The independent normal client must
-stay at `200`. This proves tunnel pass-through for control, fragmentation, and
-close frames; inspecting application payloads inside the tunnel remains a
-separate feature. The current result is 6 passed with PONG, the `echo:fragmented`
-response, and the close handshake on the protected path.
+close frame and requires the close handshake. It then sends an XSS message
+through a separate connection: the direct control must echo it, while the
+protected tunnel must close with `1008` and no origin echo. A benign message must
+still be echoed on the protected path. The independent normal client must stay at
+`200`. The current result is 8 passed with PONG, the `echo:fragmented` response,
+the close handshake, a `1008` payload block, and the benign payload echo.
+
+### TLS HTTP/2 resource variants
+
+`--sandbox-suite h2` uses `rules-h2.yaml` with TLS on port 8443 and the lab
+certificate under `fixtures/tls/`. It runs a normal HTTP/2 request, then Rapid
+Reset, a CONTINUATION flood, and an oversized HPACK header block on separate TLS
+connections. After each attack a fresh HTTP/2 connection must obtain an origin
+receipt for `/health`, while the independent normal client and RSS/restart checks
+must pass. The attack connection may be closed or reset by Kunato. HTTP/3/QUIC is
+not part of the container suite: no pinned QUIC client is available, and the Rust
+proxy tests cover a malformed raw HTTP/3 request stream. The current result is
+7 passed: normal, Rapid Reset, CONTINUATION, HPACK, independent, resources, and
+metrics; 21.1 MiB RSS and no restart.
 
 ### Slow HTTP
 
@@ -289,7 +304,7 @@ restart, and RSS under the 256 MiB ceiling. Recovery is checked immediately
 after the load stops. The `load-metrics` case also checks that Kunato's request
 counter covers the k6 workload and that no block, rate-limit, overload, or
 upstream-timeout counter moved. The current result is 6 passed: 3001 requests,
-p95 47.9 ms, p99 48.2 ms, 100% success, 8 slow connections held, normal and
+p95 48.1 ms, p99 48.4 ms, 100% success, 8 slow connections held, normal and
 recovery 200, RSS 21.8 MiB, no restart, and matching metrics.
 
 ### Restart under load
@@ -301,7 +316,7 @@ from the independent normal client; the k6 summary must retain at least 100
 requests and a check rate above 50%. The report records the exit code, shutdown
 time, request count, check rate, recovery, RSS, and normal status. OOM and
 forced-kill behavior are not exercised. The current result is 4 passed: exit
-code 0, a 397 ms shutdown, 501 requests, a 98.6% check rate, recovery and normal
+code 0, a 389 ms shutdown, 500 requests, a 98.6% check rate, recovery and normal
 `200`, and RSS 21.4 MiB.
 
 ### OWASP CRS comparison
@@ -351,10 +366,13 @@ Each run prints its directory under `target/security-lab/`. It retains:
   Kunato logs;
 - `connect/`: the blackhole-upstream request, connect-error metrics, health
   checks, and Kunato logs;
+- `h2/`: TLS/HTTP/2 normal, Rapid Reset, CONTINUATION, and HPACK probes, origin
+  receipts, health checks, metrics, and Kunato logs;
 - `ban/`: ban-trigger statuses, recovery probe, health, metrics, and Kunato
   logs;
 - `websocket-control/` and `websocket/`: direct and protected PING/PONG,
-  fragmented echo, close-handshake probes, and health;
+  fragmented echo, close-handshake, XSS payload-block, and benign payload probes,
+  plus health;
 - `restart/` and `restart-recovery/`: SIGTERM shutdown, k6 summary and logs,
   restart exit code, recovery probes, and normal-client health;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
@@ -405,10 +423,11 @@ per-source and global connection caps, and upstream-response timeout, the
 connect suite covers slow upstream connection establishment, the ban suite
 covers ban recovery with a short window, and the restart suite covers graceful
 SIGTERM under load. Queue/backpressure, true distributed-source exhaustion, OOM
-or forced-kill behavior, and application payload inspection inside WebSocket
-tunnels are not covered. The Rust proxy tests add HTTP/3 malformed request
-streams, hot reload under load, and rules update plus reload under load; those
-paths are not part of this container suite.
+or forced-kill behavior, server-to-client WebSocket frames, and compressed
+WebSocket extensions are not covered. The Rust proxy tests add HTTP/3 malformed
+request streams, hot reload under load, and rules update plus reload under load;
+HTTP/3/QUIC is not exercised in the container lab. Those paths are not part of
+this container suite.
 
 The fixtures and tools retain their upstream licenses and provenance: the DVWA
 image and source, MariaDB, Apache httpd 2.4.49, sqlmap, Nuclei, goTestWAF,

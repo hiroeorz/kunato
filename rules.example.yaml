@@ -1595,6 +1595,7 @@ limits:
   max_header_bytes: 32768
   max_headers: 100
   max_body_bytes: 8388608
+  websocket_message_bytes: 1048576
   max_response_body_bytes: 1048576
   body_inspection: strict
   upload_inspection: mismatch

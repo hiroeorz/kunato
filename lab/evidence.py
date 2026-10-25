@@ -402,6 +402,80 @@ def judge_connect(probe, before, after, restarts, application_metrics=None):
     return result
 
 
+def judge_h2(normal, rapid, continuation, hpack, independent, origin, before, after,
+             restarts, application_metrics=None):
+    receipts = Counter(event.get("case_id") for event in origin
+                       if event.get("event") == "received")
+
+    def attack(result, case):
+        return bool(result.get("normal")) and receipts[f"h2-{case}-normal"] == 1
+
+    normal_ok = bool(normal.get("ok")) and receipts["h2-normal"] == 1
+    rapid_ok = attack(rapid, "rapid-reset")
+    continuation_ok = attack(continuation, "continuation")
+    hpack_ok = attack(hpack, "hpack")
+    independent_ok = bool(independent.get("ok")) and receipts["h2-independent"] == 1
+    restarts = restarts or 0
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    cases = [
+        {"id": "h2-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "failed",
+         "origin_receipts": receipts["h2-normal"]},
+        {"id": "h2-rapid-reset", "expect": "survive",
+         "verdict": "passed" if rapid_ok else "failed",
+         "origin_receipts": receipts["h2-rapid-reset-normal"]},
+        {"id": "h2-continuation", "expect": "survive",
+         "verdict": "passed" if continuation_ok else "failed",
+         "origin_receipts": receipts["h2-continuation-normal"]},
+        {"id": "h2-hpack", "expect": "survive",
+         "verdict": "passed" if hpack_ok else "failed",
+         "origin_receipts": receipts["h2-hpack-normal"]},
+        {"id": "h2-independent", "expect": "normal",
+         "verdict": "passed" if independent_ok else "false-block",
+         "origin_receipts": receipts["h2-independent"]},
+        {"id": "h2-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    metric_notes = {}
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+        observed = None
+        for line in text.splitlines():
+            if line.startswith("kunato_requests_total "):
+                try:
+                    observed = float(line.split(None, 1)[1])
+                except (IndexError, ValueError):
+                    observed = None
+                break
+        metrics_ok = observed is not None and observed > 0
+        cases.append({"id": "h2-metrics", "expect": "metrics",
+                      "verdict": "passed" if metrics_ok else "failed",
+                      "origin_receipts": 0})
+        metric_notes = {"metric_requests": observed}
+    result = summarize(cases)
+    result["notes"] = {"receipts": dict(receipts),
+                       "rapid_reset_error": rapid.get("attack_error"),
+                       "continuation_error": continuation.get("attack_error"),
+                       "hpack_error": hpack.get("attack_error"),
+                       "rapid_reset_closed": rapid.get("attack_closed"),
+                       "continuation_closed": continuation.get("attack_closed"),
+                       "hpack_closed": hpack.get("attack_closed"),
+                       "normal_status": normal.get("ok"),
+                       "independent_status": independent.get("ok"),
+                       "restarts": restarts,
+                       "mem_before": before.get("MemUsage"),
+                       "mem_after": after.get("MemUsage"),
+                       **metric_notes}
+    return result
+
+
 def judge_ban_recovery(probe, normal, before, after, restarts, application_metrics=None):
     statuses = probe.get("statuses", [])
     banned = any(status == 429 for status in statuses)
@@ -457,7 +531,8 @@ def judge_ban_recovery(probe, normal, before, after, restarts, application_metri
     return result
 
 
-def judge_websocket_lifecycle(control, protected, normal):
+def judge_websocket_lifecycle(control, protected, normal, control_payload=None,
+                              protected_payload=None):
     def complete(result):
         return (result.get("status") == 101 and result.get("pong")
                 and result.get("echo") == "echo:fragmented"
@@ -483,6 +558,20 @@ def judge_websocket_lifecycle(control, protected, normal):
         {"id": "ws-normal", "expect": "normal",
          "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
     ]
+    if control_payload is not None and protected_payload is not None:
+        control_block = str(control_payload.get("echo", "")).startswith("echo:<script")
+        protected_block = (protected_payload.get("blocked") is True
+                           and protected_payload.get("close_code") == 1008)
+        benign_echo = str(protected_payload.get("benign_echo", ""))
+        cases.extend([
+            {"id": "ws-payload-block", "expect": "block",
+             "verdict": "passed" if control_block and protected_block
+             else ("inconclusive" if not control_block else "failed"),
+             "origin_receipts": 0},
+            {"id": "ws-payload-benign", "expect": "echo",
+             "verdict": "passed" if benign_echo.startswith("echo:benign") else "failed",
+             "origin_receipts": 0},
+        ])
     result = summarize(cases)
     result["notes"] = {"control_status": control.get("status"),
                        "protected_status": protected.get("status"),
@@ -491,7 +580,10 @@ def judge_websocket_lifecycle(control, protected, normal):
                        "closed": protected.get("closed"),
                        "normal_status": normal.get("status"),
                        "control_error": control.get("error"),
-                       "protected_error": protected.get("error")}
+                       "protected_error": protected.get("error"),
+                       "payload_close_code": (protected_payload or {}).get("close_code"),
+                       "payload_echo": (protected_payload or {}).get("echo"),
+                       "payload_benign_echo": (protected_payload or {}).get("benign_echo")}
     return result
 
 

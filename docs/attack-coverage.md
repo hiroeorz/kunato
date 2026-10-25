@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-24; the managed set carried 492 rules then.
+2026-10-25; the managed set carried 492 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -82,10 +82,11 @@ body coverage on those routes and does not change the bundled verdicts.
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
 | Abnormal HTTP Headers | 🔶 | `protocol-anomalies` plus CVE-specific (invalid Priority, oversized Range, ...); generic cases need rules |
 | Oversized Header / Request | ✅ | Headers over 32 KiB or 100 fields get 431, paths over 8 KiB get 414. Head limits are enforced before body ingestion and inspection-memory reservation on HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes, including when a declared body never arrives. Request bodies over `max_body_bytes` (8 MiB default) are evaluated on the inspected prefix when body-targeting rules, a GraphQL endpoint, or multipart upload inspection need it; a matching ALLOW forwards, a matching BLOCK uses its response, and if neither decides the body gets 413. The decision uses the bytes actually read, so chunked and HTTP/2 / HTTP/3 bodies are covered. `limits.body_inspection: stream` is the documented opt-out for applications that need larger uploads; it inspects only the prefix and logs a warning when the configuration loads |
-| HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either). Rust proxy tests replay Rapid Reset, a CONTINUATION flood, and an oversized HPACK header block while a normal HTTP/2 request still succeeds |
-| Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. The `availability` suite adds a slow-body `408`, a slow-read probe, a per-source connection cap with `503`, and an upstream-response timeout with `504`. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
-| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, immediate recovery, and metrics checks (p95 49.9 ms, p99 53.2 ms, 100% success, no block/rate-limit/overload/upstream-timeout movement). Fixed-runner trend, not a capacity claim |
+| HTTP/2 Rapid Reset and similar layer DoS | 🔶 | Mitigated by `max_concurrent_streams`, ping timeouts, and connection caps; no dedicated signature (framing cannot be expressed in the black-box list either). Rust proxy tests replay Rapid Reset, a CONTINUATION flood, and an oversized HPACK header block while a normal HTTP/2 request still succeeds; the lab `h2` suite adds the same variants over TLS with a fresh normal connection after each attack |
+| Slow HTTP / Connection Exhaustion | 🔶 | The sandbox `slow` suite holds 8 partial-header connections for 2 seconds and the independent normal client stays 200 while Kunato stays within 256 MiB/64 pids. The `availability` suite adds a slow-body `408`, a slow-read probe, per-source and global connection caps with `503`, and an upstream-response timeout with `504`; the `connect` suite adds a slow upstream connect with `502`; the `restart` suite adds SIGTERM under load with recovery. Header/body read timeouts and connection caps bound the impact; no dedicated slow-request signature |
+| Sustained Load / Throughput | 🔶 | The sandbox `load` suite runs 50 requests/second for 60 seconds with p95/p99, success, RSS, restarts, immediate recovery, and metrics checks (p95 48.1 ms, p99 48.4 ms, 100% success, no block/rate-limit/overload/upstream-timeout movement). Fixed-runner trend, not a capacity claim |
 | HTTP Desync | 🔶 | Same handling as smuggling |
+| WebSocket Application Payload | 🔶 | Client-to-server text and binary messages are reassembled up to `limits.websocket_message_bytes` (1 MiB default) and matched against body-target rules; a violating tunnel closes with code 1008. WebSocket extensions are not negotiated, so frames stay uncompressed. Rules with per-rule limits are skipped, binary payloads are matched lossily, and server-to-client frames are not inspected |
 
 Protocol compatibility: before HTTP/1.1 forwarding, split request `Cookie`
 fields are joined with `; ` in field order without decoding their bytes
@@ -409,4 +410,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled 492-rule count; behavioral actions
-still default to LOG. The snapshot date is 2026-10-24.
+still default to LOG. The snapshot date is 2026-10-25.

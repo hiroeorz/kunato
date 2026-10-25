@@ -125,17 +125,21 @@ preface, and a WebSocket handshake. Direct controls use the origin framing modes
 must not deliver a smuggled second request. The WebSocket probe sends the
 handshake, reads the response headers, sends one masked frame, and requires a
 `101` status plus the origin's `websocket` event; the origin's echo is recorded
-but not asserted. A handshake check does not imply inspection of later tunnel
-messages.
+but not asserted. The protocol case checks the handshake only; the separate
+`websocket` suite exercises post-upgrade payload inspection.
 
-### WebSocket lifecycle
+### WebSocket lifecycle and payloads
 
 The `websocket` suite runs a direct control and a protected WebSocket handshake,
 then sends a masked PING and requires the matching PONG, a fragmented text
 message and requires the origin's concatenated echo, and a close frame and
-requires the close handshake. The independent normal client must stay at `200`.
-This covers tunnel pass-through for control, fragmentation, and close frames;
-inspecting application payloads inside the tunnel remains a separate feature.
+requires the close handshake. It then sends an XSS message: the direct control
+must echo it, while the protected tunnel must close with code `1008` and no
+origin echo; a benign message must still be echoed. The independent normal client
+must stay at `200`. Client-to-server messages are reassembled and matched against
+body-target rules up to `limits.websocket_message_bytes`; WebSocket extensions are
+not negotiated, so frames stay uncompressed. Server-to-client frames, compressed
+extensions, and binary payload semantics remain outside this suite.
 
 ### Pinned tools
 
@@ -249,18 +253,21 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The last `all` run, `20261025T144621-a435a74f`, passed 16 sandbox suites:
-  replay, benign, mutations, protocol, slow, availability, connect, ban,
+- The last `all` run, `20261025T153140-9a1c99ac`, passed 17 sandbox suites:
+  replay, benign, mutations, protocol, slow, availability, connect, h2, ban,
   websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed
-  load recorded 3001 requests, p95 47.9 ms, p99 48.2 ms, 100% success,
+  load recorded 3001 requests, p95 48.1 ms, p99 48.4 ms, 100% success,
   normal/recovery `200`, RSS 21.8 MiB of 256 MiB, no restart, and matching
   metrics. The availability suite recorded a slow-body `408`, slow-read `200`,
   per-source and global connection caps at `503` with 16 active connections,
   upstream `504`, and 23.2 MiB RSS. The connect suite recorded `502` and one
-  upstream connect error. The restart suite recorded exit code 0, a 397 ms
-  shutdown, 501 requests, a 98.6% check rate, and `200` recovery. The ban suite
-  recorded a `429` ban and `200` recovery; the websocket suite recorded PONG,
-  the fragmented echo, and the close handshake.
+  upstream connect error. The h2 suite recorded normal, Rapid Reset,
+  CONTINUATION, and HPACK cases with a fresh normal connection after each attack
+  and 21.1 MiB RSS. The restart suite recorded exit code 0, a 389 ms shutdown, 500
+  requests, a 98.6% check rate, and `200` recovery. The ban suite recorded a
+  `429` ban and `200` recovery; the websocket suite recorded PONG, the
+  fragmented echo, the close handshake, a `1008` payload block, and the benign
+  payload echo.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -288,18 +295,19 @@ current suites.
 
 ### Protocol coverage
 
-- The lab's HTTP/2 client coverage is limited to the connection preface. Rust
-  integration tests add Rapid Reset, CONTINUATION, and an oversized HPACK header
-  block; the lab does not exercise SETTINGS/CONTINUATION under load, HPACK
-  resource pressure, stream-state abuse, GOAWAY, priority, or h2c.
-- HTTP/3, QUIC, and TLS termination/ACME are not exercised in the lab, although
-  the Rust proxy tests cover functional H3 requests and a malformed raw H3
+- The `h2` suite adds TLS-level Rapid Reset, CONTINUATION-flood, and oversized
+  HPACK variants, with a fresh normal HTTP/2 connection after each attack. The lab
+  still does not exercise SETTINGS floods, stream-state abuse, GOAWAY, priority,
+  h2c, or HTTP/2 resource pressure under sustained load.
+- HTTP/3 and QUIC are not exercised in the lab because no pinned QUIC client is
+  available; TLS termination and HTTP/2 are now exercised by the `h2` suite. The
+  Rust proxy tests cover functional H3 requests and a malformed raw H3
   request-stream case. HTTP/1.0, pipelining, CONNECT, chunked trailers, and very
   large chunks are not exercised beyond the 12 reviewed cases; the single
   obs-fold case has no variants.
-- The rules that would apply to WebSocket application payloads after the
-  upgrade are not tested; the suite covers control, fragmentation, and close
-  frames only.
+- WebSocket application payloads are inspected client-to-server with body-target
+  rules (close `1008` on a match); server-to-client frames, compressed
+  extensions, and binary payload semantics are not covered.
 
 ### Availability coverage
 
@@ -350,14 +358,15 @@ current suites.
 2. Benign workflow breadth: upload variants, i18n edge cases, and longer
    streams. The JSON, upload, i18n, large-body, streamed-response, GraphQL,
    authenticated-API, and slow-stream cases are implemented.
-3. HTTP/2 hardening and HTTP/3: Rapid Reset, CONTINUATION, oversized HPACK, and
-   a malformed raw H3 request stream are covered by Rust integration tests; add
-   lab resource variants after a TLS/QUIC fixture.
+3. HTTP/3 lab variants: the `h2` suite now covers TLS-level Rapid Reset,
+   CONTINUATION, and HPACK; HTTP/3/QUIC still needs a pinned QUIC client before
+   container-level resource variants can run.
 4. Restart behavior under load: SIGTERM, graceful exit, restart, and recovery
    are covered by the restart suite; OOM and forced-kill behavior remain
    outside.
-5. WebSocket application-payload inspection after the handshake. Fragmentation,
-   close, and PING/PONG lifecycle are covered by the websocket suite.
+5. WebSocket payload coverage: client-to-server body-target inspection is
+   implemented and lab-tested; server-to-client frames, compressed extensions,
+   and binary payload semantics remain outside.
 6. ZAP active scanning, endpoint-scoped and observation-only. A separate plan
    was attempted but ZAP 2.17.0 exits at activeScan start even after scoping
    the endpoints and setting `failOnError: false`; revisit when a fixed image or

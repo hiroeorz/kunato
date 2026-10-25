@@ -34,7 +34,13 @@ pub fn evaluate(
     view: &RequestView<'_>,
     limits: Option<&dyn RuleLimitCheck>,
 ) -> EvalOutcome {
-    evaluate_phase(config, Phase::Request, view, None, limits)
+    evaluate_phase(config, Phase::Request, view, None, limits, false)
+}
+
+/// Evaluate a post-upgrade WebSocket message. Request conditions still scope
+/// the rules, but only the body target is matched against the message payload.
+pub fn evaluate_websocket(config: &CompiledConfig, view: &RequestView<'_>) -> EvalOutcome {
+    evaluate_phase(config, Phase::Request, view, None, None, true)
 }
 
 pub fn evaluate_response(
@@ -42,7 +48,7 @@ pub fn evaluate_response(
     view: &RequestView<'_>,
     response: &ResponseView<'_>,
 ) -> EvalOutcome {
-    evaluate_phase(config, Phase::Response, view, Some(response), None)
+    evaluate_phase(config, Phase::Response, view, Some(response), None, false)
 }
 
 fn evaluate_phase(
@@ -51,6 +57,7 @@ fn evaluate_phase(
     view: &RequestView<'_>,
     response: Option<&ResponseView<'_>>,
     limits: Option<&dyn RuleLimitCheck>,
+    websocket: bool,
 ) -> EvalOutcome {
     let mut outcome = EvalOutcome::default();
 
@@ -63,9 +70,13 @@ fn evaluate_phase(
             let mut score = 0u32;
             let mut last: Option<&CompiledRule> = None;
             for rule in &category.rules {
-                let matched = match response {
-                    Some(response) => rule.matcher.matches_response(view, response),
-                    None => rule.matcher.matches(view),
+                let matched = if websocket {
+                    rule.matcher.matches_websocket(view)
+                } else {
+                    match response {
+                        Some(response) => rule.matcher.matches_response(view, response),
+                        None => rule.matcher.matches(view),
+                    }
                 };
                 if matched {
                     score += 1;
@@ -100,15 +111,26 @@ fn evaluate_phase(
         }
 
         for rule in &category.rules {
-            let matched = match response {
-                Some(response) => rule.matcher.matches_response(view, response),
-                None => rule.matcher.matches(view),
+            let matched = if websocket {
+                rule.matcher.matches_websocket(view)
+            } else {
+                match response {
+                    Some(response) => rule.matcher.matches_response(view, response),
+                    None => rule.matcher.matches(view),
+                }
             };
             if !matched {
                 continue;
             }
 
-            if let Some(limit) = &rule.limit {
+            if websocket {
+                // Rule limits are keyed to HTTP request volume; applying them
+                // per WebSocket message would either over-block or bypass the
+                // configured window. Leave limited rules to HTTP inspection.
+                if rule.limit.is_some() {
+                    continue;
+                }
+            } else if let Some(limit) = &rule.limit {
                 let within = limits.is_some_and(|check| {
                     check.permit(&rule.limit_key, view.source_ip, limit, &config.protection)
                 });

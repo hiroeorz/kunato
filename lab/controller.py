@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
-                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf,
+                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2,
                       judge_mutations, judge_load, judge_nuclei, judge_protocol,
                       judge_replay, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
@@ -632,6 +632,59 @@ class SandboxSuite:
             time.sleep(0.2)
         raise RuntimeError("Kunato did not start listening")
 
+    def h2(self):
+        self.reset_h2()
+        self.preflight("origin")
+        self.compose("up", "-d", "normal")
+        before = self.stats()
+        normal = self.probe("client", "h2", check=False,
+                            extra=("--h2-case", "normal", "--case-id", "h2-normal",
+                                   "--port", "8443"))
+        rapid = self.probe("client", "h2", check=False,
+                           extra=("--h2-case", "rapid-reset", "--port", "8443"))
+        time.sleep(0.5)
+        continuation = self.probe("client", "h2", check=False,
+                                  extra=("--h2-case", "continuation", "--port", "8443"))
+        time.sleep(0.5)
+        hpack = self.probe("client", "h2", check=False,
+                           extra=("--h2-case", "hpack", "--port", "8443"))
+        independent = self.probe_exec(
+            "normal", "h2",
+            extra=("--h2-case", "normal", "--case-id", "h2-independent",
+                   "--port", "8443"))
+        after = self.stats()
+        origin, _ = self.logs("h2")
+        metrics = self.probe_exec("kunato", "metrics")
+        return judge_h2(normal, rapid, continuation, hpack, independent, origin,
+                        before, after, self.restarts(), metrics)
+
+    def reset_h2(self):
+        nonce = uuid.uuid4().hex
+        self.env["LAB_NONCE"] = nonce
+        self.env["LAB_CONFIG"] = "rules-h2.yaml"
+        self.env["LAB_DISABLE_PROTECTION"] = "1"
+        self.compose("up", "-d", "--force-recreate", "--pull", "never", "origin", "kunato")
+        directory = self.run_dir / "h2"
+        directory.mkdir(exist_ok=True)
+        for _ in range(50):
+            health = self.probe(
+                "client", "h2", check=False,
+                extra=("--h2-case", "normal", "--case-id", "h2-health",
+                       "--port", "8443"))
+            if health.get("ok"):
+                time.sleep(0.2)
+                origin, _ = self.logs("h2")
+                try:
+                    verify_origin(origin, nonce)
+                except ValueError:
+                    time.sleep(0.2)
+                    continue
+                write_json(directory / "health-before.json", health)
+                write_json(directory / "attempt.json", {"nonce": nonce})
+                return nonce
+            time.sleep(0.2)
+        raise RuntimeError("Kunato/origin did not become ready over HTTP/2")
+
     def ban(self):
         nonce = self.reset_origin("ban", config="rules-ban.yaml",
                                   disable_protection=False)
@@ -654,13 +707,20 @@ class SandboxSuite:
         self.preflight("origin")
         control = self.probe("control", "ws-lifecycle", check=False,
                              log=self.run_dir / "websocket-control/probes.jsonl")
+        control_payload = self.probe(
+            "control", "ws-payload", check=False,
+            log=self.run_dir / "websocket-control/payload.jsonl")
         nonce = self.reset_origin("websocket")
         self.compose("up", "-d", "normal")
         protected = self.probe("client", "ws-lifecycle", check=False,
                                log=self.run_dir / "websocket/probes.jsonl")
+        protected_payload = self.probe(
+            "client", "ws-payload", check=False,
+            log=self.run_dir / "websocket/payload.jsonl")
         normal = self.healthy("websocket", nonce=nonce, service="normal", exec=True)
         self.logs("websocket")
-        return judge_websocket_lifecycle(control, protected, normal)
+        return judge_websocket_lifecycle(control, protected, normal,
+                                         control_payload, protected_payload)
 
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)
@@ -1108,6 +1168,14 @@ def new_run(suite):
     (config_dir / "rules-connect.yaml").write_text(
         make_config(original, "http://172.30.250.250:8080",
                     timeouts=CONNECT_TIMEOUTS))
+    h2, listeners = re.subn(r"(?m)^listen: .*", "listen: 0.0.0.0:8443",
+                            make_config(original, "http://origin:8080"))
+    if listeners != 1:
+        raise ValueError("Expected one listener for the H2 configuration")
+    h2 += ("\ntls:\n"
+           "  cert_file: /lab/fixtures/tls/cert.pem\n"
+           "  key_file: /lab/fixtures/tls/key.pem\n")
+    (config_dir / "rules-h2.yaml").write_text(h2)
     (config_dir / "rules-ban.yaml").write_text(
         make_config(original, "http://origin:8080", BAN_PROTECTION))
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
@@ -1154,7 +1222,7 @@ def run(suite):
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
                      "rules-ffuf.yaml", "rules-availability.yaml", "rules-connect.yaml",
-                     "rules-ban.yaml"):
+                     "rules-h2.yaml", "rules-ban.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
         report["suites"]["replay"] = lab.replay()
@@ -1170,6 +1238,8 @@ def run(suite):
             report["suites"]["availability"] = lab.availability()
         if suite in {"connect", "all"}:
             report["suites"]["connect"] = lab.connect()
+        if suite in {"h2", "all"}:
+            report["suites"]["h2"] = lab.h2()
         if suite in {"ban", "all"}:
             report["suites"]["ban"] = lab.ban()
         if suite in {"websocket", "all"}:
@@ -1245,7 +1315,7 @@ def main():
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "benign", "mutations", "protocol", "gotestwaf",
                                  "sqlmap", "nuclei", "ffuf", "zap", "crs", "slow",
-                                 "availability", "connect", "ban", "websocket", "load",
+                                 "availability", "connect", "h2", "ban", "websocket", "load",
                                  "restart", "all"],
                         default="replay")
     for operation in ("report", "down"):

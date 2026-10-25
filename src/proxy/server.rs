@@ -1747,6 +1747,7 @@ async fn process(
         }
         let result = websocket::forward_handshake(
             config,
+            context.config(),
             &parts,
             full_body(with_bytes_guard(
                 payload.prefix.clone(),

@@ -97,6 +97,19 @@ impl Matcher {
         self.matches_payload(view, Some(response))
     }
 
+    /// Match a post-upgrade WebSocket message. Request conditions still scope
+    /// the rule, but only the body target applies to the message payload.
+    pub fn matches_websocket(&self, view: &RequestView<'_>) -> bool {
+        self.matches_request(view) && self.matches_body_payload(view)
+    }
+
+    fn matches_body_payload(&self, view: &RequestView<'_>) -> bool {
+        let Some(payload) = &self.payload else {
+            return false;
+        };
+        payload.matches_body(view, self.allow_mode)
+    }
+
     fn matches_request(&self, view: &RequestView<'_>) -> bool {
         if !self.paths.is_empty() {
             let matched = if self.allow_mode {
@@ -210,29 +223,8 @@ impl PayloadMatcher {
             }
         }
 
-        if self.targets & TARGET_BODY != 0 && !view.body_rules_exempt {
-            if allow_mode && view.body_truncated {
-                // The rest of the body has not been inspected, so an ALLOW
-                // rule must not treat the visible prefix as the whole message.
-                return false;
-            }
-            let hit = if allow_mode {
-                !view.body.is_empty()
-                    && self.hits(&String::from_utf8_lossy(view.body))
-                    && view
-                        .body_forms
-                        .iter()
-                        .all(|form| self.hits(&String::from_utf8_lossy(form)))
-            } else {
-                (!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body)))
-                    || view
-                        .body_forms
-                        .iter()
-                        .any(|form| self.hits(&String::from_utf8_lossy(form)))
-            };
-            if hit {
-                return true;
-            }
+        if self.matches_body(view, allow_mode) {
+            return true;
         }
 
         if self.targets & TARGET_COOKIES != 0 {
@@ -278,6 +270,31 @@ impl PayloadMatcher {
         false
     }
 
+    fn matches_body(&self, view: &RequestView<'_>, allow_mode: bool) -> bool {
+        if self.targets & TARGET_BODY == 0 || view.body_rules_exempt {
+            return false;
+        }
+        if allow_mode {
+            if view.body_truncated {
+                // The rest of the body has not been inspected, so an ALLOW
+                // rule must not treat the visible prefix as the whole message.
+                return false;
+            }
+            !view.body.is_empty()
+                && self.hits(&String::from_utf8_lossy(view.body))
+                && view
+                    .body_forms
+                    .iter()
+                    .all(|form| self.hits(&String::from_utf8_lossy(form)))
+        } else {
+            (!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body)))
+                || view
+                    .body_forms
+                    .iter()
+                    .any(|form| self.hits(&String::from_utf8_lossy(form)))
+        }
+    }
+
     fn hits(&self, text: &str) -> bool {
         self.regexes.iter().any(|regex| regex.is_match(text))
     }
@@ -321,6 +338,41 @@ mod tests {
             ..Matcher::default()
         };
         assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn websocket_matches_only_body_targets() {
+        let method = Method::GET;
+        let uri: Uri = "/ws".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let view = view(&method, &uri, &headers, b"<script>alert(1)</script>");
+        let body = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)<script")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(body.matches_websocket(&view));
+
+        let query = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)<script")],
+                targets: TARGET_QUERY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(!query.matches_websocket(&view));
+
+        let path_scoped = Matcher {
+            paths: vec![regex("^/other")],
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)<script")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+        assert!(!path_scoped.matches_websocket(&view));
     }
 
     #[test]
