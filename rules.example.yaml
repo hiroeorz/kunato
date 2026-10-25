@@ -1521,6 +1521,31 @@ categories:
       # static-asset suffix.
       - name: dockhand-static-extension-auth-bypass
         match: { method: PUT, path: '(?i)^/api/[^?]*\.(js|css|map|png|jpe?g|gif|svg|ico|woff2?)$' }
+      # CVE-2026-49869 (Kestra): AuthenticationFilter treats any path ending in
+      # /configs as the public configuration endpoint, so flow, execution, KV,
+      # dashboard, and log routes with a resource named configs skip Basic
+      # Auth. The read-only public /api/v1[/{tenant}]/configs endpoints keep
+      # passing because they have no resource segment.
+      - name: kestra-configs-suffix-auth-bypass
+        match: { method: [PUT, POST, PATCH, DELETE], path: '(?i)^/api/v1/[^/]+/(flows|executions|namespaces|dashboards|logs)/.+/configs$' }
+      # CVE-2026-116211 (YesWiki): date_maj_fiche is concatenated into an
+      # INSERT ... SET instead of being escaped; a quote followed by the
+      # injected column list is never part of a valid datetime.
+      - name: yeswiki-date-maj-fiche-sqli
+        match:
+          path: '(?i)^/\?api/entries/'
+          regex: '(?i)date_maj_fiche=[^&]{0,40}["\x27]\s*,'
+          in: [body]
+      # CVE-2026-116171 (SiYuan, Windows): the NT extended-length prefix
+      # (\\?\) survives filepath.Clean, matches no sensitive-path prefix, and
+      # points the import and export handlers at the workspace conf directory.
+      - name: siyuan-extended-path-prefix
+        match: { path: '(?i)^/api/(import/importStdMd|export/copyExportFile)$', regex: '\\\\\?\\', in: [body] }
+      # CVE-2026-116176 (vLLM): X-Request-Id carries a P2pNcclConnector routing
+      # token that makes the prefill worker connect to an arbitrary host.
+      # Legitimate request IDs never use the connector's ___decode_addr_ marker.
+      - name: vllm-x-request-id-ssrf
+        match: { headers: { X-Request-Id: '(?i)___decode_addr_' } }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
