@@ -1142,10 +1142,13 @@ deployed ACME certificate. Non-loopback addresses are rejected at validation
 time, and if the port is already in use Kunato logs a warning and continues
 without the admin endpoint.
 
-`kunato metrics` prints the `GET /metrics` response body unchanged: no headers,
-no re-encoding, and no added newline, so the output is exactly what a direct
-request returns. It queries `127.0.0.1:9090` by default and accepts only a
-loopback address through `--listen`:
+`kunato metrics` renders the `GET /metrics` response as a bordered two-column
+table with a header row: one row per sample with the metric name first and its
+value second, the value column right-aligned, and the `# HELP` and `# TYPE`
+comment lines omitted. Gauges whose name ends in `_timestamp_seconds` show the
+local date and time in parentheses after the Unix value, or `(never)` while no
+event has been recorded. It queries `127.0.0.1:9090` by default and accepts only
+a loopback address through `--listen`:
 
 ```sh
 kunato metrics

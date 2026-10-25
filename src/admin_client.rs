@@ -1,8 +1,8 @@
-//! `kunato metrics`: print the raw Prometheus exposition from the admin
-//! listener.
+//! `kunato metrics`: print the metrics served by the admin listener as a table.
 //!
-//! The response body is written to stdout byte for byte, so the command output
-//! is exactly what `GET /metrics` returns.
+//! The `GET /metrics` body is fetched unchanged and rendered by
+//! [`crate::metrics_table`] as two aligned columns: the metric name and its
+//! value, without the Prometheus comment lines.
 
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -24,10 +24,11 @@ const MAX_METRICS_BYTES: usize = 8 * 1024 * 1024;
 
 type MetricsClient = Client<HttpConnector, Full<Bytes>>;
 
-/// Query the admin listener and write the exposition body to stdout unchanged.
+/// Query the admin listener and write the rendered metrics table to stdout.
 pub async fn run(args: MetricsArgs) -> Result<(), Error> {
     let body = fetch(args.listen).await?;
-    write_stdout(&body)
+    let table = crate::metrics_table::render(&String::from_utf8_lossy(&body))?;
+    write_stdout(table.as_bytes())
 }
 
 async fn fetch(listen: SocketAddr) -> Result<Vec<u8>, Error> {

@@ -12,6 +12,7 @@ mod form;
 pub mod graphql;
 pub mod logs;
 pub mod metrics;
+mod metrics_table;
 mod php;
 pub mod protection;
 pub mod proxy;

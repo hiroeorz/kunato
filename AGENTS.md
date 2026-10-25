@@ -36,11 +36,12 @@ src/
   error.rs         # Error types
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
-  admin_client.rs  # `kunato metrics`: raw fetch from the admin /metrics endpoint
+  admin_client.rs  # `kunato metrics`: fetch the admin /metrics exposition
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching
   metrics.rs       # Prometheus counters and gauges
+  metrics_table.rs # `kunato metrics`: name/value table rendering
   acme/            # RFC 8555 client, TLS-ALPN-01 resolver, and certificate cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
   form.rs          # Origin-facing multipart and URL-encoded resource limits

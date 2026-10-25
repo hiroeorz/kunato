@@ -149,13 +149,14 @@ restart:
 ```sh
 systemctl status kunato
 sudo kunato log -n 50
-kunato metrics                       # raw Prometheus exposition from :9090
+kunato metrics                       # metric table from :9090
 sudo kunato validate
 ```
 
-`kunato metrics` writes the `/metrics` response body to stdout unchanged, so it
-can be piped or diffed like a direct HTTP request; pass `--listen <ADDR>` when
-the admin listener uses another loopback address.
+`kunato metrics` prints one row per metric in a bordered table with the name and
+value columns, leaving out the Prometheus `# HELP` and `# TYPE` lines, aligning
+values to the right, and adding the local date and time to timestamp gauges;
+pass `--listen <ADDR>` when the admin listener uses another loopback address.
 
 `kunato log` reads the same systemd journal and adds structured filters:
 

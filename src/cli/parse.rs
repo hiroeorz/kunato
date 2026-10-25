@@ -882,10 +882,11 @@ Options:
 
 fn metrics_help() -> String {
     format!(
-        r#"Print the Prometheus metrics served by the admin listener.
+        r#"Print the metrics served by the admin listener as a bordered table.
 
-The response body of `GET /metrics` is written to stdout unchanged, so it can
-be scraped, diffed, or piped like a direct HTTP request.
+Each sample from `GET /metrics` becomes one row of a metric name and its value,
+with values right-aligned. The `# HELP` and `# TYPE` comment lines are omitted,
+and timestamp gauges also show the local date and time.
 
 Usage: kunato metrics [OPTIONS]
 
