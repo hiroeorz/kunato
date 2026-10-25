@@ -1,12 +1,13 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and nineteen bounded
+an isolated recording origin, direct receipt controls, and twenty bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
-baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
+baseline, 25 deterministic mutation variants, an agentic TTP chain over DVWA
+and CVE-2021-41773, 12 raw protocol/WebSocket cases,
 TLS/HTTP/2 and HTTP/3 resource variants, benign JSON/upload/i18n/large-body/streaming
 workflows, bounded slow-HTTP, availability, backpressure, slow-connect, ban-recovery, and
 WebSocket lifecycle and payload probes (client and server direction), a pinned
@@ -49,6 +50,7 @@ scripts/security-lab.sh run --sandbox-suite ffuf
 scripts/security-lab.sh run --sandbox-suite zap
 scripts/security-lab.sh run --sandbox-suite mutations
 scripts/security-lab.sh run --sandbox-suite protocol
+scripts/security-lab.sh run --sandbox-suite agentic
 scripts/security-lab.sh run --sandbox-suite h2
 scripts/security-lab.sh run --sandbox-suite h3
 scripts/security-lab.sh run --sandbox-suite slow
@@ -68,6 +70,48 @@ install or update scanners, rules, or templates. `prepare` must be repeated afte
 a Rust source, image-lock, fixture, or template change. Rules, cases, fixtures,
 and templates are copied from the current worktree into an immutable input
 snapshot at the beginning of each run.
+
+## Manual shell
+
+`shell` starts one prepared configuration and fixture, keeps it running, and
+drops you into a restricted tool container on the `front` network. It is for
+interactive exploration; it produces no `report.json`, verdicts, or direct-control
+evidence. The input snapshot, manifest, container logs, metrics, and cleanup
+record are retained under `target/security-lab/<run-id>/`. See
+[MANUAL-SHELL.md](MANUAL-SHELL.md) for a beginner-oriented, copy-paste
+walkthrough with a one-line explanation for every command.
+
+```sh
+scripts/security-lab.sh shell
+scripts/security-lab.sh shell --config rules-dvwa.yaml --tool sqlmap
+scripts/security-lab.sh shell --config rules-cve.yaml --tool nuclei
+scripts/security-lab.sh shell --publish 127.0.0.1:8080 --no-shell
+```
+
+The target inside the shell is `http://app.test:8080` and is exported as
+`LAB_TARGET`; `rules-cve.yaml` also exports the per-attempt `LAB_CANARY`. With
+`--publish`, host tools use `http://127.0.0.1:PORT`; send `Host: app.test` when
+the fixture depends on the virtual host. `--tool` selects `python`
+(default), `sqlmap`, `nuclei`, or `ffuf`; each runs as UID 65532 with a read-only
+root filesystem, dropped capabilities, and the lab memory, CPU, and pid ceilings.
+`--protection` and `--no-protection` override the default, which enables
+protection for `rules-ffuf.yaml`, `rules-ban.yaml`, `rules-backpressure.yaml`,
+and `rules-availability.yaml` and disables it for the signature configurations.
+`--dvwa-auth` enables the seeded DVWA login. The `rules-connect.yaml` profile
+starts only Kunato over the blackhole upstream and returns `502`.
+
+`--publish [127.0.0.1:]PORT` is the only host exposure: it starts a loopback-only
+relay to the Kunato container's `front` address so host tools such as Burp or
+curl can reach it. Docker does not publish ports from an `internal` network, so
+the relay is explicit and runs only for the manual session. The option is
+rejected for any host other than `127.0.0.1` or `localhost`; fixtures and the
+database are never published. The HTTP/2 and HTTP/3 configurations remain
+suite-only.
+
+Exit the shell or press Ctrl-C to remove the containers, networks, and volumes.
+`scripts/security-lab.sh down <run-directory>` cleans up an interrupted manual
+run. Treat manual results as exploration: promote a finding to `lab/cases/` or
+the black-box corpus before relying on it as regression coverage.
 
 ## Isolation and fixtures
 
@@ -201,6 +245,23 @@ benign near-misses. The cases cover keyword case, block comments, newlines,
 body formats, parameter pollution, alternative XSS tags, dot padding, shell
 metacharacters, and header values. The mutation table in the report retains the
 seed, transform, and interpretation through `report.json`.
+
+### Agentic TTP chain
+
+`--sandbox-suite agentic` runs a deterministic Goals/Planner/Worker loop against
+DVWA and the CVE-2021-41773 fixture. It does not run the ARTEX tool and does not
+use an LLM; it reproduces the reported staged behavior with bounded, reviewed
+requests: recon, exploit selection, variant adaptation, and canary extraction.
+The DVWA chain covers UNION-based SQL injection, command injection through the
+ping page, and a PHP webshell upload behind an image content type. The CVE chain
+covers traversal to the lab canary. The direct control must extract the canary
+for every case; the protected run must not, and a non-rate-limited WAF block
+event (or the upload-inspection rejection) must corroborate the block. The first
+run found that a newline command separator bypassed `shell-metacharacters`; the
+`newline-command` rule now covers that shape. The chain is deterministic, so a
+failure is reproducible; it is not a substitute for running the real ARTEX tool
+or arbitrary agentic software. The current result is four prevented cases with
+all four direct controls extracting their canaries.
 
 ### Protocol boundaries
 
@@ -383,6 +444,9 @@ Each run prints its directory under `target/security-lab/`. It retains:
   access logs, health probes, and Kunato logs;
 - `mutations-control/` and `mutations/`: direct and protected mutation probes,
   origin logs, and Kunato logs;
+- `agentic-dvwa-control/`, `agentic-dvwa/`, `agentic-cve-control/`, and
+  `agentic-cve/`: deterministic agent steps, canary results, fixture access
+  logs, health probes, metrics, and Kunato logs;
 - `crs-control/`, `crs-kunato/`, and `crs/`: CRS-comparison direct control,
   Kunato baseline, CRS probe results, origin logs, and the ModSecurity audit;
 - `protocol-control-*/` and `protocol/`: direct and protected protocol probes,
@@ -447,9 +511,11 @@ sources, Internet link saturation, or capacity; the slow and load results are
 fixed-runner trends with explicit ceilings, not proof against a botnet. The
 authenticated ZAP baseline covers login, spider, and passive discovery; active
 scanning is not part of the passing plan, and the active injection defenses
-remain the sqlmap/Nuclei/goTestWAF sandbox suites. The mutation corpus, the protocol
-cases, and the CRS comparison are bounded to the reviewed seeds, fixtures, and
-framing interpretations. The benign corpus has one case per selected workflow
+remain the sqlmap/Nuclei/goTestWAF sandbox suites. The agentic suite is a
+deterministic emulation of a staged agentic chain; it does not run ARTEX, an LLM,
+or arbitrary agentic tools, and it covers only the reviewed variants. The mutation
+corpus, the protocol cases, and the CRS comparison are bounded to the reviewed
+seeds, fixtures, and framing interpretations. The benign corpus has one case per selected workflow
 (eight total), the availability suite covers body-read timeout, slow reads, the
 per-source and global connection caps, and upstream-response timeout, the
 connect suite covers slow upstream connection establishment, the ban suite

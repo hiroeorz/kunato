@@ -59,7 +59,7 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
-lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox protocol/HTTP2/HTTP3/WebSocket/availability/backpressure/load/restart suites
+lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox protocol/agentic/HTTP2/HTTP3/WebSocket/availability/backpressure/load/restart suites
   cases/           # Replay, ffuf discovery, and deterministic mutation cases
   fixtures/        # DVWA bootstrap, the lab-only CVE fixture, and TLS material
   templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
@@ -221,8 +221,10 @@ cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/security-lab.sh prepare             # Prepare pinned lab images and fixtures
 ./scripts/security-lab.sh run --sandbox-suite all  # Isolated WAF sandbox suites with evidence
 ./scripts/security-lab.sh run --sandbox-suite protocol  # Raw protocol and WebSocket cases
+./scripts/security-lab.sh run --sandbox-suite agentic   # Deterministic agentic TTP chain
 ./scripts/security-lab.sh run --sandbox-suite slow     # Bounded slow-HTTP availability
 ./scripts/security-lab.sh run --sandbox-suite load     # k6 mixed load with recovery
+./scripts/security-lab.sh shell                        # Persistent manual attack shell
 ./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ```

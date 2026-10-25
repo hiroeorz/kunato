@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-25; the managed set carried 493 rules then.
+2026-10-25; the managed set carried 494 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -32,7 +32,7 @@ body coverage on those routes and does not change the bundled verdicts.
 | --- | --- | --- |
 | SQL Injection | ✅ | `sql-injection`: UNION (including padded `/*...*/`, `--`, and `#` comments between UNION and SELECT, closed after the local lab bypassed a fixed 20-character gap), boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
 | NoSQL Injection | ✅ | `nosql-injection`: Mongo operators (`$where/$ne/$regex`, ...) |
-| OS Command Injection | ✅ | `command-injection`: shell metacharacters plus command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627) |
+| OS Command Injection | ✅ | `command-injection`: shell metacharacters, newline separators before command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627); the agentic chain regression found and covers the newline-separator gap |
 | JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
 | PHP Configuration Injection | ✅ | `config-injection.php-ini-directives` blocks `auto_prepend_file`/`auto_append_file` values and `allow_url_include=on` reaching php.ini (pfSense CE timezone CVE-2026-111222) |
 | LDAP Injection | ✅ | `ldap-injection`: filter breakout (`*)(`, `)(\|(`, `)(attr=`), operator chains (`\|(uid=`, `&(cn=`), wildcard attributes (`(objectClass=*`, `(userPassword=*`), and wildcard credentials on the login paths (`*` as the whole value or anywhere in a user/uid/email parameter); query/body/cookies/headers, plus and percent encodings included |
@@ -419,5 +419,5 @@ and upstream canonical XFF use the same resolved IP; connection caps remain
 transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
-changing category verdicts or the bundled 493-rule count; behavioral actions
+changing category verdicts or the bundled rule count; behavioral actions
 still default to LOG. The snapshot date is 2026-10-25.

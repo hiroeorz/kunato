@@ -129,7 +129,10 @@ only `data`. Create a short-lived runner on `back` for direct positive controls
 and destroy it before the protected phase. Fixture/database ports are never
 published. Only optional manual Kunato ports bind to VM loopback; include UDP
 for HTTP/3. Collect admin metrics from loopback inside Kunato's network
-namespace.
+namespace. The manual shell (`scripts/security-lab.sh shell --publish
+127.0.0.1:8080`) implements this exception with a bounded loopback relay for
+plain HTTP configurations; it is exploratory and produces no verdict evidence.
+See [lab/MANUAL-SHELL.md](../lab/MANUAL-SHELL.md) for the step-by-step commands.
 
 Compose's internal network is external network isolation, not a VM boundary or
 proof of host-service isolation. Preflight checks IPv4/IPv6 routes, DNS, redirects,
@@ -178,6 +181,7 @@ fallback does not count as an H2/H3 test.
 | Protection/behavior | Enable intended rate/connection/ban settings and remove matching `protection.allowlist` entries. Check thresholds, windows, recovery, and normal traffic from a separate source. The ffuf behavior phase uses an explicit enumeration `BLOCK` profile and a long-lived normal client whose address cannot reuse the banned runner. |
 | Workflow/discovery | Authenticate through the form and spider/passively scan the application with ZAP; run bounded ffuf path discovery with the same wordlist directly and through the WAF. Require receipts, status/length parity, LOG/block events, and a separate normal source. ZAP active scanning is attempted but not part of a passing plan: ZAP 2.17.0 exits at activeScan start even with a scoped context and `failOnError: false`. |
 | Mutation/reference | Run reviewed seed/transform variants (case, comments, whitespace, body formats, parameter pollution, alternative tags, dot padding, shell metacharacters, headers) with direct controls, no origin receipts on blocks, and benign near-misses. Optionally compare the same corpus through a pinned OWASP CRS proxy; report agreement as an observation, not a gate. |
+| Agentic chain | Run a deterministic Goals/Planner/Worker loop over DVWA and a CVE fixture: recon, UNION SQLi, command injection, PHP upload, and traversal, with bounded variant adaptation. The direct control must extract the canary; the protected run must not, and a non-rate-limited WAF block or upload rejection must corroborate it. This is an ARTEX-style emulation, not the real ARTEX tool or an LLM. |
 | Full configuration | Run intended rules and policies with explicit lab addresses/keys and no trusted test sources; assert complete legitimate workflows and actual rejection reasons. |
 
 `--disable-protection` does not disable YAML rule-level limits. A later ban or
@@ -361,7 +365,7 @@ load. ZAP active scanning remains deferred because ZAP 2.17.0 exits at activeSca
 
 | Cadence | Workload and gate |
 | --- | --- |
-| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, h2, h3, slow, availability, connect, backpressure, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline sandbox suites, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded sandbox suites. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
+| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, agentic, h2, h3, slow, availability, connect, backpressure, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline sandbox suites, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded sandbox suites. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
 | Daily/on demand | Existing CVE intake plus selected template/fixture smoke tests with pinned inputs. Promote confirmed findings into reviewed regressions; do not demand 100% of an unreviewed public scanner catalog. |
 | Weekly/on demand | Larger ZAP/ffuf/mutation sandbox suites and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
 | Before release | Stable regressions, representative fixture controls, protocol/availability on a fixed runner, rule compatibility, and archived evidence. |

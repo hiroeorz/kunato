@@ -958,6 +958,10 @@ categories:
         match: { regex: '(?i)&\s*(busybox|cat|ls|id|whoami|uname|hostname|pwd|env|sleep|ping|nslookup|dig|host|telnet|socat|openssl|base64|xxd|touch|echo|printf|mkdir|rm|mv|cp|chmod|chown|kill|ps|netstat|ifconfig|iptables|tar|zip|unzip|awk|sed|cut|head|tail|find|grep|dd|curl|wget|nc|ncat|netcat|bash|sh|zsh|dash|python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|php[0-9.]*|node[0-9.]*|certutil|bitsadmin|wmic|schtasks|findstr|tasklist|reg|sc|net|dir|type|cmd|powershell|pwsh)\b(?:[\s;&|<>#$"\x27\x60]|$)', in: [query, body] }
       - name: command-substitution
         match: { regex: '(?i)(\$\(|`)\s*(busybox|cat|ls|id|whoami|uname|hostname|pwd|env|sleep|ping|nslookup|dig|host|telnet|socat|base64|xxd|touch|echo|printf|mkdir|rm|mv|cp|chmod|chown|kill|awk|sed|cut|head|tail|find|grep|curl|wget|nc|ncat|netcat|bash|sh|zsh|dash|python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|php[0-9.]*|node[0-9.]*|powershell|pwsh|certutil|wmic|schtasks)\b', in: [query, body] }
+      # A newline is a command separator in POSIX shells. Require a following
+      # command binary so ordinary multiline prose is not blocked.
+      - name: newline-command
+        match: { regex: '(?i)(?:\r|\n|%0a|%0d)\s*(busybox|cat|ls|id|whoami|uname|hostname|pwd|env|sleep|ping|nslookup|dig|host|telnet|socat|openssl|base64|xxd|touch|echo|printf|mkdir|rm|mv|cp|chmod|chown|kill|ps|netstat|ifconfig|iptables|tar|zip|unzip|awk|sed|cut|head|tail|find|grep|dd|curl|wget|nc|ncat|netcat|bash|sh|zsh|dash|python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|php[0-9.]*|node[0-9.]*|certutil|bitsadmin|wmic|schtasks|findstr|tasklist|reg|sc|net|dir|type|cmd|powershell|pwsh)\b', in: [query, body] }
       # Bash brace expansion runs its first entry as a command: `{cat,/tmp/x}`.
       - name: brace-expansion-command
         match: { regex: '(?i)(;|\||&&|\|\||&\s+|\$\(|`)\s*\{\s*(cat|ls|id|whoami|uname|sleep|ping|echo|touch|base64|bash|sh|nc|ncat|netcat|curl|wget)\s*,', in: [query, body] }

@@ -66,6 +66,21 @@ cannot change its input. The origin, Kunato, and every tool container are
 removed afterwards, including on ordinary failure; `cleanup.json` records that
 no project containers, networks, or volumes remain.
 
+### Manual shell
+
+`scripts/security-lab.sh shell` reuses the same prepared input snapshot and
+Compose project to keep one configuration and fixture running for interactive
+tools. It runs no direct control, writes no case verdicts or `report.json`, and
+is not evidence for a security claim. The shell container joins only `front`
+and runs unprivileged with a read-only root filesystem. `--publish` starts a
+bounded loopback relay from the controller to the Kunato container's `front`
+address; this is the only host exposure, because Docker does not publish ports
+from an `internal` network. Fixture and database ports remain unpublished.
+Container logs, metrics, the manual attempt record, and `cleanup.json` are
+retained in the run directory. Promote a finding to `lab/cases/` or the
+black-box corpus before using it as a regression. See
+[lab/MANUAL-SHELL.md](../lab/MANUAL-SHELL.md) for the step-by-step commands.
+
 ## Verdict model
 
 ```text
@@ -107,6 +122,22 @@ UNION probes with benign counterparts and legitimate 302/401/404 responses. The
 format, parameter pollution, tag, padding, shell-metacharacter, and header-value
 variants. Each case is sent directly to the origin and then through Kunato; the
 origin proves receipt, method, target, body hash, and nonce.
+
+### Agentic TTP chain
+
+The `agentic` suite runs a deterministic Goals/Planner/Worker loop over DVWA and
+the CVE-2021-41773 fixture. It does not run the ARTEX tool or an LLM; it models
+the reported staged behavior with reviewed requests: recon, exploit selection,
+bounded variant adaptation, and canary extraction. DVWA cases cover UNION SQL
+injection, command injection through the ping page, and a PHP webshell upload
+behind an image content type. The CVE case covers traversal to the lab canary.
+The direct control must extract the canary for each exploit; the protected run
+must not, and a non-rate-limited WAF block event or the upload-inspection
+rejection must corroborate the block. The suite keeps the first-run finding: a
+newline command separator bypassed `shell-metacharacters`, so the
+`newline-command` rule now covers that shape. The chain is deterministic and
+reproducible; it is not a substitute for running the real ARTEX tool or
+arbitrary agentic software.
 
 ### Benign workflows
 
@@ -282,24 +313,24 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The last `all` run, `20261025T165257-9c5d5c20`, passed 19 sandbox suites:
-  replay, benign, mutations, protocol, slow, availability, connect, h2, h3,
-  backpressure, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf,
-  and ZAP. The mixed load recorded 3000 requests, p95 49.2 ms, p99 53.4 ms,
-  100% success, normal/recovery `200`, RSS 22.2 MiB of 256 MiB, no restart, and
-  matching metrics. The availability suite recorded a slow-body `408`,
-  slow-read `200`, per-source and global connection caps at `503` with 32 active
-  connections, upstream `504`, and 23.7 MiB RSS. The connect suite recorded
-  `502` and one upstream connect error. The backpressure suite allowed 20 of
-  100 requests and shed 80 with `429`/`503` (62 rate-limited, 18 overloaded),
-  then recovered to normal `200`. The h2 suite passed its normal, Rapid Reset,
-  CONTINUATION, and HPACK cases; the h3 suite passed normal, malformed-stream,
-  and reset-stream cases; both kept a fresh normal connection after each attack.
-  The restart suite recorded exit code 0, a 519 ms shutdown, 501 requests, a
-  98.0% check rate, and `200` recovery. The ban suite recorded a `429` ban and
-  `200` recovery; the websocket suite recorded PONG, the fragmented echo, the
-  close handshake, a `1008` payload block, the benign payload echo, a `1008`
-  server-push block, and the benign push.
+- The latest full `all` run, `20261025T235922-806f4461`, passed 20 sandbox
+  suites: replay, benign, mutations, protocol, agentic, slow, availability,
+  connect, h2, h3, backpressure, ban, websocket, load, restart, goTestWAF,
+  sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001 requests,
+  p95 46.3 ms, p99 49.2 ms, 100% success, normal/recovery `200`, RSS 21.9 MiB
+  of 256 MiB, no restart, and matching metrics. The availability suite recorded
+  a slow-body `408`, slow-read `200`, per-source and global connection caps at
+  `503` with 32 active connections, upstream `504`, and 23.2 MiB RSS. The
+  connect suite recorded `502` and one upstream connect error. The backpressure
+  suite allowed 20 of 100 requests and shed 80 with `429`/`503` (63
+  rate-limited, 17 overloaded), then recovered to normal `200`. The h2 and h3
+  suites passed their normal and resource-attack cases. The restart suite
+  recorded exit code 0, a 426 ms shutdown, 501 requests, a 98.4% check rate, and
+  `200` recovery. The ban suite recorded a `429` ban and `200` recovery; the
+  websocket suite passed all 10 cases. The agentic suite prevented all four
+  cases, and its direct controls extracted the SQLi, upload, exec, and traversal
+  canaries. The first agentic run found a newline command separator that
+  bypassed `shell-metacharacters`; the `newline-command` rule now covers it.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in

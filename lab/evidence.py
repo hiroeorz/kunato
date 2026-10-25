@@ -148,6 +148,119 @@ def judge_mutations(cases, controls, results, origin, waf_events, nonce):
     return result
 
 
+AGENTIC_FIXTURES = {
+    "dvwa": {"sqli", "exec", "upload"},
+    "cve": {"traversal"},
+}
+AGENTIC_REQUIRED = {("dvwa", "sqli"), ("dvwa", "exec"), ("dvwa", "upload"),
+                    ("cve", "traversal")}
+AGENTIC_CATEGORIES = {
+    "sqli": {"sql-injection"},
+    "exec": {"command-injection"},
+    "upload": {"upload", "file-upload"},
+    "traversal": {"path-traversal"},
+}
+AGENTIC_RULES = {
+    "sqli": {"union-select"},
+    "exec": {"shell-metacharacters"},
+    "upload": set(),
+    "traversal": {"dot-dot-slash"},
+}
+
+
+def validate_agentic(cases):
+    ids = [case["id"] for case in cases]
+    if not cases or len(ids) != len(set(ids)):
+        raise ValueError("Agentic cases must be nonempty with unique IDs")
+    pairs = set()
+    for case in cases:
+        fixture = case.get("fixture")
+        exploit = case.get("exploit")
+        if fixture not in AGENTIC_FIXTURES:
+            raise ValueError("Invalid agentic fixture")
+        if exploit not in AGENTIC_FIXTURES[fixture]:
+            raise ValueError("Invalid agentic exploit for the fixture")
+        if case.get("expect") != "block":
+            raise ValueError("Agentic cases must expect a block")
+        if not isinstance(case.get("description"), str) or not case["description"].strip():
+            raise ValueError("Agentic case lacks a description")
+        pairs.add((fixture, exploit))
+    if pairs != AGENTIC_REQUIRED:
+        raise ValueError("Agentic cases must cover the reviewed TTP chain")
+
+
+def _agentic_exploit(result, exploit):
+    if not isinstance(result, dict):
+        return {}
+    return (result.get("exploits") or {}).get(exploit) or {}
+
+
+def _agentic_blocks(waf_events, exploit, paths):
+    categories = AGENTIC_CATEGORIES.get(exploit, set())
+    rules = AGENTIC_RULES.get(exploit, set())
+    matched = []
+    fallback = []
+    for event in waf_events:
+        fields = event.get("fields", {})
+        message = fields.get("message")
+        path = str(fields.get("path", ""))
+        path_match = any(path == prefix or path.startswith(prefix) for prefix in paths)
+        if message == "request blocked":
+            if fields.get("rate_limited"):
+                continue
+            if path_match:
+                matched.append(fields)
+            elif fields.get("category") in categories or fields.get("rule") in rules:
+                fallback.append(fields)
+        elif message in {"upload content rejected", "form request rejected"} and path_match:
+            matched.append(fields)
+    return matched or fallback
+
+
+def judge_agentic(cases, control_dvwa, protected_dvwa, control_cve, protected_cve,
+                  waf_dvwa, waf_cve):
+    """Judge the deterministic agentic chain with direct-control validation."""
+    validate_agentic(cases)
+    controls = {"dvwa": control_dvwa, "cve": control_cve}
+    protected = {"dvwa": protected_dvwa, "cve": protected_cve}
+    waf = {"dvwa": waf_dvwa, "cve": waf_cve}
+    verdicts = []
+    for case in cases:
+        fixture = case["fixture"]
+        exploit = case["exploit"]
+        control = _agentic_exploit(controls[fixture], exploit)
+        result = _agentic_exploit(protected[fixture], exploit)
+        blocks = _agentic_blocks(waf[fixture], exploit, result.get("paths") or [])
+        if not control.get("success"):
+            verdict = "inconclusive"
+        elif result.get("success"):
+            verdict = "gap"
+        elif result.get("blocked") and blocks:
+            verdict = "prevented"
+        else:
+            verdict = "inconclusive"
+        verdicts.append({
+            "id": case["id"], "expect": case["expect"], "verdict": verdict,
+            "status": result.get("status"), "origin_receipts": 0,
+            "rules": [{"category": block.get("category"), "rule": block.get("rule"),
+                       "message": block.get("message")} for block in blocks],
+            "attempts": result.get("attempts", 0),
+            "control_attempts": control.get("attempts", 0),
+            "canary": bool(result.get("success")),
+        })
+    judged = summarize(verdicts)
+    judged["notes"] = {
+        "planned": len(cases),
+        "fixtures": sorted({case["fixture"] for case in cases}),
+        "control_success": {
+            fixture: {exploit: bool(_agentic_exploit(controls[fixture], exploit).get("success"))
+                      for exploit in sorted(AGENTIC_FIXTURES[fixture])}
+            for fixture in sorted(AGENTIC_FIXTURES)
+        },
+    }
+    return judged
+
+
 PROTOCOL_BLOCK_STATUSES = {400, 403, 431, 501}
 
 

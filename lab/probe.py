@@ -627,7 +627,8 @@ def main():
     parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
                                           "slow-read", "exhaustion", "hold", "connect",
                                           "upstream", "ban", "ws-lifecycle", "ws-payload",
-                                          "ws-push", "h2", "burst", "isolation", "metrics"])
+                                          "ws-push", "h2", "burst", "isolation", "metrics",
+                                          "agentic"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -642,6 +643,8 @@ def main():
     parser.add_argument("--hold", type=float, default=2.0)
     parser.add_argument("--h2-case", default="normal")
     parser.add_argument("--case-id")
+    parser.add_argument("--fixture", choices=["dvwa", "cve"], default="dvwa")
+    parser.add_argument("--canary")
     args = parser.parse_args()
     if args.mode == "cases":
         for case in json.loads(Path(args.cases).read_text()):
@@ -705,6 +708,11 @@ def main():
         result = burst(args.requests, args.host, args.port)
         print(json.dumps(result))
         return 0
+    elif args.mode == "agentic":
+        from agentic import run_agent
+        result = run_agent(args.fixture, args.host, args.port, args.canary or "")
+        print(json.dumps(result))
+        return int("error" in result)
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},
                          args.host, args.port)

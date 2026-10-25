@@ -6,29 +6,49 @@ import json
 import os
 import re
 import shutil
+import signal
+import socket
+import socketserver
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import urllib.request
 import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
-                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
+from evidence import (USER_AGENT, judge_agentic, judge_availability, judge_ban_recovery,
+                      judge_connect, judge_crs, judge_ffuf, judge_ffuf_behavior,
+                      judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_mutations, judge_load, judge_nuclei, judge_protocol,
                       judge_replay, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
                       origin_response, read_jsonl, summarize,
-                      validate_cases, validate_ffuf_cases, validate_mutations,
-                      validate_protocol, verify_origin)
+                      validate_agentic, validate_cases, validate_ffuf_cases,
+                      validate_mutations, validate_protocol, verify_origin)
 
 ROOT = Path(__file__).resolve().parent.parent
 LAB = ROOT / "lab"
 WORK = ROOT / "target/security-lab"
 PREPARED = WORK / "prepared"
 COMMAND_JOURNAL = None
+
+MANUAL_CONFIGS = {
+    "rules-origin.yaml": {"fixture": "origin", "logs": ("origin", "kunato")},
+    "rules-dvwa.yaml": {"fixture": "dvwa", "logs": ("db", "dvwa", "kunato")},
+    "rules-cve.yaml": {"fixture": "cve", "logs": ("cve", "kunato")},
+    "rules-ffuf.yaml": {"fixture": "dvwa", "logs": ("db", "dvwa", "kunato")},
+    "rules-ban.yaml": {"fixture": "origin", "logs": ("origin", "kunato")},
+    "rules-backpressure.yaml": {"fixture": "origin", "logs": ("origin", "kunato")},
+    "rules-availability.yaml": {"fixture": "origin", "logs": ("origin", "kunato")},
+    "rules-connect.yaml": {"fixture": "none", "logs": ("kunato",)},
+}
+MANUAL_PROTECTED_CONFIGS = {"rules-ffuf.yaml", "rules-ban.yaml",
+                            "rules-backpressure.yaml", "rules-availability.yaml"}
+MANUAL_TOOLS = {"python": "python", "sqlmap": "sqlmap",
+                "nuclei": "nuclei", "ffuf": "python"}
 
 FFUF_PROTECTION = """protection:
   enabled: true
@@ -136,6 +156,94 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def parse_manual_publish(value):
+    host, separator, port = value.rpartition(":")
+    if not separator:
+        host, port = "127.0.0.1", value
+    if host in ("", "localhost"):
+        host = "127.0.0.1"
+    if host != "127.0.0.1":
+        raise ValueError("--publish must bind the manual Kunato listener to 127.0.0.1")
+    try:
+        port = int(port)
+    except ValueError as error:
+        raise ValueError("--publish must be [127.0.0.1:]PORT") from error
+    if not 1 <= port <= 65535:
+        raise ValueError("--publish port must be between 1 and 65535")
+    return host, port
+
+
+def manual_listen_port(config_path):
+    match = re.search(r"(?m)^listen:\s*0\.0\.0\.0:(\d+)\s*$", Path(config_path).read_text())
+    if not match:
+        raise ValueError(f"Cannot find the Kunato listener in {config_path}")
+    port = int(match.group(1))
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Kunato listener port is out of range in {config_path}")
+    return port
+
+
+class ManualForwarder(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 16
+
+    def __init__(self, server_address, handler, *, limit=32):
+        self.limit = threading.BoundedSemaphore(limit)
+        super().__init__(server_address, handler)
+
+    def process_request(self, request, client_address):
+        if not self.limit.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.limit.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.limit.release()
+
+
+class ManualForwarderHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        upstream = socket.create_connection(self.server.target, timeout=5)
+        try:
+            self.request.settimeout(None)
+            upstream.settimeout(None)
+            threads = [threading.Thread(target=self._pipe,
+                                        args=(self.request, upstream)),
+                       threading.Thread(target=self._pipe,
+                                        args=(upstream, self.request))]
+            for thread in threads:
+                thread.daemon = True
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            upstream.close()
+
+    @staticmethod
+    def _pipe(source, sink):
+        try:
+            while True:
+                data = source.recv(65536)
+                if not data:
+                    break
+                sink.sendall(data)
+        except OSError:
+            pass
+        finally:
+            try:
+                sink.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+
 def sha256(path):
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
@@ -169,6 +277,7 @@ def command(args, *, env=None, timeout=60, check=True, log=None, quiet=False):
     if not quiet:
         print("+ " + " ".join(str(arg) for arg in args), flush=True)
     result = subprocess.run([str(arg) for arg in args], cwd=ROOT, env=env,
+                            stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, timeout=timeout, check=False)
     if COMMAND_JOURNAL and not quiet:
@@ -180,6 +289,20 @@ def command(args, *, env=None, timeout=60, check=True, log=None, quiet=False):
     if check and result.returncode:
         raise RuntimeError(f"Command exited {result.returncode}: {args}\n{result.stderr[-4000:]}\n{result.stdout[-2000:]}")
     return result
+
+
+def interactive_command(args):
+    print("+ " + " ".join(str(arg) for arg in args), flush=True)
+    result = subprocess.run([str(arg) for arg in args], cwd=ROOT, check=False)
+    if COMMAND_JOURNAL:
+        with COMMAND_JOURNAL.open("a") as journal:
+            journal.write(json.dumps({"argv": [str(arg) for arg in args],
+                                      "exit_code": result.returncode}) + "\n")
+    return result
+
+
+def manual_terminate(signum, frame):
+    raise KeyboardInterrupt
 
 
 def prepare():
@@ -352,6 +475,9 @@ class SandboxSuite:
     def compose(self, *args, **kwargs):
         return command([*self.base, *args], env=self.env, **kwargs)
 
+    def front_network(self):
+        return f"{self.project}_front"
+
     def probe(self, service, mode, log=None, check=True, extra=()):
         result = self.compose("run", "--rm", "--no-deps", "-T", service, mode, *extra,
                               check=check, log=log)
@@ -453,6 +579,20 @@ class SandboxSuite:
         write_json(self.run_dir / "isolation.json", isolation)
         if not isolation.get("isolation_ok"):
             raise ValueError("Network isolation preflight failed")
+
+    def manual_preflight(self):
+        rendered = json.loads(self.compose("config", "--format", "json").stdout)
+        for network in rendered["networks"].values():
+            if not network.get("internal"):
+                raise ValueError("Lab network has external connectivity")
+            actual = command(["docker", "network", "inspect", network["name"]], check=False)
+            if actual.returncode == 0 and not json.loads(actual.stdout)[0]["Internal"]:
+                raise ValueError("Live Docker network is not internal")
+        for service_config in rendered["services"].values():
+            if (service_config.get("ports") or service_config.get("privileged")
+                    or service_config.get("network_mode")):
+                raise ValueError("Lab services cannot publish ports or use privileged/host networking")
+        write_json(self.run_dir / "manual-compose.json", rendered)
 
     def healthy(self, phase, *, path="/health", status=200, nonce=None, body=None,
                 service="client", exec=False):
@@ -560,6 +700,51 @@ class SandboxSuite:
         origin, _ = self.logs("protocol")
         return judge_protocol(cases, controls, results, direct_origins, origin,
                               direct_nonces, nonce)
+
+    def agentic(self):
+        cases = json.loads((self.input / "lab/cases/agentic.json").read_text())
+        validate_agentic(cases)
+        control_dvwa_dir = self.run_dir / "agentic-dvwa-control"
+        control_nonce = self.reset_dvwa("agentic-dvwa-control")
+        self.seed_dvwa_canary(control_nonce)
+        self.preflight("dvwa", ("db",))
+        control_dvwa = self.probe("control", "agentic",
+                                  extra=("--fixture", "dvwa", "--host", "dvwa",
+                                         "--port", "80", "--canary", control_nonce),
+                                  log=control_dvwa_dir / "probes.jsonl")
+        write_json(control_dvwa_dir / "agentic.json", control_dvwa)
+        nonce = self.reset_dvwa("agentic-dvwa")
+        self.seed_dvwa_canary(nonce)
+        self.preflight("dvwa", ("db",))
+        self.compose("up", "-d", "normal")
+        protected_dvwa = self.probe("client", "agentic",
+                                    extra=("--fixture", "dvwa", "--canary", nonce),
+                                    log=self.run_dir / "agentic-dvwa/probes.jsonl")
+        write_json(self.run_dir / "agentic-dvwa/agentic.json", protected_dvwa)
+        self.healthy("agentic-dvwa", path="/index.php", service="normal", exec=True)
+        self.raw_logs("agentic-dvwa", "dvwa")
+        _, waf_dvwa = self.logs("agentic-dvwa")
+
+        control_cve_dir = self.run_dir / "agentic-cve-control"
+        control_cve_nonce = self.reset_cve("agentic-cve-control")
+        self.preflight("cve")
+        control_cve = self.probe("control", "agentic",
+                                 extra=("--fixture", "cve", "--host", "cve",
+                                        "--port", "80", "--canary", control_cve_nonce),
+                                 log=control_cve_dir / "probes.jsonl")
+        write_json(control_cve_dir / "agentic.json", control_cve)
+        cve_nonce = self.reset_cve("agentic-cve")
+        self.preflight("cve")
+        self.compose("up", "-d", "normal")
+        protected_cve = self.probe("client", "agentic",
+                                   extra=("--fixture", "cve", "--canary", cve_nonce),
+                                   log=self.run_dir / "agentic-cve/probes.jsonl")
+        write_json(self.run_dir / "agentic-cve/agentic.json", protected_cve)
+        self.healthy("agentic-cve", path="/", service="normal", exec=True)
+        self.raw_logs("agentic-cve", "cve")
+        _, waf_cve = self.logs("agentic-cve")
+        return judge_agentic(cases, control_dvwa, protected_dvwa,
+                             control_cve, protected_cve, waf_dvwa, waf_cve)
 
     def stats(self):
         container = self.compose("ps", "-q", "kunato").stdout.strip()
@@ -934,6 +1119,17 @@ class SandboxSuite:
         write_json(directory / "attempt.json", {"nonce": nonce})
         return nonce
 
+    def seed_dvwa_canary(self, nonce):
+        value = f"CANARY-{nonce}"
+        self.compose("exec", "-T", "-u", "0", "dvwa", "sh", "-c",
+                     f"printf '%s' '{value}' > /tmp/kunato-lab-agentic-canary "
+                     "&& chmod 0644 /tmp/kunato-lab-agentic-canary")
+        check = self.compose("exec", "-T", "dvwa", "cat",
+                             "/tmp/kunato-lab-agentic-canary")
+        if check.stdout.strip() != value:
+            raise ValueError("DVWA file canary was not seeded")
+        return value
+
     def sqlmap(self):
         self.compose("stop", "origin", check=False)
         control_nonce = self.reset_dvwa("sqlmap-control")
@@ -962,12 +1158,12 @@ class SandboxSuite:
                 "--dump", "-T", "lab_canary", "--flush-session", "--disable-coloring",
                 "--user-agent", USER_AGENT, "--output-dir=/tmp/sqlmap"]
 
-    def reset_cve(self, phase):
+    def reset_cve(self, phase, *, disable_protection=True):
         self.compose("rm", "-s", "-f", "-v", "db", "dvwa", check=False)
         self.compose("rm", "-s", "-f", "cve", check=False)
         nonce = uuid.uuid4().hex
         self.env["LAB_NONCE"] = nonce
-        self.env["LAB_DISABLE_PROTECTION"] = "1"
+        self.env["LAB_DISABLE_PROTECTION"] = "1" if disable_protection else "0"
         self.compose("up", "-d", "--force-recreate", "cve")
         directory = self.run_dir / phase
         directory.mkdir(exist_ok=True)
@@ -978,6 +1174,80 @@ class SandboxSuite:
         self.wait_health(phase, "client", ("--path", "/", "--status", "200"))
         write_json(directory / "attempt.json", {"nonce": nonce})
         return nonce
+
+    def manual_up(self, config, *, disable_protection, dvwa_auth=False):
+        fixture = MANUAL_CONFIGS[config]["fixture"]
+        if fixture == "dvwa":
+            return self.reset_dvwa("manual", config=config,
+                                   disable_protection=disable_protection,
+                                   auth_disabled=not dvwa_auth)
+        if fixture == "cve":
+            return self.reset_cve("manual", disable_protection=disable_protection)
+        if fixture == "origin":
+            return self.reset_origin("manual", config=config,
+                                     disable_protection=disable_protection)
+        if config == "rules-connect.yaml":
+            self.env["LAB_CONFIG"] = config
+            self.env["LAB_DISABLE_PROTECTION"] = "1" if disable_protection else "0"
+            self.compose("up", "-d", "--force-recreate", "--pull", "never", "kunato")
+            self.wait_tcp()
+            return None
+        raise ValueError(f"Unsupported manual configuration: {config}")
+
+    def container_ip(self, service, network):
+        container_id = self.compose("ps", "-q", service).stdout.strip()
+        if not container_id:
+            raise ValueError(f"Manual fixture {service} is not running")
+        container = json.loads(command(["docker", "inspect", container_id]).stdout)[0]
+        for name, settings in container["NetworkSettings"]["Networks"].items():
+            if name == network and settings.get("IPAddress"):
+                return settings["IPAddress"]
+        raise ValueError(f"Manual fixture {service} has no address on {network}")
+
+    def manual_forwarder(self, host_port, container_port):
+        server = ManualForwarder(("127.0.0.1", host_port), ManualForwarderHandler)
+        server.target = (self.container_ip("kunato", self.front_network()), container_port)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def manual_shell_command(self, tool, *, target_port=8080, canary=None):
+        args = ["docker", "run", "--rm", "-i"]
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            args.append("-t")
+        args += ["--name", f"{self.project}-shell",
+                 "--network", self.front_network(),
+                 "--user", "65532:65532", "--read-only",
+                 "--cap-drop", "ALL",
+                 "--security-opt", "no-new-privileges:true",
+                 "--init",
+                 "--pids-limit", "64", "--memory", "256m",
+                 "--memory-swap", "256m", "--cpus", "1",
+                 "--tmpfs", "/tmp:size=67108864,mode=1777",
+                 "-e", "HOME=/tmp",
+                 "-e", f"LAB_TARGET=http://app.test:{target_port}",
+                 "-w", "/tmp",
+                 "-v", f"{self.input / 'lab'}:/lab:ro"]
+        if canary:
+            args += ["-e", f"LAB_CANARY={canary}"]
+        if tool == "ffuf":
+            args += ["-v", f"{self.input / 'ffuf'}:/usr/local/bin/ffuf:ro"]
+        args += ["--entrypoint", "sh",
+                 self.manifest["images"][MANUAL_TOOLS[tool]]["id"]]
+        return args
+
+    def manual_evidence(self, config):
+        directory = self.run_dir / "manual"
+        directory.mkdir(parents=True, exist_ok=True)
+        for service in MANUAL_CONFIGS[config]["logs"]:
+            self.compose("logs", "--no-color", "--no-log-prefix", service,
+                         check=False, log=directory / f"{service}.log")
+        self.compose("ps", "--all", "--format", "json", check=False,
+                     log=directory / "containers.json")
+        metrics = self.compose("exec", "-T", "kunato", "python3", "-B",
+                               "/lab/probe.py", "metrics", check=False)
+        if metrics.returncode == 0:
+            (directory / "metrics.json").write_text(metrics.stdout)
+        return directory
 
     @staticmethod
     def nuclei_args(target, nonce):
@@ -1312,6 +1582,7 @@ def new_run(suite):
     validate_mutations(mutation_cases)
     protocol_cases = json.loads((LAB / "cases/protocol.json").read_text())
     validate_protocol(protocol_cases)
+    validate_agentic(json.loads((LAB / "cases/agentic.json").read_text()))
     plans = input_dir / "lab/plans"
     plans.mkdir(exist_ok=True)
     write_gotestwaf_cases(plans / "gotestwaf", cases)
@@ -1357,6 +1628,8 @@ def run(suite):
             report["suites"]["mutations"] = lab.mutations()
         if suite in {"protocol", "all"}:
             report["suites"]["protocol"] = lab.protocol()
+        if suite in {"agentic", "all"}:
+            report["suites"]["agentic"] = lab.agentic()
         if suite in {"slow", "all"}:
             report["suites"]["slow"] = lab.slow()
         if suite in {"availability", "all"}:
@@ -1412,6 +1685,132 @@ def run(suite):
     return int(not report["passed"])
 
 
+def print_manual_banner(lab, config, *, disable_protection, tool, published,
+                        container_port, nonce, interactive):
+    fixture = MANUAL_CONFIGS[config]["fixture"]
+    health_path = {"origin": "/health",
+                   "dvwa": "/vulnerabilities/sqli/?id=1&Submit=Submit",
+                   "cve": "/", "none": "/health"}[fixture]
+    print("Manual lab ready", flush=True)
+    print(f"  run:        {lab.run_dir}", flush=True)
+    print(f"  config:     {config}", flush=True)
+    print(f"  protection: {'disabled' if disable_protection else 'enabled'}", flush=True)
+    print(f"  network:    {lab.front_network()}", flush=True)
+    print(f"  target:     http://app.test:{container_port}", flush=True)
+    if published:
+        print(f"  published:  {published} (loopback only)", flush=True)
+        print(f"  host:       curl -H 'Host: app.test' {published}{health_path}",
+              flush=True)
+    print(f"  evidence:   {lab.run_dir / 'manual'}", flush=True)
+    if config == "rules-connect.yaml":
+        print("  upstream:   blackhole; requests return 502 after the connect timeout",
+              flush=True)
+    if config == "rules-cve.yaml" and nonce:
+        print(f"  canary:     kunato-lab-canary-{nonce}", flush=True)
+    if tool == "python":
+        print(f"  example:    python3 -c \"import urllib.request; "
+              f"print(urllib.request.urlopen('$LAB_TARGET{health_path}')"
+              f".read().decode())\"", flush=True)
+    elif tool == "sqlmap":
+        print(f"  example:    python3 /sqlmap/sqlmap.py -u "
+              f"\"$LAB_TARGET{health_path}\" --batch", flush=True)
+        if fixture != "dvwa":
+            print("  note:       use --config rules-dvwa.yaml for the SQLi fixture",
+                  flush=True)
+    elif tool == "nuclei":
+        print("  example:    nuclei -u \"$LAB_TARGET\" "
+              "-t /lab/templates/cve-2021-41773-canary.yaml -duc -ni", flush=True)
+        if config == "rules-cve.yaml" and nonce:
+            print("              -var canary=\"$LAB_CANARY\" "
+                  f"-var \"user_agent={USER_AGENT}\"", flush=True)
+        elif fixture != "cve":
+            print("  note:       use --config rules-cve.yaml for the canary fixture",
+                  flush=True)
+    elif tool == "ffuf":
+        print("  example:    ffuf -u \"$LAB_TARGET/FUZZ\" "
+              "-w /lab/plans/ffuf-paths.txt "
+              f"-H \"User-Agent: {USER_AGENT}\" -mc all", flush=True)
+    print("  stop:       exit the shell" if interactive else "  stop:       press Ctrl-C",
+          flush=True)
+
+
+def manual_shell(args):
+    global COMMAND_JOURNAL
+    config = args.config
+    if config not in MANUAL_CONFIGS:
+        raise ValueError(f"Unsupported manual configuration: {config}")
+    if args.dvwa_auth and MANUAL_CONFIGS[config]["fixture"] != "dvwa":
+        raise ValueError("--dvwa-auth requires rules-dvwa.yaml or rules-ffuf.yaml")
+    disable_protection = (config not in MANUAL_PROTECTED_CONFIGS
+                          if args.protection is None else not args.protection)
+    publish = parse_manual_publish(args.publish) if args.publish else None
+    directory = new_run("manual")
+    COMMAND_JOURNAL = directory / "commands.jsonl"
+    container_port = manual_listen_port(directory / "input" / "config" / config)
+    published = None
+    forwarder = None
+    lab = SandboxSuite(directory)
+    signal.signal(signal.SIGTERM, manual_terminate)
+    status = 0
+    try:
+        nonce = lab.manual_up(config, disable_protection=disable_protection,
+                              dvwa_auth=args.dvwa_auth)
+        lab.manual_preflight()
+        if publish:
+            host, host_port = publish
+            forwarder = lab.manual_forwarder(host_port, container_port)
+            published = f"http://{host}:{host_port}"
+        (directory / "manual").mkdir(exist_ok=True)
+        write_json(directory / "manual" / "summary.json",
+                   {"run_id": directory.name, "mode": "manual", "config": config,
+                    "protection": not disable_protection, "tool": args.tool,
+                    "published": published,
+                    "target": f"http://app.test:{container_port}",
+                    "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+        print_manual_banner(lab, config, disable_protection=disable_protection,
+                            tool=args.tool, published=published,
+                            container_port=container_port, nonce=nonce,
+                            interactive=not args.no_shell)
+        if args.no_shell:
+            while True:
+                time.sleep(3600)
+        else:
+            canary = (f"kunato-lab-canary-{nonce}"
+                      if config == "rules-cve.yaml" and nonce else None)
+            result = interactive_command(
+                lab.manual_shell_command(args.tool, target_port=container_port,
+                                         canary=canary))
+            if result.returncode:
+                print(f"security-lab: manual shell exited {result.returncode}",
+                      file=sys.stderr)
+                status = 1
+    except KeyboardInterrupt:
+        print("\nStopping the manual lab.", flush=True)
+    finally:
+        if forwarder is not None:
+            try:
+                forwarder.shutdown()
+                forwarder.server_close()
+            except OSError as error:
+                print(f"security-lab: manual relay shutdown failed: {error}",
+                      file=sys.stderr)
+                status = 1
+        command(["docker", "rm", "-f", f"{lab.project}-shell"], check=False, quiet=True)
+        try:
+            lab.manual_evidence(config)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"security-lab: manual evidence collection failed: {error}",
+                  file=sys.stderr)
+            status = 1
+        try:
+            lab.cleanup()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"security-lab: cleanup failed: {error}", file=sys.stderr)
+            status = 1
+        print(f"Manual evidence: {directory}", flush=True)
+    return status
+
+
 def render_report(directory):
     report = json.loads((directory / "report.json").read_text())
     lines = ["# Local security lab report", "", f"Run: `{report['run_id']}`", "",
@@ -1442,11 +1841,28 @@ def main():
     subs.add_parser("verify", help="Check prepared inputs without downloads")
     runner = subs.add_parser("run", help="Run the isolated regression sandbox suites")
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
-                        choices=["replay", "benign", "mutations", "protocol", "gotestwaf",
-                                 "sqlmap", "nuclei", "ffuf", "zap", "crs", "slow",
-                                 "availability", "connect", "h2", "h3", "backpressure",
-                                 "ban", "websocket", "load", "restart", "all"],
+                        choices=["replay", "benign", "mutations", "protocol", "agentic",
+                                 "gotestwaf", "sqlmap", "nuclei", "ffuf", "zap", "crs",
+                                 "slow", "availability", "connect", "h2", "h3",
+                                 "backpressure", "ban", "websocket", "load", "restart",
+                                 "all"],
                         default="replay")
+    shell = subs.add_parser("shell", aliases=["manual"],
+                            help="Start a persistent manual lab and attack shell")
+    shell.add_argument("--config", choices=sorted(MANUAL_CONFIGS),
+                       default="rules-origin.yaml")
+    shell.add_argument("--tool", choices=sorted(MANUAL_TOOLS), default="python")
+    shell.add_argument("--publish", metavar="[127.0.0.1:]PORT",
+                       help="Expose Kunato through a loopback relay for host tools")
+    shell.add_argument("--no-shell", action="store_true",
+                       help="Keep the lab running without opening a shell")
+    shell.add_argument("--dvwa-auth", action="store_true",
+                       help="Enable the seeded DVWA login")
+    protection = shell.add_mutually_exclusive_group()
+    protection.add_argument("--protection", dest="protection", action="store_true",
+                            default=None, help="Force protection on")
+    protection.add_argument("--no-protection", dest="protection", action="store_false",
+                            help="Force protection off")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)
         sub.add_argument("run_directory", type=Path)
@@ -1459,6 +1875,8 @@ def main():
             print("Prepared inputs verified")
         elif args.operation == "run":
             return run(args.suite)
+        elif args.operation in {"shell", "manual"}:
+            return manual_shell(args)
         else:
             directory = args.run_directory.resolve()
             if directory.parent != WORK or not re.fullmatch(r"[0-9]{8}T[0-9]{6}-[a-f0-9]{8}", directory.name):
