@@ -57,9 +57,9 @@ src/
   protection/      # DoS / DDoS detection, rate limiting, bans, behavioral signals
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)
-lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox protocol/availability/load/restart suites
+lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox protocol/HTTP2/HTTP3/WebSocket/availability/backpressure/load/restart suites
   cases/           # Replay, ffuf discovery, and deterministic mutation cases
-  fixtures/        # DVWA bootstrap and the lab-only CVE fixture
+  fixtures/        # DVWA bootstrap, the lab-only CVE fixture, and TLS material
   templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
   tool-runner-*.sh # Bounded wrappers for detached lab scanners
 dist/
@@ -67,6 +67,7 @@ dist/
   rules.yaml.sha256
 examples/
   upstream.rs      # Manual test upstream with access logs
+  h3probe.rs       # HTTP/3 lab probe built by prepare
 scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box and lab runners
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/

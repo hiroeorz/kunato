@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
-                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2,
+                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_mutations, judge_load, judge_nuclei, judge_protocol,
                       judge_replay, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
@@ -80,7 +80,7 @@ CONNECT_TIMEOUTS = """timeouts:
 AVAILABILITY_PROTECTION = """protection:
   enabled: true
   max_connections_per_ip: 8
-  max_connections: 16
+  max_connections: 32
   requests_per_second: 1000
   burst: 1000
   global_requests_per_second: 10000
@@ -113,6 +113,24 @@ BAN_PROTECTION = """protection:
     enabled: false
 """
 
+BACKPRESSURE_PROTECTION = """protection:
+  enabled: true
+  max_connections_per_ip: 64
+  max_connections: 256
+  requests_per_second: 20
+  burst: 20
+  global_requests_per_second: 20
+  max_tracked_ips: 100
+  aggregate_ipv6_prefix: 64
+  ban:
+    violations: 1000
+    window: 60s
+    duration: 1s
+    max_duration: 1s
+  behavior:
+    enabled: false
+"""
+
 
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
@@ -133,7 +151,8 @@ def tree_hash(directory):
 
 def source_hash():
     digest = hashlib.sha256()
-    for path in sorted([ROOT / "Cargo.toml", ROOT / "Cargo.lock", *ROOT.glob("src/**/*.rs")]):
+    for path in sorted([ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "examples/h3probe.rs",
+                            *ROOT.glob("src/**/*.rs")]):
         digest.update(str(path.relative_to(ROOT)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -223,12 +242,16 @@ def prepare():
     }}
     source_before = source_hash()
     command(["cargo", "build", "--release", "--locked"], timeout=900)
+    command(["cargo", "build", "--release", "--locked", "--example", "h3probe"], timeout=900)
     if source_hash() != source_before:
         raise ValueError("Rust sources changed during the build; repeat prepare")
     shutil.copy2(ROOT / "target/release/kunato", PREPARED / "kunato")
+    shutil.copy2(ROOT / "target/release/examples/h3probe", PREPARED / "h3probe")
     manifest = {"schema_version": 1, "platform": lock["platform"], "images": images,
                 "fixtures": fixtures, "tools": tools, "tool_versions": lock["tool_versions"],
-                "binary_sha256": sha256(PREPARED / "kunato"), "source_sha256": source_hash(),
+                "binary_sha256": sha256(PREPARED / "kunato"),
+                "h3probe_sha256": sha256(PREPARED / "h3probe"),
+                "source_sha256": source_hash(),
                 "lock_sha256": sha256(LAB / "artifacts.lock.json")}
     write_json(PREPARED / "manifest.json", manifest)
     print(f"Prepared inputs: {PREPARED}")
@@ -239,8 +262,10 @@ def prepared_inputs():
     lock = json.loads((LAB / "artifacts.lock.json").read_text())
     if manifest["lock_sha256"] != sha256(LAB / "artifacts.lock.json"):
         raise ValueError("Image lock changed; run prepare")
-    if manifest["source_sha256"] != source_hash() or manifest["binary_sha256"] != sha256(PREPARED / "kunato"):
-        raise ValueError("Kunato sources/binary changed; run prepare")
+    if (manifest["source_sha256"] != source_hash()
+            or manifest["binary_sha256"] != sha256(PREPARED / "kunato")
+            or manifest.get("h3probe_sha256") != sha256(PREPARED / "h3probe")):
+        raise ValueError("Kunato sources or probes changed; run prepare")
     for image in manifest["images"].values():
         command(["docker", "image", "inspect", image["id"]])
     for name, tool in lock.get("tools", {}).items():
@@ -575,8 +600,9 @@ class SandboxSuite:
                                 extra=("--connections", "8"), check=False)
         time.sleep(0.5)
         self.wait_active_connections(0, above=False)
-        self.compose("--profile", "tools", "up", "-d", "--scale", "exhaust=2", "exhaust")
-        active = self.wait_active_connections(16)
+        self.compose("--profile", "tools", "up", "-d", "--scale", "exhaust=4", "exhaust")
+        active = self.wait_active_connections(32)
+        time.sleep(2)
         global_cap = self.probe("client", "health", check=False,
                                 extra=("--path", "/health", "--status", "503"))
         global_cap["active_connections"] = active
@@ -684,6 +710,93 @@ class SandboxSuite:
                 return nonce
             time.sleep(0.2)
         raise RuntimeError("Kunato/origin did not become ready over HTTP/2")
+
+    def binary_probe(self, service, *args):
+        result = self.compose("run", "--rm", "--no-deps", "-T", service, *args,
+                              check=False)
+        return self.last_json(result)
+
+    def exec_binary(self, service, *args):
+        result = self.compose("exec", "-T", service, *args, check=False)
+        return self.last_json(result)
+
+    @staticmethod
+    def last_json(result):
+        for line in reversed(result.stdout.splitlines()):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {"probe_error": result.stderr[-1000:]
+                or f"probe exited {result.returncode}"}
+
+    @staticmethod
+    def h3_args(case, case_id=None):
+        args = ["--host", "app.test", "--port", "8443",
+                "--cert", "/lab/fixtures/tls/ca.pem", "--case", case]
+        if case_id:
+            args += ["--case-id", case_id]
+        return tuple(args)
+
+    def h3(self):
+        self.reset_h3()
+        self.preflight("origin")
+        self.compose("up", "-d", "normal")
+        before = self.stats()
+        normal = self.binary_probe("h3probe", *self.h3_args("normal", "h3-normal"))
+        malformed = self.binary_probe("h3probe", *self.h3_args("malformed"))
+        time.sleep(0.5)
+        reset = self.binary_probe("h3probe", *self.h3_args("reset"))
+        independent = self.binary_probe("h3probe", *self.h3_args("normal", "h3-independent"))
+        after = self.stats()
+        origin, _ = self.logs("h3")
+        metrics = self.probe_exec("kunato", "metrics")
+        return judge_h3(normal, malformed, reset, independent, origin,
+                        before, after, self.restarts(), metrics)
+
+    def reset_h3(self):
+        nonce = uuid.uuid4().hex
+        self.env["LAB_NONCE"] = nonce
+        self.env["LAB_CONFIG"] = "rules-h3.yaml"
+        self.env["LAB_DISABLE_PROTECTION"] = "1"
+        self.compose("up", "-d", "--force-recreate", "--pull", "never", "origin", "kunato")
+        directory = self.run_dir / "h3"
+        directory.mkdir(exist_ok=True)
+        last_health = {}
+        for _ in range(50):
+            health = self.binary_probe("h3probe", *self.h3_args("normal", "h3-health"))
+            last_health = health
+            write_json(directory / "probe.json", health)
+            if health.get("ok"):
+                time.sleep(0.2)
+                origin, _ = self.logs("h3")
+                try:
+                    verify_origin(origin, nonce)
+                except ValueError:
+                    time.sleep(0.2)
+                    continue
+                write_json(directory / "health-before.json", health)
+                write_json(directory / "attempt.json", {"nonce": nonce})
+                return nonce
+            time.sleep(0.2)
+        raise RuntimeError(f"Kunato/origin did not become ready over HTTP/3: {last_health}")
+
+    def backpressure(self):
+        nonce = self.reset_origin("backpressure", config="rules-backpressure.yaml",
+                                  disable_protection=False)
+        self.preflight("origin")
+        before = self.stats()
+        burst = self.probe("client", "burst", check=False,
+                           extra=("--requests", "100"))
+        time.sleep(1.2)
+        normal = self.healthy("backpressure", nonce=nonce)
+        after = self.stats()
+        metrics_path = self.run_dir / "backpressure/metrics.json"
+        application_metrics = (json.loads(metrics_path.read_text())
+                               if metrics_path.exists() else {"response": ""})
+        self.logs("backpressure")
+        return judge_backpressure(burst, normal, before, after, self.restarts(),
+                                  application_metrics)
 
     def ban(self):
         nonce = self.reset_origin("ban", config="rules-ban.yaml",
@@ -1151,6 +1264,7 @@ def new_run(suite):
     input_dir.mkdir(parents=True)
     shutil.copytree(LAB, input_dir / "lab", ignore=shutil.ignore_patterns("__pycache__", "tests"))
     shutil.copy2(PREPARED / "kunato", input_dir / "kunato")
+    shutil.copy2(PREPARED / "h3probe", input_dir / "h3probe")
     shutil.copy2(PREPARED / "ffuf", input_dir / "ffuf")
     config_dir = input_dir / "config"
     config_dir.mkdir()
@@ -1176,8 +1290,11 @@ def new_run(suite):
            "  cert_file: /lab/fixtures/tls/cert.pem\n"
            "  key_file: /lab/fixtures/tls/key.pem\n")
     (config_dir / "rules-h2.yaml").write_text(h2)
+    (config_dir / "rules-h3.yaml").write_text(h2 + "http3: { enabled: true }\n")
     (config_dir / "rules-ban.yaml").write_text(
         make_config(original, "http://origin:8080", BAN_PROTECTION))
+    (config_dir / "rules-backpressure.yaml").write_text(
+        make_config(original, "http://origin:8080", BACKPRESSURE_PROTECTION))
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
     cases = json.loads((LAB / "cases/smoke.json").read_text())
     validate_cases(cases)
@@ -1222,7 +1339,8 @@ def run(suite):
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
                      "rules-ffuf.yaml", "rules-availability.yaml", "rules-connect.yaml",
-                     "rules-h2.yaml", "rules-ban.yaml"):
+                     "rules-h2.yaml", "rules-h3.yaml", "rules-ban.yaml",
+                     "rules-backpressure.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
                         "--config", f"/config/{name}", "--validate")
         report["suites"]["replay"] = lab.replay()
@@ -1240,6 +1358,10 @@ def run(suite):
             report["suites"]["connect"] = lab.connect()
         if suite in {"h2", "all"}:
             report["suites"]["h2"] = lab.h2()
+        if suite in {"h3", "all"}:
+            report["suites"]["h3"] = lab.h3()
+        if suite in {"backpressure", "all"}:
+            report["suites"]["backpressure"] = lab.backpressure()
         if suite in {"ban", "all"}:
             report["suites"]["ban"] = lab.ban()
         if suite in {"websocket", "all"}:
@@ -1315,8 +1437,8 @@ def main():
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "benign", "mutations", "protocol", "gotestwaf",
                                  "sqlmap", "nuclei", "ffuf", "zap", "crs", "slow",
-                                 "availability", "connect", "h2", "ban", "websocket", "load",
-                                 "restart", "all"],
+                                 "availability", "connect", "h2", "h3", "backpressure",
+                                 "ban", "websocket", "load", "restart", "all"],
                         default="replay")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)

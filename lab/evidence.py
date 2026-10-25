@@ -284,7 +284,7 @@ def judge_availability(slow, slow_body, slow_read, exhaustion, upstream, normal,
         global_status = status(global_cap)
         global_active = global_cap.get("active_connections")
         global_ok = (global_status in {429, 503}
-                     and isinstance(global_active, int) and global_active >= 16)
+                     and isinstance(global_active, int) and global_active >= 32)
         global_bad = global_status == 200
     upstream_status = status(upstream)
     upstream_ok = upstream_status == 504
@@ -473,6 +473,125 @@ def judge_h2(normal, rapid, continuation, hpack, independent, origin, before, af
                        "mem_before": before.get("MemUsage"),
                        "mem_after": after.get("MemUsage"),
                        **metric_notes}
+    return result
+
+
+def judge_h3(normal, malformed, reset, independent, origin, before, after,
+             restarts, application_metrics=None):
+    receipts = Counter(event.get("case_id") for event in origin
+                       if event.get("event") == "received")
+
+    def attack(result, case):
+        return bool(result.get("normal")) and receipts[f"h3-{case}-normal"] == 1
+
+    normal_ok = bool(normal.get("ok")) and receipts["h3-normal"] == 1
+    malformed_ok = attack(malformed, "malformed")
+    reset_ok = attack(reset, "reset")
+    independent_ok = bool(independent.get("ok")) and receipts["h3-independent"] == 1
+    restarts = restarts or 0
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    cases = [
+        {"id": "h3-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "failed",
+         "origin_receipts": receipts["h3-normal"]},
+        {"id": "h3-malformed", "expect": "survive",
+         "verdict": "passed" if malformed_ok else "failed",
+         "origin_receipts": receipts["h3-malformed-normal"]},
+        {"id": "h3-reset", "expect": "survive",
+         "verdict": "passed" if reset_ok else "failed",
+         "origin_receipts": receipts["h3-reset-normal"]},
+        {"id": "h3-independent", "expect": "normal",
+         "verdict": "passed" if independent_ok else "false-block",
+         "origin_receipts": receipts["h3-independent"]},
+        {"id": "h3-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    metric_notes = {}
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+        observed = None
+        for line in text.splitlines():
+            if line.startswith("kunato_requests_total "):
+                try:
+                    observed = float(line.split(None, 1)[1])
+                except (IndexError, ValueError):
+                    observed = None
+                break
+        metrics_ok = observed is not None and observed > 0
+        cases.append({"id": "h3-metrics", "expect": "metrics",
+                      "verdict": "passed" if metrics_ok else "failed",
+                      "origin_receipts": 0})
+        metric_notes = {"metric_requests": observed}
+    result = summarize(cases)
+    result["notes"] = {"receipts": dict(receipts),
+                       "malformed_error": malformed.get("attack_error"),
+                       "reset_error": reset.get("attack_error"),
+                       "normal_status": normal.get("status"),
+                       "independent_status": independent.get("status"),
+                       "restarts": restarts,
+                       "mem_before": before.get("MemUsage"),
+                       "mem_after": after.get("MemUsage"),
+                       **metric_notes}
+    return result
+
+
+def judge_backpressure(burst, normal, before, after, restarts, application_metrics=None):
+    statuses = burst.get("statuses", [])
+    allowed = sum(1 for status in statuses if status == 200)
+    limited = sum(1 for status in statuses if status in (429, 503))
+    errors = sum(1 for status in statuses if not isinstance(status, int))
+    burst_ok = len(statuses) >= 50 and limited >= 1 and allowed >= 1
+    normal_ok = normal.get("status") == 200 and not normal.get("error")
+    restarts = restarts or 0
+    mem_used = None
+    usage = after.get("MemUsage", "")
+    if " / " in usage:
+        try:
+            mem_used = float(usage.split(" / ")[0].rstrip("MiBGiB"))
+        except ValueError:
+            mem_used = None
+    resource_ok = restarts == 0 and (mem_used is None or mem_used < 256)
+    rate_limited = None
+    overloaded = None
+    if application_metrics is not None:
+        text = application_metrics.get("response", "")
+        for line in text.splitlines():
+            if line.startswith("kunato_rate_limited_total "):
+                try:
+                    rate_limited = float(line.split(None, 1)[1])
+                except (IndexError, ValueError):
+                    rate_limited = None
+            elif line.startswith("kunato_overloaded_total "):
+                try:
+                    overloaded = float(line.split(None, 1)[1])
+                except (IndexError, ValueError):
+                    overloaded = None
+    metrics_ok = ((rate_limited or 0) + (overloaded or 0)) >= 1
+    cases = [
+        {"id": "backpressure-burst", "expect": "bounded",
+         "verdict": "passed" if burst_ok else ("inconclusive" if errors else "failed"),
+         "origin_receipts": allowed},
+        {"id": "backpressure-normal", "expect": "normal",
+         "verdict": "passed" if normal_ok else "false-block", "origin_receipts": 1},
+        {"id": "backpressure-metrics", "expect": "metrics",
+         "verdict": "passed" if metrics_ok else "failed", "origin_receipts": 0},
+        {"id": "backpressure-resources", "expect": "resources",
+         "verdict": "passed" if resource_ok else "failed", "origin_receipts": 0},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"statuses": len(statuses), "allowed": allowed,
+                       "limited": limited, "errors": errors,
+                       "rate_limited": rate_limited, "overloaded": overloaded,
+                       "normal_status": normal.get("status"), "restarts": restarts,
+                       "mem_before": before.get("MemUsage"),
+                       "mem_after": after.get("MemUsage")}
     return result
 
 

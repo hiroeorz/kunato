@@ -18,8 +18,9 @@ use tracing::{debug, warn};
 
 use crate::client_ip::ClientSource;
 use crate::config::CompiledConfig;
-use crate::protection::ConnectionGuard;
+use crate::protection::{ConnectionGuard, ProtectionState};
 use crate::proxy::forward::{self, HttpError};
+use crate::proxy::server::{InspectionBudget, InspectionGuard};
 use crate::proxy::{ProxyBody, full_body};
 use crate::request_view::RequestView;
 use crate::rules::eval::evaluate_websocket;
@@ -53,9 +54,12 @@ struct OwnedRequest {
     headers: HeaderMap,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_handshake(
     config: &CompiledConfig,
     snapshot: Arc<CompiledConfig>,
+    inspection: Arc<InspectionBudget>,
+    protection: Arc<ProtectionState>,
     parts: &http::request::Parts,
     body: ProxyBody,
     scheme: &'static str,
@@ -194,6 +198,8 @@ pub(crate) async fn forward_handshake(
         guard,
         source,
         snapshot,
+        inspection,
+        protection,
         owned,
         body_rules_exempt,
     ));
@@ -216,6 +222,8 @@ async fn tunnel(
     guard: Option<ConnectionGuard>,
     source: ClientSource,
     config: Arc<CompiledConfig>,
+    inspection: Arc<InspectionBudget>,
+    protection: Arc<ProtectionState>,
     request: OwnedRequest,
     body_rules_exempt: bool,
 ) {
@@ -250,6 +258,8 @@ async fn tunnel(
         up_write,
         close_tx,
         config,
+        protection,
+        inspection,
         request,
         source.client_ip,
         body_rules_exempt,
@@ -285,7 +295,7 @@ async fn pump_upstream_to_client<R, W>(
 {
     loop {
         tokio::select! {
-            frame = read_frame(&mut reader, message_limit, false) => {
+            frame = read_frame(&mut reader, message_limit, false, None) => {
                 match frame {
                     Ok(frame) => {
                         if writer.write_all(&frame.raw).await.is_err() {
@@ -321,6 +331,8 @@ async fn pump_client_to_upstream<R, W>(
     mut writer: W,
     close: mpsc::Sender<CloseCommand>,
     config: Arc<CompiledConfig>,
+    protection: Arc<ProtectionState>,
+    inspection: Arc<InspectionBudget>,
     request: OwnedRequest,
     source_ip: IpAddr,
     body_rules_exempt: bool,
@@ -330,11 +342,16 @@ async fn pump_client_to_upstream<R, W>(
     W: AsyncWrite + Unpin,
 {
     let mut message = Message::default();
+    let mut budget = MessageBudget::new(inspection);
     loop {
-        let frame = match read_frame(&mut reader, message_limit, true).await {
+        let frame = match read_frame(&mut reader, message_limit, true, Some(&mut budget)).await {
             Ok(frame) => frame,
             Err(WsError::TooLarge) => {
                 send_close(&close, 1009, "message too large").await;
+                return;
+            }
+            Err(WsError::Budget) => {
+                send_close(&close, 1013, "inspection budget exhausted").await;
                 return;
             }
             Err(WsError::Protocol(reason)) => {
@@ -384,7 +401,7 @@ async fn pump_client_to_upstream<R, W>(
             false,
         )
         .with_body_rules_exempt(body_rules_exempt);
-        let outcome = evaluate_websocket(&config, &view);
+        let outcome = evaluate_websocket(&config, &view, Some(protection.as_ref()));
         if let Some(blocked) = outcome.blocked {
             warn!(
                 client = %source_ip,
@@ -412,6 +429,7 @@ async fn pump_client_to_upstream<R, W>(
         if writer.flush().await.is_err() {
             return;
         }
+        budget.finish();
     }
 }
 
@@ -501,9 +519,50 @@ enum WsError {
     Io,
     Protocol(&'static str),
     TooLarge,
+    Budget,
 }
 
-async fn read_frame<R>(reader: &mut R, max: usize, require_mask: bool) -> Result<Frame, WsError>
+struct MessageBudget {
+    budget: Arc<InspectionBudget>,
+    guard: Option<InspectionGuard>,
+}
+
+impl MessageBudget {
+    fn new(budget: Arc<InspectionBudget>) -> Self {
+        Self {
+            budget,
+            guard: None,
+        }
+    }
+
+    fn ensure(&mut self, frame_bytes: usize) -> bool {
+        let requested = frame_bytes.saturating_mul(2);
+        if requested == 0 {
+            return true;
+        }
+        if let Some(guard) = &mut self.guard {
+            return guard.grow(requested);
+        }
+        match self.budget.reserve(requested) {
+            Some(guard) => {
+                self.guard = Some(guard);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.guard = None;
+    }
+}
+
+async fn read_frame<R>(
+    reader: &mut R,
+    max: usize,
+    require_mask: bool,
+    budget: Option<&mut MessageBudget>,
+) -> Result<Frame, WsError>
 where
     R: AsyncRead + Unpin,
 {
@@ -553,6 +612,12 @@ where
     }
     if len > max as u64 {
         return Err(WsError::TooLarge);
+    }
+    if !control
+        && let Some(budget) = budget
+        && !budget.ensure(len as usize)
+    {
+        return Err(WsError::Budget);
     }
 
     let mut mask = [0u8; 4];
@@ -648,5 +713,19 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ActivityIo<T> {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_budget_is_bounded_and_released() {
+        let mut budget = MessageBudget::new(Arc::new(InspectionBudget::new()));
+        assert!(budget.ensure(128 * 1024 * 1024));
+        assert!(!budget.ensure(1));
+        budget.finish();
+        assert!(budget.ensure(1));
     }
 }

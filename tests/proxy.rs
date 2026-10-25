@@ -3851,6 +3851,60 @@ async fn websocket_upgrade_is_tunneled() {
 }
 
 #[tokio::test]
+async fn websocket_extensions_are_not_negotiated() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+    let (headers, _stream) = websocket_handshake_with_headers(
+        running.addr,
+        "/ws",
+        &[("sec-websocket-extensions", "permessage-deflate")],
+    )
+    .await;
+    assert!(headers.starts_with("HTTP/1.1 101"), "{headers}");
+    assert!(
+        !headers
+            .to_ascii_lowercase()
+            .contains("sec-websocket-extensions"),
+        "{headers}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_rule_limits_apply_per_message() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: ws-limit\n    action: BLOCK\n    rules:\n      - name: limited\n        limit: {{ requests: 1, window: 60s }}\n        match: {{ regex: x, in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+
+    let frame = client_ws_frame(0x1, b"x", true);
+    let expected = server_ws_frame(0x1, b"x", true);
+    stream.write_all(&frame).await.expect("write first");
+    let mut echo = vec![0u8; expected.len()];
+    stream.read_exact(&mut echo).await.expect("read first echo");
+    assert_eq!(echo, expected);
+
+    stream.write_all(&frame).await.expect("write second");
+    let mut head = [0u8; 2];
+    stream.read_exact(&mut head).await.expect("read close");
+    assert_eq!(head[0], 0x88);
+    let mut payload = vec![0u8; usize::from(head[1])];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("read close payload");
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn websocket_application_payload_is_inspected() {
     let upstream = spawn_upgrade_upstream().await;
     let yaml = format!(

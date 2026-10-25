@@ -4,11 +4,11 @@ Status: design selected on 2026-10-24. The recording origin, curated goTestWAF,
 DVWA/sqlmap, the CVE-2021-41773/Nuclei fixture, ffuf path discovery and
 enumeration behavior, an authenticated ZAP spider/passive baseline, 25
 deterministic mutation variants, and a pinned OWASP CRS 4.3.0 comparison are
-available, together with 12 raw protocol/WebSocket cases, TLS/HTTP/2 resource
-variants, benign JSON/upload/i18n/large-body/streamed-response/GraphQL/auth/slow-stream
-workflows, slow-HTTP, availability-boundary, slow-connect, ban-recovery, and
-WebSocket lifecycle and payload probes, a pinned k6 v2.3.0 mixed availability
-load, and a restart-under-load probe; Rust
+available, together with 12 raw protocol/WebSocket cases, TLS/HTTP/2 and HTTP/3
+resource variants, benign JSON/upload/i18n/large-body/streamed-response/GraphQL/auth/slow-stream
+workflows, slow-HTTP, availability-boundary, backpressure, slow-connect,
+ban-recovery, and WebSocket lifecycle and payload probes, a pinned k6 v2.3.0
+mixed availability load, and a restart-under-load probe; Rust
 proxy tests cover HTTP/2 Rapid Reset,
 CONTINUATION, an oversized HPACK header block, a malformed raw HTTP/3 request
 stream, hot reload under load, and rules update plus reload under load. See
@@ -343,9 +343,10 @@ Milestones 1-4 are implemented with one ZAP limitation: recording origin,
 goTestWAF, DVWA/sqlmap, the CVE-2021-41773 canary, ffuf
 discovery/enumeration, the authenticated ZAP spider/passive baseline, 25
 deterministic mutation variants, the optional OWASP CRS comparison, 12
-protocol/WebSocket cases, TLS/HTTP/2 resource variants, benign workflows, the
-slow-HTTP, availability, slow-connect, ban-recovery, WebSocket lifecycle and
-payload, and restart-under-load probes, and the k6 mixed load pass. Rust
+protocol/WebSocket cases, TLS/HTTP/2 and HTTP/3 resource variants, benign
+workflows, the slow-HTTP, availability, backpressure, slow-connect, ban-recovery,
+WebSocket lifecycle and payload, and restart-under-load probes, and the k6 mixed
+load pass. Rust
 proxy tests cover HTTP/2 Rapid Reset, CONTINUATION, oversized HPACK, malformed
 raw HTTP/3 streams, hot reload under load, and rules update plus reload under
 load. ZAP active scanning remains deferred because ZAP 2.17.0 exits at activeScan start even in an endpoint-scoped plan; no newer stable image is published.
@@ -355,12 +356,12 @@ load. ZAP active scanning remains deferred because ZAP 2.17.0 exits at activeSca
 | 1. Evidence foundation | Networks, version lock, reset/preflight, recording origin, case report. Valid requests are observed, known blocks are absent, private-source ALLOW is removed, and broken controls/collection fail the run. |
 | 2. Initial attack loop | goTestWAF, DVWA/sqlmap, one selected high-severity HTTP CVE fixture/Nuclei template. Direct controls succeed; ordinary-UA results have evidence; confirmed failures become attack/benign regression pairs, or a bounded no-gap result is recorded. |
 | 3. Workflows and variants | ZAP, ffuf, deterministic mutations, optional CRS comparison. Authenticated/API/upload journeys pass; retained variants have meaningful interpretation and seeds. Implemented: ffuf discovery/enumeration, the authenticated ZAP spider/passive baseline, and 25 mutation variants whose 15 attacks are blocked and 10 benign cases pass; the CRS 4.3.0 comparison agrees on all 25. ZAP active scanning is deferred: an endpoint-scoped plan still exits at activeScan start with ZAP 2.17.0. |
-| 4. Protocol/availability | Implemented: 12 raw HTTP/1.1/WebSocket cases with per-framing direct controls (4 passed, 8 prevented), TLS/HTTP/2 resource variants (7 passed: normal, Rapid Reset, CONTINUATION, HPACK, independent, resources, metrics), benign JSON/upload/i18n/large-body/streamed-response/GraphQL/auth/slow-stream workflows (8 passed), a bounded 8-connection/2-second slow run (2 passed), availability probes for slow body, slow read, the per-source and global connection caps, and upstream-response timeout (9 passed), a slow-connect suite (3 passed), ban recovery (5 passed), the WebSocket control/fragmentation/close lifecycle plus payload inspection (8 passed), a restart-under-load suite (4 passed), and a 50 rps/60-second k6 mixed run (6 passed: 3001 requests, p95 48.1 ms, p99 48.4 ms, 100% success, normal/recovery 200, RSS 21.8 MiB, no restart, metrics matched). Rust proxy tests cover HTTP/2 Rapid Reset, CONTINUATION, oversized HPACK, malformed raw HTTP/3 streams, hot reload under load, and rules update plus reload under load. Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
+| 4. Protocol/availability | Implemented: 12 raw HTTP/1.1/WebSocket cases with per-framing direct controls (4 passed, 8 prevented), TLS/HTTP/2 resource variants (7 passed: normal, Rapid Reset, CONTINUATION, HPACK, independent, resources, metrics), TLS/HTTP/3 resource variants (6 passed: normal, malformed, reset, independent, resources, metrics), benign JSON/upload/i18n/large-body/streamed-response/GraphQL/auth/slow-stream workflows (8 passed), a bounded 8-connection/2-second slow run (2 passed), availability probes for slow body, slow read, the per-source and 32-connection global caps, and upstream-response timeout (9 passed), a slow-connect suite (3 passed), a rate-guard backpressure suite (4 passed: 20 allowed, 80 shed), ban recovery (5 passed), the WebSocket control/fragmentation/close lifecycle plus payload inspection (8 passed), a restart-under-load suite (4 passed), and a 50 rps/60-second k6 mixed run (6 passed: 3001 requests, p95 46.5 ms, p99 49.7 ms, 100% success, normal/recovery 200, RSS 21.8 MiB, no restart, metrics matched). Rust proxy tests cover HTTP/2 Rapid Reset, CONTINUATION, oversized HPACK, malformed raw HTTP/3 streams, hot reload under load, and rules update plus reload under load. Protocol and origin-boundary evidence, independent normal source, measured resources, and recovery are required. |
 | 5. Continuous regression | Fast PR gates, scheduled discovery, release smoke tests. Mandatory cases cannot silently skip and reports reproduce locally. |
 
 | Cadence | Workload and gate |
 | --- | --- |
-| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, h2, slow, availability, connect, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline sandbox suites, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded sandbox suites. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
+| Relevant PRs | Required repository checks, full existing attack/benign corpus, then the stable lab replay, mutations, protocol, h2, h3, slow, availability, connect, backpressure, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP baseline sandbox suites, plus the optional CRS comparison, run locally before push. CI runs the lab observation tests and shellcheck wrappers, not the bounded sandbox suites. Zero new misses/false blocks and no missing/inconclusive mandatory cases. Enable ordinary PRs as well as Dependabot. |
 | Daily/on demand | Existing CVE intake plus selected template/fixture smoke tests with pinned inputs. Promote confirmed findings into reviewed regressions; do not demand 100% of an unreviewed public scanner catalog. |
 | Weekly/on demand | Larger ZAP/ffuf/mutation sandbox suites and protocol/load sweeps, with a triaged backlog of gaps, unsupported inputs, and application-only cases. |
 | Before release | Stable regressions, representative fixture controls, protocol/availability on a fixed runner, rule compatibility, and archived evidence. |

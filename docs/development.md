@@ -777,9 +777,11 @@ client-to-server WebSocket message inspected after the `101` handshake; a larger
 message closes the tunnel with close code `1009`. Kunato does not negotiate
 WebSocket extensions, so frames remain uncompressed and inspectable. Only
 client-to-server messages are inspected: text messages must be valid UTF-8,
-binary messages are matched lossily, rules scoped to body targets apply, rules
-with per-rule limits are skipped, and server-to-client frames are forwarded
-without inspection.
+binary messages are matched lossily, rules scoped to body targets apply, and
+rules with per-rule limits use the same source-keyed window as HTTP. Message
+inspection reserves from the process-wide 256 MiB inspection budget; budget
+exhaustion closes the tunnel with code `1013`. Server-to-client frames are
+forwarded without inspection.
 `max_concurrent_streams` caps concurrent request streams per
 HTTP/2 connection (and per QUIC connection for HTTP/3). HTTP/2 connections are
 pinged after 30 seconds without activity and closed when the ping is not

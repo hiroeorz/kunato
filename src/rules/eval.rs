@@ -39,8 +39,12 @@ pub fn evaluate(
 
 /// Evaluate a post-upgrade WebSocket message. Request conditions still scope
 /// the rules, but only the body target is matched against the message payload.
-pub fn evaluate_websocket(config: &CompiledConfig, view: &RequestView<'_>) -> EvalOutcome {
-    evaluate_phase(config, Phase::Request, view, None, None, true)
+pub fn evaluate_websocket(
+    config: &CompiledConfig,
+    view: &RequestView<'_>,
+    limits: Option<&dyn RuleLimitCheck>,
+) -> EvalOutcome {
+    evaluate_phase(config, Phase::Request, view, None, limits, true)
 }
 
 pub fn evaluate_response(
@@ -123,14 +127,7 @@ fn evaluate_phase(
                 continue;
             }
 
-            if websocket {
-                // Rule limits are keyed to HTTP request volume; applying them
-                // per WebSocket message would either over-block or bypass the
-                // configured window. Leave limited rules to HTTP inspection.
-                if rule.limit.is_some() {
-                    continue;
-                }
-            } else if let Some(limit) = &rule.limit {
+            if let Some(limit) = &rule.limit {
                 let within = limits.is_some_and(|check| {
                     check.permit(&rule.limit_key, view.source_ip, limit, &config.protection)
                 });

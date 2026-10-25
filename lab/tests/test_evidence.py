@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from controller import make_config, write_gotestwaf_cases
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
-                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2,
+                      judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_mutations, judge_nuclei, judge_load, judge_protocol,
                       judge_replay, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
@@ -468,6 +468,52 @@ class H2Tests(unittest.TestCase):
         self.assertEqual(result["cases"][2]["verdict"], "failed")
 
 
+class H3Tests(unittest.TestCase):
+    def results(self):
+        normal = {"ok": True, "status": 200}
+        attack = {"normal": True}
+        origin = [{"event": "received", "case_id": case}
+                  for case in ("h3-normal", "h3-independent", "h3-malformed-normal",
+                               "h3-reset-normal")]
+        return normal, attack, attack, normal, origin
+
+    def test_h3_suite_requires_post_attack_normal_requests(self):
+        normal, malformed, reset, independent, origin = self.results()
+        result = judge_h3(normal, malformed, reset, independent, origin, {},
+                          {"MemUsage": "21MiB / 256MiB"}, 0,
+                          {"response": "kunato_requests_total 10\n"})
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["receipts"]["h3-malformed-normal"], 1)
+
+    def test_h3_suite_fails_without_a_post_attack_normal_request(self):
+        normal, malformed, reset, independent, origin = self.results()
+        origin = [event for event in origin if event.get("case_id") != "h3-reset-normal"]
+        result = judge_h3(normal, malformed, reset, independent, origin, {},
+                          {"MemUsage": "21MiB / 256MiB"}, 0,
+                          {"response": "kunato_requests_total 10\n"})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][2]["verdict"], "failed")
+
+
+class BackpressureTests(unittest.TestCase):
+    def test_backpressure_suite_requires_shedding_and_recovery(self):
+        burst = {"statuses": [200] * 20 + [429] * 80}
+        metrics = {"response": "kunato_rate_limited_total 80\n"
+                               "kunato_overloaded_total 0\n"}
+        result = judge_backpressure(burst, {"status": 200}, {},
+                                    {"MemUsage": "22MiB / 256MiB"}, 0, metrics)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["limited"], 80)
+
+    def test_backpressure_suite_rejects_an_unbounded_burst(self):
+        burst = {"statuses": [200] * 100}
+        result = judge_backpressure(burst, {"status": 200}, {},
+                                    {"MemUsage": "22MiB / 256MiB"}, 0,
+                                    {"response": "kunato_rate_limited_total 0\n"})
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "failed")
+
+
 class SlowTests(unittest.TestCase):
     def test_slow_suite_requires_normal_health(self):
         slow = {"sent": 8, "closed": 8, "held_seconds": 2}
@@ -515,10 +561,10 @@ class AvailabilityTests(unittest.TestCase):
         metrics = {"response": "kunato_requests_total 42\n"
                                "kunato_upstream_timeouts_total 1\n"}
         result = judge_availability(*self.payloads(), metrics,
-                                    global_cap={"status": 503, "active_connections": 16})
+                                    global_cap={"status": 503, "active_connections": 32})
         self.assertTrue(result["passed"])
         self.assertEqual(result["notes"]["global_cap_status"], 503)
-        self.assertEqual(result["notes"]["global_active_connections"], 16)
+        self.assertEqual(result["notes"]["global_active_connections"], 32)
         self.assertEqual([case["id"] for case in result["cases"]].count("global-connection-cap"), 1)
 
     def test_availability_suite_rejects_global_exhaustion_without_active_connections(self):

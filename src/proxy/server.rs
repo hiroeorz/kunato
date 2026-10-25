@@ -56,18 +56,18 @@ const RESPONSE_INSPECTION_FACTOR: usize = 3;
 /// actual buffered bytes, not the whole decoding budget.
 const MIN_INSPECTION_RESERVATION: usize = 64 * 1024;
 
-struct InspectionBudget {
+pub(crate) struct InspectionBudget {
     reserved: AtomicUsize,
 }
 
 impl InspectionBudget {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             reserved: AtomicUsize::new(0),
         }
     }
 
-    fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InspectionGuard> {
+    pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InspectionGuard> {
         self.add(bytes).then(|| InspectionGuard {
             budget: Arc::clone(self),
             bytes,
@@ -106,7 +106,7 @@ impl InspectionGuard {
         self.bytes
     }
 
-    fn grow(&mut self, additional: usize) -> bool {
+    pub(crate) fn grow(&mut self, additional: usize) -> bool {
         if additional == 0 {
             return true;
         }
@@ -337,6 +337,14 @@ impl Context {
 
     pub(crate) fn record_overloaded(&self) {
         self.metrics.overloaded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn inspection_budget(&self) -> Arc<InspectionBudget> {
+        Arc::clone(&self.inspection)
+    }
+
+    pub(crate) fn protection_state(&self) -> Arc<ProtectionState> {
+        Arc::clone(&self.protection)
     }
 }
 
@@ -1748,6 +1756,8 @@ async fn process(
         let result = websocket::forward_handshake(
             config,
             context.config(),
+            context.inspection_budget(),
+            context.protection_state(),
             &parts,
             full_body(with_bytes_guard(
                 payload.prefix.clone(),

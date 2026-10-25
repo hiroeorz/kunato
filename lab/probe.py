@@ -542,6 +542,19 @@ def h2_probe(case, host, port, case_id=None):
     return h2_attack(host, port, case)
 
 
+def burst(count, host="app.test", port=8080):
+    statuses = []
+    for _ in range(count):
+        result = request({"id": "burst", "method": "GET", "target": "/health"},
+                         host, port)
+        statuses.append(result.get("status") if result.get("status") is not None
+                        else result.get("error"))
+    return {"id": "burst", "statuses": statuses,
+            "ok": sum(1 for status in statuses if status == 200),
+            "limited": sum(1 for status in statuses if status in (429, 503)),
+            "errors": sum(1 for status in statuses if not isinstance(status, int))}
+
+
 def isolation(hosts, addresses):
     failures = []
     routes = Path("/proc/net/route").read_text().splitlines()[1:]
@@ -574,7 +587,7 @@ def main():
     parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
                                           "slow-read", "exhaustion", "hold", "connect",
                                           "upstream", "ban", "ws-lifecycle", "ws-payload",
-                                          "h2", "isolation", "metrics"])
+                                          "h2", "burst", "isolation", "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -644,6 +657,10 @@ def main():
         result = h2_probe(args.h2_case, args.host, args.port, args.case_id)
         print(json.dumps(result))
         return int("error" in result)
+    elif args.mode == "burst":
+        result = burst(args.requests, args.host, args.port)
+        print(json.dumps(result))
+        return 0
     elif args.mode == "health":
         result = request({"id": "health", "method": "GET", "target": args.path},
                          args.host, args.port)

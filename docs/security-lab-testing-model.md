@@ -39,6 +39,9 @@ ground truth. The model below is implemented by `lab/controller.py`,
 - A dedicated internal `blackhole` network gives the slow-connect suite an
   unassigned upstream address; Kunato's TCP connect times out without a
   reachable peer.
+- A lab-only CA/leaf certificate, a small `h3probe` binary built from
+  `examples/h3probe.rs`, and a low-rate protection profile exercise TLS/HTTP/3
+  termination and rate-guard backpressure.
 - No lab service publishes ports. Containers are read-only where possible,
   have CPU, memory, and pid ceilings, and use internal Docker networks.
 
@@ -138,8 +141,10 @@ must echo it, while the protected tunnel must close with code `1008` and no
 origin echo; a benign message must still be echoed. The independent normal client
 must stay at `200`. Client-to-server messages are reassembled and matched against
 body-target rules up to `limits.websocket_message_bytes`; WebSocket extensions are
-not negotiated, so frames stay uncompressed. Server-to-client frames, compressed
-extensions, and binary payload semantics remain outside this suite.
+not negotiated, so frames stay uncompressed. Message inspection reserves from the
+process-wide inspection budget and closes with `1013` when it is exhausted.
+Server-to-client frames, compressed extensions, and binary payload semantics
+remain outside this suite.
 
 ### Pinned tools
 
@@ -169,12 +174,12 @@ raw-socket mode, not slowhttptest.
 
 `--sandbox-suite availability` runs against a dedicated configuration with a
 2-second body-read timeout, a 1-second upstream-response timeout, an
-8-connection per-source cap, and a 16-connection global cap. It sends a partial
+8-connection per-source cap, and a 32-connection global cap. It sends a partial
 request body and expects `408`, opens a large response without reading it, fills
 the per-source connection budget so the next connection gets `503`, then fills
-the global budget from two independent `exhaust` sources and requires a third
-source to get `503` while `kunato_active_connections` is 16. The fillers are
-stopped and the independent normal client must recover to `200`. It then
+the global budget from four independent `exhaust` sources and requires a fifth
+source to get `503` after 2 seconds while `kunato_active_connections` is 32. The
+fillers are stopped and the independent normal client must recover to `200`. It then
 requests an origin that sleeps past the upstream timeout so the client gets
 `504`. The same suite checks RSS, restarts, the normal client, the global
 rejection, and the upstream-timeout metric.
@@ -187,6 +192,25 @@ connect exceeds `timeouts.upstream_connect` (1 second), so the client gets `502`
 and `kunato_upstream_connect_errors_total` increments. The suite checks RSS and
 restarts and requires no origin receipt. This is a connect timeout, not the
 upstream-response timeout covered by `availability`.
+
+### Rate-guard backpressure
+
+`--sandbox-suite backpressure` runs against a profile with 20 requests per second
+per source, a burst of 20, and a 20-request global rate guard. It sends 100
+requests from one source: some must be allowed and the rest shed with `429` or
+`503`. After a 1.2-second recovery wait the independent normal client must get
+`200`, and the rate-limit or overload counter must move. Accept-queue depth is not
+inspected.
+
+### TLS HTTP/3 resource variants
+
+`--sandbox-suite h3` uses a TLS configuration with `http3: { enabled: true }` on
+port 8443. A small `h3probe` binary, built from `examples/h3probe.rs` by
+`prepare`, sends a normal HTTP/3 request, a malformed-stream flood, and a storm of
+reset streams over separate QUIC connections. After each attack a fresh HTTP/3
+connection must obtain an origin receipt for `/health`; the independent normal
+client, RSS, and restart checks must pass. The probe trusts the lab CA
+(`fixtures/tls/ca.pem`).
 
 ### Ban recovery
 
@@ -253,21 +277,23 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The last `all` run, `20261025T153140-9a1c99ac`, passed 17 sandbox suites:
-  replay, benign, mutations, protocol, slow, availability, connect, h2, ban,
-  websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed
-  load recorded 3001 requests, p95 48.1 ms, p99 48.4 ms, 100% success,
-  normal/recovery `200`, RSS 21.8 MiB of 256 MiB, no restart, and matching
-  metrics. The availability suite recorded a slow-body `408`, slow-read `200`,
-  per-source and global connection caps at `503` with 16 active connections,
-  upstream `504`, and 23.2 MiB RSS. The connect suite recorded `502` and one
-  upstream connect error. The h2 suite recorded normal, Rapid Reset,
-  CONTINUATION, and HPACK cases with a fresh normal connection after each attack
-  and 21.1 MiB RSS. The restart suite recorded exit code 0, a 389 ms shutdown, 500
-  requests, a 98.6% check rate, and `200` recovery. The ban suite recorded a
-  `429` ban and `200` recovery; the websocket suite recorded PONG, the
-  fragmented echo, the close handshake, a `1008` payload block, and the benign
-  payload echo.
+- The last `all` run, `20261025T161249-890952b1`, passed 19 sandbox suites:
+  replay, benign, mutations, protocol, slow, availability, connect, h2, h3,
+  backpressure, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf,
+  and ZAP. The mixed load recorded 3001 requests, p95 46.5 ms, p99 49.7 ms,
+  100% success, normal/recovery `200`, RSS 21.8 MiB of 256 MiB, no restart, and
+  matching metrics. The availability suite recorded a slow-body `408`,
+  slow-read `200`, per-source and global connection caps at `503` with 32 active
+  connections, upstream `504`, and 23.5 MiB RSS. The connect suite recorded
+  `502` and one upstream connect error. The backpressure suite allowed 20 of
+  100 requests and shed 80 with `429`/`503` (63 rate-limited, 17 overloaded),
+  then recovered to normal `200`. The h2 suite passed its normal, Rapid Reset,
+  CONTINUATION, and HPACK cases; the h3 suite passed normal, malformed-stream,
+  and reset-stream cases; both kept a fresh normal connection after each attack.
+  The restart suite recorded exit code 0, a 417 ms shutdown, 501 requests, a
+  98.6% check rate, and `200` recovery. The ban suite recorded a `429` ban and
+  `200` recovery; the websocket suite recorded PONG, the fragmented echo, the
+  close handshake, a `1008` payload block, and the benign payload echo.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -288,10 +314,10 @@ current suites.
   and rule-bypass payloads as absent; JWT tampering and algorithm confusion are
   partial. HTTP request smuggling, desync, response splitting, upload
   inspection, and GraphQL abuse are partial.
-- The WebSocket suite now proves the handshake, PING/PONG, fragmented echo, and
-  close handshake; it still does not inspect application payloads after the
-  upgrade. The 25 mutations and the tool corpora are reviewed samples, not the
-  full scanner catalogs.
+- The WebSocket suite proves the handshake, PING/PONG, fragmented echo, close
+  handshake, client-to-server payload block, and benign payload echo;
+  server-to-client frames remain uninspected. The 25 mutations and the tool
+  corpora are reviewed samples, not the full scanner catalogs.
 
 ### Protocol coverage
 
@@ -299,25 +325,27 @@ current suites.
   HPACK variants, with a fresh normal HTTP/2 connection after each attack. The lab
   still does not exercise SETTINGS floods, stream-state abuse, GOAWAY, priority,
   h2c, or HTTP/2 resource pressure under sustained load.
-- HTTP/3 and QUIC are not exercised in the lab because no pinned QUIC client is
-  available; TLS termination and HTTP/2 are now exercised by the `h2` suite. The
-  Rust proxy tests cover functional H3 requests and a malformed raw H3
-  request-stream case. HTTP/1.0, pipelining, CONNECT, chunked trailers, and very
+- TLS termination and HTTP/2 are exercised by the `h2` suite. The `h3` suite adds
+  a normal HTTP/3 request, a malformed-stream flood, and reset streams through
+  the `h3probe` binary; the lab still does not exercise HTTP/3 stream limits
+  under sustained load. HTTP/1.0, pipelining, CONNECT, chunked trailers, and very
   large chunks are not exercised beyond the 12 reviewed cases; the single
   obs-fold case has no variants.
 - WebSocket application payloads are inspected client-to-server with body-target
-  rules (close `1008` on a match); server-to-client frames, compressed
-  extensions, and binary payload semantics are not covered.
+  rules (close `1008` on a match, `1013` on inspection-budget exhaustion);
+  server-to-client frames, compressed extensions, and binary payload semantics
+  are not covered.
 
 ### Availability coverage
 
 - The slow suite holds 8 partial-header connections for 2 seconds. The
   availability suite adds a slow-body `408`, a slow-read probe, a per-source
-  connection cap with `503`, a two-source global cap with `503`, and an
+  connection cap with `503`, a four-source global cap with `503`, and an
   upstream-response timeout with `504`. The connect suite adds a slow upstream
-  TCP connect with `502` and the connect-error metric. Queue/backpressure,
-  true distributed-source exhaustion, and inspection-budget pressure are not
-  exercised. The ban suite adds a short-window ban trigger, a recovery request,
+  TCP connect with `502` and the connect-error metric. The backpressure suite
+  adds a low-rate burst with `429`/`503` shedding and recovery. Accept-queue
+  depth, true distributed-source exhaustion, and inspection-budget pressure are
+  not exercised. The ban suite adds a short-window ban trigger, a recovery request,
   a normal-client check, and the `kunato_banned_total` counter. The restart
   suite adds SIGTERM under load, graceful exit, restart, and recovery.
 - The load suite is a fixed 50 requests/second run and now checks Kunato's
@@ -351,16 +379,15 @@ current suites.
 
 ### Priorities
 
-1. Availability: queue/backpressure and true multi-source exhaustion. The
-   slow-body, slow-read, per-source and global connection caps, slow upstream
-   connect, upstream-response-timeout, ban-recovery, and restart cases are
-   implemented.
+1. Availability: accept-queue depth and true multi-source exhaustion. The
+   slow-body, slow-read, per-source and global connection caps, rate-guard
+   backpressure, slow upstream connect, upstream-response-timeout,
+   ban-recovery, and restart cases are implemented.
 2. Benign workflow breadth: upload variants, i18n edge cases, and longer
    streams. The JSON, upload, i18n, large-body, streamed-response, GraphQL,
    authenticated-API, and slow-stream cases are implemented.
-3. HTTP/3 lab variants: the `h2` suite now covers TLS-level Rapid Reset,
-   CONTINUATION, and HPACK; HTTP/3/QUIC still needs a pinned QUIC client before
-   container-level resource variants can run.
+3. HTTP/3 lab variants: the `h3` suite now covers normal requests, malformed
+   streams, and reset streams; sustained stream-limit pressure remains outside.
 4. Restart behavior under load: SIGTERM, graceful exit, restart, and recovery
    are covered by the restart suite; OOM and forced-kill behavior remain
    outside.
