@@ -113,6 +113,11 @@ class Recorder(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
         self.close_connection = True
+        if self.path.startswith("/ws-push"):
+            pushed = (b"-----BEGIN RSA PRIVATE KEY-----"
+                      if self.path == "/ws-push-attack" else b"benign push")
+            self.wfile.write(bytes([0x81, len(pushed)]) + pushed)
+            self.wfile.flush()
         fragmented = bytearray()
         fragment_opcode = None
         try:

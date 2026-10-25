@@ -22,8 +22,8 @@ use crate::protection::{ConnectionGuard, ProtectionState};
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::server::{InspectionBudget, InspectionGuard};
 use crate::proxy::{ProxyBody, full_body};
-use crate::request_view::RequestView;
-use crate::rules::eval::evaluate_websocket;
+use crate::request_view::{RequestView, ResponseView};
+use crate::rules::eval::{evaluate_websocket, evaluate_websocket_response};
 
 const OP_CONTINUATION: u8 = 0x0;
 const OP_TEXT: u8 = 0x1;
@@ -48,6 +48,7 @@ pub(crate) enum Handshake {
     Response(Response<ProxyBody>),
 }
 
+#[derive(Clone)]
 struct OwnedRequest {
     method: Method,
     uri: Uri,
@@ -178,6 +179,7 @@ pub(crate) async fn forward_handshake(
     let mut handshake = Response::new(full_body(Bytes::new()));
     *handshake.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
     copy_handshake_headers(response.headers(), handshake.headers_mut());
+    let response_headers = handshake.headers().clone();
 
     let guard = upgrade
         .guard_slot
@@ -202,6 +204,7 @@ pub(crate) async fn forward_handshake(
         protection,
         owned,
         body_rules_exempt,
+        response_headers,
     ));
     Ok(Handshake::Upgraded(handshake))
 }
@@ -226,6 +229,7 @@ async fn tunnel(
     protection: Arc<ProtectionState>,
     request: OwnedRequest,
     body_rules_exempt: bool,
+    response_headers: HeaderMap,
 ) {
     let _guard = guard;
 
@@ -252,7 +256,17 @@ async fn tunnel(
     let (up_read, up_write) = tokio::io::split(upstream);
     let (close_tx, close_rx) = mpsc::channel(1);
     let message_limit = config.limits.websocket_message_bytes;
-    let to_client = pump_upstream_to_client(up_read, down_write, close_rx, message_limit);
+    let to_client = pump_upstream_to_client(
+        up_read,
+        down_write,
+        close_rx,
+        config.clone(),
+        inspection.clone(),
+        request.clone(),
+        source.client_ip,
+        response_headers,
+        message_limit,
+    );
     let to_upstream = pump_client_to_upstream(
         down_read,
         up_write,
@@ -284,34 +298,115 @@ struct CloseCommand {
     ack: oneshot::Sender<()>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pump_upstream_to_client<R, W>(
     mut reader: R,
     mut writer: W,
     mut close: mpsc::Receiver<CloseCommand>,
+    config: Arc<CompiledConfig>,
+    inspection: Arc<InspectionBudget>,
+    request: OwnedRequest,
+    source_ip: IpAddr,
+    response_headers: HeaderMap,
     message_limit: usize,
 ) where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let mut message = Message::default();
+    let mut budget = MessageBudget::new(inspection);
     loop {
         tokio::select! {
-            frame = read_frame(&mut reader, message_limit, false, None) => {
-                match frame {
-                    Ok(frame) => {
+            frame = read_frame(&mut reader, message_limit, false, Some(&mut budget)) => {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(WsError::TooLarge) => {
+                        close_and_flush(&mut writer, 1009, "message too large").await;
+                        return;
+                    }
+                    Err(WsError::Budget) => {
+                        close_and_flush(&mut writer, 1013, "inspection budget exhausted").await;
+                        return;
+                    }
+                    Err(WsError::Protocol(reason)) => {
+                        close_and_flush(&mut writer, 1002, reason).await;
+                        return;
+                    }
+                    Err(WsError::Io) => return,
+                };
+                match frame.opcode {
+                    OP_CLOSE | OP_PING | OP_PONG => {
                         if writer.write_all(&frame.raw).await.is_err() {
                             return;
                         }
                         if frame.opcode == OP_CLOSE {
                             return;
                         }
+                        continue;
                     }
-                    Err(WsError::TooLarge) => {
-                        let _ = writer.write_all(&close_frame(1009, "message too large")).await;
-                        let _ = writer.flush().await;
+                    _ => {}
+                }
+                let fin = frame.fin;
+                match message.push(frame, message_limit) {
+                    Ok(()) => {}
+                    Err(PushError::TooLarge) => {
+                        close_and_flush(&mut writer, 1009, "message too large").await;
                         return;
                     }
-                    Err(_) => return,
+                    Err(PushError::Protocol(reason)) => {
+                        close_and_flush(&mut writer, 1002, reason).await;
+                        return;
+                    }
                 }
+                if !fin {
+                    continue;
+                }
+                let (_, payload, raw) = message.finish();
+                let view = RequestView::with_body_decoding(
+                    &request.method,
+                    &request.uri,
+                    &request.headers,
+                    b"",
+                    source_ip,
+                    false,
+                );
+                let response = ResponseView::new(
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    &response_headers,
+                    &payload,
+                    false,
+                );
+                let outcome = evaluate_websocket_response(&config, &view, &response);
+                if let Some(blocked) = outcome.blocked {
+                    warn!(
+                        client = %source_ip,
+                        direction = "server_to_client",
+                        category = %blocked.category,
+                        rule = %blocked.rule,
+                        "WebSocket response payload blocked"
+                    );
+                    let reason = format!("{}/{}", blocked.category, blocked.rule);
+                    close_and_flush(&mut writer, 1008, &reason).await;
+                    return;
+                }
+                for record in outcome.logs {
+                    warn!(
+                        client = %source_ip,
+                        direction = "server_to_client",
+                        category = %record.category,
+                        rule = %record.rule,
+                        "WebSocket response payload logged"
+                    );
+                }
+                for part in raw {
+                    if writer.write_all(&part).await.is_err() {
+                        return;
+                    }
+                }
+                if writer.flush().await.is_err() {
+                    return;
+                }
+                budget.finish();
             }
             command = close.recv() => {
                 if let Some(command) = command {
@@ -323,6 +418,14 @@ async fn pump_upstream_to_client<R, W>(
             }
         }
     }
+}
+
+async fn close_and_flush<W>(writer: &mut W, code: u16, reason: &str)
+where
+    W: AsyncWrite + Unpin,
+{
+    let _ = writer.write_all(&close_frame(code, reason)).await;
+    let _ = writer.flush().await;
 }
 
 #[allow(clippy::too_many_arguments)]

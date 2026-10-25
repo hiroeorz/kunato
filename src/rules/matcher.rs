@@ -103,6 +103,22 @@ impl Matcher {
         self.matches_request(view) && self.matches_body_payload(view)
     }
 
+    /// Match a server-to-client WebSocket message against response-phase rules.
+    /// Only rules that inspect `response_body` apply: a rule that only scopes
+    /// response headers would otherwise fire on the handshake response alone
+    /// and close tunnels that carry no matching payload.
+    pub fn matches_websocket_response(
+        &self,
+        view: &RequestView<'_>,
+        response: &ResponseView<'_>,
+    ) -> bool {
+        let inspects_body = self
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload.targets & TARGET_RESPONSE_BODY != 0);
+        inspects_body && self.matches_response(view, response)
+    }
+
     fn matches_body_payload(&self, view: &RequestView<'_>) -> bool {
         let Some(payload) = &self.payload else {
             return false;

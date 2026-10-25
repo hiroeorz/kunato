@@ -311,73 +311,40 @@ def recv_exact(connection, length):
     return data
 
 
-def ws_read_frame(connection):
-    header = recv_exact(connection, 2)
-    first, second = header
-    length = second & 0x7F
-    if length == 126:
-        length = int.from_bytes(recv_exact(connection, 2), "big")
-    elif length == 127:
-        length = int.from_bytes(recv_exact(connection, 8), "big")
-    mask = recv_exact(connection, 4) if second & 0x80 else b""
-    payload = recv_exact(connection, length)
-    if mask:
-        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return first & 0x0F, bool(first & 0x80), payload
+class WSReader:
+    """Reads frames while preserving bytes that arrive with the handshake."""
 
+    def __init__(self, connection, buffer=b""):
+        self.connection = connection
+        self.buffer = buffer
 
-def websocket_lifecycle(host="app.test", port=8080):
-    started = time.monotonic()
-    connection = None
-    result = {"id": "ws-lifecycle", "status": None, "pong": False,
-              "echo": None, "closed": False}
-    try:
-        connection = socket.create_connection((host, port), timeout=4)
-        key = base64.b64encode(b"kunato-lab-ws-key").decode()
-        request = (f"GET /ws-lifecycle HTTP/1.1\r\nHost: app.test\r\n"
-                   f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
-                   f"X-Kunato-Lab-Case: ws-lifecycle\r\n\r\n")
-        connection.sendall(request.encode("latin-1"))
-        connection.settimeout(4)
-        data = b""
-        while b"\r\n\r\n" not in data:
-            chunk = connection.recv(4096)
+    def read_exact(self, length):
+        while len(self.buffer) < length:
+            chunk = self.connection.recv(4096)
             if not chunk:
-                break
-            data += chunk
-        status, _ = status_of(data)
-        result["status"] = status
-        if status != 101:
-            return result
-        connection.sendall(ws_frame(0x9, b"ping"))
-        opcode, _, payload = ws_read_frame(connection)
-        result["pong"] = opcode == 0xA and payload == b"ping"
-        connection.sendall(ws_frame(0x1, b"frag", fin=False))
-        connection.sendall(ws_frame(0x0, b"ment", fin=False))
-        connection.sendall(ws_frame(0x0, b"ed", fin=True))
-        opcode, _, payload = ws_read_frame(connection)
-        if opcode == 0x1:
-            result["echo"] = payload.decode("utf-8", errors="replace")
-        connection.sendall(ws_frame(0x8, b"\x03\xe8"))
-        try:
-            opcode, _, _ = ws_read_frame(connection)
-            result["closed"] = opcode == 0x8
-        except (OSError, ValueError):
-            result["closed"] = True
-    except (OSError, ValueError) as error:
-        result["error"] = str(error)
-    finally:
-        if connection is not None:
-            connection.close()
-    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
-    return result
+                raise ValueError("WebSocket peer closed early")
+            self.buffer += chunk
+        data = self.buffer[:length]
+        self.buffer = self.buffer[length:]
+        return data
+
+    def read_frame(self):
+        first, second = self.read_exact(2)
+        length = second & 0x7F
+        if length == 126:
+            length = int.from_bytes(self.read_exact(2), "big")
+        elif length == 127:
+            length = int.from_bytes(self.read_exact(8), "big")
+        mask = self.read_exact(4) if second & 0x80 else b""
+        payload = self.read_exact(length)
+        if mask:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        return first & 0x0F, bool(first & 0x80), payload
 
 
-def ws_open(host, port, case):
-    connection = socket.create_connection((host, port), timeout=4)
+def ws_handshake(connection, path, case):
     key = base64.b64encode(f"kunato-lab-{case}".encode()).decode()
-    request = (f"GET /ws-lifecycle HTTP/1.1\r\nHost: app.test\r\n"
+    request = (f"GET {path} HTTP/1.1\r\nHost: app.test\r\n"
                f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
                f"X-Kunato-Lab-Case: {case}\r\n\r\n")
@@ -390,7 +357,50 @@ def ws_open(host, port, case):
             break
         data += chunk
     status, _ = status_of(data)
-    return connection, status
+    end = data.find(b"\r\n\r\n")
+    return status, (data[end + 4:] if end >= 0 else b"")
+
+
+def websocket_lifecycle(host="app.test", port=8080):
+    started = time.monotonic()
+    connection = None
+    result = {"id": "ws-lifecycle", "status": None, "pong": False,
+              "echo": None, "closed": False}
+    try:
+        connection = socket.create_connection((host, port), timeout=4)
+        status, leftover = ws_handshake(connection, "/ws-lifecycle", "ws-lifecycle")
+        result["status"] = status
+        if status != 101:
+            return result
+        reader = WSReader(connection, leftover)
+        connection.sendall(ws_frame(0x9, b"ping"))
+        opcode, _, payload = reader.read_frame()
+        result["pong"] = opcode == 0xA and payload == b"ping"
+        connection.sendall(ws_frame(0x1, b"frag", fin=False))
+        connection.sendall(ws_frame(0x0, b"ment", fin=False))
+        connection.sendall(ws_frame(0x0, b"ed", fin=True))
+        opcode, _, payload = reader.read_frame()
+        if opcode == 0x1:
+            result["echo"] = payload.decode("utf-8", errors="replace")
+        connection.sendall(ws_frame(0x8, b"\x03\xe8"))
+        try:
+            opcode, _, _ = reader.read_frame()
+            result["closed"] = opcode == 0x8
+        except (OSError, ValueError):
+            result["closed"] = True
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    finally:
+        if connection is not None:
+            connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def ws_open(host, port, case, path="/ws-lifecycle"):
+    connection = socket.create_connection((host, port), timeout=4)
+    status, leftover = ws_handshake(connection, path, case)
+    return connection, status, leftover
 
 
 def ws_payload(host="app.test", port=8080):
@@ -401,12 +411,13 @@ def ws_payload(host="app.test", port=8080):
                            ("benign", b"benign payload")):
         connection = None
         try:
-            connection, status = ws_open(host, port, f"ws-payload-{phase}")
+            connection, status, leftover = ws_open(host, port, f"ws-payload-{phase}")
             result["status"] = result["status"] or status
             if status != 101:
                 continue
+            reader = WSReader(connection, leftover)
             connection.sendall(ws_frame(0x1, payload))
-            opcode, _, data = ws_read_frame(connection)
+            opcode, _, data = reader.read_frame()
             if opcode == 0x8:
                 if phase == "attack":
                     result["blocked"] = True
@@ -417,6 +428,35 @@ def ws_payload(host="app.test", port=8080):
                     result["echo"] = text
                 else:
                     result["benign_echo"] = text
+        except (OSError, ValueError) as error:
+            result["error"] = str(error)
+        finally:
+            if connection is not None:
+                connection.close()
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+    return result
+
+
+def ws_push(host="app.test", port=8080):
+    started = time.monotonic()
+    result = {"id": "ws-push", "status": None, "blocked": False,
+              "close_code": None, "payload": None, "benign": None}
+    for phase, path, key in (("attack", "/ws-push-attack", "payload"),
+                             ("benign", "/ws-push-benign", "benign")):
+        connection = None
+        try:
+            connection, status, leftover = ws_open(host, port, f"ws-push-{phase}", path=path)
+            result["status"] = result["status"] or status
+            if status != 101:
+                continue
+            reader = WSReader(connection, leftover)
+            opcode, _, data = reader.read_frame()
+            if opcode == 0x8:
+                if phase == "attack":
+                    result["blocked"] = True
+                    result["close_code"] = int.from_bytes(data[:2], "big")
+            elif opcode == 0x1:
+                result[key] = data.decode("utf-8", errors="replace")
         except (OSError, ValueError) as error:
             result["error"] = str(error)
         finally:
@@ -587,7 +627,7 @@ def main():
     parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
                                           "slow-read", "exhaustion", "hold", "connect",
                                           "upstream", "ban", "ws-lifecycle", "ws-payload",
-                                          "h2", "burst", "isolation", "metrics"])
+                                          "ws-push", "h2", "burst", "isolation", "metrics"])
     parser.add_argument("--path", default="/health")
     parser.add_argument("--status", type=int, default=200)
     parser.add_argument("--nonce")
@@ -651,6 +691,10 @@ def main():
         return 0
     elif args.mode == "ws-payload":
         result = ws_payload(args.host, args.port)
+        print(json.dumps(result))
+        return int("error" in result)
+    elif args.mode == "ws-push":
+        result = ws_push(args.host, args.port)
         print(json.dumps(result))
         return int("error" in result)
     elif args.mode == "h2":

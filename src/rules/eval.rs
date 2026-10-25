@@ -29,12 +29,41 @@ pub struct EvalOutcome {
     pub logs: Vec<MatchRecord>,
 }
 
+/// How a phase is evaluated. The WebSocket variants only apply the payload
+/// target of their phase to the inspected message.
+#[derive(Clone, Copy)]
+enum Mode {
+    Request,
+    WebsocketRequest,
+    Response,
+    WebsocketResponse,
+}
+
+fn matches(
+    mode: Mode,
+    rule: &CompiledRule,
+    view: &RequestView<'_>,
+    response: Option<&ResponseView<'_>>,
+) -> bool {
+    match mode {
+        Mode::Request => rule.matcher.matches(view),
+        Mode::WebsocketRequest => rule.matcher.matches_websocket(view),
+        Mode::Response => match response {
+            Some(response) => rule.matcher.matches_response(view, response),
+            None => rule.matcher.matches(view),
+        },
+        Mode::WebsocketResponse => {
+            response.is_some_and(|response| rule.matcher.matches_websocket_response(view, response))
+        }
+    }
+}
+
 pub fn evaluate(
     config: &CompiledConfig,
     view: &RequestView<'_>,
     limits: Option<&dyn RuleLimitCheck>,
 ) -> EvalOutcome {
-    evaluate_phase(config, Phase::Request, view, None, limits, false)
+    evaluate_phase(config, Phase::Request, view, None, limits, Mode::Request)
 }
 
 /// Evaluate a post-upgrade WebSocket message. Request conditions still scope
@@ -44,7 +73,14 @@ pub fn evaluate_websocket(
     view: &RequestView<'_>,
     limits: Option<&dyn RuleLimitCheck>,
 ) -> EvalOutcome {
-    evaluate_phase(config, Phase::Request, view, None, limits, true)
+    evaluate_phase(
+        config,
+        Phase::Request,
+        view,
+        None,
+        limits,
+        Mode::WebsocketRequest,
+    )
 }
 
 pub fn evaluate_response(
@@ -52,7 +88,32 @@ pub fn evaluate_response(
     view: &RequestView<'_>,
     response: &ResponseView<'_>,
 ) -> EvalOutcome {
-    evaluate_phase(config, Phase::Response, view, Some(response), None, false)
+    evaluate_phase(
+        config,
+        Phase::Response,
+        view,
+        Some(response),
+        None,
+        Mode::Response,
+    )
+}
+
+/// Evaluate a server-to-client WebSocket message. Response conditions scope the
+/// handshake response and the tunnel's request, and only rules that match
+/// `response_body` are applied to the message payload.
+pub fn evaluate_websocket_response(
+    config: &CompiledConfig,
+    view: &RequestView<'_>,
+    response: &ResponseView<'_>,
+) -> EvalOutcome {
+    evaluate_phase(
+        config,
+        Phase::Response,
+        view,
+        Some(response),
+        None,
+        Mode::WebsocketResponse,
+    )
 }
 
 fn evaluate_phase(
@@ -61,7 +122,7 @@ fn evaluate_phase(
     view: &RequestView<'_>,
     response: Option<&ResponseView<'_>>,
     limits: Option<&dyn RuleLimitCheck>,
-    websocket: bool,
+    mode: Mode,
 ) -> EvalOutcome {
     let mut outcome = EvalOutcome::default();
 
@@ -74,14 +135,7 @@ fn evaluate_phase(
             let mut score = 0u32;
             let mut last: Option<&CompiledRule> = None;
             for rule in &category.rules {
-                let matched = if websocket {
-                    rule.matcher.matches_websocket(view)
-                } else {
-                    match response {
-                        Some(response) => rule.matcher.matches_response(view, response),
-                        None => rule.matcher.matches(view),
-                    }
-                };
+                let matched = matches(mode, rule, view, response);
                 if matched {
                     score += 1;
                     last = Some(rule);
@@ -115,14 +169,7 @@ fn evaluate_phase(
         }
 
         for rule in &category.rules {
-            let matched = if websocket {
-                rule.matcher.matches_websocket(view)
-            } else {
-                match response {
-                    Some(response) => rule.matcher.matches_response(view, response),
-                    None => rule.matcher.matches(view),
-                }
-            };
+            let matched = matches(mode, rule, view, response);
             if !matched {
                 continue;
             }
@@ -430,6 +477,25 @@ mod tests {
         evaluate_response(&config, &view, &response)
     }
 
+    fn evaluate_websocket_response_for(
+        yaml: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> EvalOutcome {
+        let config = config::parse(yaml).expect("valid test config");
+        let method = Method::GET;
+        let uri: Uri = "/ws".parse().expect("valid URI");
+        let view = RequestView::new(
+            &method,
+            &uri,
+            headers,
+            b"",
+            "127.0.0.1".parse().expect("valid IP"),
+        );
+        let response = ResponseView::new(StatusCode::SWITCHING_PROTOCOLS, headers, body, false);
+        evaluate_websocket_response(&config, &view, &response)
+    }
+
     #[test]
     fn request_phase_skips_response_categories() {
         let yaml = format!(
@@ -548,5 +614,94 @@ mod tests {
         let outcome = evaluate_response_for(&yaml, StatusCode::OK, b"secret");
         assert!(outcome.blocked.is_some());
         assert!(outcome.allowed.is_none());
+    }
+
+    #[test]
+    fn websocket_response_blocks_a_matching_server_message() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: response-leaks
+    phase: response
+    action: LOG
+    rules:
+      - name: private-key
+        action: BLOCK
+        match: {{ regex: 'BEGIN [A-Z ]*PRIVATE KEY', in: [response_body] }}
+"
+        );
+        let headers = HeaderMap::new();
+        let outcome =
+            evaluate_websocket_response_for(&yaml, &headers, b"-----BEGIN RSA PRIVATE KEY-----");
+        let blocked = outcome.blocked.expect("blocked");
+        assert_eq!(blocked.phase, config::Phase::Response);
+        assert_eq!(blocked.rule, "private-key");
+
+        let outcome = evaluate_websocket_response_for(&yaml, &headers, b"hello from the origin");
+        assert!(outcome.blocked.is_none());
+    }
+
+    #[test]
+    fn websocket_response_skips_rules_without_a_body_condition() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: hardening
+    phase: response
+    action: BLOCK
+    rules:
+      - name: frame-options-deny
+        match: {{ response_headers: {{ X-Frame-Options: '^DENY$' }} }}
+"
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-frame-options", "DENY".parse().expect("header value"));
+
+        let config = config::parse(&yaml).expect("valid config");
+        let method = Method::GET;
+        let uri: Uri = "/ws".parse().expect("valid URI");
+        let view = RequestView::new(
+            &method,
+            &uri,
+            &headers,
+            b"",
+            "127.0.0.1".parse().expect("valid IP"),
+        );
+
+        let response = ResponseView::new(StatusCode::OK, &headers, b"", false);
+        assert!(
+            evaluate_response(&config, &view, &response)
+                .blocked
+                .is_some()
+        );
+
+        let response = ResponseView::new(StatusCode::SWITCHING_PROTOCOLS, &headers, b"", false);
+        assert!(
+            evaluate_websocket_response(&config, &view, &response)
+                .blocked
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn websocket_response_status_scopes_to_the_handshake() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: ok-only
+    phase: response
+    action: BLOCK
+    rules:
+      - name: ok-body
+        match: {{ status: 200, regex: secret }}
+  - name: upgrade-only
+    phase: response
+    action: BLOCK
+    rules:
+      - name: upgrade-body
+        match: {{ status: 101, regex: secret }}
+"
+        );
+        let headers = HeaderMap::new();
+        let outcome = evaluate_websocket_response_for(&yaml, &headers, b"secret");
+        let blocked = outcome.blocked.expect("the 101 rule matches");
+        assert_eq!(blocked.rule, "upgrade-body");
     }
 }

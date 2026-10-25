@@ -823,6 +823,9 @@ class SandboxSuite:
         control_payload = self.probe(
             "control", "ws-payload", check=False,
             log=self.run_dir / "websocket-control/payload.jsonl")
+        control_push = self.probe(
+            "control", "ws-push", check=False,
+            log=self.run_dir / "websocket-control/push.jsonl")
         nonce = self.reset_origin("websocket")
         self.compose("up", "-d", "normal")
         protected = self.probe("client", "ws-lifecycle", check=False,
@@ -830,10 +833,14 @@ class SandboxSuite:
         protected_payload = self.probe(
             "client", "ws-payload", check=False,
             log=self.run_dir / "websocket/payload.jsonl")
+        protected_push = self.probe(
+            "client", "ws-push", check=False,
+            log=self.run_dir / "websocket/push.jsonl")
         normal = self.healthy("websocket", nonce=nonce, service="normal", exec=True)
         self.logs("websocket")
         return judge_websocket_lifecycle(control, protected, normal,
-                                         control_payload, protected_payload)
+                                         control_payload, protected_payload,
+                                         control_push, protected_push)
 
     def tool_attempt(self, phase, service):
         nonce = self.reset_origin(phase)

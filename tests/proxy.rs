@@ -344,7 +344,8 @@ async fn spawn_upgrade_upstream() -> SocketAddr {
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let service = service_fn(move |mut request: Request<Incoming>| async move {
-                    if request.uri().path() != "/ws" {
+                    let path = request.uri().path().to_owned();
+                    if !matches!(path.as_str(), "/ws" | "/ws-push" | "/ws-push-fragmented") {
                         return Ok::<_, Infallible>(upstream_error(StatusCode::NOT_FOUND));
                     }
                     let forwarded_for = request.headers().contains_key("x-forwarded-for");
@@ -397,6 +398,25 @@ async fn spawn_upgrade_upstream() -> SocketAddr {
                             return;
                         };
                         let mut upgraded = TokioIo::new(upgraded);
+                        match path.as_str() {
+                            "/ws-push" => {
+                                let pushed = server_ws_frame(0x1, b"pushed payload", true);
+                                if upgraded.write_all(&pushed).await.is_err() {
+                                    return;
+                                }
+                            }
+                            "/ws-push-fragmented" => {
+                                let first = server_ws_frame(0x1, b"frag", false);
+                                let second = server_ws_frame(0x0, b"mented", true);
+                                if upgraded.write_all(&first).await.is_err() {
+                                    return;
+                                }
+                                if upgraded.write_all(&second).await.is_err() {
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
                         loop {
                             let mut head = [0u8; 2];
                             if upgraded.read_exact(&mut head).await.is_err() {
@@ -520,6 +540,27 @@ async fn websocket_handshake_with_headers(
         response.push(byte[0]);
     }
     (String::from_utf8_lossy(&response).into_owned(), stream)
+}
+
+async fn read_server_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut head = [0u8; 2];
+    stream.read_exact(&mut head).await.expect("read frame head");
+    let opcode = head[0] & 0x0f;
+    let mut len = usize::from(head[1] & 0x7f);
+    if len == 126 {
+        let mut extended = [0u8; 2];
+        stream
+            .read_exact(&mut extended)
+            .await
+            .expect("read frame length");
+        len = usize::from(u16::from_be_bytes(extended));
+    }
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("read frame payload");
+    (opcode, payload)
 }
 
 struct Running {
@@ -3949,6 +3990,147 @@ categories:
     let mut echoed = vec![0u8; expected.len()];
     stream.read_exact(&mut echoed).await.expect("read echo");
     assert_eq!(echoed, expected);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_server_payload_is_inspected() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: response-leaks
+    phase: response
+    action: BLOCK
+    rules:
+      - name: pushed-marker
+        match: {{ regex: pushed, in: [response_body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws-push").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(opcode, 0x8, "expected a close frame");
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+    assert!(
+        String::from_utf8_lossy(&payload[2..]).contains("response-leaks/pushed-marker"),
+        "unexpected close reason: {:?}",
+        String::from_utf8_lossy(&payload[2..])
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_server_benign_payload_is_forwarded() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: response-leaks
+    phase: response
+    action: BLOCK
+    rules:
+      - name: never-matches
+        match: {{ regex: never-matches, in: [response_body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws-push").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(opcode, 0x1);
+    assert_eq!(payload, b"pushed payload");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_server_fragmented_payload_is_reassembled() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: response-leaks
+    phase: response
+    action: BLOCK
+    rules:
+      - name: fragmented-marker
+        match: {{ regex: fragmented, in: [response_body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws-push-fragmented").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(opcode, 0x8, "expected a close frame");
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_server_fragmented_message_over_the_limit_is_closed() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ websocket_message_bytes: 8 }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws-push-fragmented").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(opcode, 0x8, "expected a close frame");
+    assert_eq!(&payload[..2], &1009u16.to_be_bytes());
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_header_only_response_rule_does_not_close_the_tunnel() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: hardening
+    phase: response
+    action: BLOCK
+    rules:
+      - name: upgrade-header
+        match: {{ response_headers: {{ Upgrade: '(?i)websocket' }} }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws-push").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(opcode, 0x1);
+    assert_eq!(payload, b"pushed payload");
 
     running.stop().await;
 }

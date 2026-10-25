@@ -651,7 +651,8 @@ def judge_ban_recovery(probe, normal, before, after, restarts, application_metri
 
 
 def judge_websocket_lifecycle(control, protected, normal, control_payload=None,
-                              protected_payload=None):
+                              protected_payload=None, control_push=None,
+                              protected_push=None):
     def complete(result):
         return (result.get("status") == 101 and result.get("pong")
                 and result.get("echo") == "echo:fragmented"
@@ -691,6 +692,21 @@ def judge_websocket_lifecycle(control, protected, normal, control_payload=None,
              "verdict": "passed" if benign_echo.startswith("echo:benign") else "failed",
              "origin_receipts": 0},
         ])
+    if control_push is not None and protected_push is not None:
+        control_delivered = str(control_push.get("payload", "")).startswith(
+            "-----BEGIN RSA PRIVATE KEY")
+        push_blocked = (protected_push.get("blocked") is True
+                        and protected_push.get("close_code") == 1008)
+        benign_push = str(protected_push.get("benign", ""))
+        cases.extend([
+            {"id": "ws-push-block", "expect": "block",
+             "verdict": "passed" if control_delivered and push_blocked
+             else ("inconclusive" if not control_delivered else "failed"),
+             "origin_receipts": 0},
+            {"id": "ws-push-benign", "expect": "push",
+             "verdict": "passed" if benign_push.startswith("benign push") else "failed",
+             "origin_receipts": 0},
+        ])
     result = summarize(cases)
     result["notes"] = {"control_status": control.get("status"),
                        "protected_status": protected.get("status"),
@@ -702,7 +718,11 @@ def judge_websocket_lifecycle(control, protected, normal, control_payload=None,
                        "protected_error": protected.get("error"),
                        "payload_close_code": (protected_payload or {}).get("close_code"),
                        "payload_echo": (protected_payload or {}).get("echo"),
-                       "payload_benign_echo": (protected_payload or {}).get("benign_echo")}
+                       "payload_benign_echo": (protected_payload or {}).get("benign_echo"),
+                       "push_close_code": (protected_push or {}).get("close_code"),
+                       "push_payload": (protected_push or {}).get("payload"),
+                       "push_benign": (protected_push or {}).get("benign"),
+                       "control_push_payload": (control_push or {}).get("payload")}
     return result
 
 

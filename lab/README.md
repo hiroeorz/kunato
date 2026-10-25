@@ -9,7 +9,7 @@ path-discovery/enumeration comparison, an authenticated ZAP spider/passive
 baseline, 25 deterministic mutation variants, 12 raw protocol/WebSocket cases,
 TLS/HTTP/2 and HTTP/3 resource variants, benign JSON/upload/i18n/large-body/streaming
 workflows, bounded slow-HTTP, availability, backpressure, slow-connect, ban-recovery, and
-WebSocket lifecycle and payload probes, a pinned
+WebSocket lifecycle and payload probes (client and server direction), a pinned
 k6 v2.3.0 mixed availability load, a restart-under-load probe, and a pinned
 OWASP CRS 4.3.0 comparison. It measures
 request rejection, bounded exploit prevention, and availability on a fixed
@@ -228,9 +228,14 @@ fragmented text message and requires the origin's concatenated echo, and sends a
 close frame and requires the close handshake. It then sends an XSS message
 through a separate connection: the direct control must echo it, while the
 protected tunnel must close with `1008` and no origin echo. A benign message must
-still be echoed on the protected path. The independent normal client must stay at
-`200`. The current result is 8 passed with PONG, the `echo:fragmented` response,
-the close handshake, a `1008` payload block, and the benign payload echo.
+still be echoed on the protected path. It also opens `/ws-push-attack` and
+`/ws-push-benign`, where the origin pushes a message immediately after the `101`:
+the direct control must receive the private-key marker, while the protected
+tunnel must close with `1008` and deliver no message, and the benign push must
+still arrive. The independent normal client must stay at `200`. The current
+result is 10 passed with PONG, the `echo:fragmented` response, the close
+handshake, a `1008` payload block, the benign payload echo, a `1008` server push
+block, and the benign push.
 
 ### TLS HTTP/2 resource variants
 
@@ -280,7 +285,7 @@ upstream timeout (expecting `504`), and asserts the normal probe, RSS, restarts,
 the global rejection, and the upstream-timeout metric. The fillers are stopped
 and the normal client must recover to `200`. The current result is 9 passed:
 slow-body `408`, slow-read `200`, per-source and global caps at `503` (32 active
-connections), upstream `504`, normal `200`, no restart, and RSS 23.5 MiB.
+connections), upstream `504`, normal `200`, no restart, and RSS 23.7 MiB.
 
 ### Slow upstream connect
 
@@ -326,9 +331,9 @@ the judge also requires the normal and recovery probes to return 200, no Kunato
 restart, and RSS under the 256 MiB ceiling. Recovery is checked immediately
 after the load stops. The `load-metrics` case also checks that Kunato's request
 counter covers the k6 workload and that no block, rate-limit, overload, or
-upstream-timeout counter moved. The current result is 6 passed: 3001 requests,
-p95 46.5 ms, p99 49.7 ms, 100% success, 8 slow connections held, normal and
-recovery 200, RSS 21.8 MiB, no restart, and matching metrics.
+upstream-timeout counter moved. The current result is 6 passed: 3000 requests,
+p95 49.2 ms, p99 53.4 ms, 100% success, 8 slow connections held, normal and
+recovery 200, RSS 22.2 MiB, no restart, and matching metrics.
 
 ### Restart under load
 
@@ -339,7 +344,7 @@ from the independent normal client; the k6 summary must retain at least 100
 requests and a check rate above 50%. The report records the exit code, shutdown
 time, request count, check rate, recovery, RSS, and normal status. OOM and
 forced-kill behavior are not exercised. The current result is 4 passed: exit
-code 0, a 417 ms shutdown, 501 requests, a 98.6% check rate, recovery and normal
+code 0, a 519 ms shutdown, 501 requests, a 98.0% check rate, recovery and normal
 `200`, and RSS 21.4 MiB.
 
 ### OWASP CRS comparison
@@ -398,8 +403,8 @@ Each run prints its directory under `target/security-lab/`. It retains:
 - `ban/`: ban-trigger statuses, recovery probe, health, metrics, and Kunato
   logs;
 - `websocket-control/` and `websocket/`: direct and protected PING/PONG,
-  fragmented echo, close-handshake, XSS payload-block, and benign payload probes,
-  plus health;
+  fragmented echo, close-handshake, XSS payload-block, benign payload, and
+  server-push block/benign probes, plus health;
 - `restart/` and `restart-recovery/`: SIGTERM shutdown, k6 summary and logs,
   restart exit code, recovery probes, and normal-client health;
 - `report.json` and `report.md`: case verdicts, counts, rule names, notes, and
@@ -450,8 +455,8 @@ per-source and global connection caps, and upstream-response timeout, the
 connect suite covers slow upstream connection establishment, the ban suite
 covers ban recovery with a short window, and the restart suite covers graceful
 SIGTERM under load and rate-guard/connection backpressure. Accept-queue depth,
-true distributed-source exhaustion, OOM or forced-kill behavior,
-server-to-client WebSocket frames, and compressed WebSocket extensions are not
+true distributed-source exhaustion, OOM or forced-kill behavior, binary
+WebSocket payload semantics, and compressed WebSocket extensions are not
 covered. The Rust proxy tests add HTTP/3 malformed
 request streams, hot reload under load, and rules update plus reload under load;
 HTTP/3 is exercised by the `h3` suite; the Rust malformed-stream test remains the

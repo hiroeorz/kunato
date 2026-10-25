@@ -626,6 +626,13 @@ truncated response body is still inspected best-effort but never satisfies a
 body-targeting `ALLOW` rule. Decoding is inspection-only: the bytes forwarded to
 the upstream and to the client are never modified.
 
+After a `101` WebSocket handshake, reassembled server-to-client messages are the
+response body stream: response-phase rules that inspect `response_body` are
+matched per message, with the handshake response (`101` plus its headers)
+scoping `status` and `response_headers`. Rules without a `response_body`
+condition are not applied to frames, and a matching `BLOCK` closes the tunnel
+with `1008` rather than replacing an HTTP response.
+
 When response-phase rules do not target `response_body`, they run as soon as
 the upstream headers arrive, without buffering or waiting for response content.
 Status/header rules and their LOG, ALLOW, and BLOCK actions therefore work with
@@ -773,15 +780,20 @@ just the path. Request-target length, header size/count, and method-case checks
 run before inspection memory is reserved or the body is read on all transports,
 including WebSocket handshakes. An invalid head is rejected even if its declared
 body never arrives. `websocket_message_bytes` bounds each reassembled
-client-to-server WebSocket message inspected after the `101` handshake; a larger
-message closes the tunnel with close code `1009`. Kunato does not negotiate
-WebSocket extensions, so frames remain uncompressed and inspectable. Only
-client-to-server messages are inspected: text messages must be valid UTF-8,
-binary messages are matched lossily, rules scoped to body targets apply, and
-rules with per-rule limits use the same source-keyed window as HTTP. Message
-inspection reserves from the process-wide 256 MiB inspection budget; budget
-exhaustion closes the tunnel with code `1013`. Server-to-client frames are
-forwarded without inspection.
+WebSocket message inspected after the `101` handshake in either direction; a
+larger message closes the tunnel with close code `1009`. Kunato does not
+negotiate WebSocket extensions, so frames remain uncompressed and inspectable.
+Client-to-server messages are matched against body-target rules: text messages
+must be valid UTF-8, binary messages are matched lossily, and rules with
+per-rule limits use the same source-keyed window as HTTP. Server-to-client
+messages are matched against response-phase rules that inspect `response_body`;
+the handshake response (`101` plus its headers) scopes `status` and
+`response_headers`, rules without a `response_body` condition never apply to
+frames, and a matching `BLOCK` closes the tunnel with code `1008` instead of
+delivering the message. Text is matched lossily in that direction without a
+UTF-8 rejection, and an `ALLOW` ends evaluation for the current message only.
+Inspection reserves from the process-wide 256 MiB inspection budget in both
+directions; budget exhaustion closes the tunnel with code `1013`.
 `max_concurrent_streams` caps concurrent request streams per
 HTTP/2 connection (and per QUIC connection for HTTP/3). HTTP/2 connections are
 pinged after 30 seconds without activity and closed when the ping is not
@@ -1081,8 +1093,8 @@ for that.
 
 The check covers the HTTP request that carries the document. A GraphQL
 subscription transported over a WebSocket tunnel sends its operations in frames
-after the `101` handshake; those frames are opaque to the proxy, like every other
-WebSocket payload.
+after the `101` handshake; those frames are matched by body and `response_body`
+rules but are not parsed for GraphQL depth or complexity.
 
 ### Response headers
 
@@ -1405,11 +1417,18 @@ Handshake headers use the same hop-by-hop filtering as ordinary HTTP in both
 directions: fields named by `Connection` are removed, then `Connection: upgrade`
 and `Upgrade: websocket` are rebuilt for the forwarded handshake.
 
-The tunnel itself is opaque: payload bytes are not inspected and
-`max_body_bytes` does not apply. Tunnels with no traffic in either direction
-are closed after `timeouts.websocket_idle` (default `10m`), and all tunnels are
-closed on shutdown. WebSocket over HTTP/2 or HTTP/3 (extended CONNECT) is not
-supported yet.
+Application payloads are inspected in both directions. Client-to-server
+messages are reassembled (up to `limits.websocket_message_bytes`) and matched
+against body-target rules. Server-to-client messages are reassembled the same
+way and matched against response-phase rules that inspect `response_body`, with
+the `101` handshake response scoping `status` and `response_headers`. A matching
+`BLOCK` closes the tunnel with `1008`; malformed frames close with `1002`, an
+oversized message with `1009`, and inspection-budget exhaustion with `1013`.
+WebSocket extensions are not negotiated, so compressed frames are never
+accepted. `max_body_bytes` still does not apply to tunnel frames. Tunnels with
+no traffic in either direction are closed after `timeouts.websocket_idle`
+(default `10m`), and all tunnels are closed on shutdown. WebSocket over HTTP/2
+or HTTP/3 (extended CONNECT) is not supported yet.
 
 ### Hot reload
 

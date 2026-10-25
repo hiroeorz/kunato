@@ -138,13 +138,18 @@ then sends a masked PING and requires the matching PONG, a fragmented text
 message and requires the origin's concatenated echo, and a close frame and
 requires the close handshake. It then sends an XSS message: the direct control
 must echo it, while the protected tunnel must close with code `1008` and no
-origin echo; a benign message must still be echoed. The independent normal client
-must stay at `200`. Client-to-server messages are reassembled and matched against
-body-target rules up to `limits.websocket_message_bytes`; WebSocket extensions are
-not negotiated, so frames stay uncompressed. Message inspection reserves from the
-process-wide inspection budget and closes with `1013` when it is exhausted.
-Server-to-client frames, compressed extensions, and binary payload semantics
-remain outside this suite.
+origin echo; a benign message must still be echoed. A separate pair of
+connections asks the origin to push a private-key marker right after the `101`:
+the direct control must receive it, while the protected tunnel must close with
+`1008` and deliver no message; a benign push must still arrive. The independent
+normal client must stay at `200`. Messages are reassembled in both directions up
+to `limits.websocket_message_bytes`. Client-to-server messages are matched
+against body-target rules; server-to-client messages are matched against
+response-phase rules that inspect `response_body`, scoped by the `101` handshake
+response. WebSocket extensions are not negotiated, so frames stay uncompressed.
+Inspection reserves from the process-wide inspection budget in both directions
+and closes with `1013` when it is exhausted. Compressed extensions and binary
+payload semantics remain outside this suite.
 
 ### Pinned tools
 
@@ -277,23 +282,24 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The last `all` run, `20261025T161249-890952b1`, passed 19 sandbox suites:
+- The last `all` run, `20261025T165257-9c5d5c20`, passed 19 sandbox suites:
   replay, benign, mutations, protocol, slow, availability, connect, h2, h3,
   backpressure, ban, websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf,
-  and ZAP. The mixed load recorded 3001 requests, p95 46.5 ms, p99 49.7 ms,
-  100% success, normal/recovery `200`, RSS 21.8 MiB of 256 MiB, no restart, and
+  and ZAP. The mixed load recorded 3000 requests, p95 49.2 ms, p99 53.4 ms,
+  100% success, normal/recovery `200`, RSS 22.2 MiB of 256 MiB, no restart, and
   matching metrics. The availability suite recorded a slow-body `408`,
   slow-read `200`, per-source and global connection caps at `503` with 32 active
-  connections, upstream `504`, and 23.5 MiB RSS. The connect suite recorded
+  connections, upstream `504`, and 23.7 MiB RSS. The connect suite recorded
   `502` and one upstream connect error. The backpressure suite allowed 20 of
-  100 requests and shed 80 with `429`/`503` (63 rate-limited, 17 overloaded),
+  100 requests and shed 80 with `429`/`503` (62 rate-limited, 18 overloaded),
   then recovered to normal `200`. The h2 suite passed its normal, Rapid Reset,
   CONTINUATION, and HPACK cases; the h3 suite passed normal, malformed-stream,
   and reset-stream cases; both kept a fresh normal connection after each attack.
-  The restart suite recorded exit code 0, a 417 ms shutdown, 501 requests, a
-  98.6% check rate, and `200` recovery. The ban suite recorded a `429` ban and
+  The restart suite recorded exit code 0, a 519 ms shutdown, 501 requests, a
+  98.0% check rate, and `200` recovery. The ban suite recorded a `429` ban and
   `200` recovery; the websocket suite recorded PONG, the fragmented echo, the
-  close handshake, a `1008` payload block, and the benign payload echo.
+  close handshake, a `1008` payload block, the benign payload echo, a `1008`
+  server-push block, and the benign push.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -315,9 +321,10 @@ current suites.
   partial. HTTP request smuggling, desync, response splitting, upload
   inspection, and GraphQL abuse are partial.
 - The WebSocket suite proves the handshake, PING/PONG, fragmented echo, close
-  handshake, client-to-server payload block, and benign payload echo;
-  server-to-client frames remain uninspected. The 25 mutations and the tool
-  corpora are reviewed samples, not the full scanner catalogs.
+  handshake, client-to-server payload block, benign payload echo, and
+  server-to-client push block with a benign push delivered. Compressed
+  extensions remain unsupported. The 25 mutations and the tool corpora are
+  reviewed samples, not the full scanner catalogs.
 
 ### Protocol coverage
 
@@ -331,10 +338,11 @@ current suites.
   under sustained load. HTTP/1.0, pipelining, CONNECT, chunked trailers, and very
   large chunks are not exercised beyond the 12 reviewed cases; the single
   obs-fold case has no variants.
-- WebSocket application payloads are inspected client-to-server with body-target
-  rules (close `1008` on a match, `1013` on inspection-budget exhaustion);
-  server-to-client frames, compressed extensions, and binary payload semantics
-  are not covered.
+- WebSocket application payloads are inspected in both directions: client
+  messages with body-target rules and server messages with response-phase
+  `response_body` rules (close `1008` on a match, `1013` on inspection-budget
+  exhaustion). Compressed extensions and binary payload semantics are not
+  covered.
 
 ### Availability coverage
 
@@ -391,9 +399,9 @@ current suites.
 4. Restart behavior under load: SIGTERM, graceful exit, restart, and recovery
    are covered by the restart suite; OOM and forced-kill behavior remain
    outside.
-5. WebSocket payload coverage: client-to-server body-target inspection is
-   implemented and lab-tested; server-to-client frames, compressed extensions,
-   and binary payload semantics remain outside.
+5. WebSocket payload coverage: client-to-server body-target inspection and
+   server-to-client `response_body` inspection are implemented and lab-tested;
+   compressed extensions and binary payload semantics remain outside.
 6. ZAP active scanning, endpoint-scoped and observation-only. A separate plan
    was attempted but ZAP 2.17.0 exits at activeScan start even after scoping
    the endpoints and setting `failOnError: false`; revisit when a fixed image or

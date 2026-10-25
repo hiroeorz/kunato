@@ -667,6 +667,31 @@ class WebSocketTests(unittest.TestCase):
         case = next(case for case in result["cases"] if case["id"] == "ws-payload-block")
         self.assertEqual(case["verdict"], "failed")
 
+    def pushes(self):
+        return (
+            {"status": 101, "payload": "-----BEGIN RSA PRIVATE KEY-----"},
+            {"status": 101, "blocked": True, "close_code": 1008,
+             "benign": "benign push"},
+        )
+
+    def test_websocket_push_inspection_requires_a_controlled_delivery(self):
+        control, protected = self.pushes()
+        result = judge_websocket_lifecycle(self.complete(), self.complete(),
+                                           {"status": 200}, None, None,
+                                           control, protected)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["notes"]["push_close_code"], 1008)
+
+    def test_websocket_push_inspection_rejects_a_missed_block(self):
+        control, protected = self.pushes()
+        protected["blocked"] = False
+        result = judge_websocket_lifecycle(self.complete(), self.complete(),
+                                           {"status": 200}, None, None,
+                                           control, protected)
+        self.assertFalse(result["passed"])
+        case = next(case for case in result["cases"] if case["id"] == "ws-push-block")
+        self.assertEqual(case["verdict"], "failed")
+
 
 class ProtocolTests(unittest.TestCase):
     @staticmethod
