@@ -94,7 +94,7 @@ CONNECT_TIMEOUTS = """timeouts:
   header_read: 5s
   body_read: 2s
   upstream_connect: 1s
-  upstream_response: 1s
+  upstream_response: 5s
   shutdown_grace: 10s
   connection_idle: 60s
 """

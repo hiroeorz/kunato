@@ -428,7 +428,7 @@ walked 20 distinct `200` paths from one source; `behavior.scraping` allowed 8
 and blocked 12 (8 allowed, 12 blocked). The h2 suite also passed a bounded server-reset
 pressure variant after Rapid Reset, CONTINUATION, and HPACK; it is a regression
 for server-generated reset handling, not an exact MadeYouReset reproduction.
-The full `all` run `20261027T074247-547c189c` passed all 30 suites, including
+The full `all` run `20261027T081031-244d1562` passed all 30 suites, including
 the hardening, scraping, response, GraphQL, JWT, SSRF/XXE, credential-stuffing,
 and global-auth additions together with the existing tool, protocol, and
 availability controls.

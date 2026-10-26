@@ -15,6 +15,7 @@ use crate::request_view::{RequestView, cookie_pairs};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
+    Incomplete,
     InternalHost(String),
     DuplicateParameter(String),
     CacheDeception,
@@ -24,6 +25,7 @@ pub enum Violation {
 impl Violation {
     pub fn status(&self) -> http::StatusCode {
         match self {
+            Self::Incomplete => http::StatusCode::PAYLOAD_TOO_LARGE,
             Self::DuplicateParameter(_) => http::StatusCode::BAD_REQUEST,
             Self::InternalHost(_) | Self::CacheDeception | Self::Redirect(_) => {
                 http::StatusCode::FORBIDDEN
@@ -33,6 +35,7 @@ impl Violation {
 
     pub fn reason(&self) -> &'static str {
         match self {
+            Self::Incomplete => "request body is too large to inspect",
             Self::InternalHost(_) => "request targets an internal host",
             Self::DuplicateParameter(_) => "conflicting duplicate request parameter",
             Self::CacheDeception => "authenticated request addressed as a static asset",
@@ -42,6 +45,11 @@ impl Violation {
 }
 
 pub fn inspect(view: &RequestView<'_>, policy: &Hardening) -> Option<Violation> {
+    if view.body_truncated
+        && (policy.ssrf.enabled || policy.duplicates.enabled || policy.redirects.enabled)
+    {
+        return Some(Violation::Incomplete);
+    }
     if policy.ssrf.enabled
         && let Some(host) = internal_host(view, policy)
     {
@@ -99,42 +107,58 @@ fn matches_host(host: &str, policy: &Hardening) -> bool {
             .any(|suffix| host == suffix || host.ends_with(&format!(".{suffix}")))
 }
 
-/// Extracts the authority host from the first absolute URL in `text`.
+/// Extracts the authority host from the first absolute or protocol-relative
+/// URL in `text`. A trailing DNS root dot is removed before comparison.
 fn find_host(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     for scheme_end in 0..bytes.len().saturating_sub(2) {
-        if &bytes[scheme_end..scheme_end + 3] != b"://" {
+        if &bytes[scheme_end..scheme_end + 3] == b"://" {
+            let scheme_start = text[..scheme_end]
+                .rfind(|character: char| {
+                    !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
+                })
+                .map_or(0, |index| index + 1);
+            if scheme_start != scheme_end
+                && let Some(host) = authority_host(&text[scheme_end + 3..])
+            {
+                return Some(host);
+            }
+        }
+    }
+    for (index, _) in text.match_indices("//") {
+        if index > 0 && bytes[index - 1] == b':' {
             continue;
         }
-        let scheme_start = text[..scheme_end]
-            .rfind(|character: char| {
-                !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
-            })
-            .map_or(0, |index| index + 1);
-        if scheme_start == scheme_end {
-            continue;
-        }
-        let rest = &text[scheme_end + 3..];
-        let end = rest
-            .find(|character: char| {
-                matches!(
-                    character,
-                    '/' | ':' | '?' | '#' | '&' | '"' | '\'' | ' ' | '\t' | '\r' | '\n'
-                )
-            })
-            .unwrap_or(rest.len());
-        let mut authority = &rest[..end];
-        if let Some((_, host)) = authority.rsplit_once('@') {
-            authority = host;
-        }
-        let host = authority
-            .trim_matches(|character| character == '[' || character == ']')
-            .to_ascii_lowercase();
-        if !host.is_empty() {
+        if let Some(host) = authority_host(&text[index + 2..]) {
             return Some(host);
         }
     }
     None
+}
+
+fn authority_host(rest: &str) -> Option<String> {
+    if let Some(bracketed) = rest.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        let host = bracketed[..end].trim_end_matches('.').to_ascii_lowercase();
+        return (!host.is_empty()).then_some(host);
+    }
+    let end = rest
+        .find(|character: char| {
+            matches!(
+                character,
+                '/' | ':' | '?' | '#' | '&' | '"' | '\'' | ' ' | '\t' | '\r' | '\n'
+            )
+        })
+        .unwrap_or(rest.len());
+    let mut authority = &rest[..end];
+    if let Some((_, host)) = authority.rsplit_once('@') {
+        authority = host;
+    }
+    let host = authority
+        .trim_matches(|character| character == '[' || character == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 fn duplicate_parameter(view: &RequestView<'_>, policy: &Hardening) -> Option<String> {
@@ -203,7 +227,49 @@ fn redirect_target(view: &RequestView<'_>, policy: &Hardening) -> Option<String>
     {
         return redirect_in_pairs(body, policy);
     }
+    if (content_type.contains("json") || view.body.starts_with(b"{"))
+        && let Ok(serde_json::Value::Object(values)) = serde_json::from_slice(view.body)
+    {
+        for (name, value) in values {
+            if !policy
+                .redirects
+                .parameters
+                .iter()
+                .any(|entry| entry == &name.to_ascii_lowercase())
+            {
+                continue;
+            }
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            let Some(candidate) = absolute_redirect(value) else {
+                continue;
+            };
+            let Some(host) = find_host(&candidate) else {
+                continue;
+            };
+            if !policy
+                .redirects
+                .allowed_hosts
+                .iter()
+                .any(|allowed| allowed == &host)
+            {
+                return Some(host);
+            }
+        }
+    }
     None
+}
+
+fn absolute_redirect(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(value.to_owned())
+    } else if value.starts_with("//") {
+        Some(format!("http:{value}"))
+    } else {
+        None
+    }
 }
 
 fn redirect_in_pairs(pairs: &str, policy: &Hardening) -> Option<String> {
@@ -219,15 +285,8 @@ fn redirect_in_pairs(pairs: &str, policy: &Hardening) -> Option<String> {
             continue;
         }
         let value = percent_decode(raw_value);
-        let absolute = value.starts_with("http://") || value.starts_with("https://");
-        let protocol_relative = value.starts_with("//");
-        if !absolute && !protocol_relative {
+        let Some(candidate) = absolute_redirect(&value) else {
             continue;
-        }
-        let candidate = if protocol_relative {
-            format!("http:{value}")
-        } else {
-            value.into_owned()
         };
         let Some(host) = find_host(&candidate) else {
             continue;
@@ -327,7 +386,7 @@ impl<'de> Visitor<'de> for DuplicateVisitor {
 fn cache_deception(view: &RequestView<'_>, policy: &Hardening) -> bool {
     let path = view
         .path_forms
-        .first()
+        .last()
         .map(|form| form.to_ascii_lowercase())
         .unwrap_or_default();
     if !policy
@@ -446,6 +505,37 @@ mod tests {
         assert_eq!(inspect(&view(&uri, &headers, b""), &policy()), None);
         let uri: Uri = "/oauth/authorize?redirect_uri=%2Fcb".parse().unwrap();
         assert_eq!(inspect(&view(&uri, &headers, b""), &policy()), None);
+        let uri: Uri = "/oauth/authorize?redirect_uri=HTTPS%3A%2F%2Fevil.example%2Fcb"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            inspect(&view(&uri, &headers, b""), &policy()),
+            Some(Violation::Redirect("evil.example".to_owned()))
+        );
+
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let uri: Uri = "/oauth/authorize".parse().unwrap();
+        assert_eq!(
+            inspect(
+                &view(
+                    &uri,
+                    &json_headers,
+                    br#"{"redirect_uri":"https://evil.example/cb"}"#
+                ),
+                &policy()
+            ),
+            Some(Violation::Redirect("evil.example".to_owned()))
+        );
+    }
+
+    #[test]
+    fn truncated_bodies_fail_closed_for_body_policies() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/".parse().unwrap();
+        let mut view = view(&uri, &headers, b"");
+        view.body_truncated = true;
+        assert_eq!(inspect(&view, &policy()), Some(Violation::Incomplete));
     }
 
     #[test]

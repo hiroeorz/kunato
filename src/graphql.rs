@@ -625,14 +625,62 @@ fn is_name_continue(byte: u8) -> bool {
 }
 
 fn contains_introspection(text: &str) -> bool {
-    for marker in ["__schema", "__type"] {
-        for (index, _) in text.match_indices(marker) {
-            let after = text[index + marker.len()..].chars().next();
-            if !after.is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
-            {
-                return true;
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut in_string = false;
+    let mut block_string = false;
+    let mut in_comment = false;
+    while index < bytes.len() {
+        if in_comment {
+            if bytes[index] == b'\n' {
+                in_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_string {
+            if block_string {
+                if index + 2 < bytes.len() && &bytes[index..index + 3] == b"\"\"\"" {
+                    in_string = false;
+                    block_string = false;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            } else if bytes[index] == b'\\' {
+                index += 2;
+            } else if bytes[index] == b'"' {
+                in_string = false;
+                index += 1;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        match bytes[index] {
+            b'#' => in_comment = true,
+            b'"' => {
+                block_string = index + 2 < bytes.len() && &bytes[index..index + 3] == b"\"\"\"";
+                in_string = true;
+                index += if block_string { 3 } else { 1 };
+                continue;
+            }
+            _ => {}
+        }
+        for marker in ["__schema", "__type"] {
+            if bytes[index..].starts_with(marker.as_bytes()) {
+                let before = index
+                    .checked_sub(1)
+                    .and_then(|previous| bytes.get(previous))
+                    .copied();
+                let after = bytes.get(index + marker.len()).copied();
+                let name_char = |byte: u8| byte == b'_' || byte.is_ascii_alphanumeric();
+                if !before.is_some_and(name_char) && !after.is_some_and(name_char) {
+                    return true;
+                }
             }
         }
+        index += 1;
     }
     false
 }
@@ -1231,6 +1279,26 @@ mod tests {
                 None,
                 &headers,
                 br#"{"query":"{__typename}"}"#,
+                false,
+                limits
+            ),
+            None
+        );
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                br#"{"query":"{ search(text: \"__schema\") { id } }"}"#,
+                false,
+                limits
+            ),
+            None
+        );
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                b"# __schema in a comment\n{ user { id } }",
                 false,
                 limits
             ),

@@ -79,10 +79,13 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Some("jwt payload is too large to inspect".to_owned());
     }
-    let payload = decode_base64url(payload)?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload)
-        .map_err(|_| "jwt payload is not valid JSON".to_owned())
-        .ok()?;
+    let Some(payload) = decode_base64url(payload) else {
+        return Some("jwt payload is not valid base64url".to_owned());
+    };
+    let claims: serde_json::Value = match serde_json::from_slice(&payload) {
+        Ok(claims) => claims,
+        Err(_) => return Some("jwt payload is not valid JSON".to_owned()),
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

@@ -85,7 +85,10 @@ categories:
     action: BLOCK
     rules:
       - name: instruction-override
-        match: { regex: '(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\s+(all\s+)?(previous|prior|above)\s+instructions|reveal\s+(the\s+)?system\s+prompt|<\|im_start\|>|<\|system\|>|\[INST\])', in: [query, body, cookies, headers] }
+        match:
+          path: '(?i)(^|/)(chat|completions|messages|responses|generate)(/|$)'
+          regex: '(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\s+(all\s+)?(previous|prior|above)\s+instructions|reveal\s+(the\s+)?system\s+prompt|<\|im_start\|>|<\|system\|>|\[INST\])'
+          in: [query, body, cookies, headers]
 
   # Methods that no normal browser or application should send.
   - name: bad-methods

@@ -1078,7 +1078,7 @@ impl Graphql {
 /// accepted algorithms are application-specific; when configured, bearer
 /// tokens and JWT-shaped cookie values that name another algorithm are
 /// rejected before rule evaluation.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JwtSpec {
     #[serde(default)]
@@ -1093,6 +1093,19 @@ pub struct JwtSpec {
     pub allowed_audiences: Vec<String>,
     #[serde(default = "secs60", deserialize_with = "de_duration")]
     pub leeway: Duration,
+}
+
+impl Default for JwtSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_algorithms: Vec::new(),
+            require_exp: false,
+            allowed_issuers: Vec::new(),
+            allowed_audiences: Vec::new(),
+            leeway: secs60(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
