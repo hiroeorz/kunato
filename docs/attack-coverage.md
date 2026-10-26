@@ -422,7 +422,7 @@ counted six failures from two front sources and blocked the next auth request
 from a fresh source with `429` (2 passed, 1 prevented). The h2 suite also passed a bounded server-reset
 pressure variant after Rapid Reset, CONTINUATION, and HPACK; it is a regression
 for server-generated reset handling, not an exact MadeYouReset reproduction.
-The full `all` run `20261027T002423-8dfa2d37` then passed all 28 suites,
+The full `all` run `20261027T064248-eb018801` then passed all 28 suites,
 including these defenses together with the existing tool, protocol, and
 availability controls.
 

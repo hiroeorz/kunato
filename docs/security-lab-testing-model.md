@@ -396,14 +396,14 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The latest full `all` run, `20261027T002423-8dfa2d37`, passed 28 sandbox
+- The latest full `all` run, `20261027T064248-eb018801`, passed 28 sandbox
   suites: replay, benign, mutations, protocol, common, recent, response,
   graphql, jwt, ssrf-xxe, credential-stuffing, global-auth, agentic, slow,
   availability, connect, h2, h3, backpressure, ban, websocket, load, restart,
   goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001
-  requests, p95 49.7 ms, p99 53.1 ms, 100% success, normal/recovery `200`, RSS
+  requests, p95 45.8 ms, p99 46.4 ms, 100% success, normal/recovery `200`, RSS
   28.2 MiB of 256 MiB, no restart, and matching metrics. The restart suite
-  recorded exit code 0, a 579 ms shutdown, 501 requests, and a 98.0% check rate.
+  recorded exit code 0, a 364 ms shutdown, 501 requests, and a 98.8% check rate.
   The credential-stuffing suite allowed 10 of 12 logins and blocked 2 with
   `rate_limited` events. The global-auth suite counted six failures from two
   front sources and blocked the next auth request with `429`. The SSRF/XXE
