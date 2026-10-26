@@ -1,14 +1,15 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and twenty-eight bounded
+an isolated recording origin, direct receipt controls, and thirty bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
 baseline, 25 deterministic mutation variants, common-injection and recent-attack
-surface suites, response-phase leak, GraphQL complexity, JWT policy, SSRF/XXE
-canary, credential-stuffing, and global-auth suites, an agentic TTP chain over DVWA
+surface suites, response-phase leak, GraphQL complexity, JWT policy, request
+hardening, SSRF/XXE canary, credential-stuffing, global-auth, and 200-only
+scraping suites, an agentic TTP chain over DVWA
 and CVE-2021-41773, 12 raw protocol/WebSocket cases,
 TLS/HTTP/2 and HTTP/3 resource variants, benign JSON/upload/i18n/large-body/streaming
 workflows, bounded slow-HTTP, availability, backpressure, slow-connect, ban-recovery, and
@@ -56,9 +57,11 @@ scripts/security-lab.sh run --sandbox-suite recent
 scripts/security-lab.sh run --sandbox-suite response
 scripts/security-lab.sh run --sandbox-suite graphql
 scripts/security-lab.sh run --sandbox-suite jwt
+scripts/security-lab.sh run --sandbox-suite hardening
 scripts/security-lab.sh run --sandbox-suite ssrf-xxe
 scripts/security-lab.sh run --sandbox-suite credential-stuffing
 scripts/security-lab.sh run --sandbox-suite global-auth
+scripts/security-lab.sh run --sandbox-suite scraping
 scripts/security-lab.sh run --sandbox-suite protocol
 scripts/security-lab.sh run --sandbox-suite agentic
 scripts/security-lab.sh run --sandbox-suite h2
@@ -269,11 +272,11 @@ origin: SSTI, NoSQL, LDAP, and XPath injection, PHP/Java/Python/Ruby
 deserialization, CRLF injection, SSRF, XXE, JWT header attacks, and API
 behaviour (mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON
 keys, and GraphQL introspection). Each attack has a nearby benign case. The
-current result is 26 prevented, 13 benign cases passed, and 5 observed
-discovery cases. HPP and duplicate privilege/redirect fields are blocked by the
-`parameter-pollution` rules. The observed cases (JWT algorithm confusion, mass
-assignment, OAuth `redirect_uri`, BOLA, and GraphQL introspection) reached the
-origin with status 200; they are request-rejection observations, not defense
+current result is 27 prevented, 13 benign cases passed, and 4 observed
+discovery cases. HPP, duplicate privilege/redirect fields, and privileged-field
+assignments are blocked by the `parameter-pollution` and `mass-assignment`
+rules. The observed cases (JWT algorithm confusion, OAuth `redirect_uri`, BOLA,
+and GraphQL introspection) reached the origin with status 200; they are request-rejection observations, not defense
 claims. The JWT `alg:none`, `kid` traversal, `jku`, and missing-signature shapes
 are blocked by the `jwt` category; SSRF and XXE request shapes are blocked by
 `ssrf` and `xxe`.
@@ -286,10 +289,11 @@ PHP2Shell nested empty uploads, the Rack multipart escape flood, GitLab
 repository file read, Jenkins script console, TeamCity agent protocol, and MCP
 tool arguments that reach `file://` or `/etc/passwd`. It pairs those with
 benign MCP initialization, an empty two-level file upload, and AI crawler / API
-client user agents. The current result is 11 prevented, 7 benign cases passed,
-and 3 observed discovery cases. The cache-deception rule blocks an authenticated
-request addressed as a static asset; prompt injection, `X-Forwarded-Host` cache
-poisoning, and registry catalog exposure remain observations.
+client user agents. The current result is 13 prevented, 7 benign cases passed,
+and 1 observed discovery case. The cache-deception rule blocks an authenticated
+request addressed as a static asset, and prompt injection and registry catalog
+exposure are now blocked; `X-Forwarded-Host` cache poisoning remains an
+observation.
 The MCP file and system-file cases are blocked by the existing
 `remote-file-inclusion` and `path-traversal` rules, not by an MCP-aware
 signature.
@@ -303,24 +307,24 @@ triaged.
 
 `--sandbox-suite response` uses origin endpoints that return a private-key
 marker, a MySQL syntax error, a Django DEBUG page, a 420-byte PHPSESSID cookie,
-a Python stack trace, a versioned `Server` header, and benign 404/500 responses.
-The direct control must receive each leak; the protected run must block the four
-BLOCK rules (`private-key-material`, `sql-error-message`, `django-debug-page`,
-and `php2shell-session-cookie-leak`) with `response blocked` events, while the
-LOG-only stack trace and server version remain observations. The benign 404 and
-500 bodies must pass through unchanged. The current result is 4 prevented, 2
-observed, and 2 benign cases passed.
+a login-enumeration error, a Python stack trace, a versioned `Server` header,
+and benign 404/500 responses. The direct control must receive each leak; the
+protected run must block the five BLOCK rules (`private-key-material`,
+`sql-error-message`, `django-debug-page`,
+`php2shell-session-cookie-leak`, and `login-enumeration-message`) with
+`response blocked` events, while the LOG-only stack trace and server version
+remain observations. The benign 404 and 500 bodies must pass through unchanged.
+The current result is 5 prevented, 2 observed, and 2 benign cases passed.
 
 ### GraphQL complexity
 
 `--sandbox-suite graphql` sends a 25-level selection, a 1001-alias document, and
 a cyclic fragment document to `/graphql`. All three must be rejected locally
 with `400` and no origin receipt; a normal query with variables must reach the
-origin. The current result is 5 prevented and 1 benign case passed. A deep GET query
-and an `application/graphql` alias flood are also rejected with `400`; a shallow
-GET query and `application/graphql` probe reach the origin as observations, and
-introspection is logged by `api-discovery.graphql-introspection` rather than
-blocked.
+origin. The current result is 6 prevented and 1 benign case passed. Deep GET and
+`application/graphql` alias floods are rejected with `400`; introspection is
+rejected with `403` by the opt-in `block_introspection` policy. Shallow GET and
+`application/graphql` probes remain observations.
 
 ### SSRF / XXE canaries
 
@@ -332,6 +336,23 @@ to `http://vuln:8080/safe`; the protected run must block the loopback sink,
 `ssrf.internal-addresses`, `ssrf.file-scheme`, `ssrf.single-label-host`, and
 `xxe.doctype-and-entity`. The current result is 4 prevented and 2 benign cases
 passed.
+
+### Request hardening
+
+`--sandbox-suite hardening` uses `rules-hardening.yaml` to enable the optional
+engine policies: configured internal hosts/suffixes for SSRF, conflicting
+duplicate parameters and JSON keys, authenticated static-asset detection, and a
+redirect-host allowlist. The suite covers `vuln.corp`, generic HPP, duplicate
+JSON, `.avif` cache deception, and an external OAuth `redirect_uri`, with benign
+counterparts. The current result is 5 prevented and 3 benign cases passed.
+
+### 200-only scraping
+
+`--sandbox-suite scraping` enables `behavior.scraping` with a per-source
+threshold and runs 20 distinct `200` paths from one source. After 8 paths the
+source is banned; the blocked requests have no origin receipt and the
+`scraping` behavior flag is logged. The separate normal client stays healthy.
+The current result is 8 allowed, 12 blocked, and 1 flag event.
 
 ### Credential stuffing / password spraying
 
@@ -346,11 +367,11 @@ exercises the opt-in signed global block for failures spread across sources.
 ### JWT algorithm policy
 
 `--sandbox-suite jwt` uses `rules-jwt.yaml`, which sets
-`limits.jwt.allowed_algorithms: [RS256]`. A bearer token with `alg: HS256` is
-rejected with `403` before rule evaluation, while an RS256 token and an opaque
-bearer token pass to the origin. The suite is 1 prevented and 2 benign cases
-passed. This is an explicit local policy, not a generic algorithm-confusion
-signature; the default example configuration leaves the policy disabled.
+`limits.jwt.allowed_algorithms: [RS256]`, requires `exp`, and pins the issuer
+and audience. HS256, expired, wrong-issuer, wrong-audience, and missing-exp
+tokens are rejected with `403`; a valid RS256 token and an opaque bearer token
+pass. The suite is 5 prevented and 2 benign cases passed. This is an explicit
+local claim/algorithm policy, not signature verification.
 
 ### Global authentication abuse
 
@@ -575,6 +596,10 @@ Each run prints its directory under `target/security-lab/`. It retains:
 - `jwt-control/` and `jwt/`: direct and protected bearer-token policy probes;
 - `global-auth-control/` and `global-auth/`: the direct 401 control, six
   cross-source failures, and the blocked fresh-source probe;
+- `hardening-control/` and `hardening/`: direct and protected internal-host,
+  duplicate-parameter/JSON, cache-deception, and redirect-policy probes;
+- `scraping-control/` and `scraping/`: direct and protected 200-only path walks
+  plus the behavior flag;
 - `credential-stuffing-control/` and `credential-stuffing/`: the 12-attempt
   direct and throttled login sequences and their block events;
 - `agentic-dvwa-control/`, `agentic-dvwa/`, `agentic-cve-control/`, and

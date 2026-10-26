@@ -1,22 +1,27 @@
-//! Bounded JWT header inspection for deployments that pin accepted algorithms.
+//! Bounded JWT header and claim inspection for deployments that pin accepted
+//! algorithms and claims.
 //!
-//! The WAF cannot know which algorithm an application expects, but a local
-//! policy can. When `limits.jwt.allowed_algorithms` is non-empty, bearer tokens
-//! and JWT-shaped cookie values whose header names a different algorithm are
-//! rejected before rule evaluation. Opaque session tokens and malformed JWTs
-//! are ignored so this check does not turn into a general token validator.
+//! The WAF cannot know which keys an application trusts, so this module does
+//! not verify signatures. It rejects a token whose header names an algorithm
+//! outside the local policy and, when configured, enforces `exp`, `nbf`, `iss`,
+//! and `aud`. Opaque session tokens and malformed JWTs are ignored unless a
+//! claim policy makes the malformed payload relevant.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::HeaderMap;
 use http::header::AUTHORIZATION;
 
+use crate::config::Jwt;
 use crate::request_view::cookie_pairs;
 
 const MAX_TOKEN_BYTES: usize = 8192;
 const MAX_HEADER_BYTES: usize = 1024;
+const MAX_PAYLOAD_BYTES: usize = 16384;
 
-/// Returns the disallowed `alg` value when a JWT in the request names one.
-pub fn disallowed_algorithm(headers: &HeaderMap, allowed: &[String]) -> Option<String> {
-    if allowed.is_empty() {
+/// Returns a human-readable policy violation for the first matching JWT.
+pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
+    if !policy.enabled || policy.allowed_algorithms.is_empty() {
         return None;
     }
     for value in headers.get_all(AUTHORIZATION) {
@@ -29,25 +34,25 @@ pub fn disallowed_algorithm(headers: &HeaderMap, allowed: &[String]) -> Option<S
         if !scheme.eq_ignore_ascii_case("bearer") {
             continue;
         }
-        if let Some(algorithm) = check_token(token, allowed) {
-            return Some(algorithm);
+        if let Some(reason) = check_token(token, policy) {
+            return Some(reason);
         }
     }
     for (_, value) in cookie_pairs(headers) {
-        if let Some(algorithm) = check_token(value.as_ref(), allowed) {
-            return Some(algorithm);
+        if let Some(reason) = check_token(value.as_ref(), policy) {
+            return Some(reason);
         }
     }
     None
 }
 
-fn check_token(token: &str, allowed: &[String]) -> Option<String> {
+fn check_token(token: &str, policy: &Jwt) -> Option<String> {
     let token = token.trim();
     if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
         return None;
     }
     let mut parts = token.split('.');
-    let (Some(header), Some(_payload), Some(_signature), None) =
+    let (Some(header), Some(payload), Some(_signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return None;
@@ -58,8 +63,80 @@ fn check_token(token: &str, allowed: &[String]) -> Option<String> {
     let decoded = decode_base64url(header)?;
     let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
     let algorithm = value.get("alg")?.as_str()?;
-    let normalized = algorithm.to_ascii_uppercase();
-    (!allowed.iter().any(|candidate| candidate == &normalized)).then_some(normalized)
+    if !policy
+        .allowed_algorithms
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(algorithm))
+    {
+        return Some(format!("jwt algorithm `{algorithm}` is not allowed"));
+    }
+    if !policy.require_exp
+        && policy.allowed_issuers.is_empty()
+        && policy.allowed_audiences.is_empty()
+    {
+        return None;
+    }
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Some("jwt payload is too large to inspect".to_owned());
+    }
+    let payload = decode_base64url(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|_| "jwt payload is not valid JSON".to_owned())
+        .ok()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let leeway = i64::try_from(policy.leeway.as_secs()).unwrap_or(i64::MAX);
+    if policy.require_exp {
+        let Some(exp) = claims.get("exp").and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        }) else {
+            return Some("jwt is missing the exp claim".to_owned());
+        };
+        if exp.saturating_add(leeway) < now {
+            return Some("jwt is expired".to_owned());
+        }
+    }
+    if let Some(nbf) = claims.get("nbf").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+    }) && nbf.saturating_sub(leeway) > now
+    {
+        return Some("jwt is not yet valid".to_owned());
+    }
+    if !policy.allowed_issuers.is_empty() {
+        let issuer = claims.get("iss").and_then(|value| value.as_str());
+        if !issuer.is_some_and(|issuer| {
+            policy
+                .allowed_issuers
+                .iter()
+                .any(|allowed| allowed == issuer)
+        }) {
+            return Some("jwt issuer is not allowed".to_owned());
+        }
+    }
+    if !policy.allowed_audiences.is_empty() && !audience_allowed(&claims, &policy.allowed_audiences)
+    {
+        return Some("jwt audience is not allowed".to_owned());
+    }
+    None
+}
+
+fn audience_allowed(claims: &serde_json::Value, allowed: &[String]) -> bool {
+    match claims.get("aud") {
+        Some(serde_json::Value::String(audience)) => allowed.iter().any(|entry| entry == audience),
+        Some(serde_json::Value::Array(audiences)) => audiences.iter().any(|audience| {
+            audience
+                .as_str()
+                .is_some_and(|audience| allowed.iter().any(|entry| entry == audience))
+        }),
+        _ => false,
+    }
 }
 
 fn decode_base64url(input: &str) -> Option<Vec<u8>> {
@@ -91,71 +168,125 @@ mod tests {
     use super::*;
     use http::HeaderValue;
 
-    const HS256: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyIn0.c2ln";
-    const RS256: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyIn0.c2ln";
+    fn policy() -> Jwt {
+        Jwt {
+            enabled: true,
+            allowed_algorithms: vec!["RS256".to_owned()],
+            require_exp: false,
+            allowed_issuers: Vec::new(),
+            allowed_audiences: Vec::new(),
+            leeway: std::time::Duration::ZERO,
+        }
+    }
 
-    fn allowed(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_owned()).collect()
+    fn token(header: &str, payload: &str) -> String {
+        format!("{header}.{payload}.c2ln")
+    }
+
+    fn encode(value: &str) -> String {
+        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut output = String::new();
+        for chunk in value.as_bytes().chunks(3) {
+            let mut buffer = 0u32;
+            for (index, byte) in chunk.iter().enumerate() {
+                buffer |= u32::from(*byte) << (16 - index * 8);
+            }
+            for index in 0..4 {
+                if index <= chunk.len() {
+                    output.push(TABLE[((buffer >> (18 - index * 6)) & 0x3f) as usize] as char);
+                }
+            }
+        }
+        output
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers
     }
 
     #[test]
     fn rejects_a_disallowed_bearer_algorithm() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer eyJhbGciOiJIUzI1NiJ9.e30.c2ln"),
-        );
-        assert_eq!(
-            disallowed_algorithm(&headers, &allowed(&["RS256"])),
-            Some("HS256".to_owned())
-        );
+        let hs = token("eyJhbGciOiJIUzI1NiJ9", "e30");
+        assert!(violation(&bearer(&hs), &policy()).is_some());
     }
 
     #[test]
     fn allows_the_configured_algorithm() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {RS256}")).unwrap(),
-        );
-        assert_eq!(disallowed_algorithm(&headers, &allowed(&["RS256"])), None);
+        let rs = token("eyJhbGciOiJSUzI1NiJ9", "e30");
+        assert_eq!(violation(&bearer(&rs), &policy()), None);
     }
 
     #[test]
     fn rejects_a_disallowed_cookie_algorithm() {
+        let hs = token("eyJhbGciOiJIUzI1NiJ9", "e30");
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::COOKIE,
-            HeaderValue::from_str(&format!("session=opaque; access_token={HS256}")).unwrap(),
+            HeaderValue::from_str(&format!("session=opaque; access_token={hs}")).unwrap(),
         );
-        assert_eq!(
-            disallowed_algorithm(&headers, &allowed(&["RS256"])),
-            Some("HS256".to_owned())
-        );
+        assert!(violation(&headers, &policy()).is_some());
     }
 
     #[test]
     fn opaque_tokens_and_malformed_headers_are_ignored() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer opaque-session-token"),
-        );
-        assert_eq!(disallowed_algorithm(&headers, &allowed(&["RS256"])), None);
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer !!!.e30.c2ln"),
-        );
-        assert_eq!(disallowed_algorithm(&headers, &allowed(&["RS256"])), None);
+        assert_eq!(violation(&bearer("opaque-session-token"), &policy()), None);
+        assert_eq!(violation(&bearer("!!!.e30.c2ln"), &policy()), None);
     }
 
     #[test]
     fn empty_policy_disables_the_check() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer eyJhbGciOiJIUzI1NiJ9.e30.c2ln"),
+        let mut disabled = policy();
+        disabled.enabled = false;
+        let hs = token("eyJhbGciOiJIUzI1NiJ9", "e30");
+        assert_eq!(violation(&bearer(&hs), &disabled), None);
+    }
+
+    #[test]
+    fn claim_policy_enforces_exp_issuer_and_audience() {
+        let mut policy = policy();
+        policy.require_exp = true;
+        policy.allowed_issuers = vec!["https://issuer.example".to_owned()];
+        policy.allowed_audiences = vec!["kunato-lab".to_owned()];
+        let good = format!(
+            "{{\"exp\":{},\"iss\":\"https://issuer.example\",\"aud\":\"kunato-lab\"}}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600
         );
-        assert_eq!(disallowed_algorithm(&headers, &[]), None);
+        let good_token = token("eyJhbGciOiJSUzI1NiJ9", &encode(&good));
+        assert_eq!(violation(&bearer(&good_token), &policy), None);
+
+        let expired = format!(
+            "{{\"exp\":{},\"iss\":\"https://issuer.example\",\"aud\":\"kunato-lab\"}}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 10
+        );
+        assert!(
+            violation(
+                &bearer(&token("eyJhbGciOiJSUzI1NiJ9", &encode(&expired))),
+                &policy
+            )
+            .is_some()
+        );
+
+        let wrong_issuer =
+            "{\"exp\":9999999999,\"iss\":\"https://evil.example\",\"aud\":\"kunato-lab\"}";
+        assert!(
+            violation(
+                &bearer(&token("eyJhbGciOiJSUzI1NiJ9", &encode(wrong_issuer))),
+                &policy
+            )
+            .is_some()
+        );
     }
 }

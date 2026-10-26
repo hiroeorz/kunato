@@ -1217,6 +1217,9 @@ fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
             StatusCode::PAYLOAD_TOO_LARGE,
             "graphql request body too large to inspect",
         ),
+        crate::graphql::Violation::Introspection => {
+            HttpError::new(StatusCode::FORBIDDEN, "graphql introspection is disabled")
+        }
         crate::graphql::Violation::TooDeep { .. }
         | crate::graphql::Violation::TooManyFields { .. }
         | crate::graphql::Violation::TooComplex => {
@@ -1397,6 +1400,24 @@ fn record_behavior(
                     path = %parts.uri.path(),
                     auth_failures = flag.auth_failures,
                     threshold = config.protection.behavior.auth.min_failures,
+                    action = flag.action.as_str(),
+                    blocked,
+                    ban_seconds,
+                    "behavior threshold reached"
+                );
+            }
+            BehaviorSignal::Scraping => {
+                context
+                    .metrics
+                    .behavior_scraping_flags
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    client = %source.client_ip, peer = %source.peer,
+                    signal = flag.signal.as_str(),
+                    path = %parts.uri.path(),
+                    content = flag.content,
+                    distinct_paths = flag.distinct_paths,
+                    threshold = config.protection.behavior.scraping.distinct_paths,
                     action = flag.action.as_str(),
                     blocked,
                     ban_seconds,
@@ -1683,6 +1704,7 @@ async fn process(
             crate::graphql::Limits {
                 max_depth: config.limits.graphql.max_depth,
                 max_fields: config.limits.graphql.max_fields,
+                block_introspection: config.limits.graphql.block_introspection,
             },
         )
     {
@@ -1698,17 +1720,15 @@ async fn process(
         );
         return Err(graphql_error(violation));
     }
-    if let Some(algorithm) =
-        crate::jwt::disallowed_algorithm(&parts.headers, config.limits.jwt.allowed())
-    {
+    if let Some(reason) = crate::jwt::violation(&parts.headers, &config.limits.jwt) {
         debug!(
             client = %source.client_ip, peer = %source.peer,
-            algorithm = %algorithm,
-            "jwt algorithm rejected by policy"
+            reason = %reason,
+            "jwt rejected by policy"
         );
         return Err(HttpError::new(
             StatusCode::FORBIDDEN,
-            "jwt algorithm not allowed",
+            "jwt policy violation",
         ));
     }
     let view = RequestView::with_body_decoding(
@@ -1721,6 +1741,15 @@ async fn process(
     )
     .with_body_truncated(body_truncated)
     .with_body_rules_exempt(body_rules_exempt);
+    if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
+        debug!(
+            client = %source.client_ip, peer = %source.peer,
+            path = %parts.uri.path(),
+            reason = violation.reason(),
+            "request hardening rejected"
+        );
+        return Err(HttpError::new(violation.status(), violation.reason()));
+    }
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
 
     if !outcome.logs.is_empty() {

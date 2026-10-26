@@ -227,7 +227,7 @@
   },
   {
     "id": "mass-assignment",
-    "expect": "observe",
+    "expect": "block",
     "method": "POST",
     "target": "/common/mass-assignment",
     "body": "name=Alice&role=admin&is_admin=true",

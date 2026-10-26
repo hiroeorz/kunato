@@ -1,7 +1,8 @@
 # Behavioral detection Phase 3: content scraping and distributed abuse
 
-Status: **Phase 3a design spike — not implemented.** Phase 1 (per-source
-enumeration, per-source authentication abuse, and a global
+Status: **Phase 3a design spike — the opt-in `behavior.scraping` signal is
+implemented; the configurable static-asset list remains design-only.** Phase 1
+(per-source enumeration, per-source authentication abuse, and a global
 authentication-failure log) is implemented; see
 [behavioral-detection.md](behavioral-detection.md). The opt-in Phase 3b
 `global_auth.action: BLOCK` (with `ban`) was implemented on 2026-10-27; it
@@ -26,9 +27,10 @@ legitimate and no YAML signature can express the pattern:
 
 Recommendation:
 
-1. **Phase 3a (implement).** Add a configurable static-asset policy and a
-   per-source `scraping` signal over `200` responses on non-static paths. The
-   default is `LOG`; `BLOCK` is opt-in after a tuning period.
+1. **Phase 3a (partially implemented).** The per-source `scraping` signal over
+   `200` responses on non-static paths is available as opt-in
+   `behavior.scraping`; the configurable static-asset list remains design-only.
+   The default is `LOG`; `BLOCK` is opt-in after a tuning period.
 2. **Phase 3b (implemented opt-in).** The global authentication signal remains
    `LOG` by default. `global_auth.action: BLOCK` plus `ban` is available for
    deployments that accept the availability tradeoff; the conditions below

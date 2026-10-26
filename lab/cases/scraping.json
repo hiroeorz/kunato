@@ -1,0 +1,122 @@
+[
+  {
+    "id": "scraping-1",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/1"
+  },
+  {
+    "id": "scraping-2",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/2"
+  },
+  {
+    "id": "scraping-3",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/3"
+  },
+  {
+    "id": "scraping-4",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/4"
+  },
+  {
+    "id": "scraping-5",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/5"
+  },
+  {
+    "id": "scraping-6",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/6"
+  },
+  {
+    "id": "scraping-7",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/7"
+  },
+  {
+    "id": "scraping-8",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/8"
+  },
+  {
+    "id": "scraping-9",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/9"
+  },
+  {
+    "id": "scraping-10",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/10"
+  },
+  {
+    "id": "scraping-11",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/11"
+  },
+  {
+    "id": "scraping-12",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/12"
+  },
+  {
+    "id": "scraping-13",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/13"
+  },
+  {
+    "id": "scraping-14",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/14"
+  },
+  {
+    "id": "scraping-15",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/15"
+  },
+  {
+    "id": "scraping-16",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/16"
+  },
+  {
+    "id": "scraping-17",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/17"
+  },
+  {
+    "id": "scraping-18",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/18"
+  },
+  {
+    "id": "scraping-19",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/19"
+  },
+  {
+    "id": "scraping-20",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/scrape/20"
+  }
+]

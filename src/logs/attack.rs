@@ -105,6 +105,16 @@ const ATTACK_CLASSES: &[AttackClass] = &[
         categories: &["parameter-pollution"],
     },
     AttackClass {
+        name: "mass-assignment",
+        aliases: &["mass"],
+        categories: &["mass-assignment"],
+    },
+    AttackClass {
+        name: "prompt-injection",
+        aliases: &["prompt"],
+        categories: &["prompt-injection"],
+    },
+    AttackClass {
         name: "cache-deception",
         aliases: &["cache"],
         categories: &["cache-deception"],

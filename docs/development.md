@@ -1038,6 +1038,7 @@ limits:
     enabled: true
     max_depth: 20
     max_fields: 1000
+    block_introspection: false
     paths: [/query]
 ```
 
@@ -1049,7 +1050,9 @@ ignored). Path matching runs on the percent-decoded and normalized path, so
 encoded spellings and dot segments of the same endpoint are recognized. Use
 `paths: [/]` when the endpoint is served at the root of a dedicated host.
 `max_depth` must be between 1 and 1000, `max_fields` between 1 and 10000, and at
-most 16 extra paths are accepted; each path is limited to 1 KiB and must not
+most 16 extra paths are accepted. `block_introspection: true` rejects documents
+that select `__schema` or `__type` with `403`; it is opt-in because applications
+that expose introspection legitimately need it. each path is limited to 1 KiB and must not
 contain a query string, fragment, or whitespace.
 
 The document is read from a GET `query` parameter, a form `query` field, a JSON
@@ -1107,15 +1110,55 @@ limits:
   jwt:
     enabled: true
     allowed_algorithms: [RS256]
+    require_exp: true
+    allowed_issuers: [https://issuer.example]
+    allowed_audiences: [kunato-lab]
+    leeway: 30s
 ```
 
 When enabled, `Authorization: Bearer` tokens and JWT-shaped cookie values whose
 header `alg` is not in the list are rejected with `403` before rule evaluation.
-Opaque session tokens and malformed JWTs are ignored, so the policy is not a
-general token validator. The check is part of `limits` and therefore remains
+`require_exp`, `allowed_issuers`, `allowed_audiences`, and `leeway` add claim
+checks; signatures are not verified because the WAF does not hold the
+application keys. Opaque session tokens and malformed JWTs are ignored when no
+claim policy applies, so this is not a general token validator. The check is part of `limits` and therefore remains
 active with `--disable-protection`. Algorithm names are compared
 case-insensitively after normalization; each entry is 1-32 ASCII letters,
 digits, `-`, or `_`, and at most 16 entries are accepted.
+
+### Request hardening
+
+Optional request-shape checks cover classes that are unreliable as regular
+expressions. All are disabled by default:
+
+```yaml
+limits:
+  hardening:
+    ssrf:
+      enabled: true
+      internal_hosts: [metadata.internal]
+      internal_suffixes: [corp]
+    duplicate_parameters:
+      enabled: true
+      json_keys: true
+      allow_parameters: [tag]
+    cache_deception:
+      enabled: true
+      static_suffixes: [.css, .js, .png]
+      auth_cookies: [session]
+    redirects:
+      enabled: true
+      allowed_hosts: [app.example.com]
+      parameters: [redirect_uri, next]
+```
+
+`ssrf` rejects URL values whose host is a configured internal host or suffix.
+`duplicate_parameters` rejects conflicting duplicate query/form parameters and
+duplicate JSON object keys; `allow_parameters` exempts intentional list
+parameters. `cache_deception` rejects a request for a configured static suffix
+when an authentication cookie is present. `redirects` rejects an absolute or
+protocol-relative redirect target whose host is not in `allowed_hosts` on the
+configured parameter names.
 
 ### Response headers
 
@@ -1251,6 +1294,8 @@ sudo kunato log --attack cve-2025 --format json | jq .
 | `prototype-pollution` (`prototype`) | `prototype-pollution` |
 | `open-redirect` (`redirect`) | `open-redirect` |
 | `parameter-pollution` (`hpp`) | `parameter-pollution` |
+| `mass-assignment` (`mass`) | `mass-assignment` |
+| `prompt-injection` (`prompt`) | `prompt-injection` |
 | `cache-deception` (`cache`) | `cache-deception` |
 | `config-injection` (`config`) | `config-injection` |
 | `jwt` | `jwt` |
@@ -1521,6 +1566,11 @@ protection:
       min_failures: 100
       action: BLOCK
       ban: 60s
+    scraping:
+      enabled: true
+      action: BLOCK
+      min_requests: 40
+      distinct_paths: 40
 ```
 
 The per-IP limiter uses a token bucket (`requests_per_second` refill rate, `burst`
@@ -1528,6 +1578,10 @@ capacity). Exceeding it returns `429 Too Many Requests` with a `Retry-After`
 header; exceeding the global rate or connection budget returns `503 Service
 Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
 to `max_duration`. Addresses in `allowlist` bypass all protection limits.
+
+`scraping` counts distinct `200` responses on non-static paths per source and
+flags a source that crosses both `min_requests` and `distinct_paths`. It is
+opt-in because API clients and legitimate crawlers can look similar.
 
 `global_auth` aggregates authentication failures across sources. With the
 default `action: LOG` it only records the threshold; with `action: BLOCK` it

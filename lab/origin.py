@@ -215,6 +215,10 @@ class Recorder(BaseHTTPRequestHandler):
                 200, b"ok", {"Server": "nginx/1.18.0"}),
             "/leak/session-cookie": (
                 200, b"ok", {"Set-Cookie": "PHPSESSID=" + "a" * 420}),
+            "/leak/login": (
+                401,
+                b"Invalid username: user not found",
+                {}),
             "/leak/benign-404": (404, b'{"error":"not found"}', {}),
             "/leak/benign-500": (500, b'{"error":"internal"}', {}),
         }.get(path, (404, b'{"error":"unknown leak fixture"}', {}))

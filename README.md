@@ -281,9 +281,11 @@ scripts/security-lab.sh run --sandbox-suite recent
 scripts/security-lab.sh run --sandbox-suite response
 scripts/security-lab.sh run --sandbox-suite graphql
 scripts/security-lab.sh run --sandbox-suite jwt
+scripts/security-lab.sh run --sandbox-suite hardening
 scripts/security-lab.sh run --sandbox-suite ssrf-xxe
 scripts/security-lab.sh run --sandbox-suite credential-stuffing
 scripts/security-lab.sh run --sandbox-suite global-auth
+scripts/security-lab.sh run --sandbox-suite scraping
 scripts/security-lab.sh run --sandbox-suite protocol
 scripts/security-lab.sh run --sandbox-suite slow
 scripts/security-lab.sh run --sandbox-suite load

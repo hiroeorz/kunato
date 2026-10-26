@@ -421,6 +421,8 @@ pub struct LimitsSpec {
     #[serde(default)]
     pub jwt: JwtSpec,
     #[serde(default)]
+    pub hardening: HardeningSpec,
+    #[serde(default)]
     pub form: FormLimits,
 }
 
@@ -438,6 +440,7 @@ impl Default for LimitsSpec {
             max_concurrent_streams: default_max_concurrent_streams(),
             graphql: GraphqlSpec::default(),
             jwt: JwtSpec::default(),
+            hardening: HardeningSpec::default(),
             form: FormLimits::default(),
         }
     }
@@ -537,6 +540,8 @@ pub struct GraphqlSpec {
     pub max_depth: usize,
     #[serde(default = "default_graphql_max_fields")]
     pub max_fields: usize,
+    #[serde(default)]
+    pub block_introspection: bool,
 }
 
 impl Default for GraphqlSpec {
@@ -546,6 +551,7 @@ impl Default for GraphqlSpec {
             paths: Vec::new(),
             max_depth: DEFAULT_GRAPHQL_MAX_DEPTH,
             max_fields: DEFAULT_GRAPHQL_MAX_FIELDS,
+            block_introspection: false,
         }
     }
 }
@@ -732,6 +738,8 @@ pub struct BehaviorSpec {
     pub auth: AuthSpec,
     #[serde(default)]
     pub global_auth: GlobalAuthSpec,
+    #[serde(default)]
+    pub scraping: ScrapingSpec,
 }
 
 impl Default for BehaviorSpec {
@@ -743,6 +751,7 @@ impl Default for BehaviorSpec {
             enumeration: EnumerationSpec::default(),
             auth: AuthSpec::default(),
             global_auth: GlobalAuthSpec::default(),
+            scraping: ScrapingSpec::default(),
         }
     }
 }
@@ -820,6 +829,38 @@ impl Default for GlobalAuthSpec {
             ban: secs60(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScrapingSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: BehaviorAction,
+    #[serde(default = "default_scraping_min_requests")]
+    pub min_requests: u32,
+    #[serde(default = "default_scraping_distinct_paths")]
+    pub distinct_paths: u32,
+}
+
+impl Default for ScrapingSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            action: BehaviorAction::Log,
+            min_requests: default_scraping_min_requests(),
+            distinct_paths: default_scraping_distinct_paths(),
+        }
+    }
+}
+
+fn default_scraping_min_requests() -> u32 {
+    40
+}
+
+fn default_scraping_distinct_paths() -> u32 {
+    40
 }
 
 fn default_max_connections_per_ip() -> u32 {
@@ -964,6 +1005,7 @@ pub struct Limits {
     pub max_concurrent_streams: u32,
     pub graphql: Graphql,
     pub jwt: Jwt,
+    pub hardening: Hardening,
     pub form: FormLimits,
 }
 
@@ -981,6 +1023,7 @@ impl From<&LimitsSpec> for Limits {
             max_concurrent_streams: spec.max_concurrent_streams,
             graphql: Graphql::from(&spec.graphql),
             jwt: Jwt::from(&spec.jwt),
+            hardening: Hardening::from(&spec.hardening),
             form: spec.form.clone(),
         }
     }
@@ -992,6 +1035,7 @@ pub struct Graphql {
     pub paths: Vec<String>,
     pub max_depth: usize,
     pub max_fields: usize,
+    pub block_introspection: bool,
 }
 
 impl From<&GraphqlSpec> for Graphql {
@@ -1001,6 +1045,7 @@ impl From<&GraphqlSpec> for Graphql {
             paths: spec.paths.clone(),
             max_depth: spec.max_depth,
             max_fields: spec.max_fields,
+            block_introspection: spec.block_introspection,
         }
     }
 }
@@ -1040,12 +1085,24 @@ pub struct JwtSpec {
     pub enabled: bool,
     #[serde(default)]
     pub allowed_algorithms: Vec<String>,
+    #[serde(default)]
+    pub require_exp: bool,
+    #[serde(default)]
+    pub allowed_issuers: Vec<String>,
+    #[serde(default)]
+    pub allowed_audiences: Vec<String>,
+    #[serde(default = "secs60", deserialize_with = "de_duration")]
+    pub leeway: Duration,
 }
 
 #[derive(Debug, Clone)]
 pub struct Jwt {
     pub enabled: bool,
     pub allowed_algorithms: Vec<String>,
+    pub require_exp: bool,
+    pub allowed_issuers: Vec<String>,
+    pub allowed_audiences: Vec<String>,
+    pub leeway: Duration,
 }
 
 impl From<&JwtSpec> for Jwt {
@@ -1057,6 +1114,10 @@ impl From<&JwtSpec> for Jwt {
                 .iter()
                 .map(|algorithm| algorithm.to_ascii_uppercase())
                 .collect(),
+            require_exp: spec.require_exp,
+            allowed_issuers: spec.allowed_issuers.clone(),
+            allowed_audiences: spec.allowed_audiences.clone(),
+            leeway: spec.leeway,
         }
     }
 }
@@ -1070,6 +1131,218 @@ impl Jwt {
         }
     }
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardeningSpec {
+    #[serde(default)]
+    pub ssrf: SsrfSpec,
+    #[serde(default)]
+    pub duplicate_parameters: DuplicateSpec,
+    #[serde(default)]
+    pub cache_deception: CacheDeceptionSpec,
+    #[serde(default)]
+    pub redirects: RedirectSpec,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SsrfSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub internal_hosts: Vec<String>,
+    #[serde(default)]
+    pub internal_suffixes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub json_keys: bool,
+    #[serde(default)]
+    pub allow_parameters: Vec<String>,
+}
+
+impl Default for DuplicateSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            json_keys: true,
+            allow_parameters: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheDeceptionSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub static_suffixes: Vec<String>,
+    #[serde(default)]
+    pub auth_cookies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedirectSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub parameters: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Hardening {
+    pub ssrf: SsrfPolicy,
+    pub duplicates: DuplicatePolicy,
+    pub cache: CachePolicy,
+    pub redirects: RedirectPolicy,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SsrfPolicy {
+    pub enabled: bool,
+    pub internal_hosts: Vec<String>,
+    pub internal_suffixes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DuplicatePolicy {
+    pub enabled: bool,
+    pub json_keys: bool,
+    pub allow_parameters: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CachePolicy {
+    pub enabled: bool,
+    pub static_suffixes: Vec<String>,
+    pub auth_cookies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RedirectPolicy {
+    pub enabled: bool,
+    pub allowed_hosts: Vec<String>,
+    pub parameters: Vec<String>,
+}
+
+impl From<&HardeningSpec> for Hardening {
+    fn from(spec: &HardeningSpec) -> Self {
+        Self {
+            ssrf: SsrfPolicy {
+                enabled: spec.ssrf.enabled,
+                internal_hosts: spec
+                    .ssrf
+                    .internal_hosts
+                    .iter()
+                    .map(|host| host.to_ascii_lowercase())
+                    .collect(),
+                internal_suffixes: spec
+                    .ssrf
+                    .internal_suffixes
+                    .iter()
+                    .map(|suffix| suffix.trim_start_matches('.').to_ascii_lowercase())
+                    .collect(),
+            },
+            duplicates: DuplicatePolicy {
+                enabled: spec.duplicate_parameters.enabled,
+                json_keys: spec.duplicate_parameters.json_keys,
+                allow_parameters: spec
+                    .duplicate_parameters
+                    .allow_parameters
+                    .iter()
+                    .map(|name| name.to_ascii_lowercase())
+                    .collect(),
+            },
+            redirects: RedirectPolicy {
+                enabled: spec.redirects.enabled,
+                allowed_hosts: spec
+                    .redirects
+                    .allowed_hosts
+                    .iter()
+                    .map(|host| host.to_ascii_lowercase())
+                    .collect(),
+                parameters: if spec.redirects.parameters.is_empty() {
+                    DEFAULT_REDIRECT_PARAMETERS
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect()
+                } else {
+                    spec.redirects
+                        .parameters
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect()
+                },
+            },
+            cache: CachePolicy {
+                enabled: spec.cache_deception.enabled,
+                static_suffixes: if spec.cache_deception.static_suffixes.is_empty() {
+                    DEFAULT_CACHE_SUFFIXES
+                        .iter()
+                        .map(|suffix| (*suffix).to_owned())
+                        .collect()
+                } else {
+                    spec.cache_deception
+                        .static_suffixes
+                        .iter()
+                        .map(|suffix| suffix.to_ascii_lowercase())
+                        .collect()
+                },
+                auth_cookies: if spec.cache_deception.auth_cookies.is_empty() {
+                    DEFAULT_AUTH_COOKIES
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect()
+                } else {
+                    spec.cache_deception
+                        .auth_cookies
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect()
+                },
+            },
+        }
+    }
+}
+
+const DEFAULT_CACHE_SUFFIXES: &[&str] = &[
+    ".css", ".js", ".mjs", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff",
+    ".woff2", ".ttf", ".eot",
+];
+const DEFAULT_AUTH_COOKIES: &[&str] = &[
+    "session",
+    "sess",
+    "sid",
+    "auth",
+    "token",
+    "jwt",
+    "access_token",
+    "id_token",
+];
+const DEFAULT_REDIRECT_PARAMETERS: &[&str] = &[
+    "redirect_uri",
+    "redirect",
+    "redirect_url",
+    "redirect_to",
+    "return_to",
+    "next",
+    "continue",
+    "goto",
+    "dest",
+    "destination",
+    "target_url",
+    "out_url",
+];
 
 fn trim_path(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
@@ -1235,6 +1508,7 @@ pub struct BehaviorConfig {
     pub enumeration: EnumerationConfig,
     pub auth: AuthConfig,
     pub global_auth: GlobalAuthConfig,
+    pub scraping: ScrapingConfig,
 }
 
 impl BehaviorConfig {
@@ -1261,6 +1535,12 @@ impl BehaviorConfig {
                 min_failures: default_global_auth_min_failures(),
                 action: BehaviorAction::Log,
                 ban: secs60(),
+            },
+            scraping: ScrapingConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                min_requests: default_scraping_min_requests(),
+                distinct_paths: default_scraping_distinct_paths(),
             },
         }
     }
@@ -1295,6 +1575,14 @@ pub struct GlobalAuthConfig {
     pub min_failures: u32,
     pub action: BehaviorAction,
     pub ban: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScrapingConfig {
+    pub enabled: bool,
+    pub action: BehaviorAction,
+    pub min_requests: u32,
+    pub distinct_paths: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2023,6 +2311,7 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
     }
     validate_graphql(&limits.graphql, issues);
     validate_jwt(&limits.jwt, issues);
+    validate_hardening(&limits.hardening, issues);
     for (name, value, max) in [
         ("max_parts", limits.form.max_parts, 64),
         (
@@ -2142,6 +2431,120 @@ fn compile_php(spec: &PhpSpec, issues: &mut Vec<String>) -> Option<Php> {
     })
 }
 
+fn validate_hardening(spec: &HardeningSpec, issues: &mut Vec<String>) {
+    if spec.ssrf.enabled
+        && spec.ssrf.internal_hosts.is_empty()
+        && spec.ssrf.internal_suffixes.is_empty()
+    {
+        issues.push(
+            "limits.hardening.ssrf requires at least one internal_hosts or internal_suffixes entry"
+                .to_owned(),
+        );
+    }
+    if spec.ssrf.internal_hosts.len() > 64 || spec.ssrf.internal_suffixes.len() > 64 {
+        issues.push("limits.hardening.ssrf accepts at most 64 hosts and 64 suffixes".to_owned());
+    }
+    for host in spec
+        .ssrf
+        .internal_hosts
+        .iter()
+        .chain(spec.ssrf.internal_suffixes.iter())
+    {
+        if host.is_empty()
+            || host.len() > 253
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            issues.push(format!(
+                "limits.hardening.ssrf entry `{host}` is not a valid host"
+            ));
+        }
+    }
+    if spec.duplicate_parameters.allow_parameters.len() > 64 {
+        issues.push(
+            "limits.hardening.duplicate_parameters.allow_parameters accepts at most 64 entries"
+                .to_owned(),
+        );
+    }
+    for name in &spec.duplicate_parameters.allow_parameters {
+        if name.is_empty()
+            || name.len() > 128
+            || !name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'[' | b']')
+            })
+        {
+            issues.push(format!(
+                "limits.hardening.duplicate_parameters allow entry `{name}` is not a valid parameter name"
+            ));
+        }
+    }
+    if spec.cache_deception.static_suffixes.len() > 64
+        || spec.cache_deception.auth_cookies.len() > 64
+    {
+        issues.push(
+            "limits.hardening.cache_deception accepts at most 64 suffixes and 64 cookies"
+                .to_owned(),
+        );
+    }
+    for suffix in &spec.cache_deception.static_suffixes {
+        if suffix.is_empty()
+            || suffix.len() > 16
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            issues.push(format!(
+                "limits.hardening.cache_deception suffix `{suffix}` is not a valid suffix"
+            ));
+        }
+    }
+    for name in &spec.cache_deception.auth_cookies {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            issues.push(format!(
+                "limits.hardening.cache_deception cookie `{name}` is not a valid cookie name"
+            ));
+        }
+    }
+    if spec.redirects.enabled && spec.redirects.allowed_hosts.is_empty() {
+        issues.push("limits.hardening.redirects requires at least one allowed host".to_owned());
+    }
+    if spec.redirects.allowed_hosts.len() > 64 || spec.redirects.parameters.len() > 64 {
+        issues.push(
+            "limits.hardening.redirects accepts at most 64 hosts and 64 parameters".to_owned(),
+        );
+    }
+    for host in &spec.redirects.allowed_hosts {
+        if host.is_empty()
+            || host.len() > 253
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            issues.push(format!(
+                "limits.hardening.redirects host `{host}` is not valid"
+            ));
+        }
+    }
+    for name in &spec.redirects.parameters {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            issues.push(format!(
+                "limits.hardening.redirects parameter `{name}` is not valid"
+            ));
+        }
+    }
+}
+
 fn validate_jwt(jwt: &JwtSpec, issues: &mut Vec<String>) {
     if jwt.enabled && jwt.allowed_algorithms.is_empty() {
         issues.push("limits.jwt.allowed_algorithms must not be empty when enabled".to_owned());
@@ -2160,6 +2563,21 @@ fn validate_jwt(jwt: &JwtSpec, issues: &mut Vec<String>) {
                 "limits.jwt.allowed_algorithms entry `{algorithm}` must be 1-32 ASCII letters, digits, '-' or '_'"
             ));
         }
+    }
+    if jwt.allowed_issuers.len() > 16 || jwt.allowed_audiences.len() > 16 {
+        issues.push("limits.jwt accepts at most 16 issuers and 16 audiences".to_owned());
+    }
+    for value in jwt
+        .allowed_issuers
+        .iter()
+        .chain(jwt.allowed_audiences.iter())
+    {
+        if value.is_empty() || value.len() > 512 {
+            issues.push("limits.jwt issuer and audience entries must be 1-512 bytes".to_owned());
+        }
+    }
+    if jwt.leeway > MAX_BEHAVIOR_WINDOW {
+        issues.push("limits.jwt.leeway must be at most 1h".to_owned());
     }
 }
 
@@ -2601,6 +3019,15 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
                 .to_owned(),
         );
     }
+    if spec.scraping.min_requests == 0 {
+        issues
+            .push("protection.behavior.scraping.min_requests must be greater than zero".to_owned());
+    }
+    if !(1..=256).contains(&spec.scraping.distinct_paths) {
+        issues.push(
+            "protection.behavior.scraping.distinct_paths must be between 1 and 256".to_owned(),
+        );
+    }
 
     let patterns: Vec<String> = match &spec.auth.paths {
         Some(paths) => paths.clone(),
@@ -2633,6 +3060,12 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
             min_failures: spec.global_auth.min_failures,
             action: spec.global_auth.action,
             ban: spec.global_auth.ban,
+        },
+        scraping: ScrapingConfig {
+            enabled: spec.scraping.enabled,
+            action: spec.scraping.action,
+            min_requests: spec.scraping.min_requests,
+            distinct_paths: spec.scraping.distinct_paths,
         },
     }
 }
@@ -4080,6 +4513,9 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert_eq!(behavior.global_auth.min_failures, 100);
         assert_eq!(behavior.global_auth.action, BehaviorAction::Log);
         assert_eq!(behavior.global_auth.ban, Duration::from_secs(60));
+        assert!(!behavior.scraping.enabled);
+        assert_eq!(behavior.scraping.min_requests, 40);
+        assert_eq!(behavior.scraping.distinct_paths, 40);
     }
 
     #[test]
@@ -4115,6 +4551,21 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert_eq!(behavior.global_auth.min_failures, 50);
         assert_eq!(behavior.global_auth.action, BehaviorAction::Block);
         assert_eq!(behavior.global_auth.ban, Duration::from_secs(5));
+        assert!(!behavior.scraping.enabled);
+    }
+
+    #[test]
+    fn parses_scraping_behavior() {
+        let config = parse_with(
+            BASE,
+            "protection:\n  behavior:\n    scraping: { enabled: true, action: BLOCK, min_requests: 3, distinct_paths: 4 }\n",
+        )
+        .expect("valid config");
+        let scraping = config.protection.behavior.scraping;
+        assert!(scraping.enabled);
+        assert_eq!(scraping.action, BehaviorAction::Block);
+        assert_eq!(scraping.min_requests, 3);
+        assert_eq!(scraping.distinct_paths, 4);
     }
 
     #[test]
@@ -4166,6 +4617,14 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
             (
                 "protection: { behavior: { global_auth: { ban: 0s } } }\n",
                 "global_auth.ban",
+            ),
+            (
+                "protection: { behavior: { scraping: { min_requests: 0 } } }\n",
+                "scraping.min_requests",
+            ),
+            (
+                "protection: { behavior: { scraping: { distinct_paths: 0 } } }\n",
+                "scraping.distinct_paths",
             ),
             (
                 "protection: { behavior: { auth: { paths: ['('] } } }\n",
@@ -5510,6 +5969,70 @@ categories:
             config.limits.jwt.allowed(),
             &["RS256".to_owned(), "ES256".to_owned()]
         );
+    }
+
+    #[test]
+    fn hardening_and_introspection_are_disabled_by_default() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert!(!config.limits.hardening.ssrf.enabled);
+        assert!(!config.limits.hardening.duplicates.enabled);
+        assert!(!config.limits.hardening.cache.enabled);
+        assert!(!config.limits.hardening.redirects.enabled);
+        assert!(!config.limits.graphql.block_introspection);
+    }
+
+    #[test]
+    fn parses_hardening_policy() {
+        let config = parse_with(
+            BASE,
+            "limits:\n  hardening:\n    ssrf: { enabled: true, internal_hosts: [VULN.CORP], internal_suffixes: [.corp] }\n    duplicate_parameters: { enabled: true, allow_parameters: [Tag] }\n    cache_deception: { enabled: true, static_suffixes: [.avif], auth_cookies: [Session] }\n    redirects: { enabled: true, allowed_hosts: [App.Test], parameters: [redirect_uri] }\n",
+        )
+        .expect("valid config");
+        let hardening = &config.limits.hardening;
+        assert!(hardening.ssrf.enabled);
+        assert_eq!(hardening.ssrf.internal_hosts, vec!["vuln.corp".to_owned()]);
+        assert_eq!(hardening.ssrf.internal_suffixes, vec!["corp".to_owned()]);
+        assert!(hardening.duplicates.enabled);
+        assert_eq!(
+            hardening.duplicates.allow_parameters,
+            vec!["tag".to_owned()]
+        );
+        assert!(hardening.cache.enabled);
+        assert_eq!(hardening.cache.static_suffixes, vec![".avif".to_owned()]);
+        assert_eq!(hardening.cache.auth_cookies, vec!["session".to_owned()]);
+        assert!(hardening.redirects.enabled);
+        assert_eq!(
+            hardening.redirects.allowed_hosts,
+            vec!["app.test".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_hardening_policies() {
+        for (body, expected) in [
+            (
+                "limits: { hardening: { ssrf: { enabled: true } } }\n",
+                "requires at least one",
+            ),
+            (
+                "limits: { hardening: { redirects: { enabled: true } } }\n",
+                "requires at least one allowed host",
+            ),
+            (
+                "limits: { hardening: { cache_deception: { enabled: true, static_suffixes: ['bad suffix'] } } }\n",
+                "not a valid suffix",
+            ),
+        ] {
+            let error = parse_with(BASE, body).expect_err("invalid hardening policy must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn parses_graphql_introspection_policy() {
+        let config = parse_with(BASE, "limits: { graphql: { block_introspection: true } }\n")
+            .expect("valid config");
+        assert!(config.limits.graphql.block_introspection);
     }
 
     #[test]

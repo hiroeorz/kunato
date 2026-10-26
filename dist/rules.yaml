@@ -71,6 +71,22 @@ categories:
       - name: duplicate-redirect-uri-json-key
         match: { regex: '(?i)"redirect_uri"\s*:[^}]{0,256}"redirect_uri"\s*:', in: [body] }
 
+  # Privileged-field assignment in ordinary API requests. Admin APIs that
+  # legitimately set these fields need a scoped override.
+  - name: mass-assignment
+    action: BLOCK
+    rules:
+      - name: privileged-field-assignment
+        match: { regex: '(?i)(^|[?&"\s])(is_admin|isadmin|permission|permissions|account_type|user_type|scope|authorities)["\x27]?\s*[:=]\s*["\x27]?(admin|true|1|root|superuser|owner)["\x27]?', in: [query, body] }
+
+  # Common prompt-injection and chat-template control strings. This is a
+  # coarse signature for obvious payloads, not a semantic guard for an LLM.
+  - name: prompt-injection
+    action: BLOCK
+    rules:
+      - name: instruction-override
+        match: { regex: '(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\s+(all\s+)?(previous|prior|above)\s+instructions|reveal\s+(the\s+)?system\s+prompt|<\|im_start\|>|<\|system\|>|\[INST\])', in: [query, body, cookies, headers] }
+
   # Methods that no normal browser or application should send.
   - name: bad-methods
     action: BLOCK
@@ -1397,6 +1413,8 @@ categories:
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
       # phpinfo() pages left in the web root leak configuration and paths;
       # generic `info.php`/`test.php` names are left alone as application files.
+      - name: registry-catalog
+        match: { path: '(?i)^/v2/_catalog/?$' }
       - name: phpinfo-endpoints
         match: { regex: '(?i)^/\.?(php_?info|phpversion)(\.php)?/?$', in: [path] }
       # Rails writes its default logs here; the directory must not be served.
@@ -1606,6 +1624,12 @@ categories:
       - name: php2shell-session-cookie-control-bytes
         action: BLOCK
         match: { headers: { Content-Type: '(?i)^multipart/form-data' }, response_headers: { Set-Cookie: '(?i)^PHPSESSID=[^;\s]*%(?:0[0-9a-f]|1[0-9a-f]|7f)' } }
+      - name: login-enumeration-message
+        action: BLOCK
+        match:
+          path: '(?i)(^|/)(login|logon|signin|sign_in|sign-in|auth|session)(/|$)'
+          regex: '(?i)(user(name)?\s+(not found|does not exist)|invalid username|unknown user|account\s+(does not exist|not found)|no such user)'
+          in: [response_body]
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
 

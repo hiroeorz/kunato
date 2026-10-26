@@ -95,6 +95,22 @@ categories:
       - name: duplicate-redirect-uri-json-key
         match: { regex: '(?i)"redirect_uri"\s*:[^}]{0,256}"redirect_uri"\s*:', in: [body] }
 
+  # Privileged-field assignment in ordinary API requests. Admin APIs that
+  # legitimately set these fields need a scoped override.
+  - name: mass-assignment
+    action: BLOCK
+    rules:
+      - name: privileged-field-assignment
+        match: { regex: '(?i)(^|[?&"\s])(is_admin|isadmin|permission|permissions|account_type|user_type|scope|authorities)["\x27]?\s*[:=]\s*["\x27]?(admin|true|1|root|superuser|owner)["\x27]?', in: [query, body] }
+
+  # Common prompt-injection and chat-template control strings. This is a
+  # coarse signature for obvious payloads, not a semantic guard for an LLM.
+  - name: prompt-injection
+    action: BLOCK
+    rules:
+      - name: instruction-override
+        match: { regex: '(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\s+(all\s+)?(previous|prior|above)\s+instructions|reveal\s+(the\s+)?system\s+prompt|<\|im_start\|>|<\|system\|>|\[INST\])', in: [query, body, cookies, headers] }
+
   # Methods that no normal browser or application should send.
   - name: bad-methods
     action: BLOCK
@@ -1421,6 +1437,8 @@ categories:
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
       # phpinfo() pages left in the web root leak configuration and paths;
       # generic `info.php`/`test.php` names are left alone as application files.
+      - name: registry-catalog
+        match: { path: '(?i)^/v2/_catalog/?$' }
       - name: phpinfo-endpoints
         match: { regex: '(?i)^/\.?(php_?info|phpversion)(\.php)?/?$', in: [path] }
       # Rails writes its default logs here; the directory must not be served.
@@ -1630,6 +1648,12 @@ categories:
       - name: php2shell-session-cookie-control-bytes
         action: BLOCK
         match: { headers: { Content-Type: '(?i)^multipart/form-data' }, response_headers: { Set-Cookie: '(?i)^PHPSESSID=[^;\s]*%(?:0[0-9a-f]|1[0-9a-f]|7f)' } }
+      - name: login-enumeration-message
+        action: BLOCK
+        match:
+          path: '(?i)(^|/)(login|logon|signin|sign_in|sign-in|auth|session)(/|$)'
+          regex: '(?i)(user(name)?\s+(not found|does not exist)|invalid username|unknown user|account\s+(does not exist|not found)|no such user)'
+          in: [response_body]
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
 
@@ -1696,12 +1720,36 @@ limits:
     enabled: true
     max_depth: 20
     max_fields: 1000
+    block_introspection: false
     # paths: [/query]
   # Reject JWTs whose header algorithm is not in this list. Disabled by
   # default because the accepted algorithms are application-specific.
   jwt:
     enabled: false
     allowed_algorithms: []
+    require_exp: false
+    allowed_issuers: []
+    allowed_audiences: []
+    leeway: 30s
+  # Optional request-shape hardening. Disabled by default; enable only the
+  # policies the application needs.
+  hardening:
+    ssrf:
+      enabled: false
+      internal_hosts: []
+      internal_suffixes: []
+    duplicate_parameters:
+      enabled: false
+      json_keys: true
+      allow_parameters: []
+    cache_deception:
+      enabled: false
+      static_suffixes: []
+      auth_cookies: []
+    redirects:
+      enabled: false
+      allowed_hosts: []
+      parameters: []
 
 # Optional PHP-specific mitigation. Explicit paths: [/] covers the entire
 # upstream; use hosts and/or path prefixes to restrict a mixed deployment.
@@ -1755,6 +1803,11 @@ protection:
       min_failures: 100
       action: LOG
       ban: 60s
+    scraping:
+      enabled: false
+      action: LOG
+      min_requests: 40
+      distinct_paths: 40
 
 admin:
   enabled: true

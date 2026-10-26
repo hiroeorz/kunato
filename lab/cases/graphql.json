@@ -63,13 +63,15 @@
   },
   {
     "id": "graphql-introspection",
-    "expect": "observe",
+    "expect": "block",
     "method": "POST",
     "target": "/graphql",
     "body": "{\"query\":\"{__schema{types{name}}}\"}",
     "headers": {
       "Content-Type": "application/json"
-    }
+    },
+    "block_status": 403,
+    "mechanism": "graphql"
   },
   {
     "id": "graphql-deep-get",

@@ -47,6 +47,7 @@ pub(crate) struct ThrottleReport {
 pub enum BehaviorSignal {
     Enumeration,
     AuthAbuse,
+    Scraping,
 }
 
 impl BehaviorSignal {
@@ -54,6 +55,7 @@ impl BehaviorSignal {
         match self {
             Self::Enumeration => "enumeration",
             Self::AuthAbuse => "auth-abuse",
+            Self::Scraping => "scraping",
         }
     }
 }
@@ -66,6 +68,7 @@ pub struct BehaviorFlag {
     pub not_found: u32,
     pub distinct_paths: u32,
     pub auth_failures: u32,
+    pub content: u32,
     pub ban: Option<Duration>,
 }
 
@@ -260,12 +263,13 @@ impl ProtectionState {
 
         let enumeration_enabled = behavior.enumeration.enabled;
         let auth_enabled = behavior.auth.enabled;
+        let scraping_enabled = behavior.scraping.enabled;
         let global_enabled = behavior.global_auth.enabled;
         let auth_failure = (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
             && (auth_enabled || global_enabled)
             && auth_path_matches(&behavior.auth.paths, path);
 
-        if !enumeration_enabled && !auth_failure {
+        if !enumeration_enabled && !auth_failure && !scraping_enabled {
             return BehaviorOutcome::default();
         }
 
@@ -301,6 +305,15 @@ impl ProtectionState {
                 }
             }
 
+            if scraping_enabled && status == StatusCode::OK {
+                let normalized = normalize_path(path);
+                let normalized = normalized.as_deref().unwrap_or(path);
+                if !is_static_asset(normalized) {
+                    entry.behavior.content = entry.behavior.content.saturating_add(1);
+                    entry.behavior.add_content_path(normalized);
+                }
+            }
+
             if auth_enabled && auth_failure {
                 entry.behavior.auth_failures = entry.behavior.auth_failures.saturating_add(1);
                 outcome.observed_auth_failure = true;
@@ -318,6 +331,7 @@ impl ProtectionState {
                     not_found: entry.behavior.not_found,
                     distinct_paths: entry.behavior.distinct_paths(),
                     auth_failures: entry.behavior.auth_failures,
+                    content: entry.behavior.content,
                     ban: None,
                 };
                 if behavior.enumeration.action == BehaviorAction::Block {
@@ -340,9 +354,33 @@ impl ProtectionState {
                     not_found: entry.behavior.not_found,
                     distinct_paths: entry.behavior.distinct_paths(),
                     auth_failures: entry.behavior.auth_failures,
+                    content: entry.behavior.content,
                     ban: None,
                 };
                 if behavior.auth.action == BehaviorAction::Block {
+                    flag.ban = Some(apply_behavior_ban(entry, config, now));
+                    entry.behavior.reset(now);
+                }
+                outcome.source = Some(flag);
+            }
+
+            if scraping_enabled
+                && entry.behavior.flags & BehaviorEntry::SCRAPING_FLAG == 0
+                && entry.behavior.content >= behavior.scraping.min_requests
+                && entry.behavior.distinct_content_paths() >= behavior.scraping.distinct_paths
+            {
+                entry.behavior.flags |= BehaviorEntry::SCRAPING_FLAG;
+                let mut flag = BehaviorFlag {
+                    signal: BehaviorSignal::Scraping,
+                    action: behavior.scraping.action,
+                    requests: entry.behavior.requests,
+                    not_found: entry.behavior.not_found,
+                    distinct_paths: entry.behavior.distinct_content_paths(),
+                    auth_failures: entry.behavior.auth_failures,
+                    content: entry.behavior.content,
+                    ban: None,
+                };
+                if behavior.scraping.action == BehaviorAction::Block {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
                 }
@@ -801,12 +839,15 @@ struct BehaviorEntry {
     not_found: u32,
     auth_failures: u32,
     not_found_paths: [u64; 4],
+    content: u32,
+    content_paths: [u64; 4],
     flags: u8,
 }
 
 impl BehaviorEntry {
     const ENUMERATION_FLAG: u8 = 1;
     const AUTH_FLAG: u8 = 2;
+    const SCRAPING_FLAG: u8 = 4;
 
     fn new(now: Instant) -> Self {
         Self {
@@ -815,6 +856,8 @@ impl BehaviorEntry {
             not_found: 0,
             auth_failures: 0,
             not_found_paths: [0; 4],
+            content: 0,
+            content_paths: [0; 4],
             flags: 0,
         }
     }
@@ -830,26 +873,38 @@ impl BehaviorEntry {
     }
 
     fn add_path(&mut self, path: &str) {
-        let hash = mix64(fnv1a64(path));
-        let first = (hash & 0xff) as usize;
-        let second = ((hash >> 32) & 0xff) as usize;
-        self.not_found_paths[first / 64] |= 1u64 << (first % 64);
-        self.not_found_paths[second / 64] |= 1u64 << (second % 64);
+        add_hashed_path(&mut self.not_found_paths, path);
     }
 
     fn distinct_paths(&self) -> u32 {
-        let set_bits: u32 = self
-            .not_found_paths
-            .iter()
-            .map(|word| word.count_ones())
-            .sum();
-        if set_bits >= 256 {
-            return 256;
-        }
-        let ratio = f64::from(set_bits) / 256.0;
-        let estimate = -128.0 * (1.0 - ratio).ln();
-        estimate.round().clamp(0.0, 256.0) as u32
+        estimate_paths(&self.not_found_paths)
     }
+
+    fn add_content_path(&mut self, path: &str) {
+        add_hashed_path(&mut self.content_paths, path);
+    }
+
+    fn distinct_content_paths(&self) -> u32 {
+        estimate_paths(&self.content_paths)
+    }
+}
+
+fn add_hashed_path(paths: &mut [u64; 4], path: &str) {
+    let hash = mix64(fnv1a64(path));
+    let first = (hash & 0xff) as usize;
+    let second = ((hash >> 32) & 0xff) as usize;
+    paths[first / 64] |= 1u64 << (first % 64);
+    paths[second / 64] |= 1u64 << (second % 64);
+}
+
+fn estimate_paths(paths: &[u64; 4]) -> u32 {
+    let set_bits: u32 = paths.iter().map(|word| word.count_ones()).sum();
+    if set_bits >= 256 {
+        return 256;
+    }
+    let ratio = f64::from(set_bits) / 256.0;
+    let estimate = -128.0 * (1.0 - ratio).ln();
+    estimate.round().clamp(0.0, 256.0) as u32
 }
 
 struct GlobalAuthWindow {
@@ -1053,7 +1108,9 @@ fn escalated_duration(base: Duration, max: Duration, ban_count: u32) -> Duration
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AuthConfig, BanConfig, EnumerationConfig, GlobalAuthConfig};
+    use crate::config::{
+        AuthConfig, BanConfig, EnumerationConfig, GlobalAuthConfig, ScrapingConfig,
+    };
 
     fn config() -> Protection {
         Protection {
@@ -1752,6 +1809,12 @@ mod tests {
                 action: BehaviorAction::Log,
                 ban: Duration::from_secs(60),
             },
+            scraping: ScrapingConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                min_requests: 3,
+                distinct_paths: 2,
+            },
         }
     }
 
@@ -1930,6 +1993,31 @@ mod tests {
                 .global_auth_block(ip("10.0.0.3"), "/login", &config)
                 .is_none()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scraping_flags_200_only_path_walks() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.enumeration.enabled = false;
+        behavior.auth.enabled = false;
+        behavior.scraping.enabled = true;
+        behavior.scraping.min_requests = 3;
+        behavior.scraping.distinct_paths = 2;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+
+        for path in ["/articles/1", "/articles/2", "/articles/3"] {
+            let outcome = state.observe_response(ip("10.0.0.1"), path, StatusCode::OK, &config);
+            if path == "/articles/3" {
+                let flag = outcome.source.expect("scraping flag");
+                assert_eq!(flag.signal, BehaviorSignal::Scraping);
+                assert_eq!(flag.content, 3);
+                assert_eq!(flag.distinct_paths, 3);
+            } else {
+                assert!(outcome.source.is_none());
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

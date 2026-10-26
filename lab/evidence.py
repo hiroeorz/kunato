@@ -156,6 +156,35 @@ def response_contains(case, result):
     return True
 
 
+def judge_scraping(controls, results, waf_events, expected=20):
+    control_ok = (len(controls) == expected
+                  and all(result.get("status") == 200 and result.get("origin")
+                          for result in controls))
+    allowed = [result for result in results
+               if result.get("status") == 200 and result.get("origin")]
+    blocked = [result for result in results if result.get("status") in {403, 429}]
+    errors = [result for result in results if result.get("error")]
+    blocks = [event["fields"] for event in waf_events
+              if event.get("fields", {}).get("signal") == "scraping"]
+    if not control_ok or errors:
+        verdict = "inconclusive"
+    elif allowed and blocked and all(result.get("origin") is None for result in blocked):
+        verdict = "prevented" if blocks else "inconclusive"
+    elif len(results) == expected and all(result.get("status") == 200 for result in results):
+        verdict = "gap"
+    else:
+        verdict = "inconclusive"
+    cases = [{"id": "scraping-behavior", "expect": "prevent",
+              "verdict": verdict, "origin_receipts": len(allowed),
+              "rules": [{"category": fields.get("category"),
+                         "rule": fields.get("rule")} for fields in blocks]}]
+    result = summarize(cases)
+    result["notes"] = {"attempts": len(results), "allowed": len(allowed),
+                       "blocked": len(blocked), "flag_events": len(blocks),
+                       "statuses": [item.get("status") for item in results]}
+    return result
+
+
 def judge_global_auth(control, failures, blocked, waf_events, expected=6):
     control_ok = (not control.get("error") and control.get("status") == 401
                   and control.get("origin"))

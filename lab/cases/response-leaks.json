@@ -32,8 +32,20 @@
     "method": "GET",
     "target": "/leak/session-cookie",
     "status": 200,
-    "header": {"name": "Set-Cookie", "contains": "PHPSESSID="},
+    "header": {
+      "name": "Set-Cookie",
+      "contains": "PHPSESSID="
+    },
     "rule": "php2shell-session-cookie-leak"
+  },
+  {
+    "id": "response-login-enumeration",
+    "expect": "block",
+    "method": "GET",
+    "target": "/leak/login",
+    "status": 401,
+    "body_contains": "user not found",
+    "rule": "login-enumeration-message"
   },
   {
     "id": "response-stack-trace",
@@ -49,7 +61,10 @@
     "method": "GET",
     "target": "/leak/server-version",
     "status": 200,
-    "header": {"name": "Server", "contains": "nginx/"}
+    "header": {
+      "name": "Server",
+      "contains": "nginx/"
+    }
   },
   {
     "id": "response-benign-404",

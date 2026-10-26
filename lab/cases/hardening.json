@@ -1,0 +1,67 @@
+[
+  {
+    "id": "hardening-ssrf-suffix",
+    "expect": "block",
+    "method": "GET",
+    "target": "/fetch?url=http%3A%2F%2Fvuln.corp%2Fsafe",
+    "block_status": 403,
+    "mechanism": "ssrf"
+  },
+  {
+    "id": "hardening-hpp-generic",
+    "expect": "block",
+    "method": "GET",
+    "target": "/search?account=one&account=two",
+    "block_status": 400,
+    "mechanism": "duplicate"
+  },
+  {
+    "id": "hardening-hpp-benign",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/search?tag=one&tag=two"
+  },
+  {
+    "id": "hardening-json-duplicate",
+    "expect": "block",
+    "method": "POST",
+    "target": "/api/account",
+    "body": "{\"account\":\"one\",\"account\":\"two\"}",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "block_status": 400,
+    "mechanism": "duplicate"
+  },
+  {
+    "id": "hardening-cache-deception",
+    "expect": "block",
+    "method": "GET",
+    "target": "/profile.avif",
+    "headers": {
+      "Cookie": "session=alice"
+    },
+    "block_status": 403,
+    "mechanism": "cache"
+  },
+  {
+    "id": "hardening-cache-benign",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/profile.avif"
+  },
+  {
+    "id": "hardening-oauth-redirect",
+    "expect": "block",
+    "method": "GET",
+    "target": "/oauth/authorize?redirect_uri=https%3A%2F%2Fevil.example%2Fcb",
+    "block_status": 403,
+    "mechanism": "redirect"
+  },
+  {
+    "id": "hardening-oauth-redirect-allowed",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/oauth/authorize?redirect_uri=https%3A%2F%2Fapp.test%2Fcb"
+  }
+]

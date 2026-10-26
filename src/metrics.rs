@@ -31,6 +31,7 @@ pub struct Metrics {
     pub behavior_enumeration_flags: AtomicU64,
     pub behavior_auth_flags: AtomicU64,
     pub behavior_global_auth_flags: AtomicU64,
+    pub behavior_scraping_flags: AtomicU64,
     pub behavior_blocked: AtomicU64,
     pub overloaded: AtomicU64,
     pub upstream_connect_errors: AtomicU64,
@@ -78,6 +79,7 @@ impl Metrics {
             behavior_enumeration_flags: AtomicU64::new(0),
             behavior_auth_flags: AtomicU64::new(0),
             behavior_global_auth_flags: AtomicU64::new(0),
+            behavior_scraping_flags: AtomicU64::new(0),
             behavior_blocked: AtomicU64::new(0),
             overloaded: AtomicU64::new(0),
             upstream_connect_errors: AtomicU64::new(0),
@@ -258,6 +260,12 @@ impl Metrics {
         );
         counter(
             &mut out,
+            "kunato_behavior_scraping_flags_total",
+            "Sources flagged for 200-only scraping (transitions, not every observation).",
+            self.behavior_scraping_flags.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
             "kunato_behavior_blocked_total",
             "Behavioral flags that applied a ban.",
             self.behavior_blocked.load(Ordering::Relaxed),
@@ -411,6 +419,7 @@ mod tests {
         assert!(text.contains("kunato_behavior_auth_failures_total 0"));
         assert!(text.contains("kunato_behavior_enumeration_flags_total 0"));
         assert!(text.contains("kunato_behavior_auth_flags_total 0"));
+        assert!(text.contains("kunato_behavior_scraping_flags_total 0"));
         assert!(text.contains("kunato_behavior_global_auth_flags_total 0"));
         assert!(text.contains("kunato_behavior_blocked_total 0"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));

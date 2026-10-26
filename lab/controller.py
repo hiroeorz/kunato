@@ -23,7 +23,7 @@ from evidence import (USER_AGENT, judge_agentic, judge_availability, judge_ban_r
                       judge_connect, judge_crs, judge_ffuf, judge_ffuf_behavior,
                       judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_credential_stuffing, judge_exploit_canary, judge_global_auth,
-                      judge_mutations,
+                      judge_mutations, judge_scraping,
                       judge_load, judge_nuclei, judge_protocol,
                       judge_replay, judge_response_leaks, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
@@ -133,6 +133,38 @@ BAN_PROTECTION = """protection:
     max_duration: 2s
   behavior:
     enabled: false
+"""
+
+SCRAPING_PROTECTION = """protection:
+  enabled: true
+  allowlist: [127.0.0.1/32]
+  max_connections_per_ip: 64
+  max_connections: 256
+  requests_per_second: 1000
+  burst: 1000
+  global_requests_per_second: 10000
+  max_tracked_ips: 100
+  aggregate_ipv6_prefix: 64
+  ban:
+    violations: 1000
+    window: 60s
+    duration: 1s
+    max_duration: 1s
+  behavior:
+    enabled: true
+    window: 60s
+    min_requests: 1
+    enumeration:
+      enabled: false
+    auth:
+      enabled: false
+    global_auth:
+      enabled: false
+    scraping:
+      enabled: true
+      action: BLOCK
+      min_requests: 8
+      distinct_paths: 8
 """
 
 GLOBAL_AUTH_PROTECTION = """protection:
@@ -733,6 +765,12 @@ class SandboxSuite:
     def jwt_policy(self):
         return self.surface("jwt", config="rules-jwt.yaml")
 
+    def graphql(self):
+        return self.surface("graphql", config="rules-graphql.yaml")
+
+    def hardening(self):
+        return self.surface("hardening", config="rules-hardening.yaml")
+
     def response_leaks(self):
         cases = json.loads((self.input / "lab/cases/response-leaks.json").read_text())
         validate_cases(cases)
@@ -824,6 +862,27 @@ class SandboxSuite:
         self.healthy("global-auth", nonce=nonce)
         origin, waf = self.logs("global-auth")
         return judge_global_auth(control, failures, blocked, waf)
+
+    def scraping(self):
+        cases = json.loads((self.input / "lab/cases/scraping.json").read_text())
+        validate_cases(cases)
+        control_nonce = self.reset_origin("scraping-control",
+                                          config="rules-scraping.yaml")
+        self.preflight("origin")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", "/lab/cases/scraping.json"),
+                              log=self.run_dir / "scraping-control/probes.jsonl")
+        control_origin, _ = self.logs("scraping-control")
+        verify_origin(control_origin, control_nonce)
+        nonce = self.reset_origin("scraping", config="rules-scraping.yaml",
+                                  disable_protection=False)
+        self.compose("up", "-d", "normal")
+        results = self.probe("client", "cases",
+                             extra=("--cases", "/lab/cases/scraping.json"),
+                             log=self.run_dir / "scraping/probes.jsonl")
+        self.healthy("scraping", service="normal", exec=True, nonce=nonce)
+        origin, waf = self.logs("scraping")
+        return judge_scraping(controls, results, waf)
 
     def credential_stuffing(self):
         cases = json.loads((self.input / "lab/cases/credential-stuffing.json").read_text())
@@ -1751,8 +1810,15 @@ def new_run(suite):
         make_config(original, "http://origin:8080", BACKPRESSURE_PROTECTION))
     jwt_config = make_config(original, "http://origin:8080")
     jwt_config, count = re.subn(
-        r"(?m)^  jwt:\n    enabled: false\n    allowed_algorithms: \[\]\n",
-        "  jwt:\n    enabled: true\n    allowed_algorithms: [RS256]\n",
+        r"(?ms)^  jwt:\n(?:    [^\n]*\n)+",
+        """  jwt:
+    enabled: true
+    allowed_algorithms: [RS256]
+    require_exp: true
+    allowed_issuers: [https://issuer.example]
+    allowed_audiences: [kunato-lab]
+    leeway: 30s
+""",
         jwt_config,
     )
     if count != 1:
@@ -1760,6 +1826,43 @@ def new_run(suite):
     (config_dir / "rules-jwt.yaml").write_text(jwt_config)
     (config_dir / "rules-global-auth.yaml").write_text(
         make_config(original, "http://origin:8080", GLOBAL_AUTH_PROTECTION))
+    (config_dir / "rules-scraping.yaml").write_text(
+        make_config(original, "http://origin:8080", SCRAPING_PROTECTION))
+    graphql_config = make_config(original, "http://origin:8080")
+    graphql_config, count = re.subn(
+        r"(?m)^    block_introspection: false$",
+        "    block_introspection: true",
+        graphql_config,
+    )
+    if count != 1:
+        raise ValueError("Expected one disabled graphql introspection setting")
+    (config_dir / "rules-graphql.yaml").write_text(graphql_config)
+    hardening_config = make_config(original, "http://origin:8080")
+    hardening_config, count = re.subn(
+        r"(?ms)^  hardening:\n(?:    [^\n]*\n)+",
+        """  hardening:
+    ssrf:
+      enabled: true
+      internal_hosts: [vuln.corp]
+      internal_suffixes: []
+    duplicate_parameters:
+      enabled: true
+      json_keys: true
+      allow_parameters: [tag]
+    cache_deception:
+      enabled: true
+      static_suffixes: [.avif]
+      auth_cookies: [session]
+    redirects:
+      enabled: true
+      allowed_hosts: [app.test]
+      parameters: [redirect_uri]
+""",
+        hardening_config,
+    )
+    if count != 1:
+        raise ValueError("Expected one disabled hardening block")
+    (config_dir / "rules-hardening.yaml").write_text(hardening_config)
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
     cases = json.loads((LAB / "cases/smoke.json").read_text())
     validate_cases(cases)
@@ -1771,7 +1874,7 @@ def new_run(suite):
     protocol_cases = json.loads((LAB / "cases/protocol.json").read_text())
     validate_protocol(protocol_cases)
     for name in ("common", "recent", "response-leaks", "graphql", "ssrf-xxe", "jwt",
-                 "global-auth"):
+                 "global-auth", "hardening", "scraping"):
         validate_cases(json.loads((LAB / f"cases/{name}.json").read_text()))
     validate_agentic(json.loads((LAB / "cases/agentic.json").read_text()))
     plans = input_dir / "lab/plans"
@@ -1808,6 +1911,7 @@ def run(suite):
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
                      "rules-vuln.yaml", "rules-jwt.yaml", "rules-global-auth.yaml",
+                     "rules-hardening.yaml", "rules-graphql.yaml", "rules-scraping.yaml",
                      "rules-ffuf.yaml",
                      "rules-availability.yaml", "rules-connect.yaml",
                      "rules-h2.yaml", "rules-h3.yaml", "rules-ban.yaml",
@@ -1828,13 +1932,17 @@ def run(suite):
         if suite in {"response", "all"}:
             report["suites"]["response"] = lab.response_leaks()
         if suite in {"graphql", "all"}:
-            report["suites"]["graphql"] = lab.surface("graphql")
+            report["suites"]["graphql"] = lab.graphql()
         if suite in {"jwt", "all"}:
             report["suites"]["jwt"] = lab.jwt_policy()
+        if suite in {"hardening", "all"}:
+            report["suites"]["hardening"] = lab.hardening()
         if suite in {"ssrf-xxe", "all"}:
             report["suites"]["ssrf-xxe"] = lab.ssrf_xxe()
         if suite in {"credential-stuffing", "all"}:
             report["suites"]["credential-stuffing"] = lab.credential_stuffing()
+        if suite in {"scraping", "all"}:
+            report["suites"]["scraping"] = lab.scraping()
         if suite in {"global-auth", "all"}:
             report["suites"]["global-auth"] = lab.global_auth()
         if suite in {"agentic", "all"}:
@@ -2051,8 +2159,8 @@ def main():
     runner = subs.add_parser("run", help="Run the isolated regression sandbox suites")
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "benign", "mutations", "protocol", "common", "recent",
-                                 "response", "graphql", "jwt", "ssrf-xxe",
-                                 "credential-stuffing", "global-auth",
+                                 "response", "graphql", "jwt", "hardening", "ssrf-xxe",
+                                 "credential-stuffing", "global-auth", "scraping",
                                  "agentic", "gotestwaf", "sqlmap", "nuclei", "ffuf", "zap", "crs",
                                  "slow", "availability", "connect", "h2", "h3",
                                  "backpressure", "ban", "websocket", "load", "restart",

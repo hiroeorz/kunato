@@ -35,10 +35,12 @@ const MAX_MULTIPART_JSON_ATTEMPTS: usize = 8;
 pub struct Limits {
     pub max_depth: usize,
     pub max_fields: usize,
+    pub block_introspection: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Violation {
+    Introspection,
     TooDeep { depth: usize },
     TooManyFields { fields: usize },
     TooComplex,
@@ -67,6 +69,13 @@ pub fn inspect(
     let Some(candidates) = candidates(uri_query, headers, body) else {
         return Some(Violation::TooComplex);
     };
+    if limits.block_introspection
+        && candidates
+            .iter()
+            .any(|candidate| contains_introspection(candidate))
+    {
+        return Some(Violation::Introspection);
+    }
     if candidates.is_empty() {
         // A multipart body is the one shape where forwarding an unextracted
         // document is dangerous: the parser supports several boundary
@@ -615,6 +624,19 @@ fn is_name_continue(byte: u8) -> bool {
     is_name_start(byte) || byte.is_ascii_digit()
 }
 
+fn contains_introspection(text: &str) -> bool {
+    for marker in ["__schema", "__type"] {
+        for (index, _) in text.match_indices(marker) {
+            let after = text[index + marker.len()..].chars().next();
+            if !after.is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn media_type(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(CONTENT_TYPE)?.to_str().ok()?;
     let media = value.split(';').next()?.trim().to_ascii_lowercase();
@@ -933,6 +955,7 @@ mod tests {
             Limits {
                 max_depth: 20,
                 max_fields: 1000,
+                block_introspection: false,
             },
         )
     }
@@ -1186,6 +1209,36 @@ mod tests {
     }
 
     #[test]
+    fn blocks_introspection_when_configured() {
+        let headers = HeaderMap::new();
+        let limits = Limits {
+            max_depth: 20,
+            max_fields: 1000,
+            block_introspection: true,
+        };
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                br#"{"query":"{__schema{types{name}}}"}"#,
+                false,
+                limits
+            ),
+            Some(Violation::Introspection)
+        );
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                br#"{"query":"{__typename}"}"#,
+                false,
+                limits
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn detects_a_bare_application_graphql_body() {
         let violation = inspect_with(
             None,
@@ -1346,6 +1399,7 @@ mod tests {
                 Limits {
                     max_depth: 5,
                     max_fields: 10,
+                    block_introspection: false,
                 },
             );
         }

@@ -1,6 +1,8 @@
 # Behavioral bot and authentication-abuse detection
 
-Status: Phase 1 implemented; Phase 2/3 remain future work.
+Status: Phase 1 and the opt-in `behavior.scraping` / `global_auth.action: BLOCK`
+parts of Phase 3 are implemented; challenges, configurable static exclusions, and
+the remaining Phase 2/3 items are future work.
 
 Related documents:
 
@@ -73,13 +75,13 @@ on the YAML rule set.
   IP / IPv6-prefix key used by rate limits and bans.
 - Content classification (spam, comment quality) or business-logic abuse such as
   coupon abuse, inventory hoarding, or mass assignment.
-- Detecting scraping that only produces `200` responses. That needs response
-  content and access-pattern modeling and is a separate feature.
+- Detecting a slow scraper below the configured `behavior.scraping` thresholds
+  or one spread across many source addresses.
 - Blocking the response that triggered a flag. Detection runs after the upstream
   response; a `BLOCK` action bans the source for subsequent requests.
-- A global deny-all or global ban. A global signal must not let one attacker
-  deny authentication to every user; the first release records the global signal
-  without a global action.
+- A global deny-all or global ban. `global_auth.action` defaults to `LOG`; an
+  opt-in `BLOCK` action can deny authentication to legitimate users during an
+  attack and must be tuned and allowlisted before use.
 - Persisting behavior state across restarts. State is in-memory and resets on
   restart, like the existing rate-limit state.
 
@@ -785,8 +787,9 @@ an identity, and trusted proxy support does not add session/account tracking.
   per-source enumeration can still be diluted.
 - **Slow probing.** Staying below every window threshold avoids detection. Rate
   limits and the global request guard remain the outer bound.
-- **`200`-only scraping.** Not covered; it needs response content and access
-  pattern analysis.
+- **`200`-only scraping.** Opt-in `behavior.scraping` counts distinct `200`
+  responses on non-static paths per source and can ban the source. A slow or
+  multi-source scraper below the thresholds remains uncovered.
 - **Path encoding.** Encoded variants can inflate the distinct-path estimate,
   making detection more sensitive, not less. They cannot hide a `404` from the
   counter.
@@ -874,19 +877,18 @@ Phase 1 updated these files:
 - `README.md` feature list: mention per-source probing and authentication-abuse
   detection.
 - `docs/attack-coverage.md`:
-  - **Bot**: partial; User-Agent signatures plus `404`-ratio and distinct-path
-    behavioral flags (LOG default, BLOCK opt-in). No JS challenge or
-    `200`-only scraping detection.
+  - **Bot**: partial; User-Agent signatures, `404`-ratio/distinct-path flags,
+    and opt-in `200`-only scraping detection (LOG default, BLOCK opt-in). No JS
+    challenge.
   - **Directory / File / Endpoint Enumeration**: partial; scanner UA, rate
     limits, and behavioral `404` flags.
   - **API Endpoint Enumeration**: partial; same mechanism.
   - **Brute Force / Password Spraying / Credential Stuffing**: partial;
-    per-source login throttle, per-source auth-failure flags, and a global
-    auth-failure log for distributed attempts. Automatic global mitigation is
-    future work.
-  - **Notable Gaps**: replace "behavioral bot detection" with a narrower
-    statement: probing and authentication abuse are observable, but `200`-only
-    scraping, business logic, and automatic distributed mitigation remain gaps.
+    per-source login throttle, per-source auth-failure flags, and an opt-in
+    cross-source `global_auth` block for distributed attempts. Default is LOG.
+  - **Notable Gaps**: probing, authentication abuse, and `200`-only scraping
+    have opt-in signals, but business logic, slow/multi-source scraping, and
+    automatic global mitigation remain gaps.
   - Keep statuses honest: the default is `LOG`, so no row becomes `Covered`
     merely because a signal exists. A row can become `Covered` only when the
     bundled default stops the attack.
@@ -901,10 +903,10 @@ Phase 1 updated these files:
    `kunato_behavior_*` counters and logs, and adjust defaults. Consider raising
    `enumeration.action` to `BLOCK` only after the false-positive rate is known;
    keep auth `LOG` unless the deployment has a controlled login surface.
-3. **Phase 3 (future).** Add an opt-in global auth throttle or challenge, a
-   sliding window, configurable static exclusions, and additional signals
-   (account-creation failure bursts, `200`-only scraping). Each needs a separate
-   design because the false-positive and availability tradeoffs differ.
+3. **Phase 3 (partial).** The opt-in global auth `BLOCK` and `200`-only
+   `scraping` signal are available. A challenge, sliding window, configurable
+   static exclusions, and account-creation failure bursts remain future work
+   because their false-positive and availability tradeoffs differ.
 
 Phase 1 acceptance criteria:
 

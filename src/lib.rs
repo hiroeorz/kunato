@@ -10,6 +10,7 @@ pub mod decoding;
 pub mod error;
 mod form;
 pub mod graphql;
+pub mod hardening;
 pub mod jwt;
 pub mod logs;
 pub mod metrics;

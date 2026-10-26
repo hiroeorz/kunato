@@ -131,18 +131,19 @@ The `common` suite adds 44 reviewed cases for classes the replay and mutation
 corpora did not cover: SSTI, NoSQL, LDAP, XPath, PHP/Java/Python/Ruby
 deserialization, CRLF, SSRF, XXE, JWT header attacks, and API behaviours
 (mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON keys, GraphQL
-introspection). Each case has a direct origin control; 26 attacks are blocked,
-13 benign cases pass, and 5 discovery cases are observed at the origin. The
-`parameter-pollution` rules block duplicate privilege and redirect fields.
+introspection). Each case has a direct origin control; 27 attacks are blocked,
+13 benign cases pass, and 4 discovery cases are observed at the origin. The
+`parameter-pollution` and `mass-assignment` rules block duplicate and
+privileged-field assignments.
 
 The `recent` suite adds 21 cases for 2025-2026 CVE and AI-era traffic:
 React2Shell, Next.js middleware/RSC variants, PHP2Shell, the Rack multipart
 escape flood, GitLab repository file read, Jenkins script console, TeamCity
 agent protocol, MCP tool arguments, AI crawler and API-client user agents, and
-benign MCP/upload traffic. Eleven attacks are blocked, seven benign cases pass,
-and three discovery cases (prompt injection, forwarded-host cache poisoning,
-registry catalog) are observed at the origin. The `cache-deception` rule blocks
-an authenticated request addressed as a static asset.
+benign MCP/upload traffic. Thirteen attacks are blocked, seven benign cases pass, and one discovery case
+(forwarded-host cache poisoning) is observed at the origin. The
+`cache-deception`, `prompt-injection`, and registry-catalog rules block their
+shapes.
 
 The observed cases are deliberately not counted as blocked: the JWT
 algorithm-confusion, mass-assignment, OAuth redirect, BOLA, HPP, duplicate JSON,
@@ -154,22 +155,22 @@ signature.
 ### Response-phase leaks
 
 The `response` suite serves a private-key body, a MySQL syntax error, a Django
-DEBUG page, a long PHPSESSID cookie, a Python stack trace, a versioned `Server`
-header, and benign 404/500 responses from the recording origin. The direct
-control must receive each leak. The protected run must produce `response blocked`
-events for the four BLOCK rules and must not forward the marker; the LOG-only
-stack trace and server version are observed, and the benign bodies must pass
-unchanged. The current result is 4 prevented, 2 observed, and 2 benign passes.
+DEBUG page, a long PHPSESSID cookie, a login-enumeration error, a Python stack
+trace, a versioned `Server` header, and benign 404/500 responses from the
+recording origin. The direct control must receive each leak. The protected run
+must produce `response blocked` events for the five BLOCK rules and must not
+forward the marker; the LOG-only stack trace and server version are observed,
+and the benign bodies must pass unchanged. The current result is 5 prevented,
+2 observed, and 2 benign passes.
 
 ### GraphQL complexity
 
 The `graphql` suite sends a 25-level selection, a 1001-alias document, and a
 cyclic fragment document, plus a deep GET query and an `application/graphql`
 alias flood. The engine rejects all five with `400` and no origin receipt; a
-normal query with variables reaches the origin. The result is 5 prevented and 1
-benign pass. Shallow GET and `application/graphql` probes reach the origin as
-observations, and introspection is logged by
-`api-discovery.graphql-introspection`.
+normal query with variables reaches the origin. The result is 6 prevented and
+1 benign pass. Shallow GET and `application/graphql` probes reach the origin as
+observations; introspection is blocked by the opt-in policy.
 
 ### SSRF and XXE canaries
 
@@ -194,8 +195,9 @@ opt-in signed global block for failures spread across sources.
 The `jwt` suite uses `rules-jwt.yaml` with
 `limits.jwt.allowed_algorithms: [RS256]`. A bearer token with `alg: HS256` is
 rejected with `403` before rule evaluation; an RS256 token and an opaque bearer
-token reach the origin. The result is 1 prevented and 2 benign passes. This is
-an explicit local policy, not a generic algorithm-confusion signature.
+token reach the origin. The result is 5 prevented and 2 benign passes (HS256, expired, wrong issuer,
+wrong audience, and missing exp). This is an explicit local policy, not
+signature verification.
 
 ### Global authentication abuse
 
@@ -205,6 +207,22 @@ ban. Six `401` responses from two independent front sources cross the threshold;
 the next auth request from a fresh source gets `429` with no origin receipt and
 the mitigation log. The normal client stays at `200`. The result is 2 passed and
 1 prevented.
+
+### Request hardening
+
+The `hardening` suite enables the optional engine policies in
+`rules-hardening.yaml`: configured internal hosts/suffixes, conflicting
+duplicate parameters and JSON keys, authenticated static-asset detection, and a
+redirect-host allowlist. It covers `vuln.corp`, generic HPP, duplicate JSON,
+`.avif` cache deception, and an external OAuth `redirect_uri`, with benign
+counterparts. The result is 5 prevented and 3 benign passes.
+
+### 200-only scraping
+
+The `scraping` suite enables `behavior.scraping` and walks 20 distinct `200`
+paths from one source. After 8 paths the source is banned; the blocked requests
+have no origin receipt and the `scraping` flag is logged. The separate normal
+client stays healthy. The result is 8 allowed, 12 blocked, and 1 flag event.
 
 ### Agentic TTP chain
 
@@ -396,26 +414,30 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The latest full `all` run, `20261027T064248-eb018801`, passed 28 sandbox
+- The latest full `all` run, `20261027T074247-547c189c`, passed 30 sandbox
   suites: replay, benign, mutations, protocol, common, recent, response,
-  graphql, jwt, ssrf-xxe, credential-stuffing, global-auth, agentic, slow,
-  availability, connect, h2, h3, backpressure, ban, websocket, load, restart,
-  goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001
-  requests, p95 45.8 ms, p99 46.4 ms, 100% success, normal/recovery `200`, RSS
-  28.2 MiB of 256 MiB, no restart, and matching metrics. The restart suite
-  recorded exit code 0, a 364 ms shutdown, 501 requests, and a 98.8% check rate.
-  The credential-stuffing suite allowed 10 of 12 logins and blocked 2 with
-  `rate_limited` events. The global-auth suite counted six failures from two
-  front sources and blocked the next auth request with `429`. The SSRF/XXE
+  graphql, jwt, hardening, ssrf-xxe, credential-stuffing, global-auth,
+  scraping, agentic, slow, availability, connect, h2, h3, backpressure, ban,
+  websocket, load, restart, goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed
+  load recorded 3001 requests, p95 48.7 ms, p99 48.9 ms, 100% success,
+  normal/recovery `200`, RSS 28.3 MiB of 256 MiB, no restart, and matching
+  metrics. The restart suite recorded exit code 0, a 453 ms shutdown, 500
+  requests, and a 98.6% check rate. The credential-stuffing suite allowed 10 of
+  12 logins and blocked 2 with `rate_limited` events. The global-auth suite
+  counted six failures from two front sources and blocked the next auth request
+  with `429`. The scraping suite allowed 8 and blocked 12 of 20 distinct `200`
+  paths. The hardening suite blocked configured internal hosts, generic HPP,
+  duplicate JSON, cache deception, and an external redirect. The SSRF/XXE
   canaries blocked the loopback sink, `file://`, the single-label host, and the
-  external entity. The response suite blocked the four response rules and left
-  the two LOG-only leaks observable. The GraphQL suite rejected the deep,
-  alias-flood, cyclic, deep-GET, and `application/graphql` documents. The h2
-  suite passed the bounded server-reset pressure variant. The agentic suite
-  prevented all four cases, sqlmap extracted no protected canary, Nuclei and
-  ffuf retained their controls, and the authenticated ZAP baseline completed.
-  The earlier 2026-10-25 and 2026-10-26 runs remain in the retained evidence
-  directories.
+  external entity. The response suite blocked the five response rules and left
+  the two LOG-only leaks observable. The GraphQL suite rejected deep, alias,
+  cyclic, GET, `application/graphql`, and introspection documents. The JWT
+  suite rejected disallowed, expired, wrong-issuer, wrong-audience, and
+  missing-exp tokens. The h2 suite passed the bounded server-reset pressure
+  variant. The agentic suite prevented all four cases, sqlmap extracted no
+  protected canary, Nuclei and ffuf retained their controls, and the
+  authenticated ZAP baseline completed. Earlier runs remain in the retained
+  evidence directories.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -433,13 +455,16 @@ current suites.
 
 - The tracker lists Content-Type spoofing, API version/schema abuse,
   session-ID anomalies, business-logic classes (IDOR, coupon/carding, scalping),
-  and rule-bypass payloads as absent; HPP, cache deception, JWT tampering and
-  algorithm confusion, and distributed authentication abuse are partial. HTTP request smuggling, desync, response splitting, upload
-  inspection, and GraphQL abuse are partial. The common/recent suites now
-  exercise SSTI, NoSQL, LDAP, XPath, deserialization, CRLF, JWT header attacks,
-  response leaks, GraphQL depth/field limits, JWT algorithm policy, SSRF/XXE
-  canaries, per-source login throttling, and a two-source global auth block, but
-  do not close the absent classes above.
+  and rule-bypass payloads as absent. HPP, cache deception, JWT algorithm/claim
+  policy, mass assignment, redirects, distributed authentication abuse,
+  response leaks, and 200-only scraping are partial. HTTP request smuggling,
+  desync, response splitting, upload inspection, and GraphQL abuse are partial.
+  The common/recent/hardening/scraping suites now exercise SSTI, NoSQL, LDAP,
+  XPath, deserialization, CRLF, JWT header/claim attacks, response leaks,
+  GraphQL depth/fields/introspection, SSRF/XXE canaries and internal hosts,
+  duplicate parameters/JSON keys, cache deception, redirects, per-source login
+  throttling, a two-source global auth block, and 200-only scraping, but do not
+  close the absent classes above.
 - The WebSocket suite proves the handshake, PING/PONG, fragmented echo, close
   handshake, client-to-server payload block, benign payload echo, and
   server-to-client push block with a benign push delivered. Compressed

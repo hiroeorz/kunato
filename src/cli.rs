@@ -137,6 +137,7 @@ pub struct LogArgs {
     ///   jdbc-injection (jdbc), command-injection (command, rce), ssti,
     ///   config-injection (config), xss, css-injection (css),
     ///   open-redirect (redirect), parameter-pollution (hpp),
+    ///   mass-assignment (mass), prompt-injection (prompt),
     ///   cache-deception (cache).
     ///
     /// Server-side and file classes:
