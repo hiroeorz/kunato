@@ -602,3 +602,15 @@ POST /api/import/importStdMd header="Content-Type: application/json" body="{\"no
 POST /v1/chat/completions header="Content-Type: application/json" header="X-Request-Id: 7f3a-request-id" body="{\"model\":\"m\",\"messages\":[]}"
 GET /weaver/ln.FileDownload?fpath=download%2Freport.pdf
 GET /webapi/file/transfer?type=db_backup&name=backup%2Fconfig.db
+
+# --- Near-misses for the 2026-10-26 KEV and traversal/SQLi/command/XSS
+#     signatures: the same endpoints and parameters with ordinary values must
+#     keep passing. ---
+POST /index.php?option=com_icagenda&task=event.submit header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /api/2.0/mlflow/webhooks/1/test header="Content-Type: application/json" body="{\"url\":\"https://hooks.example.com/mlflow\"}"
+MKCOL /tenant-a/new-directory
+PUT /tenant-a/notes.txt body="tenant note"
+POST /api/update header="Content-Type: application/json" body="{\"module\":{\"namespace\":\"sales\",\"migrations\":[\"2026_10_add_index\"]}}"
+POST /admin/tools/export.php header="Content-Type: application/x-www-form-urlencoded" body="mysqldump=/usr/bin/mysqldump&database=erp"
+POST /api/index.php/thirdparties/1/bankaccounts header="Content-Type: application/json" body="{\"type\":\"bank\",\"label\":\"Operating account\"}"
+GET /check-auth?to=https://app.example.com/dashboard
