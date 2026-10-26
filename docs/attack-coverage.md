@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-27; the managed set carried 512 rules then.
+2026-10-27; the managed set carried 516 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -428,7 +428,7 @@ walked 20 distinct `200` paths from one source; `behavior.scraping` allowed 8
 and blocked 12 (8 allowed, 12 blocked). The h2 suite also passed a bounded server-reset
 pressure variant after Rapid Reset, CONTINUATION, and HPACK; it is a regression
 for server-generated reset handling, not an exact MadeYouReset reproduction.
-The full `all` run `20261027T081031-244d1562` passed all 30 suites, including
+The full `all` run `20261027T082621-78e11d12` passed all 30 suites, including
 the hardening, scraping, response, GraphQL, JWT, SSRF/XXE, credential-stuffing,
 and global-auth additions together with the existing tool, protocol, and
 availability controls.
