@@ -39,6 +39,9 @@ class Recorder(BaseHTTPRequestHandler):
         if self.headers.get("Upgrade", "").lower() == "websocket":
             self.websocket()
             return
+        if self.path.startswith("/leak/"):
+            self.leak()
+            return
         if self.path == "/slow-upstream":
             time.sleep(float(os.environ.get("LAB_SLOW_UPSTREAM", "3")))
         self.record()
@@ -178,6 +181,61 @@ class Recorder(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (OSError, socket.timeout, ValueError):
             return
+
+    def leak(self):
+        case_id = self.headers.get("X-Kunato-Lab-Case", "")
+        path = self.path.split("?", 1)[0]
+        self.emit("received", case_id=case_id, method=self.command,
+                  target=self.path[:8192], user_agent=self.headers.get("User-Agent", "")[:512])
+        status, body, headers = {
+            "/leak/private-key": (
+                200,
+                b"-----BEGIN RSA PRIVATE KEY-----\n"
+                b"lab-only placeholder key material\n"
+                b"-----END RSA PRIVATE KEY-----\n",
+                {}),
+            "/leak/sql-error": (
+                500,
+                b"You have an error in your SQL syntax; check the manual that "
+                b"corresponds to your MySQL server version near 'union select' at line 1",
+                {}),
+            "/leak/django-debug": (
+                500,
+                b"You're seeing this error because you have DEBUG = True in your "
+                b"Django settings file. Change that to False, and Django will "
+                b"display a standard 500 page.",
+                {}),
+            "/leak/stack-trace": (
+                500,
+                b"Traceback (most recent call last):\n"
+                b"  File \"app.py\", line 42, in view\n"
+                b"RuntimeError: lab stack trace",
+                {}),
+            "/leak/server-version": (
+                200, b"ok", {"Server": "nginx/1.18.0"}),
+            "/leak/session-cookie": (
+                200, b"ok", {"Set-Cookie": "PHPSESSID=" + "a" * 420}),
+            "/leak/benign-404": (404, b'{"error":"not found"}', {}),
+            "/leak/benign-500": (500, b'{"error":"internal"}', {}),
+        }.get(path, (404, b'{"error":"unknown leak fixture"}', {}))
+        self.emit("completed", case_id=case_id, method=self.command,
+                  target=self.path[:8192], status=status, body_bytes=len(body),
+                  user_agent=self.headers.get("User-Agent", "")[:512])
+        if "Server" in headers:
+            self.server_version = headers.pop("Server")
+        self.close_connection = True
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def record(self):
         if Recorder.events >= MAX_EVENTS:

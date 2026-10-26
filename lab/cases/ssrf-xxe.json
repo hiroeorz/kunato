@@ -1,0 +1,53 @@
+[
+  {
+    "id": "ssrf-loopback-sink",
+    "expect": "block",
+    "method": "GET",
+    "target": "/fetch?url=http%3A%2F%2F127.0.0.1%3A9000%2Fhit",
+    "body_contains": "sink:/hit",
+    "rule": "internal-addresses"
+  },
+  {
+    "id": "ssrf-file-read",
+    "expect": "block",
+    "method": "GET",
+    "target": "/fetch?url=file%3A%2F%2F%2Ftmp%2Fkunato-lab-canary.txt",
+    "body_contains": "CANARY-",
+    "rule": "file-scheme"
+  },
+  {
+    "id": "xxe-http-entity",
+    "expect": "block",
+    "method": "POST",
+    "target": "/xml",
+    "body": "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"http://vuln:8080/safe\">]><foo>&xxe;</foo>",
+    "headers": {
+      "Content-Type": "application/xml"
+    },
+    "body_contains": "safe",
+    "rule": "doctype-and-entity"
+  },
+  {
+    "id": "ssrf-internal-dns",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/fetch?url=http%3A%2F%2Fvuln%3A8080%2Fsafe",
+    "body_contains": "safe"
+  },
+  {
+    "id": "benign-safe",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/safe"
+  },
+  {
+    "id": "benign-xml",
+    "expect": "allow",
+    "method": "POST",
+    "target": "/xml",
+    "body": "<note>ok</note>",
+    "headers": {
+      "Content-Type": "application/xml"
+    }
+  }
+]

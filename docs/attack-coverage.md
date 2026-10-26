@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-25; the managed set carried 494 rules then.
+2026-10-26; the managed set carried 494 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -376,6 +376,52 @@ kept the independent normal client at `200`, and recorded the ban counter. The
 WebSocket suite proved PING/PONG, a fragmented text echo, and a close handshake
 through the tunnel, blocked a client XSS payload with `1008`, and blocked an
 origin-pushed private-key message with `1008` while a benign push was delivered.
+The 2026-10-26 common and recent surface suites add 63 reviewed request cases
+with direct controls. `common` ran 43 cases: 24 attacks were blocked with no
+origin receipt, 12 benign cases were forwarded unchanged, and 7 discovery cases
+were observed reaching the origin. It covers SSTI (Jinja/Twig, Freemarker,
+Velocity), NoSQL, LDAP, XPath, PHP/Java/Python/Ruby deserialization, CRLF, SSRF
+(metadata, loopback, decimal, protocol-relative), XXE, JWT `alg:none` / `kid`
+traversal / `jku` / missing signature, and benign API traffic. `recent` ran 20
+cases: 10 attacks were blocked, 6 benign cases passed, and 4 discovery cases
+were observed. It covers React2Shell, the Next.js middleware subrequest and RSC
+route variants, PHP2Shell nested empty uploads, the Rack multipart escape flood,
+GitLab repository file read, Jenkins script console, TeamCity agent protocol,
+MCP tool arguments reaching `file://` or `/etc/passwd`, AI crawler and API-client
+user agents, and benign MCP initialization / empty upload traffic.
+
+The observed cases are discovery results, not defense claims: JWT algorithm
+confusion, mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON keys,
+GraphQL introspection, prompt injection, cache deception, `X-Forwarded-Host`
+cache poisoning, and registry catalog exposure all reached the origin. The MCP
+file and system-file cases were stopped by the existing
+`remote-file-inclusion` and `path-traversal` rules, not by an MCP-specific
+signature, and the suite does not
+prove exploit execution or prevention.
+
+The 2026-10-26 response suite exercised the response phase against the
+recording origin: the private-key, SQL-error, Django-debug, and long-PHPSESSID
+rules blocked with `response blocked` events (4 prevented), the stack trace and
+server-version rules logged and forwarded (2 observed), and benign 404/500
+bodies passed unchanged (2 passed). The GraphQL suite rejected a 25-level
+selection, a 1001-alias document, and a fragment cycle locally with `400` and no
+origin receipt (3 prevented); a normal query passed, while GET,
+`application/graphql`, and introspection reached the origin (3 observed). The
+SSRF/XXE canary suite proved a direct control can reach the loopback sink, read
+a `file://` canary, and expand an external entity, while the protected requests
+were blocked by `ssrf.internal-addresses`, `ssrf.file-scheme`, and
+`xxe.doctype-and-entity` (3 prevented, 2 benign passed). A request targeting
+`http://vuln:8080/safe` reached the origin (1 observed): literal private-address
+rules do not cover arbitrary internal DNS names. The credential-stuffing
+sequence sent 12 logins from one source; `login-throttle` allowed 10 and blocked
+2 with `rate_limited` events, leaving 12 origin receipts in the direct control
+and 10 in the protected run. The h2 suite also passed a bounded server-reset
+pressure variant after Rapid Reset, CONTINUATION, and HPACK; it is a regression
+for server-generated reset handling, not an exact MadeYouReset reproduction.
+The full `all` run `20261026T234106-e1fadf91` then passed all 26 suites,
+including these new cases together with the existing tool, protocol, and
+availability controls.
+
 The Rust proxy tests add HTTP/2 Rapid Reset,
 CONTINUATION-flood, oversized HPACK, a malformed raw HTTP/3 request stream, hot
 reload under load, and rules update plus reload under load; normal HTTP/2 and

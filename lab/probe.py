@@ -10,6 +10,7 @@ import socket
 import ssl
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 from evidence import USER_AGENT
 
@@ -29,6 +30,7 @@ def request(case, host="app.test", port=8080):
         if len(content) > 65536:
             raise ValueError("Response exceeds probe limit")
         result.update(status=response.status, origin=response.getheader("X-Kunato-Lab-Origin"),
+                      headers={name.lower(): value for name, value in response.getheaders()},
                       response=content.decode("utf-8", errors="replace"))
     except (OSError, ValueError, http.client.HTTPException) as error:
         result["error"] = str(error)
@@ -557,6 +559,12 @@ def h2_attack(host, port, case):
                 connection.sendall(h2_frame(0x9, 0, 1, b"\x82" * 1024))
         elif case == "hpack":
             connection.sendall(h2_frame(0x1, 0x4, 1, b"\x82" * 16000))
+        elif case == "made-you-reset":
+            for index in range(50):
+                stream = 1 + index * 2
+                connection.sendall(h2_frame(
+                    0x1, 0x5, stream, h2_header_block(f"h2-made-you-reset-{index}")))
+                connection.sendall(h2_frame(0x8, 0, stream, b"\x00\x00\x00\x00"))
         else:
             raise ValueError("unknown h2 case")
         connection.settimeout(1)
@@ -580,6 +588,19 @@ def h2_probe(case, host, port, case_id=None):
     if case == "normal":
         return h2_normal(host, port, case_id or "h2-normal")
     return h2_attack(host, port, case)
+
+
+def auth_spray(cases, host="app.test", port=8080):
+    attempts = []
+    for index, case in enumerate(cases):
+        body = urlencode({"username": case["username"], "password": case["password"]})
+        result = request({"id": f"credential-stuffing-{index}", "method": "POST",
+                          "target": "/login", "body": body,
+                          "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
+                         host, port)
+        attempts.append({"id": result["id"], "status": result.get("status"),
+                         "origin": result.get("origin"), "error": result.get("error")})
+    return {"attempts": attempts}
 
 
 def burst(count, host="app.test", port=8080):
@@ -624,7 +645,7 @@ def isolation(hosts, addresses):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["health", "cases", "raw", "slow", "slow-body",
+    parser.add_argument("mode", choices=["health", "cases", "raw", "auth-spray", "slow", "slow-body",
                                           "slow-read", "exhaustion", "hold", "connect",
                                           "upstream", "ban", "ws-lifecycle", "ws-payload",
                                           "ws-push", "h2", "burst", "isolation", "metrics",
@@ -652,6 +673,10 @@ def main():
     elif args.mode == "raw":
         for case in json.loads(Path(args.cases).read_text()):
             print(json.dumps(raw_request(case, args.host, args.port)), flush=True)
+    elif args.mode == "auth-spray":
+        result = auth_spray(json.loads(Path(args.cases).read_text()), args.host, args.port)
+        print(json.dumps(result))
+        return int(any(attempt.get("error") for attempt in result["attempts"]))
     elif args.mode == "slow":
         result = slow_request({"connections": args.connections, "hold_seconds": args.hold},
                               args.host, args.port)

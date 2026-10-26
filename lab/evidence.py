@@ -60,7 +60,7 @@ def validate_cases(cases):
     if not cases or len(ids) != len(set(ids)):
         raise ValueError("Cases must be nonempty with unique IDs")
     for case in cases:
-        if case["expect"] not in {"allow", "block"}:
+        if case["expect"] not in {"allow", "block", "observe"}:
             raise ValueError("Invalid expectation")
         if not case["target"].startswith("/") or "\r" in case["target"] or "\n" in case["target"]:
             raise ValueError("Cases must use relative HTTP request targets")
@@ -86,9 +86,10 @@ def origin_response(case, result, nonce):
         body = json.loads(result["response"])
     except (ValueError, KeyError, TypeError):
         return False
+    expected_agent = case.get("headers", {}).get("User-Agent", USER_AGENT)
     return (body.get("origin") == nonce and body.get("case_id") == case["id"]
             and body.get("target") == case["target"] and body.get("method") == case["method"]
-            and body.get("user_agent") == USER_AGENT
+            and body.get("user_agent") == expected_agent
             and body.get("body_sha256") == hashlib.sha256(case.get("body", "").encode()).hexdigest())
 
 
@@ -112,20 +113,173 @@ def judge_replay(cases, controls, results, origin, waf_events, nonce):
                   if event.get("fields", {}).get("message") == "request blocked"
                   and event["fields"].get("path") == case["target"].split("?", 1)[0]
                   and event["fields"].get("rate_limited") is False]
+        block_status = case.get("block_status", 403)
+        if isinstance(block_status, int):
+            block_status = {block_status}
+        else:
+            block_status = set(block_status)
+        mechanism = case.get("mechanism")
         if not control.get("validated"):
             verdict = "inconclusive"
-        elif case["expect"] == "block" and receipts[case["id"]]:
-            verdict = "gap"
         elif result.get("error"):
             verdict = "inconclusive"
+        elif case["expect"] == "observe":
+            verdict = "observed"
+        elif case["expect"] == "block" and receipts[case["id"]]:
+            verdict = "gap"
         elif case["expect"] == "allow":
             verdict = "passed" if (origin_response(case, result, nonce)
                                      and receipts[case["id"]] == completed[case["id"]] == 1) else "false-block"
+        elif result.get("status") in block_status and result.get("origin") is None:
+            verdict = "prevented" if (len(blocks) == 1 or mechanism) else "inconclusive"
         else:
-            verdict = "prevented" if (result.get("status") == 403 and result.get("origin") is None
-                                       and len(blocks) == 1) else "inconclusive"
+            verdict = "inconclusive"
         verdicts.append({"id": case["id"], "expect": case["expect"], "verdict": verdict,
                          "status": result.get("status"), "origin_receipts": receipts[case["id"]],
+                         "mechanism": mechanism,
+                         "rules": [{"category": b.get("category"), "rule": b.get("rule")} for b in blocks]})
+    return verdicts
+
+
+def response_header(result, name):
+    headers = result.get("headers") or {}
+    return headers.get(name.lower(), "")
+
+
+def response_contains(case, result):
+    marker = case.get("body_contains")
+    if marker and marker not in result.get("response", ""):
+        return False
+    header = case.get("header")
+    if header and header["contains"] not in response_header(result, header["name"]):
+        return False
+    return True
+
+
+def judge_credential_stuffing(control, protected, waf_events, expected=12):
+    control_attempts = control.get("attempts", [])
+    protected_attempts = protected.get("attempts", [])
+    control_ok = (len(control_attempts) == expected
+                  and all(attempt.get("status") == 200 for attempt in control_attempts))
+    allowed = [attempt for attempt in protected_attempts
+               if attempt.get("status") == 200 and attempt.get("origin")]
+    blocked = [attempt for attempt in protected_attempts if attempt.get("status") == 403]
+    errors = [attempt for attempt in protected_attempts if attempt.get("error")]
+    blocks = [event["fields"] for event in waf_events
+              if event.get("fields", {}).get("message") == "request blocked"
+              and event.get("fields", {}).get("path") == "/login"
+              and event["fields"].get("rate_limited")]
+    if not control_ok or errors:
+        verdict = "inconclusive"
+    elif allowed and blocked and all(not attempt.get("origin") for attempt in blocked):
+        verdict = "prevented" if len(blocks) >= len(blocked) else "inconclusive"
+    elif len(protected_attempts) == expected and all(attempt.get("status") == 200
+                                                    for attempt in protected_attempts):
+        verdict = "gap"
+    else:
+        verdict = "inconclusive"
+    cases = [{"id": "credential-stuffing", "expect": "throttle", "verdict": verdict,
+              "origin_receipts": len(allowed),
+              "rules": [{"category": fields.get("category"), "rule": fields.get("rule")}
+                        for fields in blocks]}]
+    result = summarize(cases)
+    result["notes"] = {"attempts": len(protected_attempts),
+                       "allowed": len(allowed), "blocked": len(blocked),
+                       "block_events": len(blocks),
+                       "statuses": [attempt.get("status") for attempt in protected_attempts]}
+    return result
+
+
+def judge_exploit_canary(cases, controls, results, waf_events):
+    validate_cases(cases)
+    expected_ids = {case["id"] for case in cases}
+    for observations in (controls, results):
+        ids = [result["id"] for result in observations]
+        if len(ids) != len(set(ids)) or set(ids) != expected_ids:
+            raise ValueError("Missing, duplicate, or unexpected canary probe results")
+    controls = {result["id"]: result for result in controls}
+    results = {result["id"]: result for result in results}
+    verdicts = []
+    for case in cases:
+        control = controls[case["id"]]
+        result = results[case["id"]]
+        marker = case.get("body_contains", "")
+        control_ok = (not control.get("error") and control.get("status") == 200
+                      and marker in control.get("response", ""))
+        blocks = [event["fields"] for event in waf_events
+                  if event.get("fields", {}).get("message") == "request blocked"
+                  and event["fields"].get("path") == case["target"].split("?", 1)[0]
+                  and event["fields"].get("rate_limited") is False]
+        leaked = marker in result.get("response", "") if marker else False
+        if not control_ok:
+            verdict = "inconclusive"
+        elif case["expect"] == "observe":
+            verdict = "observed"
+        elif case["expect"] == "allow":
+            verdict = "passed" if (result.get("status") == 200
+                                     and result.get("response") == control.get("response")) else "false-block"
+        elif leaked:
+            verdict = "gap"
+        elif result.get("status") != 403:
+            verdict = "inconclusive"
+        elif not any(field.get("rule") == case.get("rule") for field in blocks):
+            verdict = "inconclusive"
+        else:
+            verdict = "prevented"
+        verdicts.append({"id": case["id"], "expect": case["expect"], "verdict": verdict,
+                         "status": result.get("status"),
+                         "origin_receipts": 1 if result.get("status") == 200 and not result.get("error") else 0,
+                         "leaked": leaked,
+                         "rules": [{"category": b.get("category"), "rule": b.get("rule")} for b in blocks]})
+    return verdicts
+
+
+def judge_response_leaks(cases, controls, results, origin, waf_events, nonce):
+    validate_cases(cases)
+    verify_origin(origin, nonce)
+    expected_ids = {case["id"] for case in cases}
+    for observations in (controls, results):
+        ids = [result["id"] for result in observations]
+        if len(ids) != len(set(ids)) or set(ids) != expected_ids:
+            raise ValueError("Missing, duplicate, or unexpected response probe results")
+    controls = {result["id"]: result for result in controls}
+    results = {result["id"]: result for result in results}
+    receipts = Counter(event.get("case_id") for event in origin if event.get("event") == "received")
+    completed = Counter(event.get("case_id") for event in origin if event.get("event") == "completed")
+    verdicts = []
+    for case in cases:
+        control = controls[case["id"]]
+        result = results[case["id"]]
+        status = case.get("status", 200)
+        expected_rule = case.get("rule")
+        blocks = [event["fields"] for event in waf_events
+                  if event.get("fields", {}).get("message") == "response blocked"
+                  and event["fields"].get("rule") == expected_rule]
+        control_ok = (control.get("status") == status
+                      and response_contains(case, control))
+        reached_origin = receipts[case["id"]] == completed[case["id"]] == 1
+        leaked = response_contains(case, result)
+        if not control_ok:
+            verdict = "inconclusive"
+        elif not reached_origin:
+            verdict = "inconclusive"
+        elif case["expect"] == "observe":
+            verdict = "observed"
+        elif case["expect"] == "block":
+            if leaked:
+                verdict = "gap"
+            elif result.get("status") != 403:
+                verdict = "inconclusive"
+            elif len(blocks) != 1:
+                verdict = "inconclusive"
+            else:
+                verdict = "prevented"
+        else:
+            verdict = "passed" if (result.get("status") == control.get("status")
+                                     and result.get("response") == control.get("response")) else "false-block"
+        verdicts.append({"id": case["id"], "expect": case["expect"], "verdict": verdict,
+                         "status": result.get("status"), "origin_receipts": receipts[case["id"]],
+                         "leaked": leaked,
                          "rules": [{"category": b.get("category"), "rule": b.get("rule")} for b in blocks]})
     return verdicts
 
@@ -516,7 +670,7 @@ def judge_connect(probe, before, after, restarts, application_metrics=None):
 
 
 def judge_h2(normal, rapid, continuation, hpack, independent, origin, before, after,
-             restarts, application_metrics=None):
+             restarts, application_metrics=None, made_you_reset=None):
     receipts = Counter(event.get("case_id") for event in origin
                        if event.get("event") == "received")
 
@@ -527,6 +681,8 @@ def judge_h2(normal, rapid, continuation, hpack, independent, origin, before, af
     rapid_ok = attack(rapid, "rapid-reset")
     continuation_ok = attack(continuation, "continuation")
     hpack_ok = attack(hpack, "hpack")
+    made_ok = (made_you_reset is not None
+               and attack(made_you_reset, "made-you-reset"))
     independent_ok = bool(independent.get("ok")) and receipts["h2-independent"] == 1
     restarts = restarts or 0
     mem_used = None
@@ -550,6 +706,10 @@ def judge_h2(normal, rapid, continuation, hpack, independent, origin, before, af
         {"id": "h2-hpack", "expect": "survive",
          "verdict": "passed" if hpack_ok else "failed",
          "origin_receipts": receipts["h2-hpack-normal"]},
+        *([{"id": "h2-made-you-reset", "expect": "survive",
+            "verdict": "passed" if made_ok else "failed",
+            "origin_receipts": receipts["h2-made-you-reset-normal"]}]
+          if made_you_reset is not None else []),
         {"id": "h2-independent", "expect": "normal",
          "verdict": "passed" if independent_ok else "false-block",
          "origin_receipts": receipts["h2-independent"]},
@@ -577,9 +737,11 @@ def judge_h2(normal, rapid, continuation, hpack, independent, origin, before, af
                        "rapid_reset_error": rapid.get("attack_error"),
                        "continuation_error": continuation.get("attack_error"),
                        "hpack_error": hpack.get("attack_error"),
+                       "made_you_reset_error": (made_you_reset or {}).get("attack_error"),
                        "rapid_reset_closed": rapid.get("attack_closed"),
                        "continuation_closed": continuation.get("attack_closed"),
                        "hpack_closed": hpack.get("attack_closed"),
+                       "made_you_reset_closed": (made_you_reset or {}).get("attack_closed"),
                        "normal_status": normal.get("ok"),
                        "independent_status": independent.get("ok"),
                        "restarts": restarts,
@@ -1410,5 +1572,6 @@ def judge_zap_workflow(control_log, protected_log, control_report, protected_rep
 
 def summarize(verdicts):
     counts = dict(Counter(result["verdict"] for result in verdicts))
-    return {"passed": bool(verdicts) and all(result["verdict"] in {"passed", "prevented"} for result in verdicts),
+    return {"passed": bool(verdicts) and all(result["verdict"] in {"passed", "prevented", "observed"}
+                                             for result in verdicts),
             "counts": counts, "cases": verdicts}

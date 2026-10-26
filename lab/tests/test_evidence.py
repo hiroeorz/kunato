@@ -13,10 +13,11 @@ from controller import make_config, write_gotestwaf_cases
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
                       judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_mutations, judge_nuclei, judge_load, judge_protocol,
-                      judge_replay, judge_restart, judge_slow, judge_sqlmap,
+                      judge_credential_stuffing, judge_exploit_canary, judge_replay, judge_response_leaks,
+                      judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
-                      read_jsonl, summarize,
-                      validate_mutations, validate_protocol)
+                      origin_response, read_jsonl, summarize,
+                      validate_cases, validate_mutations, validate_protocol)
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
@@ -78,6 +79,65 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(self.verdict(), "passed")
         self.response["response"] = "Wrong application result"
         self.assertEqual(self.verdict(), "false-block")
+
+    def test_observed_case_records_the_status_without_a_defense_claim(self):
+        self.case.update(expect="observe")
+        self.response.update(status=200, origin="attempt")
+        self.events.append({"event": "received", "nonce": "attempt", "case_id": "sample"})
+        verdict = judge_replay([self.case], [self.control], [self.response],
+                               self.events, self.waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "observed")
+        self.assertEqual(verdict["origin_receipts"], 1)
+        self.assertTrue(summarize([verdict])["passed"])
+
+    def test_observed_case_can_record_a_block(self):
+        self.case.update(expect="observe")
+        verdict = judge_replay([self.case], [self.control], [self.response],
+                               self.events, self.waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "observed")
+        self.assertEqual(verdict["origin_receipts"], 0)
+
+    def test_observe_is_accepted_but_unknown_expectations_are_rejected(self):
+        validate_cases([{**self.case, "expect": "observe"}])
+        with self.assertRaises(ValueError):
+            validate_cases([{**self.case, "expect": "blocked"}])
+
+    def test_custom_user_agent_is_part_of_the_origin_contract(self):
+        case = {"id": "agent", "expect": "allow", "method": "GET",
+                "target": "/agent", "headers": {"User-Agent": "GPTBot/1.2"}}
+        body = {"origin": "attempt", "case_id": "agent", "method": "GET", "target": "/agent",
+                "user_agent": "GPTBot/1.2", "body_sha256": hashlib.sha256(b"").hexdigest()}
+        result = {"status": 200, "origin": "attempt", "response": json.dumps(body)}
+        self.assertTrue(origin_response(case, result, "attempt"))
+        body["user_agent"] = USER_AGENT
+        result["response"] = json.dumps(body)
+        self.assertFalse(origin_response(case, result, "attempt"))
+
+    def test_structural_rejection_does_not_require_a_rule_event(self):
+        self.case.update(expect="block", block_status=400, mechanism="graphql")
+        self.response.update(status=400, origin=None)
+        self.waf = []
+        verdict = judge_replay([self.case], [self.control], [self.response],
+                               self.events, self.waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "prevented")
+        self.assertEqual(verdict["mechanism"], "graphql")
+
+    def test_structural_rejection_requires_no_origin_receipt(self):
+        self.case.update(expect="block", block_status=400, mechanism="graphql")
+        self.response.update(status=400, origin=None)
+        self.waf = []
+        self.events.append({"event": "received", "nonce": "attempt", "case_id": "sample"})
+        verdict = judge_replay([self.case], [self.control], [self.response],
+                               self.events, self.waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "gap")
+
+    def test_structural_rejection_requires_the_declared_status(self):
+        self.case.update(expect="block", block_status=400, mechanism="graphql")
+        self.response.update(status=403, origin=None)
+        self.waf = []
+        verdict = judge_replay([self.case], [self.control], [self.response],
+                               self.events, self.waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "inconclusive")
 
     def test_empty_results_never_pass(self):
         self.assertFalse(summarize([])["passed"])
@@ -219,6 +279,146 @@ class EvidenceTests(unittest.TestCase):
                               protected_nonce, control_nonce)
         self.assertEqual(result["cases"][1]["verdict"], "inconclusive")
         self.assertFalse(result["passed"])
+
+
+class CredentialStuffingTests(unittest.TestCase):
+    def attempts(self, *statuses, origin=True):
+        return {"attempts": [{"id": f"credential-stuffing-{index}", "status": status,
+                              "origin": ("attempt" if origin and status == 200 else None)}
+                             for index, status in enumerate(statuses)]}
+
+    def test_throttle_requires_allowed_and_blocked_attempts(self):
+        control = self.attempts(*([200] * 12))
+        protected = self.attempts(*([200] * 10 + [403] * 2))
+        waf = [{"fields": {"message": "request blocked", "path": "/login",
+                           "category": "login-throttle", "rule": "login-attempts",
+                           "rate_limited": True}} for _ in range(2)]
+        result = judge_credential_stuffing(control, protected, waf)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["cases"][0]["verdict"], "prevented")
+
+    def test_no_blocks_is_a_gap(self):
+        control = self.attempts(*([200] * 12))
+        protected = self.attempts(*([200] * 12))
+        result = judge_credential_stuffing(control, protected, [])
+        self.assertEqual(result["cases"][0]["verdict"], "gap")
+        self.assertFalse(result["passed"])
+
+    def test_missing_rate_limited_event_is_inconclusive(self):
+        control = self.attempts(*([200] * 12))
+        protected = self.attempts(*([200] * 10 + [403] * 2))
+        result = judge_credential_stuffing(control, protected, [])
+        self.assertEqual(result["cases"][0]["verdict"], "inconclusive")
+
+    def test_failed_control_is_inconclusive(self):
+        control = self.attempts(*([200] * 11))
+        protected = self.attempts(*([403] * 12))
+        result = judge_credential_stuffing(control, protected, [])
+        self.assertEqual(result["cases"][0]["verdict"], "inconclusive")
+
+
+class ExploitCanaryTests(unittest.TestCase):
+    def setUp(self):
+        self.case = {"id": "ssrf", "expect": "block", "method": "GET",
+                     "target": "/fetch?url=http%3A%2F%2F127.0.0.1%3A9000%2Fhit",
+                     "body_contains": "sink:/hit", "rule": "internal-addresses"}
+        self.control = {"id": "ssrf", "status": 200, "response": "sink:/hit"}
+        self.result = {"id": "ssrf", "status": 403, "response": "Forbidden"}
+        self.waf = [{"fields": {"message": "request blocked",
+                                "path": self.case["target"].split("?", 1)[0],
+                                "category": "ssrf", "rule": "internal-addresses",
+                                "rate_limited": False}}]
+
+    def verdict(self):
+        return judge_exploit_canary([self.case], [self.control], [self.result],
+                                    self.waf)[0]["verdict"]
+
+    def test_canary_requires_a_successful_direct_exploit(self):
+        self.assertEqual(self.verdict(), "prevented")
+        self.control["response"] = "fetch failed"
+        self.assertEqual(self.verdict(), "inconclusive")
+
+    def test_canary_leak_is_a_gap(self):
+        self.result.update(status=200, response="sink:/hit")
+        self.assertEqual(self.verdict(), "gap")
+
+    def test_canary_requires_the_declared_rule(self):
+        self.waf[0]["fields"]["rule"] = "other"
+        self.assertEqual(self.verdict(), "inconclusive")
+
+    def test_observed_internal_dns_canary_records_the_leak(self):
+        self.case.update(expect="observe", rule=None,
+                         target="/fetch?url=http%3A%2F%2Fvuln%3A8080%2Fsafe",
+                         body_contains="safe")
+        self.control.update(response="safe")
+        self.result.update(status=200, response="safe")
+        self.waf = []
+        verdict = judge_exploit_canary([self.case], [self.control], [self.result],
+                                       self.waf)[0]
+        self.assertEqual(verdict["verdict"], "observed")
+        self.assertTrue(verdict["leaked"])
+
+
+class ResponseLeakTests(unittest.TestCase):
+    def setUp(self):
+        self.case = {"id": "private", "expect": "block", "method": "GET",
+                     "target": "/leak/private-key", "status": 200,
+                     "body_contains": "BEGIN RSA PRIVATE KEY",
+                     "rule": "private-key-material"}
+        self.control = {"id": "private", "status": 200,
+                        "response": "-----BEGIN RSA PRIVATE KEY-----\n...",
+                        "headers": {"content-type": "text/plain"}}
+        self.result = {"id": "private", "status": 403, "response": "Forbidden",
+                       "headers": {}}
+        self.events = [{"event": "ready", "nonce": "attempt"},
+                       {"event": "received", "nonce": "attempt", "case_id": "private"},
+                       {"event": "completed", "nonce": "attempt", "case_id": "private"}]
+        self.waf = [{"fields": {"message": "response blocked",
+                                "category": "response-leaks", "rule": "private-key-material"}}]
+
+    def verdict(self):
+        return judge_response_leaks([self.case], [self.control], [self.result],
+                                    self.events, self.waf, "attempt")[0]["verdict"]
+
+    def test_response_block_requires_origin_and_rule_evidence(self):
+        self.assertEqual(self.verdict(), "prevented")
+        self.waf = []
+        self.assertEqual(self.verdict(), "inconclusive")
+
+    def test_leaked_response_is_a_gap(self):
+        self.result.update(status=200,
+                           response="-----BEGIN RSA PRIVATE KEY-----\n...")
+        self.assertEqual(self.verdict(), "gap")
+
+    def test_missing_protected_receipt_is_inconclusive(self):
+        self.events = [{"event": "ready", "nonce": "attempt"}]
+        self.assertEqual(self.verdict(), "inconclusive")
+
+    def test_observed_leak_records_the_status(self):
+        self.case.update(expect="observe", rule=None, body_contains="Traceback", status=500)
+        self.control.update(status=500, response="Traceback (most recent call last):")
+        self.result.update(status=500, response="Traceback (most recent call last):")
+        self.waf = []
+        verdict = judge_response_leaks([self.case], [self.control], [self.result],
+                                       self.events, self.waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "observed")
+        self.assertTrue(verdict["leaked"])
+
+    def test_response_header_block_uses_the_header_marker(self):
+        case = {"id": "cookie", "expect": "block", "method": "GET",
+                "target": "/leak/session-cookie", "status": 200,
+                "header": {"name": "Set-Cookie", "contains": "PHPSESSID="},
+                "rule": "php2shell-session-cookie-leak"}
+        control = {"id": "cookie", "status": 200, "response": "ok",
+                   "headers": {"set-cookie": "PHPSESSID=" + "a" * 420}}
+        result = {"id": "cookie", "status": 403, "response": "Forbidden", "headers": {}}
+        waf = [{"fields": {"message": "response blocked", "category": "response-leaks",
+                           "rule": "php2shell-session-cookie-leak"}}]
+        events = [{"event": "ready", "nonce": "attempt"},
+                  {"event": "received", "nonce": "attempt", "case_id": "cookie"},
+                  {"event": "completed", "nonce": "attempt", "case_id": "cookie"}]
+        verdict = judge_response_leaks([case], [control], [result], events, waf, "attempt")[0]
+        self.assertEqual(verdict["verdict"], "prevented")
 
 
 class FfufAndZapTests(unittest.TestCase):

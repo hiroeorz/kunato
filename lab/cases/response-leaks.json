@@ -1,0 +1,68 @@
+[
+  {
+    "id": "response-private-key",
+    "expect": "block",
+    "method": "GET",
+    "target": "/leak/private-key",
+    "status": 200,
+    "body_contains": "BEGIN RSA PRIVATE KEY",
+    "rule": "private-key-material"
+  },
+  {
+    "id": "response-sql-error",
+    "expect": "block",
+    "method": "GET",
+    "target": "/leak/sql-error",
+    "status": 500,
+    "body_contains": "MySQL server version",
+    "rule": "sql-error-message"
+  },
+  {
+    "id": "response-django-debug",
+    "expect": "block",
+    "method": "GET",
+    "target": "/leak/django-debug",
+    "status": 500,
+    "body_contains": "DEBUG = True",
+    "rule": "django-debug-page"
+  },
+  {
+    "id": "response-session-cookie",
+    "expect": "block",
+    "method": "GET",
+    "target": "/leak/session-cookie",
+    "status": 200,
+    "header": {"name": "Set-Cookie", "contains": "PHPSESSID="},
+    "rule": "php2shell-session-cookie-leak"
+  },
+  {
+    "id": "response-stack-trace",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/leak/stack-trace",
+    "status": 500,
+    "body_contains": "Traceback (most recent call last)"
+  },
+  {
+    "id": "response-server-version",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/leak/server-version",
+    "status": 200,
+    "header": {"name": "Server", "contains": "nginx/"}
+  },
+  {
+    "id": "response-benign-404",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/leak/benign-404",
+    "status": 404
+  },
+  {
+    "id": "response-benign-500",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/leak/benign-500",
+    "status": 500
+  }
+]

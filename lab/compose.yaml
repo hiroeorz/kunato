@@ -53,6 +53,19 @@ services:
       back:
         aliases: [app.test]
 
+  vuln:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    entrypoint: [python3, -B, /lab/fixtures/vuln.py]
+    environment:
+      LAB_NONCE: ${LAB_NONCE}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks:
+      back: {}
+
   kunato:
     <<: *runtime
     image: ${LAB_PYTHON_IMAGE}

@@ -107,10 +107,12 @@ is valid. For a `block` case, `prevented` requires corroborating block evidence
 (status, log, or rule record), not merely a failed or timed-out request. In a
 protocol smuggling case, a forwarded first request is still `prevented` when the
 origin records no smuggled second request. The `summarize()` helper marks a
-sandbox suite passed only when every case is `passed` or `prevented`;
-`inconclusive`, `false-block`, `gap`, and `failed` all fail the run. This
-fail-closed rule prevents missing evidence from being reported as defense
-success.
+sandbox suite passed when every case is `passed`, `prevented`, or `observed`;
+`inconclusive`, `false-block`, `gap`, and `failed` all fail the run. An
+`observed` case must complete a direct control and records whether the protected
+request reached the origin or was stopped; it is an explicit discovery result,
+never a defense claim. This keeps gap discovery runnable without weakening the
+fail-closed rule for cases that declare `block` or `allow`.
 
 ## Sandbox suite measurements
 
@@ -122,6 +124,68 @@ UNION probes with benign counterparts and legitimate 302/401/404 responses. The
 format, parameter pollution, tag, padding, shell-metacharacter, and header-value
 variants. Each case is sent directly to the origin and then through Kunato; the
 origin proves receipt, method, target, body hash, and nonce.
+
+### Common and recent attack surfaces
+
+The `common` suite adds 43 reviewed cases for classes the replay and mutation
+corpora did not cover: SSTI, NoSQL, LDAP, XPath, PHP/Java/Python/Ruby
+deserialization, CRLF, SSRF, XXE, JWT header attacks, and API behaviours
+(mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON keys, GraphQL
+introspection). Each case has a direct origin control; 24 attacks are blocked,
+12 benign cases pass, and 7 discovery cases are observed at the origin.
+
+The `recent` suite adds 20 cases for 2025-2026 CVE and AI-era traffic:
+React2Shell, Next.js middleware/RSC variants, PHP2Shell, the Rack multipart
+escape flood, GitLab repository file read, Jenkins script console, TeamCity
+agent protocol, MCP tool arguments, AI crawler and API-client user agents, and
+benign MCP/upload traffic. Ten attacks are blocked, six benign cases pass, and
+four discovery cases (prompt injection, cache deception, forwarded-host cache
+poisoning, registry catalog) are observed at the origin.
+
+The observed cases are deliberately not counted as blocked: the JWT
+algorithm-confusion, mass-assignment, OAuth redirect, BOLA, HPP, duplicate JSON,
+GraphQL introspection, prompt-injection, cache, and registry shapes remain
+gaps or application-side concerns. MCP file and system-file arguments are
+stopped by the generic `remote-file-inclusion` and `path-traversal` rules, not by an MCP-aware
+signature.
+
+### Response-phase leaks
+
+The `response` suite serves a private-key body, a MySQL syntax error, a Django
+DEBUG page, a long PHPSESSID cookie, a Python stack trace, a versioned `Server`
+header, and benign 404/500 responses from the recording origin. The direct
+control must receive each leak. The protected run must produce `response blocked`
+events for the four BLOCK rules and must not forward the marker; the LOG-only
+stack trace and server version are observed, and the benign bodies must pass
+unchanged. The current result is 4 prevented, 2 observed, and 2 benign passes.
+
+### GraphQL complexity
+
+The `graphql` suite sends a 25-level selection, a 1001-alias document, and a
+cyclic fragment document. The engine rejects all three with `400` and no origin
+receipt; a normal query with variables reaches the origin. The result is 3
+prevented and 1 benign pass. GET, `application/graphql`, and introspection are
+observations: the first two reach the origin and introspection is logged by
+`api-discovery.graphql-introspection`.
+
+### SSRF and XXE canaries
+
+The `ssrf-xxe` suite uses a lab-only fixture on the back network with an
+in-process loopback sink and a per-attempt canary file. The direct control must
+fetch the sink, read the canary through `file://`, and expand an external entity
+to an internal URL; the protected run must not. The result is 3 prevented and 2
+benign passes. An internal DNS-name target (`http://vuln:8080/safe`) reaches the
+origin and is recorded as an observation: the bundled SSRF rules match literal
+private addresses, not arbitrary internal names.
+
+### Credential stuffing and password spraying
+
+The `credential-stuffing` suite sends 12 form logins for distinct users with the
+same password from one source. The direct control reaches the origin 12 times.
+With protection enabled, `login-throttle` allows 10 and blocks the last two with
+`403` and `rate_limited` events; the normal client stays healthy. The result is
+10 allowed and 2 throttled. This is per-source behavior; distributed sources and
+the global authentication-failure log remain observations.
 
 ### Agentic TTP chain
 
@@ -313,24 +377,25 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The latest full `all` run, `20261025T235922-806f4461`, passed 20 sandbox
-  suites: replay, benign, mutations, protocol, agentic, slow, availability,
+- The latest full `all` run, `20261026T234106-e1fadf91`, passed 26 sandbox
+  suites: replay, benign, mutations, protocol, common, recent, response,
+  graphql, ssrf-xxe, credential-stuffing, agentic, slow, availability,
   connect, h2, h3, backpressure, ban, websocket, load, restart, goTestWAF,
-  sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001 requests,
-  p95 46.3 ms, p99 49.2 ms, 100% success, normal/recovery `200`, RSS 21.9 MiB
-  of 256 MiB, no restart, and matching metrics. The availability suite recorded
-  a slow-body `408`, slow-read `200`, per-source and global connection caps at
-  `503` with 32 active connections, upstream `504`, and 23.2 MiB RSS. The
-  connect suite recorded `502` and one upstream connect error. The backpressure
-  suite allowed 20 of 100 requests and shed 80 with `429`/`503` (63
-  rate-limited, 17 overloaded), then recovered to normal `200`. The h2 and h3
-  suites passed their normal and resource-attack cases. The restart suite
-  recorded exit code 0, a 426 ms shutdown, 501 requests, a 98.4% check rate, and
-  `200` recovery. The ban suite recorded a `429` ban and `200` recovery; the
-  websocket suite passed all 10 cases. The agentic suite prevented all four
-  cases, and its direct controls extracted the SQLi, upload, exec, and traversal
-  canaries. The first agentic run found a newline command separator that
-  bypassed `shell-metacharacters`; the `newline-command` rule now covers it.
+  sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3000 requests,
+  p95 51.5 ms, p99 54.4 ms, 100% success, normal/recovery `200`, RSS 21.9 MiB
+  of 256 MiB, no restart, and matching metrics. The restart suite recorded exit
+  code 0, a 607 ms shutdown, 501 requests, and a 97.8% check rate. The
+  credential-stuffing suite allowed 10 of 12 logins and blocked 2 with
+  `rate_limited` events. The SSRF/XXE canaries blocked the loopback sink,
+  `file://`, and external-entity shapes, while the internal DNS-name target was
+  observed reaching the fixture. The response suite blocked the four response
+  rules and left the two LOG-only leaks observable. The GraphQL suite rejected
+  the deep, alias-flood, and cyclic documents. The h2 suite passed the bounded
+  server-reset pressure variant. The agentic suite prevented all four cases,
+  sqlmap extracted no protected canary, Nuclei and ffuf retained their
+  controls, and the authenticated ZAP baseline completed. The earlier
+  2026-10-25 full run and the separate surface runs remain in the retained
+  evidence directories.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -350,7 +415,10 @@ current suites.
   session-ID anomalies, business-logic classes (IDOR, coupon/carding, scalping),
   and rule-bypass payloads as absent; JWT tampering and algorithm confusion are
   partial. HTTP request smuggling, desync, response splitting, upload
-  inspection, and GraphQL abuse are partial.
+  inspection, and GraphQL abuse are partial. The common/recent suites now
+  exercise SSTI, NoSQL, LDAP, XPath, deserialization, CRLF, JWT header attacks,
+  response leaks, GraphQL depth/field limits, SSRF/XXE canaries, and per-source
+  login throttling, but do not close the absent classes above.
 - The WebSocket suite proves the handshake, PING/PONG, fragmented echo, close
   handshake, client-to-server payload block, benign payload echo, and
   server-to-client push block with a benign push delivered. Compressed
@@ -359,10 +427,13 @@ current suites.
 
 ### Protocol coverage
 
-- The `h2` suite adds TLS-level Rapid Reset, CONTINUATION-flood, and oversized
-  HPACK variants, with a fresh normal HTTP/2 connection after each attack. The lab
-  still does not exercise SETTINGS floods, stream-state abuse, GOAWAY, priority,
-  h2c, or HTTP/2 resource pressure under sustained load.
+- The `h2` suite adds TLS-level Rapid Reset, CONTINUATION-flood, oversized
+  HPACK, and a bounded server-reset pressure variant (invalid `WINDOW_UPDATE`
+  frames on many streams), with a fresh normal HTTP/2 connection after each
+  attack. The reset-pressure case is a regression, not an exact MadeYouReset
+  reproduction; hyper is listed as not affected. The lab still does not exercise
+  SETTINGS floods, stream-state abuse, GOAWAY, priority, h2c, or HTTP/2 resource
+  pressure under sustained load.
 - TLS termination and HTTP/2 are exercised by the `h2` suite. The `h3` suite adds
   a normal HTTP/3 request, a malformed-stream flood, and reset streams through
   the `h3probe` binary; the lab still does not exercise HTTP/3 stream limits
@@ -388,11 +459,13 @@ current suites.
   a normal-client check, and the `kunato_banned_total` counter. The restart
   suite adds SIGTERM under load, graceful exit, restart, and recovery.
 - The load suite is a fixed 50 requests/second run and now checks Kunato's
-  request, block, rate-limit, overload, and upstream-timeout counters. H2 Rapid
-  Reset, CONTINUATION floods, and HPACK bombs are not attempted in the lab;
-  rate-limit window recovery, longer ban windows, and distributed sources
-  (impossible in one lab) remain untested. OOM and forced-kill behavior under
-  pressure are not part of the passing suites.
+  request, block, rate-limit, overload, and upstream-timeout counters. The h2
+  suite covers Rapid Reset, CONTINUATION, HPACK, and a reset-pressure variant,
+  but SETTINGS floods, GOAWAY/priority abuse, and h2c remain untested.
+  Rate-limit window recovery, longer ban windows, and distributed sources
+  (impossible in one lab) remain untested; the credential-stuffing suite uses
+  one source. OOM and forced-kill behavior under pressure are not part of the
+  passing suites.
 
 ### Workflows and false positives
 

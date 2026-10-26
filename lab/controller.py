@@ -22,8 +22,9 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit
 from evidence import (USER_AGENT, judge_agentic, judge_availability, judge_ban_recovery,
                       judge_connect, judge_crs, judge_ffuf, judge_ffuf_behavior,
                       judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
-                      judge_mutations, judge_load, judge_nuclei, judge_protocol,
-                      judge_replay, judge_restart, judge_slow, judge_sqlmap,
+                      judge_credential_stuffing, judge_exploit_canary, judge_mutations,
+                      judge_load, judge_nuclei, judge_protocol,
+                      judge_replay, judge_response_leaks, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
                       origin_response, read_jsonl, summarize,
                       validate_agentic, validate_cases, validate_ffuf_cases,
@@ -673,6 +674,110 @@ class SandboxSuite:
         origin, waf = self.logs("mutations")
         return judge_mutations(cases, controls, results, origin, waf, nonce)
 
+    def surface(self, name):
+        cases_path = self.input / f"lab/cases/{name}.json"
+        cases = json.loads(cases_path.read_text())
+        validate_cases(cases)
+        control_nonce = self.reset_origin(f"{name}-control")
+        self.preflight("origin")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", f"/lab/cases/{name}.json"),
+                              log=self.run_dir / f"{name}-control/probes.jsonl")
+        control_origin, _ = self.logs(f"{name}-control")
+        verify_origin(control_origin, control_nonce)
+        for case, observation in zip(cases, controls, strict=True):
+            observation["validated"] = origin_response(case, observation, control_nonce)
+        if not all(observation["validated"] for observation in controls):
+            raise ValueError(f"Direct {name} controls failed")
+        write_json(self.run_dir / f"{name}-control/validated.json", controls)
+        nonce = self.reset_origin(name)
+        results = self.probe("client", "cases",
+                             extra=("--cases", f"/lab/cases/{name}.json"),
+                             log=self.run_dir / f"{name}/probes.jsonl")
+        self.healthy(name, nonce=nonce)
+        origin, waf = self.logs(name)
+        return summarize(judge_replay(cases, controls, results, origin, waf, nonce))
+
+    def response_leaks(self):
+        cases = json.loads((self.input / "lab/cases/response-leaks.json").read_text())
+        validate_cases(cases)
+        control_nonce = self.reset_origin("response-control")
+        self.preflight("origin")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", "/lab/cases/response-leaks.json"),
+                              log=self.run_dir / "response-control/probes.jsonl")
+        control_origin, _ = self.logs("response-control")
+        verify_origin(control_origin, control_nonce)
+        write_json(self.run_dir / "response-control/validated.json", controls)
+        nonce = self.reset_origin("response")
+        results = self.probe("client", "cases",
+                             extra=("--cases", "/lab/cases/response-leaks.json"),
+                             log=self.run_dir / "response/probes.jsonl")
+        self.healthy("response", nonce=nonce)
+        origin, waf = self.logs("response")
+        return summarize(judge_response_leaks(cases, controls, results, origin, waf, nonce))
+
+    def reset_vuln(self, phase):
+        nonce = uuid.uuid4().hex
+        self.env["LAB_NONCE"] = nonce
+        self.env["LAB_CONFIG"] = "rules-vuln.yaml"
+        self.env["LAB_DISABLE_PROTECTION"] = "1"
+        self.compose("up", "-d", "--force-recreate", "--pull", "never", "vuln", "kunato")
+        directory = self.run_dir / phase
+        directory.mkdir(exist_ok=True)
+        for _ in range(50):
+            health = self.probe("control", "health", check=False,
+                                extra=("--host", "vuln", "--path", "/health",
+                                       "--status", "200", "--nonce", nonce))
+            if health.get("status") == 200 and health.get("origin") == nonce:
+                write_json(directory / "health-before.json", health)
+                write_json(directory / "attempt.json", {"nonce": nonce})
+                return nonce
+            time.sleep(0.2)
+        raise RuntimeError("Vulnerable fixture did not become ready")
+
+    def ssrf_xxe(self):
+        cases = json.loads((self.input / "lab/cases/ssrf-xxe.json").read_text())
+        validate_cases(cases)
+        self.reset_vuln("ssrf-xxe-control")
+        self.preflight("vuln")
+        controls = self.probe("control", "cases",
+                              extra=("--cases", "/lab/cases/ssrf-xxe.json",
+                                     "--host", "vuln"),
+                              log=self.run_dir / "ssrf-xxe-control/probes.jsonl")
+        nonce = self.reset_vuln("ssrf-xxe")
+        results = self.probe("client", "cases",
+                             extra=("--cases", "/lab/cases/ssrf-xxe.json"),
+                             log=self.run_dir / "ssrf-xxe/probes.jsonl")
+        self.healthy("ssrf-xxe", nonce=nonce)
+        directory = self.run_dir / "ssrf-xxe"
+        self.compose("logs", "--no-color", "--no-log-prefix", "vuln",
+                     log=directory / "vuln.log")
+        self.compose("logs", "--no-color", "--no-log-prefix", "kunato",
+                     log=directory / "kunato.jsonl")
+        waf = read_jsonl(directory / "kunato.jsonl")
+        return summarize(judge_exploit_canary(cases, controls, results, waf))
+
+    def credential_stuffing(self):
+        cases = json.loads((self.input / "lab/cases/credential-stuffing.json").read_text())
+        if len(cases) != 12 or any(not case.get("username") or not case.get("password")
+                                   for case in cases):
+            raise ValueError("Credential-stuffing cases must contain 12 username/password attempts")
+        control_nonce = self.reset_origin("credential-stuffing-control")
+        self.preflight("origin")
+        controls = self.probe("control", "auth-spray",
+                              extra=("--cases", "/lab/cases/credential-stuffing.json"),
+                              log=self.run_dir / "credential-stuffing-control/probes.jsonl")
+        control_origin, _ = self.logs("credential-stuffing-control")
+        verify_origin(control_origin, control_nonce)
+        nonce = self.reset_origin("credential-stuffing", disable_protection=False)
+        results = self.probe("client", "auth-spray",
+                             extra=("--cases", "/lab/cases/credential-stuffing.json"),
+                             log=self.run_dir / "credential-stuffing/probes.jsonl")
+        self.healthy("credential-stuffing", nonce=nonce)
+        origin, waf = self.logs("credential-stuffing")
+        return judge_credential_stuffing(controls, results, waf, expected=len(cases))
+
     def protocol(self):
         cases = json.loads((self.input / "lab/plans/protocol.json").read_text())
         controls = []
@@ -859,6 +964,9 @@ class SandboxSuite:
         time.sleep(0.5)
         hpack = self.probe("client", "h2", check=False,
                            extra=("--h2-case", "hpack", "--port", "8443"))
+        time.sleep(0.5)
+        made = self.probe("client", "h2", check=False,
+                          extra=("--h2-case", "made-you-reset", "--port", "8443"))
         independent = self.probe_exec(
             "normal", "h2",
             extra=("--h2-case", "normal", "--case-id", "h2-independent",
@@ -867,7 +975,8 @@ class SandboxSuite:
         origin, _ = self.logs("h2")
         metrics = self.probe_exec("kunato", "metrics")
         return judge_h2(normal, rapid, continuation, hpack, independent, origin,
-                        before, after, self.restarts(), metrics)
+                        before, after, self.restarts(), metrics,
+                        made_you_reset=made)
 
     def reset_h2(self):
         nonce = uuid.uuid4().hex
@@ -1549,7 +1658,8 @@ def new_run(suite):
     (config_dir / "rules.example.yaml").write_text(original)
     for name, upstream in (("rules-origin.yaml", "http://origin:8080"),
                            ("rules-dvwa.yaml", "http://dvwa:80"),
-                           ("rules-cve.yaml", "http://cve:80")):
+                           ("rules-cve.yaml", "http://cve:80"),
+                           ("rules-vuln.yaml", "http://vuln:8080")):
         (config_dir / name).write_text(make_config(original, upstream))
     (config_dir / "rules-ffuf.yaml").write_text(
         make_config(original, "http://dvwa:80", FFUF_PROTECTION))
@@ -1582,6 +1692,8 @@ def new_run(suite):
     validate_mutations(mutation_cases)
     protocol_cases = json.loads((LAB / "cases/protocol.json").read_text())
     validate_protocol(protocol_cases)
+    for name in ("common", "recent", "response-leaks", "graphql", "ssrf-xxe"):
+        validate_cases(json.loads((LAB / f"cases/{name}.json").read_text()))
     validate_agentic(json.loads((LAB / "cases/agentic.json").read_text()))
     plans = input_dir / "lab/plans"
     plans.mkdir(exist_ok=True)
@@ -1616,7 +1728,7 @@ def run(suite):
     try:
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
-                     "rules-ffuf.yaml", "rules-availability.yaml", "rules-connect.yaml",
+                     "rules-vuln.yaml", "rules-ffuf.yaml", "rules-availability.yaml", "rules-connect.yaml",
                      "rules-h2.yaml", "rules-h3.yaml", "rules-ban.yaml",
                      "rules-backpressure.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
@@ -1628,6 +1740,18 @@ def run(suite):
             report["suites"]["mutations"] = lab.mutations()
         if suite in {"protocol", "all"}:
             report["suites"]["protocol"] = lab.protocol()
+        if suite in {"common", "all"}:
+            report["suites"]["common"] = lab.surface("common")
+        if suite in {"recent", "all"}:
+            report["suites"]["recent"] = lab.surface("recent")
+        if suite in {"response", "all"}:
+            report["suites"]["response"] = lab.response_leaks()
+        if suite in {"graphql", "all"}:
+            report["suites"]["graphql"] = lab.surface("graphql")
+        if suite in {"ssrf-xxe", "all"}:
+            report["suites"]["ssrf-xxe"] = lab.ssrf_xxe()
+        if suite in {"credential-stuffing", "all"}:
+            report["suites"]["credential-stuffing"] = lab.credential_stuffing()
         if suite in {"agentic", "all"}:
             report["suites"]["agentic"] = lab.agentic()
         if suite in {"slow", "all"}:
@@ -1841,8 +1965,9 @@ def main():
     subs.add_parser("verify", help="Check prepared inputs without downloads")
     runner = subs.add_parser("run", help="Run the isolated regression sandbox suites")
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
-                        choices=["replay", "benign", "mutations", "protocol", "agentic",
-                                 "gotestwaf", "sqlmap", "nuclei", "ffuf", "zap", "crs",
+                        choices=["replay", "benign", "mutations", "protocol", "common", "recent",
+                                 "response", "graphql", "ssrf-xxe", "credential-stuffing",
+                                 "agentic", "gotestwaf", "sqlmap", "nuclei", "ffuf", "zap", "crs",
                                  "slow", "availability", "connect", "h2", "h3",
                                  "backpressure", "ban", "websocket", "load", "restart",
                                  "all"],

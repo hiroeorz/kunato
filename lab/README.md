@@ -1,12 +1,14 @@
 # Local security lab
 
 This covers the first four milestones of the [adversarial testing design](../docs/security-testing.md):
-an isolated recording origin, direct receipt controls, and twenty bounded
+an isolated recording origin, direct receipt controls, and twenty-six bounded
 sandbox suites (the optional CRS comparison is not part of `all`). It runs curated
 goTestWAF probes, a DVWA/sqlmap SQL-injection comparison, a Nuclei canary
 against an Apache 2.4.49 CVE-2021-41773 fixture, an ffuf
 path-discovery/enumeration comparison, an authenticated ZAP spider/passive
-baseline, 25 deterministic mutation variants, an agentic TTP chain over DVWA
+baseline, 25 deterministic mutation variants, common-injection and recent-attack
+surface suites, response-phase leak, GraphQL complexity, SSRF/XXE canary, and
+credential-stuffing suites, an agentic TTP chain over DVWA
 and CVE-2021-41773, 12 raw protocol/WebSocket cases,
 TLS/HTTP/2 and HTTP/3 resource variants, benign JSON/upload/i18n/large-body/streaming
 workflows, bounded slow-HTTP, availability, backpressure, slow-connect, ban-recovery, and
@@ -49,6 +51,12 @@ scripts/security-lab.sh run --sandbox-suite nuclei
 scripts/security-lab.sh run --sandbox-suite ffuf
 scripts/security-lab.sh run --sandbox-suite zap
 scripts/security-lab.sh run --sandbox-suite mutations
+scripts/security-lab.sh run --sandbox-suite common
+scripts/security-lab.sh run --sandbox-suite recent
+scripts/security-lab.sh run --sandbox-suite response
+scripts/security-lab.sh run --sandbox-suite graphql
+scripts/security-lab.sh run --sandbox-suite ssrf-xxe
+scripts/security-lab.sh run --sandbox-suite credential-stuffing
 scripts/security-lab.sh run --sandbox-suite protocol
 scripts/security-lab.sh run --sandbox-suite agentic
 scripts/security-lab.sh run --sandbox-suite h2
@@ -155,6 +163,12 @@ and writes a per-attempt canary under `/opt/kunato-lab/`. The Nuclei template in
 upstream CVE template; it is not an upstream-signed template. The fixture keeps
 the Apache event MPM inside a 64-pid budget.
 
+The SSRF/XXE suite uses the lab-only `fixtures/vuln.py` fixture. It runs on the
+`back` network only, serves a callback sink on loopback port 9000, and writes a
+per-attempt canary to `/tmp`. The fixture is deliberately vulnerable and has no
+host exposure; it exists to prove that a direct control can reach the sink or
+read the canary before the protected request is evaluated.
+
 ## Sandbox suites
 
 ### Replay and goTestWAF
@@ -246,6 +260,84 @@ body formats, parameter pollution, alternative XSS tags, dot padding, shell
 metacharacters, and header values. The mutation table in the report retains the
 seed, transform, and interpretation through `report.json`.
 
+### Common attack surface
+
+`--sandbox-suite common` runs 43 reviewed request cases against the recording
+origin: SSTI, NoSQL, LDAP, and XPath injection, PHP/Java/Python/Ruby
+deserialization, CRLF injection, SSRF, XXE, JWT header attacks, and API
+behaviour (mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON
+keys, and GraphQL introspection). Each attack has a nearby benign case. The
+current result is 24 prevented, 12 benign cases passed, and 7 observed
+discovery cases. The observed cases reached the origin with status 200; they
+are request-rejection observations, not defense claims. The JWT `alg:none`,
+`kid` traversal, `jku`, and missing-signature shapes are blocked by the `jwt`
+category; SSRF and XXE request shapes are blocked by `ssrf` and `xxe`.
+
+### Recent attack surface
+
+`--sandbox-suite recent` runs 20 cases for 2025-2026 CVE and AI-era traffic:
+React2Shell, the Next.js middleware subrequest bypass and RSC route variant,
+PHP2Shell nested empty uploads, the Rack multipart escape flood, GitLab
+repository file read, Jenkins script console, TeamCity agent protocol, and MCP
+tool arguments that reach `file://` or `/etc/passwd`. It pairs those with
+benign MCP initialization, an empty two-level file upload, and AI crawler / API
+client user agents. The current result is 10 prevented, 6 benign cases passed,
+and 4 observed discovery cases. Prompt injection, cache deception/poisoning,
+and registry catalog exposure are currently observations; the first two are
+application or cache-layer concerns, and no bundled MCP-specific rule exists.
+The MCP file and system-file cases are blocked by the existing
+`remote-file-inclusion` and `path-traversal` rules, not by an MCP-aware
+signature.
+
+Observed cases are explicit discovery results: they must complete a direct
+control, but a pass-through is recorded rather than treated as defense success
+or as a false block. This keeps the suite runnable while the missing policy is
+triaged.
+
+### Response-phase leaks
+
+`--sandbox-suite response` uses origin endpoints that return a private-key
+marker, a MySQL syntax error, a Django DEBUG page, a 420-byte PHPSESSID cookie,
+a Python stack trace, a versioned `Server` header, and benign 404/500 responses.
+The direct control must receive each leak; the protected run must block the four
+BLOCK rules (`private-key-material`, `sql-error-message`, `django-debug-page`,
+and `php2shell-session-cookie-leak`) with `response blocked` events, while the
+LOG-only stack trace and server version remain observations. The benign 404 and
+500 bodies must pass through unchanged. The current result is 4 prevented, 2
+observed, and 2 benign cases passed.
+
+### GraphQL complexity
+
+`--sandbox-suite graphql` sends a 25-level selection, a 1001-alias document, and
+a cyclic fragment document to `/graphql`. All three must be rejected locally
+with `400` and no origin receipt; a normal query with variables must reach the
+origin. The current result is 3 prevented and 1 benign case passed. A GET query,
+an `application/graphql` body, and introspection are observations: the GET and
+content-type shapes reach the origin, and introspection is logged by
+`api-discovery.graphql-introspection` rather than blocked.
+
+### SSRF / XXE canaries
+
+`--sandbox-suite ssrf-xxe` starts a lab-only vulnerable fixture with an
+in-process callback sink and a canary file. The direct control must make
+`/fetch` reach the sink or read the canary, and must expand an external entity
+to `http://vuln:8080/safe`; the protected run must block the loopback sink,
+`file://`, and XXE entity shapes with `ssrf.internal-addresses`,
+`ssrf.file-scheme`, and `xxe.doctype-and-entity`. The current result is 3
+prevented and 2 benign cases passed. `http://vuln:8080/safe` is observed
+reaching the origin: the SSRF rules match literal private addresses, not
+arbitrary internal DNS names.
+
+### Credential stuffing / password spraying
+
+`--sandbox-suite credential-stuffing` sends 12 form logins for distinct users
+with the same password from one source. The direct control reaches the origin
+12 times; with protection enabled, the bundled `login-throttle` limit allows 10
+and blocks the last two with `403`, both carrying a `rate_limited` block event.
+The current result is 10 allowed, 2 blocked, and a healthy normal client after
+the burst. This is a per-source control; the global authentication-failure log
+for distributed spraying remains an observation, not automatic mitigation.
+
 ### Agentic TTP chain
 
 `--sandbox-suite agentic` runs a deterministic Goals/Planner/Worker loop against
@@ -302,12 +394,16 @@ block, and the benign push.
 
 `--sandbox-suite h2` uses `rules-h2.yaml` with TLS on port 8443 and the lab
 certificate under `fixtures/tls/`. It runs a normal HTTP/2 request, then Rapid
-Reset, a CONTINUATION flood, and an oversized HPACK header block on separate TLS
-connections. After each attack a fresh HTTP/2 connection must obtain an origin
-receipt for `/health`, while the independent normal client and RSS/restart checks
-must pass. The attack connection may be closed or reset by Kunato. The current
-result is 7 passed: normal, Rapid Reset, CONTINUATION, HPACK, independent,
-resources, and metrics; 21.1 MiB RSS and no restart.
+Reset, a CONTINUATION flood, an oversized HPACK header block, and a bounded
+server-reset pressure variant that opens streams and sends invalid
+`WINDOW_UPDATE` frames on separate TLS connections. After each attack a fresh
+HTTP/2 connection must obtain an origin receipt for `/health`, while the
+independent normal client and RSS/restart checks must pass. The reset-pressure
+case is a regression for server-generated reset handling, not an exact
+MadeYouReset (CVE-2025-8671) reproduction; hyper is listed as not affected. The
+current result is 8 passed: normal, Rapid Reset, CONTINUATION, HPACK,
+reset-pressure, independent, resources, and metrics; 21.2 MiB RSS and no
+restart.
 
 ### TLS HTTP/3 resource variants
 
@@ -444,6 +540,16 @@ Each run prints its directory under `target/security-lab/`. It retains:
   access logs, health probes, and Kunato logs;
 - `mutations-control/` and `mutations/`: direct and protected mutation probes,
   origin logs, and Kunato logs;
+- `common-control/`, `common/`, `recent-control/`, and `recent/`: direct and
+  protected surface probes, origin logs, Kunato logs, and observed cases;
+- `response-control/` and `response/`: direct and protected response-phase leak
+  probes and the matching `response blocked` events;
+- `graphql-control/` and `graphql/`: direct and protected GraphQL complexity
+  probes and rejection reasons;
+- `ssrf-xxe-control/` and `ssrf-xxe/`: direct and protected canary probes plus
+  the vulnerable fixture log;
+- `credential-stuffing-control/` and `credential-stuffing/`: the 12-attempt
+  direct and throttled login sequences and their block events;
 - `agentic-dvwa-control/`, `agentic-dvwa/`, `agentic-cve-control/`, and
   `agentic-cve/`: deterministic agent steps, canary results, fixture access
   logs, health probes, metrics, and Kunato logs;
@@ -482,8 +588,9 @@ scripts/security-lab.sh down target/security-lab/<run-id>
 ```
 
 Reports exit with failure when a required control or observation is missing, a
-tool fails, an attack reaches the origin in a replay case, a legitimate exchange
-changes, or a sandbox suite is inconclusive. Containers and project networks are
+tool fails, an attack reaches the origin in a declared block case, a legitimate
+exchange changes, or a sandbox suite is inconclusive. Observed discovery cases
+record a pass-through without failing the run. Containers and project networks are
 removed after the run, including on ordinary failure. `down` cleans only the
 identified lab project if a controller was forcibly interrupted; evidence is
 retained.
@@ -503,8 +610,8 @@ retains the request shapes.
 
 ## Limits
 
-The recording origin cannot prove exploit prevention, and the DVWA/CVE fixtures
-prove only their bounded scenarios. A missing signature, a fixture mismatch, a
+The recording origin cannot prove exploit prevention, and the DVWA/CVE/SSRF-XXE
+fixtures prove only their bounded scenarios. A missing signature, a fixture mismatch, a
 blocked tool, or an inconclusive collection fails the run; it is never counted
 as defense success. The lab does not test arbitrary applications, distributed
 sources, Internet link saturation, or capacity; the slow and load results are
@@ -513,9 +620,18 @@ authenticated ZAP baseline covers login, spider, and passive discovery; active
 scanning is not part of the passing plan, and the active injection defenses
 remain the sqlmap/Nuclei/goTestWAF sandbox suites. The agentic suite is a
 deterministic emulation of a staged agentic chain; it does not run ARTEX, an LLM,
-or arbitrary agentic tools, and it covers only the reviewed variants. The mutation
-corpus, the protocol cases, and the CRS comparison are bounded to the reviewed
-seeds, fixtures, and framing interpretations. The benign corpus has one case per selected workflow
+or arbitrary agentic tools, and it covers only the reviewed variants. The common
+and recent suites exercise request rejection, not exploit execution; their CVE
+shapes use the recording origin. The ssrf-xxe suite proves canary access through
+one deliberately vulnerable fixture, not arbitrary application exploitation.
+The response suite exercises the bundled response rules against lab responses,
+and the GraphQL suite covers structural limits and selected transport variants,
+not every parser or application query. Credential stuffing is tested from one
+source; global distributed suppression is not implemented. The `observed`
+verdict records a pass-through and is not a coverage claim. The reset-pressure
+h2 variant is a bounded server-reset regression, not an exact MadeYouReset
+reproduction. The mutation corpus, the protocol cases, and the CRS comparison
+are bounded to the reviewed seeds, fixtures, and framing interpretations. The benign corpus has one case per selected workflow
 (eight total), the availability suite covers body-read timeout, slow reads, the
 per-source and global connection caps, and upstream-response timeout, the
 connect suite covers slow upstream connection establishment, the ban suite

