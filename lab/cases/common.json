@@ -252,13 +252,13 @@
   },
   {
     "id": "hpp-role",
-    "expect": "observe",
+    "expect": "block",
     "method": "GET",
     "target": "/common/hpp-role?role=user&role=admin"
   },
   {
     "id": "json-duplicate-role",
-    "expect": "observe",
+    "expect": "block",
     "method": "POST",
     "target": "/common/json-duplicate-role",
     "body": "{\"role\":\"user\",\"role\":\"admin\"}",
@@ -291,5 +291,11 @@
     "headers": {
       "Content-Type": "application/json"
     }
+  },
+  {
+    "id": "hpp-benign-tags",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/common/hpp-benign-tags?tag=a&tag=b"
   }
 ]

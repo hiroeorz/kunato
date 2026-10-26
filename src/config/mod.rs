@@ -419,6 +419,8 @@ pub struct LimitsSpec {
     #[serde(default)]
     pub graphql: GraphqlSpec,
     #[serde(default)]
+    pub jwt: JwtSpec,
+    #[serde(default)]
     pub form: FormLimits,
 }
 
@@ -435,6 +437,7 @@ impl Default for LimitsSpec {
             upload_inspection: UploadInspection::default(),
             max_concurrent_streams: default_max_concurrent_streams(),
             graphql: GraphqlSpec::default(),
+            jwt: JwtSpec::default(),
             form: FormLimits::default(),
         }
     }
@@ -801,6 +804,10 @@ pub struct GlobalAuthSpec {
     pub window: Duration,
     #[serde(default = "default_global_auth_min_failures")]
     pub min_failures: u32,
+    #[serde(default)]
+    pub action: BehaviorAction,
+    #[serde(default = "secs60", deserialize_with = "de_duration")]
+    pub ban: Duration,
 }
 
 impl Default for GlobalAuthSpec {
@@ -809,6 +816,8 @@ impl Default for GlobalAuthSpec {
             enabled: true,
             window: secs60(),
             min_failures: default_global_auth_min_failures(),
+            action: BehaviorAction::Log,
+            ban: secs60(),
         }
     }
 }
@@ -954,6 +963,7 @@ pub struct Limits {
     pub upload_inspection: UploadInspection,
     pub max_concurrent_streams: u32,
     pub graphql: Graphql,
+    pub jwt: Jwt,
     pub form: FormLimits,
 }
 
@@ -970,6 +980,7 @@ impl From<&LimitsSpec> for Limits {
             upload_inspection: spec.upload_inspection,
             max_concurrent_streams: spec.max_concurrent_streams,
             graphql: Graphql::from(&spec.graphql),
+            jwt: Jwt::from(&spec.jwt),
             form: spec.form.clone(),
         }
     }
@@ -1015,6 +1026,48 @@ impl Graphql {
         plain.split('/').any(|segment| {
             segment.eq_ignore_ascii_case("graphql") || segment.eq_ignore_ascii_case("gql")
         })
+    }
+}
+
+/// Optional JWT algorithm policy. The check is disabled by default because the
+/// accepted algorithms are application-specific; when configured, bearer
+/// tokens and JWT-shaped cookie values that name another algorithm are
+/// rejected before rule evaluation.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JwtSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_algorithms: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Jwt {
+    pub enabled: bool,
+    pub allowed_algorithms: Vec<String>,
+}
+
+impl From<&JwtSpec> for Jwt {
+    fn from(spec: &JwtSpec) -> Self {
+        Self {
+            enabled: spec.enabled,
+            allowed_algorithms: spec
+                .allowed_algorithms
+                .iter()
+                .map(|algorithm| algorithm.to_ascii_uppercase())
+                .collect(),
+        }
+    }
+}
+
+impl Jwt {
+    pub fn allowed(&self) -> &[String] {
+        if self.enabled {
+            &self.allowed_algorithms
+        } else {
+            &[]
+        }
     }
 }
 
@@ -1206,6 +1259,8 @@ impl BehaviorConfig {
                 enabled: false,
                 window: secs60(),
                 min_failures: default_global_auth_min_failures(),
+                action: BehaviorAction::Log,
+                ban: secs60(),
             },
         }
     }
@@ -1238,6 +1293,8 @@ pub struct GlobalAuthConfig {
     pub enabled: bool,
     pub window: Duration,
     pub min_failures: u32,
+    pub action: BehaviorAction,
+    pub ban: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1965,6 +2022,7 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
         issues.push("limits.max_concurrent_streams must be between 1 and 1000".to_owned());
     }
     validate_graphql(&limits.graphql, issues);
+    validate_jwt(&limits.jwt, issues);
     for (name, value, max) in [
         ("max_parts", limits.form.max_parts, 64),
         (
@@ -2082,6 +2140,27 @@ fn compile_php(spec: &PhpSpec, issues: &mut Vec<String>) -> Option<Php> {
         max_session_id_bytes: spec.max_session_id_bytes,
         session_id_pattern,
     })
+}
+
+fn validate_jwt(jwt: &JwtSpec, issues: &mut Vec<String>) {
+    if jwt.enabled && jwt.allowed_algorithms.is_empty() {
+        issues.push("limits.jwt.allowed_algorithms must not be empty when enabled".to_owned());
+    }
+    if jwt.allowed_algorithms.len() > 16 {
+        issues.push("limits.jwt.allowed_algorithms must contain at most 16 entries".to_owned());
+    }
+    for algorithm in &jwt.allowed_algorithms {
+        if algorithm.is_empty()
+            || algorithm.len() > 32
+            || !algorithm
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            issues.push(format!(
+                "limits.jwt.allowed_algorithms entry `{algorithm}` must be 1-32 ASCII letters, digits, '-' or '_'"
+            ));
+        }
+    }
 }
 
 fn validate_graphql(graphql: &GraphqlSpec, issues: &mut Vec<String>) {
@@ -2516,6 +2595,12 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
             "protection.behavior.global_auth.min_failures must be greater than zero".to_owned(),
         );
     }
+    if spec.global_auth.ban.is_zero() || spec.global_auth.ban > MAX_BEHAVIOR_WINDOW {
+        issues.push(
+            "protection.behavior.global_auth.ban must be greater than zero and at most 1h"
+                .to_owned(),
+        );
+    }
 
     let patterns: Vec<String> = match &spec.auth.paths {
         Some(paths) => paths.clone(),
@@ -2546,6 +2631,8 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
             enabled: spec.global_auth.enabled,
             window: spec.global_auth.window,
             min_failures: spec.global_auth.min_failures,
+            action: spec.global_auth.action,
+            ban: spec.global_auth.ban,
         },
     }
 }
@@ -3991,6 +4078,8 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert!(behavior.global_auth.enabled);
         assert_eq!(behavior.global_auth.window, Duration::from_secs(60));
         assert_eq!(behavior.global_auth.min_failures, 100);
+        assert_eq!(behavior.global_auth.action, BehaviorAction::Log);
+        assert_eq!(behavior.global_auth.ban, Duration::from_secs(60));
     }
 
     #[test]
@@ -4004,7 +4093,7 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
     min_requests: 5
     enumeration: { enabled: false, action: BLOCK, not_found_ratio: 0.25, distinct_paths: 10 }
     auth: { enabled: true, action: BLOCK, min_failures: 3, paths: ['^/custom$'] }
-    global_auth: { enabled: false, window: 10s, min_failures: 50 }
+    global_auth: { enabled: false, window: 10s, min_failures: 50, action: BLOCK, ban: 5s }
 ",
         )
         .expect("valid config");
@@ -4024,6 +4113,8 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert!(!behavior.global_auth.enabled);
         assert_eq!(behavior.global_auth.window, Duration::from_secs(10));
         assert_eq!(behavior.global_auth.min_failures, 50);
+        assert_eq!(behavior.global_auth.action, BehaviorAction::Block);
+        assert_eq!(behavior.global_auth.ban, Duration::from_secs(5));
     }
 
     #[test]
@@ -4071,6 +4162,10 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
             (
                 "protection: { behavior: { global_auth: { min_failures: 0 } } }\n",
                 "global_auth.min_failures",
+            ),
+            (
+                "protection: { behavior: { global_auth: { ban: 0s } } }\n",
+                "global_auth.ban",
             ),
             (
                 "protection: { behavior: { auth: { paths: ['('] } } }\n",
@@ -5393,6 +5488,46 @@ categories:
         assert!(!graphql.matches_path("/graphqlql"));
         assert!(!graphql.matches_path("/graphql-assets"));
         assert!(!graphql.matches_path("/"));
+    }
+
+    #[test]
+    fn jwt_policy_is_disabled_by_default() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert!(!config.limits.jwt.enabled);
+        assert!(config.limits.jwt.allowed_algorithms.is_empty());
+        assert!(config.limits.jwt.allowed().is_empty());
+    }
+
+    #[test]
+    fn parses_and_normalizes_a_jwt_policy() {
+        let config = parse_with(
+            BASE,
+            "limits:\n  jwt:\n    enabled: true\n    allowed_algorithms: [rs256, ES256]\n",
+        )
+        .expect("valid config");
+        assert!(config.limits.jwt.enabled);
+        assert_eq!(
+            config.limits.jwt.allowed(),
+            &["RS256".to_owned(), "ES256".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_jwt_policies() {
+        for (body, expected) in [
+            ("limits: { jwt: { enabled: true } }\n", "must not be empty"),
+            (
+                "limits: { jwt: { enabled: true, allowed_algorithms: ['bad algorithm'] } }\n",
+                "must be 1-32",
+            ),
+            (
+                "limits: { jwt: { enabled: true, allowed_algorithms: [''] } }\n",
+                "must be 1-32",
+            ),
+        ] {
+            let error = parse_with(BASE, body).expect_err("invalid jwt policy must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]

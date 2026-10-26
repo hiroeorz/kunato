@@ -33,10 +33,14 @@ protection:
     enabled: true
     enumeration: { action: LOG }
     auth: { action: LOG }
-    global_auth: { enabled: true }
+    global_auth: { enabled: true, action: LOG }
 ```
 
-LOG applies only to behavioral actions: existing request/rule rate limits and
+`global_auth.action: BLOCK` is opt-in and blocks subsequent requests on
+`auth.paths` for `global_auth.ban` once the cross-source threshold is crossed.
+It can deny authentication to legitimate users during an attack, so enable it
+only with trusted-source allowlisting, tuned thresholds, and an operational
+rollback. LOG applies only to behavioral actions: existing request/rule rate limits and
 bans remain active. `protection.allowlist` exempts a source from those request
 protections as well as behavioral observation; an ALLOW rule does not exempt it
 from observation. Trusting a proxy is separate from allowlisting its clients.

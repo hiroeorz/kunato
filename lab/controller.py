@@ -22,7 +22,8 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit
 from evidence import (USER_AGENT, judge_agentic, judge_availability, judge_ban_recovery,
                       judge_connect, judge_crs, judge_ffuf, judge_ffuf_behavior,
                       judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
-                      judge_credential_stuffing, judge_exploit_canary, judge_mutations,
+                      judge_credential_stuffing, judge_exploit_canary, judge_global_auth,
+                      judge_mutations,
                       judge_load, judge_nuclei, judge_protocol,
                       judge_replay, judge_response_leaks, judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
@@ -132,6 +133,37 @@ BAN_PROTECTION = """protection:
     max_duration: 2s
   behavior:
     enabled: false
+"""
+
+GLOBAL_AUTH_PROTECTION = """protection:
+  enabled: true
+  allowlist: [127.0.0.1/32]
+  max_connections_per_ip: 64
+  max_connections: 256
+  requests_per_second: 1000
+  burst: 1000
+  global_requests_per_second: 10000
+  max_tracked_ips: 100
+  aggregate_ipv6_prefix: 64
+  ban:
+    violations: 1000
+    window: 60s
+    duration: 1s
+    max_duration: 1s
+  behavior:
+    enabled: true
+    window: 60s
+    min_requests: 1
+    enumeration:
+      enabled: false
+    auth:
+      enabled: false
+    global_auth:
+      enabled: true
+      window: 60s
+      min_failures: 6
+      action: BLOCK
+      ban: 10s
 """
 
 BACKPRESSURE_PROTECTION = """protection:
@@ -674,11 +706,11 @@ class SandboxSuite:
         origin, waf = self.logs("mutations")
         return judge_mutations(cases, controls, results, origin, waf, nonce)
 
-    def surface(self, name):
+    def surface(self, name, config="rules-origin.yaml"):
         cases_path = self.input / f"lab/cases/{name}.json"
         cases = json.loads(cases_path.read_text())
         validate_cases(cases)
-        control_nonce = self.reset_origin(f"{name}-control")
+        control_nonce = self.reset_origin(f"{name}-control", config=config)
         self.preflight("origin")
         controls = self.probe("control", "cases",
                               extra=("--cases", f"/lab/cases/{name}.json"),
@@ -690,13 +722,16 @@ class SandboxSuite:
         if not all(observation["validated"] for observation in controls):
             raise ValueError(f"Direct {name} controls failed")
         write_json(self.run_dir / f"{name}-control/validated.json", controls)
-        nonce = self.reset_origin(name)
+        nonce = self.reset_origin(name, config=config)
         results = self.probe("client", "cases",
                              extra=("--cases", f"/lab/cases/{name}.json"),
                              log=self.run_dir / f"{name}/probes.jsonl")
         self.healthy(name, nonce=nonce)
         origin, waf = self.logs(name)
         return summarize(judge_replay(cases, controls, results, origin, waf, nonce))
+
+    def jwt_policy(self):
+        return self.surface("jwt", config="rules-jwt.yaml")
 
     def response_leaks(self):
         cases = json.loads((self.input / "lab/cases/response-leaks.json").read_text())
@@ -757,6 +792,38 @@ class SandboxSuite:
                      log=directory / "kunato.jsonl")
         waf = read_jsonl(directory / "kunato.jsonl")
         return summarize(judge_exploit_canary(cases, controls, results, waf))
+
+    def global_auth(self):
+        cases = json.loads((self.input / "lab/cases/global-auth.json").read_text())
+        validate_cases(cases)
+        control_nonce = self.reset_origin("global-auth-control",
+                                          config="rules-global-auth.yaml")
+        self.preflight("origin")
+        control_results = self.probe("control", "cases",
+                                      extra=("--cases", "/lab/cases/global-auth.json"),
+                                      log=self.run_dir / "global-auth-control/probes.jsonl")
+        control = control_results[0]
+        control_origin, _ = self.logs("global-auth-control")
+        verify_origin(control_origin, control_nonce)
+        if not origin_response(cases[0], control, control_nonce):
+            raise ValueError("Global-auth direct control failed")
+        write_json(self.run_dir / "global-auth-control/validated.json", control)
+
+        nonce = self.reset_origin("global-auth", config="rules-global-auth.yaml",
+                                  disable_protection=False)
+        failures = []
+        for service in ("client", "client-b"):
+            for _ in range(3):
+                failures.append(self.probe(
+                    service, "cases",
+                    extra=("--cases", "/lab/cases/global-auth.json"),
+                    log=self.run_dir / f"global-auth/failure-{len(failures)}.jsonl")[0])
+        blocked = self.probe("client", "cases",
+                             extra=("--cases", "/lab/cases/global-auth.json"),
+                             log=self.run_dir / "global-auth/blocked.jsonl")[0]
+        self.healthy("global-auth", nonce=nonce)
+        origin, waf = self.logs("global-auth")
+        return judge_global_auth(control, failures, blocked, waf)
 
     def credential_stuffing(self):
         cases = json.loads((self.input / "lab/cases/credential-stuffing.json").read_text())
@@ -1682,6 +1749,17 @@ def new_run(suite):
         make_config(original, "http://origin:8080", BAN_PROTECTION))
     (config_dir / "rules-backpressure.yaml").write_text(
         make_config(original, "http://origin:8080", BACKPRESSURE_PROTECTION))
+    jwt_config = make_config(original, "http://origin:8080")
+    jwt_config, count = re.subn(
+        r"(?m)^  jwt:\n    enabled: false\n    allowed_algorithms: \[\]\n",
+        "  jwt:\n    enabled: true\n    allowed_algorithms: [RS256]\n",
+        jwt_config,
+    )
+    if count != 1:
+        raise ValueError("Expected one disabled jwt limits block")
+    (config_dir / "rules-jwt.yaml").write_text(jwt_config)
+    (config_dir / "rules-global-auth.yaml").write_text(
+        make_config(original, "http://origin:8080", GLOBAL_AUTH_PROTECTION))
     zap_template = (LAB / "templates/zap-authenticated.yaml").read_text()
     cases = json.loads((LAB / "cases/smoke.json").read_text())
     validate_cases(cases)
@@ -1692,7 +1770,8 @@ def new_run(suite):
     validate_mutations(mutation_cases)
     protocol_cases = json.loads((LAB / "cases/protocol.json").read_text())
     validate_protocol(protocol_cases)
-    for name in ("common", "recent", "response-leaks", "graphql", "ssrf-xxe"):
+    for name in ("common", "recent", "response-leaks", "graphql", "ssrf-xxe", "jwt",
+                 "global-auth"):
         validate_cases(json.loads((LAB / f"cases/{name}.json").read_text()))
     validate_agentic(json.loads((LAB / "cases/agentic.json").read_text()))
     plans = input_dir / "lab/plans"
@@ -1728,7 +1807,9 @@ def run(suite):
     try:
         lab.compose("config", "--quiet")
         for name in ("rules-origin.yaml", "rules-dvwa.yaml", "rules-cve.yaml",
-                     "rules-vuln.yaml", "rules-ffuf.yaml", "rules-availability.yaml", "rules-connect.yaml",
+                     "rules-vuln.yaml", "rules-jwt.yaml", "rules-global-auth.yaml",
+                     "rules-ffuf.yaml",
+                     "rules-availability.yaml", "rules-connect.yaml",
                      "rules-h2.yaml", "rules-h3.yaml", "rules-ban.yaml",
                      "rules-backpressure.yaml"):
             lab.compose("run", "--rm", "--no-deps", "-T", "kunato",
@@ -1748,10 +1829,14 @@ def run(suite):
             report["suites"]["response"] = lab.response_leaks()
         if suite in {"graphql", "all"}:
             report["suites"]["graphql"] = lab.surface("graphql")
+        if suite in {"jwt", "all"}:
+            report["suites"]["jwt"] = lab.jwt_policy()
         if suite in {"ssrf-xxe", "all"}:
             report["suites"]["ssrf-xxe"] = lab.ssrf_xxe()
         if suite in {"credential-stuffing", "all"}:
             report["suites"]["credential-stuffing"] = lab.credential_stuffing()
+        if suite in {"global-auth", "all"}:
+            report["suites"]["global-auth"] = lab.global_auth()
         if suite in {"agentic", "all"}:
             report["suites"]["agentic"] = lab.agentic()
         if suite in {"slow", "all"}:
@@ -1966,7 +2051,8 @@ def main():
     runner = subs.add_parser("run", help="Run the isolated regression sandbox suites")
     runner.add_argument("--sandbox-suite", "--suite", "--campaign", dest="suite",
                         choices=["replay", "benign", "mutations", "protocol", "common", "recent",
-                                 "response", "graphql", "ssrf-xxe", "credential-stuffing",
+                                 "response", "graphql", "jwt", "ssrf-xxe",
+                                 "credential-stuffing", "global-auth",
                                  "agentic", "gotestwaf", "sqlmap", "nuclei", "ffuf", "zap", "crs",
                                  "slow", "availability", "connect", "h2", "h3",
                                  "backpressure", "ban", "websocket", "load", "restart",

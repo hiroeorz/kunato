@@ -13,7 +13,8 @@ from controller import make_config, write_gotestwaf_cases
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
                       judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_mutations, judge_nuclei, judge_load, judge_protocol,
-                      judge_credential_stuffing, judge_exploit_canary, judge_replay, judge_response_leaks,
+                      judge_credential_stuffing, judge_exploit_canary, judge_global_auth,
+                      judge_replay, judge_response_leaks,
                       judge_restart, judge_slow, judge_sqlmap,
                       judge_websocket_lifecycle, judge_zap, judge_zap_workflow,
                       origin_response, read_jsonl, summarize,
@@ -279,6 +280,33 @@ class EvidenceTests(unittest.TestCase):
                               protected_nonce, control_nonce)
         self.assertEqual(result["cases"][1]["verdict"], "inconclusive")
         self.assertFalse(result["passed"])
+
+
+class GlobalAuthTests(unittest.TestCase):
+    def test_global_threshold_blocks_a_fresh_source(self):
+        control = {"status": 401, "origin": "attempt"}
+        failures = [{"status": 401, "origin": "attempt"} for _ in range(6)]
+        blocked = {"status": 429, "origin": None}
+        waf = [{"fields": {"message": "global authentication abuse mitigation active",
+                           "path": "/login"}}]
+        result = judge_global_auth(control, failures, blocked, waf)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["cases"][-1]["verdict"], "prevented")
+
+    def test_missing_global_block_is_a_gap(self):
+        control = {"status": 401, "origin": "attempt"}
+        failures = [{"status": 401, "origin": "attempt"} for _ in range(6)]
+        blocked = {"status": 401, "origin": "attempt"}
+        result = judge_global_auth(control, failures, blocked, [])
+        self.assertEqual(result["cases"][-1]["verdict"], "gap")
+        self.assertFalse(result["passed"])
+
+    def test_global_block_requires_the_mitigation_log(self):
+        control = {"status": 401, "origin": "attempt"}
+        failures = [{"status": 401, "origin": "attempt"} for _ in range(6)]
+        blocked = {"status": 429, "origin": None}
+        result = judge_global_auth(control, failures, blocked, [])
+        self.assertEqual(result["cases"][-1]["verdict"], "inconclusive")
 
 
 class CredentialStuffingTests(unittest.TestCase):

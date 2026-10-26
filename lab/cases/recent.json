@@ -135,12 +135,13 @@
   },
   {
     "id": "cache-deception-static-suffix",
-    "expect": "observe",
+    "expect": "block",
     "method": "GET",
-    "target": "/recent/cache-deception-static-suffix",
+    "target": "/recent/profile.css",
     "headers": {
       "Cookie": "session=alice"
-    }
+    },
+    "rule": "authenticated-static-suffix"
   },
   {
     "id": "cache-poisoning-forwarded-host",
@@ -176,5 +177,11 @@
     "headers": {
       "Content-Type": "multipart/form-data; boundary=X"
     }
+  },
+  {
+    "id": "benign-static-asset",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/recent/logo.png"
   }
 ]

@@ -154,6 +154,17 @@ services:
       - ${LAB_INPUT}/h3probe:/h3probe:ro
     networks: [front]
 
+  client-b:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE}
+    platform: ${LAB_PLATFORM}
+    profiles: [tools]
+    entrypoint: [python3, -B, /lab/probe.py]
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+      - ${LAB_INPUT}/h3probe:/h3probe:ro
+    networks: [front]
+
   normal:
     <<: *runtime
     image: ${LAB_PYTHON_IMAGE}

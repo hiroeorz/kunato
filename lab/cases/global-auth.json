@@ -1,0 +1,11 @@
+[
+  {
+    "id": "global-auth-failure",
+    "expect": "allow",
+    "method": "POST",
+    "target": "/login",
+    "body": "username=alice&password=wrong",
+    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+    "status": 401
+  }
+]

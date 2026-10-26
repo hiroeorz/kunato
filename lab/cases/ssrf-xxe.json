@@ -29,10 +29,11 @@
   },
   {
     "id": "ssrf-internal-dns",
-    "expect": "observe",
+    "expect": "block",
     "method": "GET",
     "target": "/fetch?url=http%3A%2F%2Fvuln%3A8080%2Fsafe",
-    "body_contains": "safe"
+    "body_contains": "safe",
+    "rule": "single-label-host"
   },
   {
     "id": "benign-safe",

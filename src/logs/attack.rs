@@ -100,6 +100,16 @@ const ATTACK_CLASSES: &[AttackClass] = &[
         categories: &["open-redirect"],
     },
     AttackClass {
+        name: "parameter-pollution",
+        aliases: &["hpp"],
+        categories: &["parameter-pollution"],
+    },
+    AttackClass {
+        name: "cache-deception",
+        aliases: &["cache"],
+        categories: &["cache-deception"],
+    },
+    AttackClass {
         name: "config-injection",
         aliases: &["config"],
         categories: &["config-injection"],

@@ -4661,3 +4661,14 @@ POST /api/index.php/thirdparties/1/bankaccounts header="Content-Type: applicatio
 # --- CVE-2026-116167 (SiYuan): the unauthenticated /check-auth page assigns
 #     the to parameter to window.location.href without a scheme check. ---
 GET /check-auth?to=javascript:alert(1)
+# --- Parameter pollution on privilege and redirect fields: duplicate scalar
+#     values let an upstream parser choose a value the WAF did not evaluate. ---
+GET /api/users?role=user&role=admin
+POST /api/users header="Content-Type: application/json" body="{\"role\":\"user\",\"role\":\"admin\"}"
+GET /oauth/authorize?redirect_uri=https%3A%2F%2Fgood.example%2Fcb&redirect_uri=https%3A%2F%2Fevil.example%2Fcb
+
+# --- Cache deception: an authenticated request addressed as a static asset. ---
+GET /account/profile.css header="Cookie: session=alice"
+
+# --- SSRF to a single-label internal DNS name, not a literal private address. ---
+GET /fetch?url=http%3A%2F%2Fmetadata%2Flatest%2Fmeta-data%2F

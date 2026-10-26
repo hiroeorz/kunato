@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-26; the managed set carried 494 rules then.
+2026-10-27; the managed set carried 508 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -76,7 +76,7 @@ body coverage on those routes and does not change the bundled verdicts.
 | HTTP Request Smuggling | 🔶 | hyper's strict framing (rejects TE/CL conflicts and malformed chunked bodies), `embedded-http-request-in-body`, CVE signatures, black-box probes. No generic TE/CL semantics rule |
 | HTTP Request Splitting | 🔶 | `crlf-injection` plus embedded-HTTP inspection |
 | HTTP Response Splitting | 🔶 | Same (CRLF in headers is blocked) |
-| HTTP Parameter Pollution (HPP) | ❌ | Duplicate-parameter inspection/normalization is absent |
+| HTTP Parameter Pollution (HPP) | 🔶 | `parameter-pollution` blocks duplicate privilege and redirect fields in query/form bodies and duplicate JSON keys (`role`, `is_admin`, `admin`, `permission`, `account_type`, `redirect_uri`); arbitrary duplicate list parameters and duplicate keys outside that set remain uncovered |
 | Host Header Injection | 🔶 | Full enforcement when `allowed_hosts` is configured: a missing, malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority` (HTTP/2 / HTTP/3) is rejected with `400`/`421` before body buffering and rule evaluation, and `ALLOW` rules cannot bypass it. Fresh `kunato init --acme-domain` installs seed the list and accept `--allowed-host`; manual certificate/TLS-proxy installs and existing configs opt in, and an unset list leaves the previous behavior. A client-supplied `X-Forwarded-Host` is replaced with the Host header. `malformed-host-header` and `oversized-host-header` remain as defense in depth when the policy is unset (the Rack/Forwarded allowlist CVEs are CVSS 4.8, below the bundling bar) |
 | Invalid Content-Length / Transfer-Encoding | 🔶 | Kunato's request-head checks reject duplicate Host, duplicate Content-Length, CL+TE, and non-chunked Transfer-Encoding before forwarding; the lab's per-framing direct controls show no smuggled request reaches the origin. CVE-specific rules add defense in depth; no generic TE/CL semantics rule |
 | HTTP Method Abuse | ✅ | `bad-methods` (TRACE/TRACK/CONNECT/DEBUG) plus WebDAV methods (LOCK/COPY/MOVE/PROPPATCH); method conditions match the wire method — Rack-style `_method` overrides are not resolved, but Rack only accepts standard methods, so `bad-methods` cannot be bypassed. Non-canonical case variants of standard methods (`get`, `pOsT`) are rejected with `400` before rule evaluation, closing the method-case authorization-bypass class (OpenNMS CVE-2026-111235) |
@@ -112,7 +112,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | REST API Injection | ✅ | Generic injection rules inspect query/body/cookies with Content-Type-aware decoding |
-| GraphQL Injection / Abuse | 🔶 | One CVE-specific case (SSRF mutation, caught by metadata rules) |
+| GraphQL Injection / Abuse | 🔶 | Complexity limits cover POST JSON, GET `query`, and `application/graphql` documents; a normal GET probe and a shallow `application/graphql` body pass. One CVE-specific injection case is caught by metadata rules |
 | GraphQL Introspection Abuse | 🔶 | `api-discovery.graphql-introspection` LOGs `__schema` and `__type(...)` in query/body; raise the category to BLOCK to disable introspection. The harness cannot assert LOG behavior; `allowed.txt` pins that `__typename` queries and the logged paths stay forwarded |
 | GraphQL Query Depth / Complexity | ✅ | `limits.graphql` expands fragments and caps both selection depth (default 20) and expanded field count (default 1000) on recognized GraphQL paths; over-limit documents get `400`, and a body larger than `max_body_bytes` gets `413` rather than being forwarded with an uninspected remainder. Cycles and duplicate fragment definitions are rejected, and the parser has a bounded node budget. Verified by unit and proxy tests and `blocked.txt` (deep, fragment-chain, fragment-amplification, and alias-flood shapes). The HTTP transports are covered; GraphQL operations carried in WebSocket frames after a `101` handshake reach body and `response_body` rules but are not parsed for depth or complexity |
 | API Parameter Tampering | ❌ | Business-logic dependent |
@@ -120,6 +120,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Excessive Data Exposure Requests | 🔶 | Response-phase inspection can express it, but no bundled rules (only private keys, SQL errors, ...) |
 | API Endpoint Enumeration | 🔶 | Scanner UA blocking, rate limits, and behavioral `404`/distinct-path flags (LOG default; `enumeration.action: BLOCK` opt-in) |
 | API Version Abuse | ❌ | No rules |
+| Cache Deception | 🔶 | `cache-deception.authenticated-static-suffix` blocks authenticated requests addressed as `.css`/`.js`/images/fonts while a session-like cookie is present; cache-key normalization outside the static-suffix heuristic remains deployment-specific |
 | Content-Type Spoofing | ❌ | No rules |
 | JSON/XML Payload Tampering | 🔶 | JSON escapes, multipart, and form-urlencoded bodies are decoded for inspection; detection depends on signatures |
 | Schema Validation Violations | ❌ | No schema validation feature |
@@ -130,15 +131,15 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. Protection also flags per-source `401`/`403` bursts on authentication paths (`protection.behavior.auth`, LOG default, per-signal `BLOCK` opt-in) and logs global bursts for distributed attempts. The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
-| Password Spraying | 🔶 | Same throttle, bans, and per-source auth-failure flags slow a single source; the global auth-failure window (LOG only) records spraying spread across many source IPs, but automatic global mitigation is future work |
-| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs (LOG only), but cannot identify individual stolen credentials and does not mitigate globally |
+| Password Spraying | 🔶 | Same throttle, bans, and per-source auth-failure flags slow a single source; `protection.behavior.global_auth` aggregates failures across sources and, with `action: BLOCK`, rejects subsequent auth requests for `ban`. The default remains LOG, and attacker source diversity is not otherwise modeled |
+| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs, and opt-in `action: BLOCK` mitigates subsequent attempts globally, but individual stolen credentials cannot be identified |
 | Account / Login Enumeration | ❌ | Not covered (response-phase error-text rules could be added locally) |
 | MFA Flooding | 🔶 | Rate limits only |
 | OTP Brute Force | 🔶 | Rate limits only |
 | Session ID Anomalies | ❌ | No rules |
 | Cookie Tampering | 🔶 | Only specific CVE shapes (forged `STATE_COOKIE`, rememberMe `rO0`, ...) |
 | JWT Tampering | 🔶 | The `jwt` category blocks unsecured (`alg:none`) and signature-less tokens, `kid`/`jku`/`jwk`/`x5u`/`x5c` key-lookup injection, and the zero-signature CVE-2022-21449 PoCs, across headers/cookies/query/body; claim tampering and re-signing with an unknown weak secret remain undetectable |
-| JWT Algorithm Confusion | 🔶 | The `none`-algorithm subset is blocked by `jwt.none-algorithm`; RS256↔HS256 confusion has no static shape (still patch-side watch work in `blackbox/requests/blocked.txt`) |
+| JWT Algorithm Confusion | 🔶 | The `none`-algorithm subset is blocked by `jwt.none-algorithm`; `limits.jwt.allowed_algorithms` rejects tokens whose header algorithm is not pinned by local policy (for example HS256 on an RS256 API), but the attack has no generic static shape and the policy is opt-in |
 
 ## 7. Authorization and Access Control
 
@@ -156,7 +157,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| SSRF | ✅ | `ssrf`: metadata endpoints, loopback (127/8, `localhost`, `[::1]`, `[::]`), RFC1918 ranges, link-local, CGNAT, decimal/hex/octal loopback forms, IPv6 ULA/link-local/mapped forms, protocol-relative values, non-HTTP schemes, and `file://`; DNS names that resolve internally remain outside static reach |
+| SSRF | ✅ | `ssrf`: metadata endpoints, loopback (127/8, `localhost`, `[::1]`, `[::]`), RFC1918 ranges, link-local, CGNAT, decimal/hex/octal loopback forms, IPv6 ULA/link-local/mapped forms, protocol-relative values, non-HTTP schemes, `file://`, and single-label hosts such as `vuln` or `metadata`; arbitrary multi-label internal names remain outside static reach |
 | XXE | ✅ | `xxe` (DOCTYPE plus ENTITY) and CVE-specific rules |
 | Unsafe Deserialization | 🔶 | Dense CVE-specific signatures (`rO0AB`, WDDX, ObjectStateFormatter, XStream, OFBiz, ...); `ruby-deserialization` adds generic Marshal (`BAh7`, encoded raw `%04%08`) and YAML `!ruby/` shapes for Ruby/Rails; other runtimes remain CVE-specific |
 | RCE Payloads | ✅ | `command-injection` plus JNDI/OGNL/EL known-exploits plus the CVE set |
@@ -329,7 +330,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | XXE / RCE payloads | ✅ |
 | Malicious file upload | 🔶 (extension plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
-| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, and a global auth-failure log) |
+| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, and an opt-in global auth block) |
 | Bot | 🔶 (User-Agent signatures plus behavioral probing/auth-failure flags; no JS challenge or 200-only scraping detection) |
 | API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
@@ -376,24 +377,25 @@ kept the independent normal client at `200`, and recorded the ban counter. The
 WebSocket suite proved PING/PONG, a fragmented text echo, and a close handshake
 through the tunnel, blocked a client XSS payload with `1008`, and blocked an
 origin-pushed private-key message with `1008` while a benign push was delivered.
-The 2026-10-26 common and recent surface suites add 63 reviewed request cases
-with direct controls. `common` ran 43 cases: 24 attacks were blocked with no
-origin receipt, 12 benign cases were forwarded unchanged, and 7 discovery cases
+The 2026-10-26 common and recent surface suites add 65 reviewed request cases
+with direct controls. `common` ran 44 cases: 26 attacks were blocked with no
+origin receipt, 13 benign cases were forwarded unchanged, and 5 discovery cases
 were observed reaching the origin. It covers SSTI (Jinja/Twig, Freemarker,
 Velocity), NoSQL, LDAP, XPath, PHP/Java/Python/Ruby deserialization, CRLF, SSRF
 (metadata, loopback, decimal, protocol-relative), XXE, JWT `alg:none` / `kid`
-traversal / `jku` / missing signature, and benign API traffic. `recent` ran 20
-cases: 10 attacks were blocked, 6 benign cases passed, and 4 discovery cases
-were observed. It covers React2Shell, the Next.js middleware subrequest and RSC
+traversal / `jku` / missing signature, HPP and duplicate JSON keys, and benign
+API traffic. `recent` ran 21 cases: 11 attacks were blocked, 7 benign cases
+passed, and 3 discovery cases were observed. It covers React2Shell, the Next.js middleware subrequest and RSC
 route variants, PHP2Shell nested empty uploads, the Rack multipart escape flood,
 GitLab repository file read, Jenkins script console, TeamCity agent protocol,
 MCP tool arguments reaching `file://` or `/etc/passwd`, AI crawler and API-client
 user agents, and benign MCP initialization / empty upload traffic.
 
 The observed cases are discovery results, not defense claims: JWT algorithm
-confusion, mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON keys,
-GraphQL introspection, prompt injection, cache deception, `X-Forwarded-Host`
-cache poisoning, and registry catalog exposure all reached the origin. The MCP
+confusion, mass assignment, OAuth `redirect_uri`, BOLA, GraphQL introspection,
+prompt injection, `X-Forwarded-Host` cache poisoning, and registry catalog
+exposure all reached the origin. HPP, duplicate JSON keys, and cache deception
+are now blocked by the `parameter-pollution` and `cache-deception` rules. The MCP
 file and system-file cases were stopped by the existing
 `remote-file-inclusion` and `path-traversal` rules, not by an MCP-specific
 signature, and the suite does not
@@ -404,22 +406,24 @@ recording origin: the private-key, SQL-error, Django-debug, and long-PHPSESSID
 rules blocked with `response blocked` events (4 prevented), the stack trace and
 server-version rules logged and forwarded (2 observed), and benign 404/500
 bodies passed unchanged (2 passed). The GraphQL suite rejected a 25-level
-selection, a 1001-alias document, and a fragment cycle locally with `400` and no
-origin receipt (3 prevented); a normal query passed, while GET,
+selection, a 1001-alias document, a fragment cycle, a deep GET query, and an
+`application/graphql` alias flood locally with `400` and no origin receipt
+(5 prevented); a normal query passed, while shallow GET,
 `application/graphql`, and introspection reached the origin (3 observed). The
 SSRF/XXE canary suite proved a direct control can reach the loopback sink, read
 a `file://` canary, and expand an external entity, while the protected requests
-were blocked by `ssrf.internal-addresses`, `ssrf.file-scheme`, and
-`xxe.doctype-and-entity` (3 prevented, 2 benign passed). A request targeting
-`http://vuln:8080/safe` reached the origin (1 observed): literal private-address
-rules do not cover arbitrary internal DNS names. The credential-stuffing
-sequence sent 12 logins from one source; `login-throttle` allowed 10 and blocked
-2 with `rate_limited` events, leaving 12 origin receipts in the direct control
-and 10 in the protected run. The h2 suite also passed a bounded server-reset
+were blocked by `ssrf.internal-addresses`, `ssrf.file-scheme`,
+`ssrf.single-label-host`, and `xxe.doctype-and-entity` (4 prevented, 2 benign
+passed). The JWT policy suite allowed an RS256 and an opaque token and rejected
+an HS256 token under an RS256-only policy (1 prevented, 2 benign passed). The
+credential-stuffing sequence sent 12 logins from one source; `login-throttle`
+allowed 10 and blocked 2 with `rate_limited` events. The global-auth suite then
+counted six failures from two front sources and blocked the next auth request
+from a fresh source with `429` (2 passed, 1 prevented). The h2 suite also passed a bounded server-reset
 pressure variant after Rapid Reset, CONTINUATION, and HPACK; it is a regression
 for server-generated reset handling, not an exact MadeYouReset reproduction.
-The full `all` run `20261026T234106-e1fadf91` then passed all 26 suites,
-including these new cases together with the existing tool, protocol, and
+The full `all` run `20261027T002423-8dfa2d37` then passed all 28 suites,
+including these defenses together with the existing tool, protocol, and
 availability controls.
 
 The Rust proxy tests add HTTP/2 Rapid Reset,
@@ -429,13 +433,14 @@ HTTP/3 requests still succeed afterward.
 
 ## Notable Gaps
 
-JWT signature/claim forgery beyond the bundled shapes (algorithm confusion in
-either direction, arbitrary re-signing), open redirect via unlisted parameter
-names, HPP, deep upload content (content outside the inspected prefix,
-archives, nested files, executable or markup bytes beyond the leading
-position), `200`-only scraping, distributed mitigation for
-credential stuffing, and the business-logic family (IDOR/BOLA, mass assignment,
-parameter tampering). CSRF, IDOR, authorization gaps, and session design cannot
+JWT claim forgery and arbitrary re-signing (an algorithm allowlist can reject a
+mismatched header but cannot prove the signature), open redirect via unlisted
+parameter names, HPP and duplicate JSON keys outside the bundled sensitive-field
+list, cache deception outside the static-suffix/cookie heuristic, deep upload
+content (content outside the inspected prefix, archives, nested files,
+executable or markup bytes beyond the leading position), `200`-only scraping,
+distributed authentication abuse beyond the opt-in global window, and the
+business-logic family (IDOR/BOLA, mass assignment, parameter tampering). CSRF, IDOR, authorization gaps, and session design cannot
 be fixed by a WAF at all; Kunato can only assist through custom response-phase
 rules. Closing a gap usually means either a YAML rule (most request-shape gaps)
 or an engine feature (behavioral and stateful checks).
@@ -453,10 +458,10 @@ Etherpad from the response body. The bundled `etherpad-admin-bypass` rule is
 therefore opt-in (`enabled: false`); `/admin` is logged by `bare-admin-path`
 instead. Patch Etherpad to 1.6.4 or later.
 
-Behavioral detection (Phase 1) covers `404` probing, per-source authentication
-failure bursts, and a global authentication-failure log. It defaults to `LOG`;
-a class becomes `Covered` only when the bundled default stops the attack, not
-merely because a signal exists. See
+Behavioral detection covers `404` probing, per-source authentication failure
+bursts, and a global authentication window with an opt-in `BLOCK` action. The
+default remains `LOG`; a class becomes `Covered` only when the bundled default
+stops the attack, not merely because a signal exists. See
 [the behavioral detection notes](behavioral-detection.md).
 
 Trusted-proxy identity resolution now keeps clients behind a CDN/load balancer

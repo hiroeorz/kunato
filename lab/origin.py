@@ -253,6 +253,8 @@ class Recorder(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         status = {"/status/302": 302, "/status/401": 401, "/status/404": 404}.get(self.path, 200)
+        if self.path == "/login" and self.command == "POST":
+            status = 401
         if self.path == "/api/private" and (
                 "session=lab-session" not in self.headers.get("Cookie", "")
                 or self.headers.get("Authorization", "") != "Bearer lab-token"):

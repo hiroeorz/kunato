@@ -156,13 +156,48 @@ def response_contains(case, result):
     return True
 
 
+def judge_global_auth(control, failures, blocked, waf_events, expected=6):
+    control_ok = (not control.get("error") and control.get("status") == 401
+                  and control.get("origin"))
+    failure_ok = (len(failures) == expected
+                  and all(not result.get("error") and result.get("status") == 401
+                          and result.get("origin") for result in failures))
+    blocked_ok = (not blocked.get("error") and blocked.get("status") in {403, 429}
+                  and blocked.get("origin") is None)
+    blocks = [event["fields"] for event in waf_events
+              if event.get("fields", {}).get("message")
+              == "global authentication abuse mitigation active"
+              and event["fields"].get("path") == "/login"]
+    if not control_ok or not failure_ok:
+        verdict = "inconclusive"
+    elif blocked_ok and len(blocks) >= 1:
+        verdict = "prevented"
+    elif blocked_ok:
+        verdict = "inconclusive"
+    else:
+        verdict = "gap"
+    cases = [
+        {"id": "global-auth-control", "expect": "failure", "verdict":
+         "passed" if control_ok else "inconclusive", "origin_receipts": 1 if control_ok else 0},
+        {"id": "global-auth-failures", "expect": "aggregate", "verdict":
+         "passed" if failure_ok else "inconclusive", "origin_receipts": len(failures)},
+        {"id": "global-auth-block", "expect": "prevent", "verdict": verdict,
+         "origin_receipts": 0, "rules": [{"category": fields.get("category"),
+                                          "rule": fields.get("rule")} for fields in blocks]},
+    ]
+    result = summarize(cases)
+    result["notes"] = {"failures": len(failures), "blocked_status": blocked.get("status"),
+                       "block_events": len(blocks)}
+    return result
+
+
 def judge_credential_stuffing(control, protected, waf_events, expected=12):
     control_attempts = control.get("attempts", [])
     protected_attempts = protected.get("attempts", [])
     control_ok = (len(control_attempts) == expected
-                  and all(attempt.get("status") == 200 for attempt in control_attempts))
+                  and all(attempt.get("status") in {200, 401} for attempt in control_attempts))
     allowed = [attempt for attempt in protected_attempts
-               if attempt.get("status") == 200 and attempt.get("origin")]
+               if attempt.get("status") in {200, 401} and attempt.get("origin")]
     blocked = [attempt for attempt in protected_attempts if attempt.get("status") == 403]
     errors = [attempt for attempt in protected_attempts if attempt.get("error")]
     blocks = [event["fields"] for event in waf_events
@@ -173,7 +208,7 @@ def judge_credential_stuffing(control, protected, waf_events, expected=12):
         verdict = "inconclusive"
     elif allowed and blocked and all(not attempt.get("origin") for attempt in blocked):
         verdict = "prevented" if len(blocks) >= len(blocked) else "inconclusive"
-    elif len(protected_attempts) == expected and all(attempt.get("status") == 200
+    elif len(protected_attempts) == expected and all(attempt.get("status") in {200, 401}
                                                     for attempt in protected_attempts):
         verdict = "gap"
     else:

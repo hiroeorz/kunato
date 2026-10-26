@@ -1,9 +1,12 @@
 # Behavioral detection Phase 3: content scraping and distributed abuse
 
-Status: **Design spike** — not implemented. Phase 1 (per-source enumeration,
-per-source authentication abuse, and a global authentication-failure log) is
-implemented; see [behavioral-detection.md](behavioral-detection.md). This
-document evaluates the Phase 3 follow-ups and recommends a scoped implementation.
+Status: **Phase 3a design spike — not implemented.** Phase 1 (per-source
+enumeration, per-source authentication abuse, and a global
+authentication-failure log) is implemented; see
+[behavioral-detection.md](behavioral-detection.md). The opt-in Phase 3b
+`global_auth.action: BLOCK` (with `ban`) was implemented on 2026-10-27; it
+remains `LOG` by default because of the availability risk below. This document
+evaluates the Phase 3 follow-ups and recommends a scoped implementation.
 
 ## 1. Summary
 
@@ -26,9 +29,10 @@ Recommendation:
 1. **Phase 3a (implement).** Add a configurable static-asset policy and a
    per-source `scraping` signal over `200` responses on non-static paths. The
    default is `LOG`; `BLOCK` is opt-in after a tuning period.
-2. **Phase 3b (design only).** Keep the global authentication signal log-only.
-   Document the conditions under which a safe global throttle could be added
-   later; do not add a global action field now.
+2. **Phase 3b (implemented opt-in).** The global authentication signal remains
+   `LOG` by default. `global_auth.action: BLOCK` plus `ban` is available for
+   deployments that accept the availability tradeoff; the conditions below
+   still apply.
 3. **Defer.** Account-creation failure bursts, `403`/`400` probing, and a
    sliding window. Each needs its own false-positive analysis and is not
    required to close the scraping gap.
@@ -322,11 +326,11 @@ Options considered:
 | Global challenge (JS/PoW) | Distinguishes browsers from scripts | No challenge mechanism exists; it breaks API clients and non-browser flows |
 | Keep log-only | No availability risk | Does not stop the spray |
 
-Recommendation: **keep the global signal log-only in Phase 3**. The existing
-per-source ban and the bundled login throttle remain the enforcement points.
-A safe global action needs an identity or challenge mechanism that this project
-does not have; adding a global `action: BLOCK` would trade a detection gap for
-an attacker-controlled outage.
+Recommendation: **keep the default `LOG`**. The existing per-source ban and the
+bundled login throttle remain the default enforcement points. An opt-in
+`action: BLOCK` now exists, but it trades a detection gap for an
+attacker-controlled outage; deployments that enable it should allowlist
+trusted authentication sources and tune `min_failures`/`ban` before rollout.
 
 If a future release adds a challenge, the likely shape is an opt-in
 `global_auth.action: THROTTLE` with a short cooldown, a maximum cooldown, an

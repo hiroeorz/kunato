@@ -893,6 +893,26 @@ pub(crate) fn admission_error(
     parts: &http::request::Parts,
     config: &CompiledConfig,
 ) -> Option<HttpError> {
+    if let Some(remaining) =
+        context
+            .protection
+            .global_auth_block(source.client_ip, parts.uri.path(), &config.protection)
+    {
+        context
+            .metrics
+            .behavior_blocked
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            client = %source.client_ip, peer = %source.peer,
+            path = %parts.uri.path(),
+            remaining_secs = remaining.as_secs(),
+            "global authentication abuse mitigation active"
+        );
+        return Some(HttpError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "authentication abuse mitigation active",
+        ));
+    }
     let decision = context
         .protection
         .check_request(source.client_ip, &config.protection);
@@ -1401,8 +1421,17 @@ fn record_behavior(
             failures = flag.failures,
             window_secs = flag.window.as_secs(),
             threshold = config.protection.behavior.global_auth.min_failures,
+            action = flag.action.as_str(),
+            blocked = flag.action == crate::config::BehaviorAction::Block,
+            ban_seconds = flag.ban.as_secs(),
             "behavioral global authentication abuse detected"
         );
+        if flag.action == crate::config::BehaviorAction::Block {
+            context
+                .metrics
+                .behavior_blocked
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1668,6 +1697,19 @@ async fn process(
             "graphql request rejected"
         );
         return Err(graphql_error(violation));
+    }
+    if let Some(algorithm) =
+        crate::jwt::disallowed_algorithm(&parts.headers, config.limits.jwt.allowed())
+    {
+        debug!(
+            client = %source.client_ip, peer = %source.peer,
+            algorithm = %algorithm,
+            "jwt algorithm rejected by policy"
+        );
+        return Err(HttpError::new(
+            StatusCode::FORBIDDEN,
+            "jwt algorithm not allowed",
+        ));
     }
     let view = RequestView::with_body_decoding(
         &parts.method,

@@ -1,0 +1,25 @@
+[
+  {
+    "id": "jwt-disallowed-hs256",
+    "expect": "block",
+    "method": "GET",
+    "target": "/jwt/policy",
+    "headers": {"Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyIn0.c2ln"},
+    "block_status": 403,
+    "mechanism": "jwt"
+  },
+  {
+    "id": "jwt-allowed-rs256",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/jwt/allowed",
+    "headers": {"Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyIn0.c2ln"}
+  },
+  {
+    "id": "jwt-opaque-token",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/jwt/opaque",
+    "headers": {"Authorization": "Bearer opaque-session-token"}
+  }
+]

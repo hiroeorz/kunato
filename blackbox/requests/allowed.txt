@@ -614,3 +614,11 @@ POST /api/update header="Content-Type: application/json" body="{\"module\":{\"na
 POST /admin/tools/export.php header="Content-Type: application/x-www-form-urlencoded" body="mysqldump=/usr/bin/mysqldump&database=erp"
 POST /api/index.php/thirdparties/1/bankaccounts header="Content-Type: application/json" body="{\"type\":\"bank\",\"label\":\"Operating account\"}"
 GET /check-auth?to=https://app.example.com/dashboard
+# --- Near-misses for the parameter-pollution, cache-deception, and
+#     single-label SSRF rules: repeated list values, unauthenticated static
+#     assets, distinct privilege fields, and public dotted hosts stay open. ---
+GET /search?tag=rust&tag=security
+GET /assets/logo.png
+GET /api/users?role=user&admin=false
+GET /fetch?url=https%3A%2F%2Fexample.com%2Favatar.png
+GET /assets/logo.png header="Cookie: theme=dark"

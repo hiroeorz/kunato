@@ -64,6 +64,37 @@ categories:
         limit: { requests: 10, window: 60s }
         match: { method: POST, path: '(?i)(^|/)(wp-login\.php|xmlrpc\.php|users/sign_in|admin/login|login|logon|signin|sign_in|sign-in|session)(\.(php|do|jsp|aspx|html))?/?$' }
 
+  # Parameter pollution on privilege and redirect fields: a duplicate scalar
+  # value lets an upstream parser choose a different value than the WAF saw.
+  # Ordinary repeated list parameters (`tag=a&tag=b`) are not matched.
+  - name: parameter-pollution
+    action: BLOCK
+    rules:
+      - name: duplicate-role-parameter
+        match: { regex: '(?i)(?:^|[?&\s])role=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?role=', in: [query, body] }
+      - name: duplicate-is-admin-parameter
+        match: { regex: '(?i)(?:^|[?&\s])is_admin=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?is_admin=', in: [query, body] }
+      - name: duplicate-admin-parameter
+        match: { regex: '(?i)(?:^|[?&\s])admin=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?admin=', in: [query, body] }
+      - name: duplicate-permission-parameter
+        match: { regex: '(?i)(?:^|[?&\s])permissions?=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?permissions?=', in: [query, body] }
+      - name: duplicate-account-type-parameter
+        match: { regex: '(?i)(?:^|[?&\s])account_type=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?account_type=', in: [query, body] }
+      - name: duplicate-redirect-uri-parameter
+        match: { regex: '(?i)(?:^|[?&\s])redirect_uri=[^&\s]{0,128}&(?:[^&\s]{0,64}&)?redirect_uri=', in: [query, body] }
+      - name: duplicate-role-json-key
+        match: { regex: '(?i)"role"\s*:[^}]{0,256}"role"\s*:', in: [body] }
+      - name: duplicate-is-admin-json-key
+        match: { regex: '(?i)"is_admin"\s*:[^}]{0,256}"is_admin"\s*:', in: [body] }
+      - name: duplicate-admin-json-key
+        match: { regex: '(?i)"admin"\s*:[^}]{0,256}"admin"\s*:', in: [body] }
+      - name: duplicate-permission-json-key
+        match: { regex: '(?i)"permissions?"\s*:[^}]{0,256}"permissions?"\s*:', in: [body] }
+      - name: duplicate-account-type-json-key
+        match: { regex: '(?i)"account_type"\s*:[^}]{0,256}"account_type"\s*:', in: [body] }
+      - name: duplicate-redirect-uri-json-key
+        match: { regex: '(?i)"redirect_uri"\s*:[^}]{0,256}"redirect_uri"\s*:', in: [body] }
+
   # Methods that no normal browser or application should send.
   - name: bad-methods
     action: BLOCK
@@ -1107,6 +1138,18 @@ categories:
       - name: dom-sinks
         match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body] }
 
+  # Web cache deception: an authenticated request addressed as a static asset
+  # can be stored by a cache that keys only on the URL. Static assets normally
+  # carry no session cookie; deployments that serve authenticated assets need
+  # an override.
+  - name: cache-deception
+    action: BLOCK
+    rules:
+      - name: authenticated-static-suffix
+        match:
+          path: '(?i)\.(css|js|mjs|map|png|jpe?g|gif|svg|ico|woff2?|ttf|eot)$'
+          headers:
+            Cookie: '(?i)(^|;\s*)(session|sess|sid|auth|token|jwt|access_token|id_token)='
   # CSS injection: style-context breakout, scriptable CSS properties, and the
   # remote-load and attribute-selector shapes used for blind data exfiltration.
   # Deployments that let users author CSS (theme editors) need to override this
@@ -1183,6 +1226,13 @@ categories:
       - name: protocol-relative-include-parameter
         match: { regex: '(?i)(^|[?&"\x27\s])(include|include_once|require|require_once|page|template|tpl|module|mod|load|import|file|path|dir|view|lang|content)["\x27]?\s*[:=]\s*"?[\\/]{2}', in: [query, body] }
 
+  # XML external entity payloads.
+  - name: xxe
+    action: BLOCK
+    rules:
+      - name: doctype-and-entity
+        match: { regex: '(?i)<!DOCTYPE[^>]{0,200}\[|<!ENTITY\b', in: [body] }
+
   # Server-side request forgery: cloud metadata endpoints, private,
   # link-local, and CGNAT targets, encoded and shorthand loopback addresses,
   # IPv6 equivalents, and protocol-relative values.
@@ -1195,17 +1245,12 @@ categories:
         match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(127\.[0-9]|localhost([/:?#&"\x27\s]|$)|0\.0\.0\.0|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|\[::1\]|\[::\]|\[(f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?):|\[::ffff:(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|7f00:1\]))', in: [query, body] }
       - name: encoded-addresses
         match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(2130706433|017700000001|0x7f0{5}1|0x7f\.0\.0\.1|0x7f\.1|0177\.0\.0\.1)([/:?#&"\x27\s]|$)', in: [query, body] }
+      - name: single-label-host
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://[a-z0-9_-]+([:/?#&"\x27\s]|$)', in: [query, body] }
       - name: protocol-relative-internal
         match: { regex: '(?i)//(127\.[0-9]|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|localhost([/:?#&"\x27\s]|$)|\[::1\])', in: [query, body] }
       - name: file-scheme
         match: { regex: '(?i)file://', in: [query, body] }
-
-  # XML external entity payloads.
-  - name: xxe
-    action: BLOCK
-    rules:
-      - name: doctype-and-entity
-        match: { regex: '(?i)<!DOCTYPE[^>]{0,200}\[|<!ENTITY\b', in: [body] }
 
   # Ruby deserialization payloads: base64 Marshal blobs (BAh7 is the base64 of
   # the "\x04\x08" Marshal header), percent-encoded raw Marshal bytes, and the
@@ -1652,6 +1697,11 @@ limits:
     max_depth: 20
     max_fields: 1000
     # paths: [/query]
+  # Reject JWTs whose header algorithm is not in this list. Disabled by
+  # default because the accepted algorithms are application-specific.
+  jwt:
+    enabled: false
+    allowed_algorithms: []
 
 # Optional PHP-specific mitigation. Explicit paths: [/] covers the entire
 # upstream; use hosts and/or path prefixes to restrict a mixed deployment.
@@ -1703,6 +1753,8 @@ protection:
       enabled: true
       window: 60s
       min_failures: 100
+      action: LOG
+      ban: 60s
 
 admin:
   enabled: true

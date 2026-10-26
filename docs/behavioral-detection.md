@@ -193,7 +193,9 @@ whose path matches an authentication-path pattern (Section 4.5). This is counted
 per source and also added to the global window.
 
 **Global authentication failures (`global_auth_failures`).** The sum of
-authentication failures across all sources in `global_auth.window`.
+authentication failures across all sources in `global_auth.window`. With
+`global_auth.action: BLOCK`, crossing the threshold rejects subsequent requests
+on the authentication paths for `global_auth.ban`, regardless of source.
 
 ### 4.3 Trigger conditions
 
@@ -229,7 +231,9 @@ Defaults are deliberately conservative:
 | `enumeration.distinct_paths` | `40` | A burst of distinct missing paths is scanner-like |
 | `auth.min_failures` | `20` | Above the bundled login throttle's 10/60 s |
 | `global_auth.window` | `60s` | Matches the source window |
-| `global_auth.min_failures` | `100` | Distributed attempts only; log-only in this release |
+| `global_auth.min_failures` | `100` | Distributed attempts only |
+| `global_auth.action` | `LOG` | Blocking is opt-in after tuning |
+| `global_auth.ban` | `60s` | Duration of the global auth-path block when action is `BLOCK` |
 
 A slow prober that stays below every threshold is not detected. That is an
 accepted limitation; rate limits and the rule set remain the outer controls.

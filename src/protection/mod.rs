@@ -73,6 +73,8 @@ pub struct BehaviorFlag {
 pub struct GlobalAuthFlag {
     pub failures: u32,
     pub window: Duration,
+    pub action: BehaviorAction,
+    pub ban: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +119,7 @@ impl ProtectionState {
                 started: Instant::now(),
                 failures: 0,
                 logged: false,
+                blocked_until: None,
             }),
         }
     }
@@ -372,10 +375,44 @@ impl ProtectionState {
         window.failures = window.failures.saturating_add(1);
         if !window.logged && window.failures >= config.behavior.global_auth.min_failures {
             window.logged = true;
+            if config.behavior.global_auth.action == BehaviorAction::Block {
+                window.blocked_until = Some(now + config.behavior.global_auth.ban);
+            }
             outcome.global = Some(GlobalAuthFlag {
                 failures: window.failures,
                 window: config.behavior.global_auth.window,
+                action: config.behavior.global_auth.action,
+                ban: config.behavior.global_auth.ban,
             });
+        }
+    }
+
+    /// Returns the remaining global authentication block for a request on an
+    /// authentication path. The block is set when the global failure window
+    /// crosses its threshold and the configured action is BLOCK.
+    pub fn global_auth_block(
+        &self,
+        ip: IpAddr,
+        path: &str,
+        config: &Protection,
+    ) -> Option<Duration> {
+        if !config.enabled
+            || !config.behavior.enabled
+            || !config.behavior.global_auth.enabled
+            || config.behavior.global_auth.action != BehaviorAction::Block
+            || is_allowlisted(normalize_ip(ip), &config.allowlist)
+            || !auth_path_matches(&config.behavior.auth.paths, path)
+        {
+            return None;
+        }
+        let now = Instant::now();
+        let mut window = lock(&self.global_auth);
+        let until = window.blocked_until?;
+        if until > now {
+            Some(until.saturating_duration_since(now))
+        } else {
+            window.blocked_until = None;
+            None
         }
     }
 
@@ -819,6 +856,7 @@ struct GlobalAuthWindow {
     started: Instant,
     failures: u32,
     logged: bool,
+    blocked_until: Option<Instant>,
 }
 
 struct GlobalWindow {
@@ -1711,6 +1749,8 @@ mod tests {
                 enabled: false,
                 window: Duration::from_secs(60),
                 min_failures: 2,
+                action: BehaviorAction::Log,
+                ban: Duration::from_secs(60),
             },
         }
     }
@@ -1856,6 +1896,40 @@ mod tests {
         let flag = second.global.expect("global auth flag");
         assert_eq!(flag.failures, 2);
         assert!(second.source.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn global_auth_block_applies_to_auth_paths_and_expires() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.enumeration.enabled = false;
+        behavior.auth.enabled = false;
+        behavior.global_auth.enabled = true;
+        behavior.global_auth.min_failures = 2;
+        behavior.global_auth.action = BehaviorAction::Block;
+        behavior.global_auth.ban = Duration::from_secs(5);
+        config.behavior = behavior;
+        let state = ProtectionState::new();
+
+        state.observe_response(ip("10.0.0.1"), "/login", StatusCode::UNAUTHORIZED, &config);
+        state.observe_response(ip("10.0.0.2"), "/login", StatusCode::UNAUTHORIZED, &config);
+        assert!(
+            state
+                .global_auth_block(ip("10.0.0.3"), "/login", &config)
+                .is_some()
+        );
+        assert!(
+            state
+                .global_auth_block(ip("10.0.0.3"), "/health", &config)
+                .is_none()
+        );
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(
+            state
+                .global_auth_block(ip("10.0.0.3"), "/login", &config)
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]

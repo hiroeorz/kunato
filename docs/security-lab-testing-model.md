@@ -127,20 +127,22 @@ origin proves receipt, method, target, body hash, and nonce.
 
 ### Common and recent attack surfaces
 
-The `common` suite adds 43 reviewed cases for classes the replay and mutation
+The `common` suite adds 44 reviewed cases for classes the replay and mutation
 corpora did not cover: SSTI, NoSQL, LDAP, XPath, PHP/Java/Python/Ruby
 deserialization, CRLF, SSRF, XXE, JWT header attacks, and API behaviours
 (mass assignment, OAuth `redirect_uri`, BOLA, HPP, duplicate JSON keys, GraphQL
-introspection). Each case has a direct origin control; 24 attacks are blocked,
-12 benign cases pass, and 7 discovery cases are observed at the origin.
+introspection). Each case has a direct origin control; 26 attacks are blocked,
+13 benign cases pass, and 5 discovery cases are observed at the origin. The
+`parameter-pollution` rules block duplicate privilege and redirect fields.
 
-The `recent` suite adds 20 cases for 2025-2026 CVE and AI-era traffic:
+The `recent` suite adds 21 cases for 2025-2026 CVE and AI-era traffic:
 React2Shell, Next.js middleware/RSC variants, PHP2Shell, the Rack multipart
 escape flood, GitLab repository file read, Jenkins script console, TeamCity
 agent protocol, MCP tool arguments, AI crawler and API-client user agents, and
-benign MCP/upload traffic. Ten attacks are blocked, six benign cases pass, and
-four discovery cases (prompt injection, cache deception, forwarded-host cache
-poisoning, registry catalog) are observed at the origin.
+benign MCP/upload traffic. Eleven attacks are blocked, seven benign cases pass,
+and three discovery cases (prompt injection, forwarded-host cache poisoning,
+registry catalog) are observed at the origin. The `cache-deception` rule blocks
+an authenticated request addressed as a static asset.
 
 The observed cases are deliberately not counted as blocked: the JWT
 algorithm-confusion, mass-assignment, OAuth redirect, BOLA, HPP, duplicate JSON,
@@ -162,10 +164,11 @@ unchanged. The current result is 4 prevented, 2 observed, and 2 benign passes.
 ### GraphQL complexity
 
 The `graphql` suite sends a 25-level selection, a 1001-alias document, and a
-cyclic fragment document. The engine rejects all three with `400` and no origin
-receipt; a normal query with variables reaches the origin. The result is 3
-prevented and 1 benign pass. GET, `application/graphql`, and introspection are
-observations: the first two reach the origin and introspection is logged by
+cyclic fragment document, plus a deep GET query and an `application/graphql`
+alias flood. The engine rejects all five with `400` and no origin receipt; a
+normal query with variables reaches the origin. The result is 5 prevented and 1
+benign pass. Shallow GET and `application/graphql` probes reach the origin as
+observations, and introspection is logged by
 `api-discovery.graphql-introspection`.
 
 ### SSRF and XXE canaries
@@ -173,10 +176,9 @@ observations: the first two reach the origin and introspection is logged by
 The `ssrf-xxe` suite uses a lab-only fixture on the back network with an
 in-process loopback sink and a per-attempt canary file. The direct control must
 fetch the sink, read the canary through `file://`, and expand an external entity
-to an internal URL; the protected run must not. The result is 3 prevented and 2
-benign passes. An internal DNS-name target (`http://vuln:8080/safe`) reaches the
-origin and is recorded as an observation: the bundled SSRF rules match literal
-private addresses, not arbitrary internal names.
+to an internal URL; the protected run must not. The result is 4 prevented and 2
+benign passes. The single-label host rule (`ssrf.single-label-host`) blocks the
+internal DNS-name target `http://vuln:8080/safe`.
 
 ### Credential stuffing and password spraying
 
@@ -184,8 +186,25 @@ The `credential-stuffing` suite sends 12 form logins for distinct users with the
 same password from one source. The direct control reaches the origin 12 times.
 With protection enabled, `login-throttle` allows 10 and blocks the last two with
 `403` and `rate_limited` events; the normal client stays healthy. The result is
-10 allowed and 2 throttled. This is per-source behavior; distributed sources and
-the global authentication-failure log remain observations.
+10 allowed and 2 throttled. The separate `global-auth` suite exercises the
+opt-in signed global block for failures spread across sources.
+
+### JWT algorithm policy
+
+The `jwt` suite uses `rules-jwt.yaml` with
+`limits.jwt.allowed_algorithms: [RS256]`. A bearer token with `alg: HS256` is
+rejected with `403` before rule evaluation; an RS256 token and an opaque bearer
+token reach the origin. The result is 1 prevented and 2 benign passes. This is
+an explicit local policy, not a generic algorithm-confusion signature.
+
+### Global authentication abuse
+
+The `global-auth` suite uses a protection profile with
+`behavior.global_auth.action: BLOCK`, a six-failure window, and a ten-second
+ban. Six `401` responses from two independent front sources cross the threshold;
+the next auth request from a fresh source gets `429` with no origin receipt and
+the mitigation log. The normal client stays at `200`. The result is 2 passed and
+1 prevented.
 
 ### Agentic TTP chain
 
@@ -377,25 +396,26 @@ and forced-kill behavior are not exercised.
   with the optional, observation-only `crs` comparison; individual suites can
   also be run separately. CI runs only the lab observation unit tests and the
   shellcheck wrappers.
-- The latest full `all` run, `20261026T234106-e1fadf91`, passed 26 sandbox
+- The latest full `all` run, `20261027T002423-8dfa2d37`, passed 28 sandbox
   suites: replay, benign, mutations, protocol, common, recent, response,
-  graphql, ssrf-xxe, credential-stuffing, agentic, slow, availability,
-  connect, h2, h3, backpressure, ban, websocket, load, restart, goTestWAF,
-  sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3000 requests,
-  p95 51.5 ms, p99 54.4 ms, 100% success, normal/recovery `200`, RSS 21.9 MiB
-  of 256 MiB, no restart, and matching metrics. The restart suite recorded exit
-  code 0, a 607 ms shutdown, 501 requests, and a 97.8% check rate. The
-  credential-stuffing suite allowed 10 of 12 logins and blocked 2 with
-  `rate_limited` events. The SSRF/XXE canaries blocked the loopback sink,
-  `file://`, and external-entity shapes, while the internal DNS-name target was
-  observed reaching the fixture. The response suite blocked the four response
-  rules and left the two LOG-only leaks observable. The GraphQL suite rejected
-  the deep, alias-flood, and cyclic documents. The h2 suite passed the bounded
-  server-reset pressure variant. The agentic suite prevented all four cases,
-  sqlmap extracted no protected canary, Nuclei and ffuf retained their
-  controls, and the authenticated ZAP baseline completed. The earlier
-  2026-10-25 full run and the separate surface runs remain in the retained
-  evidence directories.
+  graphql, jwt, ssrf-xxe, credential-stuffing, global-auth, agentic, slow,
+  availability, connect, h2, h3, backpressure, ban, websocket, load, restart,
+  goTestWAF, sqlmap, Nuclei, ffuf, and ZAP. The mixed load recorded 3001
+  requests, p95 49.7 ms, p99 53.1 ms, 100% success, normal/recovery `200`, RSS
+  28.2 MiB of 256 MiB, no restart, and matching metrics. The restart suite
+  recorded exit code 0, a 579 ms shutdown, 501 requests, and a 98.0% check rate.
+  The credential-stuffing suite allowed 10 of 12 logins and blocked 2 with
+  `rate_limited` events. The global-auth suite counted six failures from two
+  front sources and blocked the next auth request with `429`. The SSRF/XXE
+  canaries blocked the loopback sink, `file://`, the single-label host, and the
+  external entity. The response suite blocked the four response rules and left
+  the two LOG-only leaks observable. The GraphQL suite rejected the deep,
+  alias-flood, cyclic, deep-GET, and `application/graphql` documents. The h2
+  suite passed the bounded server-reset pressure variant. The agentic suite
+  prevented all four cases, sqlmap extracted no protected canary, Nuclei and
+  ffuf retained their controls, and the authenticated ZAP baseline completed.
+  The earlier 2026-10-25 and 2026-10-26 runs remain in the retained evidence
+  directories.
 - Evidence stays under `target/security-lab/<run-id>/`: the per-phase probes,
   origin and Kunato logs, tool reports, `report.md`, and `report.json`.
 - The sandbox suite list, commands, and limits are documented in
@@ -411,14 +431,15 @@ current suites.
 
 ### Attack and engine coverage
 
-- The tracker lists HPP, Content-Type spoofing, API version/schema abuse,
+- The tracker lists Content-Type spoofing, API version/schema abuse,
   session-ID anomalies, business-logic classes (IDOR, coupon/carding, scalping),
-  and rule-bypass payloads as absent; JWT tampering and algorithm confusion are
-  partial. HTTP request smuggling, desync, response splitting, upload
+  and rule-bypass payloads as absent; HPP, cache deception, JWT tampering and
+  algorithm confusion, and distributed authentication abuse are partial. HTTP request smuggling, desync, response splitting, upload
   inspection, and GraphQL abuse are partial. The common/recent suites now
   exercise SSTI, NoSQL, LDAP, XPath, deserialization, CRLF, JWT header attacks,
-  response leaks, GraphQL depth/field limits, SSRF/XXE canaries, and per-source
-  login throttling, but do not close the absent classes above.
+  response leaks, GraphQL depth/field limits, JWT algorithm policy, SSRF/XXE
+  canaries, per-source login throttling, and a two-source global auth block, but
+  do not close the absent classes above.
 - The WebSocket suite proves the handshake, PING/PONG, fragmented echo, close
   handshake, client-to-server payload block, benign payload echo, and
   server-to-client push block with a benign push delivered. Compressed
@@ -462,10 +483,10 @@ current suites.
   request, block, rate-limit, overload, and upstream-timeout counters. The h2
   suite covers Rapid Reset, CONTINUATION, HPACK, and a reset-pressure variant,
   but SETTINGS floods, GOAWAY/priority abuse, and h2c remain untested.
-  Rate-limit window recovery, longer ban windows, and distributed sources
-  (impossible in one lab) remain untested; the credential-stuffing suite uses
-  one source. OOM and forced-kill behavior under pressure are not part of the
-  passing suites.
+  Rate-limit window recovery, longer ban windows, and true distributed sources
+  remain untested; the global-auth suite uses two front sources, and the
+  credential-stuffing suite uses one. OOM and forced-kill behavior under
+  pressure are not part of the passing suites.
 
 ### Workflows and false positives
 

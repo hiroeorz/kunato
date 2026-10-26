@@ -1096,6 +1096,27 @@ subscription transported over a WebSocket tunnel sends its operations in frames
 after the `101` handshake; those frames are matched by body and `response_body`
 rules but are not parsed for GraphQL depth or complexity.
 
+### JWT algorithm policy
+
+An application-specific JWT policy can pin the accepted header algorithms. It
+is disabled by default because the WAF cannot know which algorithm an upstream
+expects:
+
+```yaml
+limits:
+  jwt:
+    enabled: true
+    allowed_algorithms: [RS256]
+```
+
+When enabled, `Authorization: Bearer` tokens and JWT-shaped cookie values whose
+header `alg` is not in the list are rejected with `403` before rule evaluation.
+Opaque session tokens and malformed JWTs are ignored, so the policy is not a
+general token validator. The check is part of `limits` and therefore remains
+active with `--disable-protection`. Algorithm names are compared
+case-insensitively after normalization; each entry is 1-32 ASCII letters,
+digits, `-`, or `_`, and at most 16 entries are accepted.
+
 ### Response headers
 
 `response_headers` rewrites the headers of every response Kunato sends — upstream
@@ -1229,6 +1250,8 @@ sudo kunato log --attack cve-2025 --format json | jq .
 | `deserialization` | `ruby-deserialization`, `python-deserialization`, `php-deserialization`, `java-deserialization` |
 | `prototype-pollution` (`prototype`) | `prototype-pollution` |
 | `open-redirect` (`redirect`) | `open-redirect` |
+| `parameter-pollution` (`hpp`) | `parameter-pollution` |
+| `cache-deception` (`cache`) | `cache-deception` |
 | `config-injection` (`config`) | `config-injection` |
 | `jwt` | `jwt` |
 | `malicious-upload` (`upload`) | `malicious-upload` |
@@ -1496,6 +1519,8 @@ protection:
       enabled: true
       window: 60s
       min_failures: 100
+      action: BLOCK
+      ban: 60s
 ```
 
 The per-IP limiter uses a token bucket (`requests_per_second` refill rate, `burst`
@@ -1503,6 +1528,12 @@ capacity). Exceeding it returns `429 Too Many Requests` with a `Retry-After`
 header; exceeding the global rate or connection budget returns `503 Service
 Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
 to `max_duration`. Addresses in `allowlist` bypass all protection limits.
+
+`global_auth` aggregates authentication failures across sources. With the
+default `action: LOG` it only records the threshold; with `action: BLOCK` it
+blocks subsequent requests on the configured `auth.paths` for `ban`, even when
+the new request comes from another source. The block is not a per-source ban and
+does not identify individual stolen credentials.
 
 Admission consumes one token. After the body has been read and decoded, Kunato
 charges additional tokens for the inspection work: one token per 256 KiB of

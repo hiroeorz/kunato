@@ -136,7 +136,8 @@ pub struct LogArgs {
     ///   ldap-injection (ldap), xpath-injection (xpath),
     ///   jdbc-injection (jdbc), command-injection (command, rce), ssti,
     ///   config-injection (config), xss, css-injection (css),
-    ///   open-redirect (redirect).
+    ///   open-redirect (redirect), parameter-pollution (hpp),
+    ///   cache-deception (cache).
     ///
     /// Server-side and file classes:
     ///   path-traversal (traversal, lfi),
