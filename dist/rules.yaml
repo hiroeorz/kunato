@@ -1411,7 +1411,9 @@ categories:
     response: { status: 404, body: Not Found }
     rules:
       - name: credentials-and-config
-        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git(/|$)|\.svn(/|$)|\.hg(/|$)|\.DS_Store|\.aws(/|$)|\.ssh(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|settings\.py|local_settings\.py|composer\.(json|lock)|wp-config\.php)', in: [path] }
+        # Windows-style trailing dots and spaces are stripped by the origin's
+        # file system, so `/.git./HEAD` and `/.git%20/HEAD` still reach `.git`.
+        match: { regex: '(?i)(^|/)(\.env(\.|$)|\.git[.\s]*(/|$)|\.svn[.\s]*(/|$)|\.hg[.\s]*(/|$)|\.DS_Store|\.aws[.\s]*(/|$)|\.ssh[.\s]*(/|$)|\.htpasswd|\.htaccess|id_rsa|credentials([./]|$)|secrets?\.(ya?ml|json|toml)|master\.key|database\.yml|storage\.yml|settings\.py|local_settings\.py|composer\.(json|lock)|wp-config\.php)', in: [path] }
       - name: backup-and-dump-files
         match: { regex: '(?i)\.(bak|backup|old|orig|save|swp|swo|sql)(\.|$)', in: [path] }
       # phpinfo() pages left in the web root leak configuration and paths;

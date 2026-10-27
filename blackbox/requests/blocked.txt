@@ -552,8 +552,13 @@ GET /.env.backup
 GET /.git/config
 GET /.git/HEAD
 GET /.git/index
+GET /.git./HEAD
+GET /.git%20/HEAD
+GET /.git%2e/config
 GET /.svn/entries
+GET /.svn./entries
 GET /.hg/store
+GET /.hg.%20/HEAD
 GET /.DS_Store
 GET /.aws/credentials
 GET /.ssh/id_rsa

@@ -4984,6 +4984,53 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
     }
 
     #[test]
+    fn example_configuration_blocks_vcs_metadata_with_trailing_dots_and_spaces() {
+        use crate::request_view::RequestView;
+
+        let config =
+            parse(include_str!("../../rules.example.yaml")).expect("example configuration");
+        let category = config
+            .categories
+            .iter()
+            .find(|category| category.name == "sensitive-files")
+            .expect("sensitive-files category");
+        let rule = category
+            .rules
+            .iter()
+            .find(|rule| rule.name == "credentials-and-config")
+            .expect("credentials-and-config rule");
+        let headers = HeaderMap::new();
+        let check = |path: &str, expected: bool| {
+            let uri: Uri = path.parse().expect("valid URI");
+            let view = RequestView::new(
+                &Method::GET,
+                &uri,
+                &headers,
+                b"",
+                "127.0.0.1".parse().expect("valid IP"),
+            );
+            assert_eq!(rule.matcher.matches(&view), expected, "{path}");
+        };
+
+        for path in [
+            "/.git/HEAD",
+            "/.git./HEAD",
+            "/.git%20/HEAD",
+            "/.git%2e/HEAD",
+            "/.git.../HEAD",
+            "/nested/.svn./entries",
+            "/.hg.%20/HEAD",
+            "/.aws./config",
+            "/.ssh./config",
+        ] {
+            check(path, true);
+        }
+        for path in ["/.gitignore", "/.github/workflows", "/.gitlab-ci.yml"] {
+            check(path, false);
+        }
+    }
+
+    #[test]
     fn parses_response_phase_rules() {
         let config = parse_with(
             BASE,

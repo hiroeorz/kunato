@@ -624,3 +624,7 @@ GET /fetch?url=https%3A%2F%2Fexample.com%2Favatar.png
 GET /assets/logo.png header="Cookie: theme=dark"
 POST /api/users header="Content-Type: application/x-www-form-urlencoded" body="name=Alice&role=user&is_admin=false"
 POST /v1/chat/completions header="Content-Type: application/json" body="{\"messages\":[{\"role\":\"user\",\"content\":\"Summarize this article\"}]}"
+# --- VCS metadata near-misses: look-alike names stay reachable ---
+GET /.gitignore
+GET /.github/workflows/ci.yml
+GET /.gitlab-ci.yml
