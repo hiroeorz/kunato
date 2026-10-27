@@ -497,9 +497,10 @@ Protection is automatic and independent of the rule set. It consists of:
    `404`s hit many distinct non-static paths, and for authentication abuse when
    many `401`/`403`s hit login/token/session/MFA/SSO paths. A separate global
    window sums authentication failures across sources for distributed attempts.
-   The per-source signals default to `LOG` and can be raised to `BLOCK`; a
-   `BLOCK` flag applies a normal ban after the current response. The global
-   signal is `LOG` only. State is inline in the tracked-source entry, and no
+   The compiled defaults for the per-source signals are `LOG`;
+   `rules.example.yaml` enables enumeration `BLOCK` while leaving authentication
+   `LOG`. A `BLOCK` flag applies a normal ban after the current response. The
+   global signal is `LOG` only. State is inline in the tracked-source entry, and no
    path contents are stored. See
    [the design and operations notes](behavioral-detection.md) for the signal
    definitions, thresholds, and limitations.
@@ -542,7 +543,7 @@ protection:
     min_requests: 30
     enumeration:
       enabled: true
-      action: LOG
+      action: BLOCK
       not_found_ratio: 0.5
       distinct_paths: 40
     auth:

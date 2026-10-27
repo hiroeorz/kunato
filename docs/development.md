@@ -1305,7 +1305,7 @@ sudo kunato log --attack cve-2025 --format json | jq .
 | `brute-force` (`login-throttle`) | `login-throttle` |
 | `discovery` | `api-discovery`, `admin-interfaces` |
 | `exposure` | `rails-debug-endpoints`, `django-debug-endpoints`, `nextjs-dev-endpoints`, `laravel-debug-endpoints`, `vite-dev-endpoints`, `spring-actuator`, `ai-service-management`, `ci-cd-servers` |
-| `info-disclosure` (`leaks`) | `sensitive-files`, `response-leaks` |
+| `info-disclosure` (`leaks`) | `sensitive-files`, `response-leaks`, `directory-index` |
 | `bypass` | `framework-routing-bypass` |
 | `exploit` | `known-exploits` |
 | `cve`, `cve-YYYY`, `cve-YYYY-MM` | every `cve-*` category |
@@ -1553,7 +1553,7 @@ protection:
     min_requests: 30
     enumeration:
       enabled: true
-      action: LOG
+      action: BLOCK
       not_found_ratio: 0.5
       distinct_paths: 40
     auth:
@@ -1616,9 +1616,10 @@ bans interfering.
 Kunato also keeps a per-source, tumbling behavior window over upstream response
 statuses. It runs after the upstream response and before response-phase rules,
 so it uses the status the application actually returned and never observes
-Kunato's own block or error responses. The default is observation only: flags
-are logged and counted, and no traffic is blocked until a signal's `action` is
-raised to `BLOCK`.
+Kunato's own block or error responses. The engine defaults to observation only:
+flags are logged and counted, and no traffic is blocked until a signal's
+`action` is raised to `BLOCK`. The bundled `rules.example.yaml` enables
+enumeration `BLOCK` and leaves authentication signals in `LOG`.
 
 - **Enumeration** counts `404` responses on non-static paths and estimates the
   number of distinct paths in the window. A source is flagged when it meets all

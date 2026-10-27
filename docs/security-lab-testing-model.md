@@ -155,13 +155,13 @@ signature.
 ### Response-phase leaks
 
 The `response` suite serves a private-key body, a MySQL syntax error, a Django
-DEBUG page, a long PHPSESSID cookie, a login-enumeration error, a Python stack
-trace, a versioned `Server` header, and benign 404/500 responses from the
-recording origin. The direct control must receive each leak. The protected run
-must produce `response blocked` events for the five BLOCK rules and must not
-forward the marker; the LOG-only stack trace and server version are observed,
-and the benign bodies must pass unchanged. The current result is 5 prevented,
-2 observed, and 2 benign passes.
+DEBUG page, a long PHPSESSID cookie, a login-enumeration error, a default HTML
+directory index, a Python stack trace, a versioned `Server` header, and benign
+404/500/HTML responses from the recording origin. The direct control must
+receive each leak. The protected run must produce `response blocked` events for
+the six BLOCK rules and must not forward the marker; the LOG-only stack trace
+and server version are observed, and the benign bodies must pass unchanged. The
+current result is 6 prevented, 2 observed, and 3 benign passes.
 
 ### GraphQL complexity
 
@@ -429,7 +429,7 @@ and forced-kill behavior are not exercised.
   paths. The hardening suite blocked configured internal hosts, generic HPP,
   duplicate JSON, cache deception, and an external redirect. The SSRF/XXE
   canaries blocked the loopback sink, `file://`, the single-label host, and the
-  external entity. The response suite blocked the five response rules and left
+  external entity. The response suite blocked the six response rules and left
   the two LOG-only leaks observable. The GraphQL suite rejected deep, alias,
   cyclic, GET, `application/graphql`, and introspection documents. The JWT
   suite rejected disallowed, expired, wrong-issuer, wrong-audience, and

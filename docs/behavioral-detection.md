@@ -237,6 +237,10 @@ Defaults are deliberately conservative:
 | `global_auth.action` | `LOG` | Blocking is opt-in after tuning |
 | `global_auth.ban` | `60s` | Duration of the global auth-path block when action is `BLOCK` |
 
+These are the engine defaults when a configuration omits the signal.
+`rules.example.yaml` overrides `enumeration.action` to `BLOCK`; review
+`client_ip` and `protection.allowlist` before using that policy on shared egress.
+
 A slow prober that stays below every threshold is not detected. That is an
 accepted limitation; rate limits and the rule set remain the outer controls.
 
@@ -479,8 +483,8 @@ and no migration.
   responses out.
 - `src/metrics.rs` — add the counters from Section 8 and their render/help text.
 - `src/cli.rs` — render a short commented behavior block in `kunato init`.
-- `rules.example.yaml` — add the block with per-signal `action: LOG` and tuning
-  comments.
+- `rules.example.yaml` — add the block with enumeration `BLOCK`, auth `LOG`,
+  and tuning comments.
 - `tests/proxy.rs` — add enumeration/auth/block/disabled integration tests.
 - `docs/development.md`, `docs/DESIGN.md`, `README.md` — document the feature and
   the state bound.
@@ -870,8 +874,8 @@ Phase 1 updated these files:
   false-positive guidance.
 - `docs/DESIGN.md` Section 7: add behavioral detection as item 8, describe the
   state bound and the observation point, and include the config sketch.
-- `rules.example.yaml`: add the block with per-signal `action: LOG` and
-  comments explaining when to raise it to `BLOCK`.
+- `rules.example.yaml`: add the block with enumeration `BLOCK`, auth `LOG`, and
+  comments explaining when to raise or lower the signals.
 - `src/cli.rs` (`kunato init`): render a short commented behavior block so new
   installs can discover it.
 - `README.md` feature list: mention per-source probing and authentication-abuse
@@ -897,12 +901,15 @@ Phase 1 updated these files:
 ## 12. Rollout
 
 1. **Phase 1 (implemented).** Per-source enumeration and auth observation,
-   global auth observation, metrics, logs, tests, docs. Default `enabled: true`,
-   per-signal `action: LOG`. No traffic is blocked.
-2. **Phase 2 (tuning).** Run on a representative deployment, inspect
-   `kunato_behavior_*` counters and logs, and adjust defaults. Consider raising
-   `enumeration.action` to `BLOCK` only after the false-positive rate is known;
-   keep auth `LOG` unless the deployment has a controlled login surface.
+   global auth observation, metrics, logs, tests, docs. Engine defaults are
+   `enabled: true` with per-signal `action: LOG`, so configurations that omit
+   the signal do not block traffic.
+2. **Phase 2 (tuning).** `rules.example.yaml` enables
+   `enumeration.action: BLOCK` as a starting policy. Inspect
+   `kunato_behavior_*` counters and logs, configure `client_ip` and
+   `protection.allowlist` for shared egress, and tune the thresholds against
+   real traffic. Keep auth `LOG` unless the deployment has a controlled login
+   surface.
 3. **Phase 3 (partial).** The opt-in global auth `BLOCK` and `200`-only
    `scraping` signal are available. A challenge, sliding window, configurable
    static exclusions, and account-creation failure bursts remain future work

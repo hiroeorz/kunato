@@ -219,9 +219,25 @@ class Recorder(BaseHTTPRequestHandler):
                 401,
                 b"Invalid username: user not found",
                 {}),
+            "/leak/directory-index/": (
+                200,
+                b"<!DOCTYPE html>\n<html>\n<head>"
+                b"<title>Index of /leak/directory-index/</title></head>\n"
+                b"<body>\n<h1>Index of /leak/directory-index/</h1>\n"
+                b"<ul><li><a href=\"../\">../</a></li></ul>\n</body>\n</html>\n",
+                {}),
+            "/leak/benign-html/": (
+                200,
+                b"<!DOCTYPE html>\n<html>\n<head>"
+                b"<title>Dashboard</title></head>\n"
+                b"<body>\n<h1>Dashboard</h1>\n</body>\n</html>\n",
+                {}),
             "/leak/benign-404": (404, b'{"error":"not found"}', {}),
             "/leak/benign-500": (500, b'{"error":"internal"}', {}),
         }.get(path, (404, b'{"error":"unknown leak fixture"}', {}))
+        content_type = ("text/html; charset=utf-8"
+                        if path in {"/leak/directory-index/", "/leak/benign-html/"}
+                        else "text/plain; charset=utf-8")
         self.emit("completed", case_id=case_id, method=self.command,
                   target=self.path[:8192], status=status, body_bytes=len(body),
                   user_agent=self.headers.get("User-Agent", "")[:512])
@@ -230,7 +246,7 @@ class Recorder(BaseHTTPRequestHandler):
         self.close_connection = True
         try:
             self.send_response(status)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("X-Kunato-Lab-Origin", os.environ["LAB_NONCE"])
             for name, value in headers.items():
                 self.send_header(name, value)

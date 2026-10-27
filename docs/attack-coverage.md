@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-27; the managed set carried 516 rules then.
+2026-10-27; the managed set carried 517 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -118,7 +118,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | API Parameter Tampering | ❌ | Business-logic dependent |
 | Mass Assignment | 🔶 | `mass-assignment.privileged-field-assignment` blocks high-risk assignments such as `is_admin=true` and `permission=root` in query/form/JSON bodies. `role=admin` alone is not blocked because legitimate admin APIs use it; nested authorization logic remains application-side. |
 | Excessive Data Exposure Requests | 🔶 | Response-phase inspection can express it, but no bundled rules (only private keys, SQL errors, ...) |
-| API Endpoint Enumeration | 🔶 | Scanner UA blocking, rate limits, and behavioral `404`/distinct-path flags (LOG default; `enumeration.action: BLOCK` opt-in) |
+| API Endpoint Enumeration | 🔶 | Scanner UA blocking, rate limits, and behavioral `404`/distinct-path flags; the example config enables `enumeration.action: BLOCK` (engine default is LOG) |
 | API Version Abuse | ❌ | No rules |
 | Cache Deception | 🔶 | `cache-deception.authenticated-static-suffix` and opt-in `limits.hardening.cache_deception` (configurable suffixes/cookie names) block authenticated requests addressed as static assets; cache-key normalization outside the suffix/cookie heuristic remains deployment-specific |
 | Content-Type Spoofing | ❌ | No rules |
@@ -267,7 +267,8 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | Vulnerability Scanner | ✅ | 20+ tools blocked by User-Agent (sqlmap, nikto, nmap, nuclei, Acunetix, ...) |
-| Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, rate limits, and behavioral `404`/distinct-path flags (LOG default; `enumeration.action: BLOCK` opt-in); a slow prober below every threshold still passes |
+| Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, rate limits, and behavioral `404`/distinct-path flags; the example config enables `enumeration.action: BLOCK` (engine default is LOG), but a slow prober below every threshold still passes |
+| Directory Index Browsing | 🔶 | `directory-index.directory-index-html` blocks default Apache/nginx HTML autoindex pages with a 403 in the response phase; nginx JSON/XML autoindex formats and custom Apache templates are not covered, and autoindex should still be disabled upstream |
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
 | `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`) |
 | phpinfo-style Information Endpoints | ✅ | `sensitive-files.phpinfo-endpoints` 404s `/phpinfo`, `/phpinfo.php`, `/php_info.php`, `/phpversion.php`, and `/.phpinfo.php`; generic `info.php`/`test.php` names are intentionally left alone to avoid breaking application files |
@@ -280,7 +281,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Malicious Bot | 🔶 | User-Agent signatures plus behavioral probing and authentication-abuse flags (LOG default; per-signal `BLOCK` opt-in). No JS challenge, and `200`-only scraping is not detected |
+| Malicious Bot | 🔶 | User-Agent signatures plus behavioral probing and authentication-abuse flags; the example config blocks enumeration and leaves authentication signals in LOG (engine default is LOG for every signal). No JS challenge, and `200`-only scraping is not detected |
 | Scraping / Crawling Abuse | 🔶 | SEO/AI crawlers are logged; opt-in `behavior.scraping` flags a source walking distinct `200` non-static paths and can ban it. A slow, multi-source scraper below the threshold still passes. |
 | Account Creation Bots / Login Bots | 🔶 | Rate limits and bans only |
 | Inventory Hoarding / Ticket Scalping | ❌ | Not covered |
@@ -403,16 +404,16 @@ signature, and the suite does not
 prove exploit execution or prevention.
 
 The response suite exercised the response phase against the recording origin:
-the private-key, SQL-error, Django-debug, long-PHPSESSID, and login-enumeration
-rules blocked with `response blocked` events (5 prevented), the stack trace and
-server-version rules logged and forwarded (2 observed), and benign 404/500
-bodies passed unchanged (2 passed). The GraphQL suite rejected a 25-level
-selection, a 1001-alias document, a fragment cycle, a deep GET query, an
-`application/graphql` alias flood, and introspection locally with `400`/`403`
-and no origin receipt (6 prevented); a normal query passed, while shallow GET
-and `application/graphql` probes reached the origin (2 observed). The SSRF/XXE
-canary suite proved a direct control can reach the loopback sink, read a
-`file://` canary, and expand an external entity, while the protected requests
+the private-key, SQL-error, Django-debug, long-PHPSESSID, login-enumeration, and
+directory-index rules blocked with `response blocked` events (6 prevented), the
+stack trace and server-version rules logged and forwarded (2 observed), and
+benign 404/500/HTML bodies passed unchanged (3 passed). The GraphQL suite
+rejected a 25-level selection, a 1001-alias document, a fragment cycle, a deep
+GET query, an `application/graphql` alias flood, and introspection locally with
+`400`/`403` and no origin receipt (6 prevented); a normal query passed, while
+shallow GET and `application/graphql` probes reached the origin (2 observed).
+The SSRF/XXE canary suite proved a direct control can reach the loopback sink,
+read a `file://` canary, and expand an external entity, while the protected requests
 were blocked by `ssrf.internal-addresses`, `ssrf.file-scheme`,
 `ssrf.single-label-host`, and `xxe.doctype-and-entity` (4 prevented, 2 benign
 passed). The JWT policy suite allowed a valid RS256 token and an opaque token

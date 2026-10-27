@@ -1636,3 +1636,20 @@ categories:
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
 
+  # Default HTML directory indexes expose file names. This blocks the common
+  # Apache/nginx `Index of` and Python/Tomcat `Directory listing` pages with a
+  # 403. Custom templates and nginx JSON/XML autoindex formats are not covered;
+  # disabling autoindex on the upstream server remains the primary defense.
+  - name: directory-index
+    phase: response
+    action: BLOCK
+    rules:
+      - name: directory-index-html
+        match:
+          status: 200
+          path: '/$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(<title>|<h1>)[^<]{0,200}(index of|directory listing)'
+          in: [response_body]
+

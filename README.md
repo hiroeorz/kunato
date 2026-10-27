@@ -63,8 +63,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
   server.
 - **Behavioral abuse detection** — Per-source windows over upstream responses
   flag iterative `404` probing and authentication-failure bursts, and a global
-  window records distributed authentication failures. Observation is the
-  default; `BLOCK` is opt-in per signal.
+  window records distributed authentication failures. The example configuration
+  blocks enumeration and leaves authentication signals in observation mode;
+  `BLOCK` remains configurable per signal.
 - **Trusted proxy support** — Explicit proxy IP/CIDR trust resolves client
   identities behind CDNs and load balancers for rules, request limits, and
   behavioral bans. See the [deployment checklist](docs/behavioral-readiness.md).

@@ -39,6 +39,23 @@
     "rule": "php2shell-session-cookie-leak"
   },
   {
+    "id": "response-directory-index",
+    "expect": "block",
+    "method": "GET",
+    "target": "/leak/directory-index/",
+    "status": 200,
+    "body_contains": "<title>Index of /leak/directory-index/</title>",
+    "rule": "directory-index-html"
+  },
+  {
+    "id": "response-benign-html",
+    "expect": "allow",
+    "method": "GET",
+    "target": "/leak/benign-html/",
+    "status": 200,
+    "body_contains": "Dashboard"
+  },
+  {
     "id": "response-login-enumeration",
     "expect": "block",
     "method": "GET",

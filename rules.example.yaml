@@ -1660,6 +1660,23 @@ categories:
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
 
+  # Default HTML directory indexes expose file names. This blocks the common
+  # Apache/nginx `Index of` and Python/Tomcat `Directory listing` pages with a
+  # 403. Custom templates and nginx JSON/XML autoindex formats are not covered;
+  # disabling autoindex on the upstream server remains the primary defense.
+  - name: directory-index
+    phase: response
+    action: BLOCK
+    rules:
+      - name: directory-index-html
+        match:
+          status: 200
+          path: '/$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(<title>|<h1>)[^<]{0,200}(index of|directory listing)'
+          in: [response_body]
+
 timeouts:
   header_read: 10s
   body_read: 30s
@@ -1784,16 +1801,16 @@ protection:
     window: 10s
     duration: 60s
     max_duration: 1h
-  # Behavioral detection observes upstream responses and flags sources that
-  # probe many missing paths or fail authentication repeatedly. It starts in
-  # LOG mode; raise a signal's action to BLOCK after reviewing the logs.
+  # Behavioral detection observes upstream responses. Enumeration is blocked
+  # because scanners probe many distinct missing paths; authentication failure
+  # signals stay in LOG mode until their false-positive rate is known.
   behavior:
     enabled: true
     window: 60s
     min_requests: 30
     enumeration:
       enabled: true
-      action: LOG
+      action: BLOCK
       not_found_ratio: 0.5
       distinct_paths: 40
     auth:

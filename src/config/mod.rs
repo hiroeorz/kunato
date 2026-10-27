@@ -4976,6 +4976,11 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
             .expect("example configuration must stay valid");
         assert!(!config.categories.is_empty());
         assert!(config.admin.enabled);
+        assert_eq!(
+            config.protection.behavior.enumeration.action,
+            BehaviorAction::Block
+        );
+        assert_eq!(config.protection.behavior.auth.action, BehaviorAction::Log);
     }
 
     #[test]

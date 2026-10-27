@@ -307,14 +307,15 @@ triaged.
 
 `--sandbox-suite response` uses origin endpoints that return a private-key
 marker, a MySQL syntax error, a Django DEBUG page, a 420-byte PHPSESSID cookie,
-a login-enumeration error, a Python stack trace, a versioned `Server` header,
-and benign 404/500 responses. The direct control must receive each leak; the
-protected run must block the five BLOCK rules (`private-key-material`,
-`sql-error-message`, `django-debug-page`,
-`php2shell-session-cookie-leak`, and `login-enumeration-message`) with
-`response blocked` events, while the LOG-only stack trace and server version
-remain observations. The benign 404 and 500 bodies must pass through unchanged.
-The current result is 5 prevented, 2 observed, and 2 benign cases passed.
+a login-enumeration error, a default HTML directory index, a Python stack trace,
+a versioned `Server` header, and benign 404/500/HTML responses. The direct
+control must receive each leak; the protected run must block the six BLOCK rules
+(`private-key-material`, `sql-error-message`, `django-debug-page`,
+`php2shell-session-cookie-leak`, `login-enumeration-message`, and
+`directory-index-html`) with `response blocked` events, while the LOG-only stack
+trace and server version remain observations. The benign 404, 500, and HTML
+bodies must pass through unchanged. The current result is 6 prevented,
+2 observed, and 3 benign cases passed.
 
 ### GraphQL complexity
 

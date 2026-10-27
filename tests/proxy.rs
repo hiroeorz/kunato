@@ -274,6 +274,53 @@ async fn spawn_encoded_response_upstream(
     addr
 }
 
+async fn spawn_html_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    let (status, body) = match request.uri().path() {
+                        "/files/" => (
+                            StatusCode::OK,
+                            "<html><head><title>Index of /files/</title></head>\
+                             <body><h1>Index of /files/</h1></body></html>",
+                        ),
+                        "/dashboard/" => (
+                            StatusCode::OK,
+                            "<html><head><title>Dashboard</title></head>\
+                             <body><h1>Dashboard</h1></body></html>",
+                        ),
+                        _ => (
+                            StatusCode::NOT_FOUND,
+                            "<html><head><title>Not Found</title></head></html>",
+                        ),
+                    };
+                    let mut response =
+                        Response::new(Full::new(Bytes::from_static(body.as_bytes())));
+                    *response.status_mut() = status;
+                    response.headers_mut().insert(
+                        HeaderName::from_static("content-type"),
+                        HeaderValue::from_static("text/html; charset=utf-8"),
+                    );
+                    Ok::<_, Infallible>(response)
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_stalling_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -3139,6 +3186,40 @@ async fn gzip_response_body_is_rule_evaluated() {
 
     let (status, _) = send(running.addr, Method::GET, "/", "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn directory_index_response_is_blocked() {
+    let upstream = spawn_html_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: directory-index
+    phase: response
+    action: BLOCK
+    rules:
+      - name: directory-index-html
+        match:
+          status: 200
+          path: '/$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(<title>|<h1>)[^<]{{0,200}}(index of|directory listing)'
+          in: [response_body]
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/files/", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!body.contains("Index of"), "leaked directory index: {body}");
+
+    let (status, body) = send(running.addr, Method::GET, "/dashboard/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Dashboard"));
 
     running.stop().await;
 }
