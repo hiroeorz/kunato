@@ -1614,6 +1614,34 @@ categories:
       # Legitimate request IDs never use the connector's ___decode_addr_ marker.
       - name: vllm-x-request-id-ssrf
         match: { headers: { X-Request-Id: '(?i)___decode_addr_' } }
+      # CVE-2026-39808 (Fortinet FortiSandbox): the unauthenticated jid poll
+      # value starts a new pipe segment and redirects command output into the
+      # web root. Job IDs never begin with a pipe.
+      - name: fortisandbox-jid-command
+        match: { path: '(?i)^/fortisandbox/job-detail/tracer-behavior$', regex: '(?i)(?:^|[?&])jid=(?:%7c|\|)[^&\s]{0,300}', in: [query] }
+      # CVE-2026-41940 (cPanel & WHM): CRLF-poisoned session fields are smuggled
+      # through a Basic Authorization value; the base64 prefix decodes to
+      # "root:x\r\nsuccessful_internal_auth_with_timestamp=".
+      - name: cpanel-session-poison-basic
+        match: { headers: { Authorization: '(?i)^\s*Basic\s+cm9vdDp4DQpzdWNjZXNzZnVsX2ludGVybmFsX2F1dGhfd2l0aF90aW1lc3RhbXA9' } }
+      # CVE-2026-42208 (LiteLLM): the raw Bearer token is interpolated into the
+      # API-key lookup; a quote followed by a SQL operator or function is the
+      # published pre-authentication injection shape.
+      - name: litellm-bearer-sqli
+        match: { headers: { Authorization: '(?i)^\s*Bearer\s+\S*[''\x22]\s*(or|and|union|select|;|--|pg_sleep|sleep|benchmark)\b' } }
+      # CVE-2026-42271 (LiteLLM): the MCP preview endpoints spawn a stdio
+      # process from the submitted command. Legitimate previews use SSE URLs.
+      - name: litellm-mcp-stdio-exec
+        match: { path: '(?i)^/mcp-rest/test/(connection|tools/list)$', regex: '(?i)("transport"\s*:\s*"stdio"|"command"\s*:\s*"[^"]{0,96}"\s*,\s*"args")', in: [body] }
+      # CVE-2026-34197 (Apache ActiveMQ): the Jolokia exec operation adds a
+      # network connector whose VM transport loads a remote Spring XML context.
+      - name: activemq-jolokia-network-connector-rce
+        match: { path: '(?i)^/api/jolokia/', regex: '(?i)(addNetworkConnector|brokerConfig\s*=\s*(?:xbean:)?https?://)', in: [body, query] }
+      # CVE-2026-107081 (SLiMS): tableName and tableFields are interpolated as
+      # SQL identifiers, so a subquery, comment, or function call after the
+      # parameter name is never part of a real table identifier.
+      - name: slims-admin-identifier-sqli
+        match: { path: '(?i)^/admin/(AJAX_lookup_handler|AJAX_check_id|AJAX_vocabolary_control)\.php$', regex: '(?i)(tableName|tableFields)\s*=\s*[^&\s]*(\(|\bselect\b|\bfrom\b|extractvalue|sleep\s*\(|0x[0-9a-f]+)', in: [body] }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

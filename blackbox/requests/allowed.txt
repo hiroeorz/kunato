@@ -628,3 +628,21 @@ POST /v1/chat/completions header="Content-Type: application/json" body="{\"messa
 GET /.gitignore
 GET /.github/workflows/ci.yml
 GET /.gitlab-ci.yml
+
+# --- Near-misses for the 2026-10-27 KEV, SLiMS, traversal, and command
+#     signatures: the same endpoints and parameters with ordinary values must
+#     keep passing. ---
+GET /fortisandbox/job-detail/tracer-behavior?jid=20261027-0001
+GET / header="Authorization: Basic cm9vdDpzZWN1cmUtcGFzcw=="
+POST /v1/chat/completions header="Content-Type: application/json" header="Authorization: Bearer 'tis-the-season" body="{\"model\":\"m\",\"messages\":[]}"
+POST /mcp-rest/test/connection header="Content-Type: application/json" body="{\"transport\":\"sse\",\"url\":\"https://mcp.example.com/sse\"}"
+POST /mcp-rest/test/tools/list header="Content-Type: application/json" body="{\"transport\":\"sse\",\"url\":\"https://mcp.example.com/sse\"}"
+POST /api/jolokia/ header="Content-Type: application/json" body="{\"type\":\"read\",\"mbean\":\"org.apache.activemq:type=Broker,brokerName=localhost\",\"attribute\":\"BrokerVersion\"}"
+POST /admin/AJAX_lookup_handler.php header="Content-Type: application/x-www-form-urlencoded" body="tableName=biblio&tableFields=biblio_id,title"
+POST /admin/AJAX_check_id.php header="Content-Type: application/x-www-form-urlencoded" body="tableName=biblio&tableFields=biblio_id&id=1"
+GET /admin/modules/reporting/customs/dl_detail.php?reportView=true&fileID=42
+POST /admin/modules/serial_control/subscription.php header="Content-Type: application/x-www-form-urlencoded" body="itemAction=del&itemID%5B0%5D=42"
+POST /htdocs/web/diagnostic.php header="Content-Type: application/x-www-form-urlencoded" body="act=ping&dst=192.0.2.1"
+GET /scripts/logdownload.php?path=logs%2F2026-10-27.log
+GET /protocol.csp?opt=ovpn_file&type=del&file_id=vpn-profile.ovpn header="IP-FROM: 127.0.0.1"
+POST /api/3.0/mlflow/traces header="Content-Type: application/json" body="{\"trace_id\":\"tr-2026-10-27-0001\",\"experiment_id\":\"1\"}"
