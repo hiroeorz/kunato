@@ -321,6 +321,64 @@ async fn spawn_html_upstream() -> SocketAddr {
     addr
 }
 
+async fn spawn_default_page_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream address");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    let (status, body) = match request.uri().path() {
+                        "/" => (
+                            StatusCode::OK,
+                            "<html><head><title>Apache2 Ubuntu Default Page: It works</title></head>\
+                             <body><h1>It works!</h1></body></html>",
+                        ),
+                        "/index.nginx-debian.html" => (
+                            StatusCode::OK,
+                            "<html><head><title>Welcome to nginx!</title></head>\
+                             <body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web \
+                             server is successfully installed and working.</p></body></html>",
+                        ),
+                        "/iisstart.htm" => (
+                            StatusCode::OK,
+                            "<html><head><title>IIS Windows Server</title></head>\
+                             <body><h1>Internet Information Services</h1></body></html>",
+                        ),
+                        "/index.html" | "/dashboard" => (
+                            StatusCode::OK,
+                            "<html><head><title>Application</title></head>\
+                             <body><h1>Application</h1></body></html>",
+                        ),
+                        _ => (
+                            StatusCode::NOT_FOUND,
+                            "<html><head><title>Not Found</title></head></html>",
+                        ),
+                    };
+                    let mut response =
+                        Response::new(Full::new(Bytes::from_static(body.as_bytes())));
+                    *response.status_mut() = status;
+                    response.headers_mut().insert(
+                        HeaderName::from_static("content-type"),
+                        HeaderValue::from_static("text/html; charset=utf-8"),
+                    );
+                    Ok::<_, Infallible>(response)
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    addr
+}
+
 async fn spawn_stalling_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -3220,6 +3278,62 @@ categories:
     let (status, body) = send(running.addr, Method::GET, "/dashboard/", "").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Dashboard"));
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn default_pages_are_blocked_and_application_pages_pass() {
+    let upstream = spawn_default_page_upstream().await;
+    let yaml = format!(
+        r#"listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: default-pages
+    phase: response
+    action: BLOCK
+    rules:
+      - name: apache-default-page
+        match:
+          path: '(?i)^/(index\.html)?$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(Apache2 (Ubuntu|Debian) Default Page|Apache HTTP Server Test Page|Red Hat Enterprise Linux Test Page|<title>\s*It works!\s*</title>)'
+          in: [response_body]
+      - name: nginx-default-page
+        match:
+          path: '(?i)^/(index\.html|index\.nginx-debian\.html)?$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(<title>\s*Welcome to nginx!\s*</title>|If you see this page, the nginx web server is successfully installed)'
+          in: [response_body]
+      - name: iis-default-page
+        match:
+          path: '(?i)^/(iisstart\.htm)?$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)<title>\s*(IIS Windows( Server)?|Internet Information Services)\s*</title>'
+          in: [response_body]
+"#
+    );
+    let running = start_kunato(&yaml).await;
+
+    for path in ["/", "/index.nginx-debian.html", "/iisstart.htm"] {
+        let (status, body) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+        assert!(
+            !body.contains("It works")
+                && !body.contains("Welcome to nginx")
+                && !body.contains("IIS Windows"),
+            "{path} leaked the default page: {body}"
+        );
+    }
+
+    for path in ["/index.html", "/dashboard"] {
+        let (status, body) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(body.contains("Application"), "{path}: {body}");
+    }
 
     running.stop().await;
 }

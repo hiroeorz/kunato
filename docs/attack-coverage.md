@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-27; the managed set carried 517 rules then.
+2026-10-28; the managed set carried 520 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -269,6 +269,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Vulnerability Scanner | ✅ | 20+ tools blocked by User-Agent (sqlmap, nikto, nmap, nuclei, Acunetix, ...) |
 | Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, rate limits, and behavioral `404`/distinct-path flags; the example config enables `enumeration.action: BLOCK` (engine default is LOG), but a slow prober below every threshold still passes |
 | Directory Index Browsing | 🔶 | `directory-index.directory-index-html` blocks default Apache/nginx HTML autoindex pages with a 403 in the response phase; nginx JSON/XML autoindex formats and custom Apache templates are not covered, and autoindex should still be disabled upstream |
+| Default Web Server Pages | 🔶 | `default-pages` blocks the stock Apache (`Apache2 Ubuntu/Debian Default Page`, `It works!`, RHEL/CentOS test page), nginx (`Welcome to nginx!`), and IIS (`IIS Windows Server`) pages at `/`, `/index.html`, `/index.nginx-debian.html`, and `/iisstart.htm` with a 403 in the response phase; localized or custom templates and other document names are not covered, and removing the default content upstream remains the primary defense |
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
 | `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`). VCS metadata names with trailing dots or spaces (for example `/.git./HEAD` and `/.git%20/HEAD`) are matched too, because Windows-style origin path handling strips them before reaching the file system |
 | phpinfo-style Information Endpoints | ✅ | `sensitive-files.phpinfo-endpoints` 404s `/phpinfo`, `/phpinfo.php`, `/php_info.php`, `/phpversion.php`, and `/.phpinfo.php`; generic `info.php`/`test.php` names are intentionally left alone to avoid breaking application files |
@@ -481,4 +482,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled rule count; behavioral actions
-still default to LOG. The snapshot date is 2026-10-25.
+still default to LOG. The snapshot date is 2026-10-28.

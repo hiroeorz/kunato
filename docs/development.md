@@ -1305,7 +1305,7 @@ sudo kunato log --attack cve-2025 --format json | jq .
 | `brute-force` (`login-throttle`) | `login-throttle` |
 | `discovery` | `api-discovery`, `admin-interfaces` |
 | `exposure` | `rails-debug-endpoints`, `django-debug-endpoints`, `nextjs-dev-endpoints`, `laravel-debug-endpoints`, `vite-dev-endpoints`, `spring-actuator`, `ai-service-management`, `ci-cd-servers` |
-| `info-disclosure` (`leaks`) | `sensitive-files`, `response-leaks`, `directory-index` |
+| `info-disclosure` (`leaks`) | `sensitive-files`, `response-leaks`, `directory-index`, `default-pages` |
 | `bypass` | `framework-routing-bypass` |
 | `exploit` | `known-exploits` |
 | `cve`, `cve-YYYY`, `cve-YYYY-MM` | every `cve-*` category |

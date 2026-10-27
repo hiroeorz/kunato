@@ -1679,6 +1679,37 @@ categories:
           regex: '(?i)(<title>|<h1>)[^<]{0,200}(index of|directory listing)'
           in: [response_body]
 
+  # Stock vendor pages prove the virtual host is unconfigured and expose the
+  # web server and its setup. Block the common Apache, nginx, and IIS pages at
+  # their default document paths. Localized or custom templates and other
+  # document names are not covered, and removing the content upstream remains
+  # the primary defense.
+  - name: default-pages
+    phase: response
+    action: BLOCK
+    rules:
+      - name: apache-default-page
+        match:
+          path: '(?i)^/(index\.html)?$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(Apache2 (Ubuntu|Debian) Default Page|Apache HTTP Server Test Page|Red Hat Enterprise Linux Test Page|<title>\s*It works!\s*</title>)'
+          in: [response_body]
+      - name: nginx-default-page
+        match:
+          path: '(?i)^/(index\.html|index\.nginx-debian\.html)?$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)(<title>\s*Welcome to nginx!\s*</title>|If you see this page, the nginx web server is successfully installed)'
+          in: [response_body]
+      - name: iis-default-page
+        match:
+          path: '(?i)^/(iisstart\.htm)?$'
+          response_headers:
+            Content-Type: '(?i)^text/html'
+          regex: '(?i)<title>\s*(IIS Windows( Server)?|Internet Information Services)\s*</title>'
+          in: [response_body]
+
 timeouts:
   header_read: 10s
   body_read: 30s

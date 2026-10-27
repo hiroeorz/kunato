@@ -477,6 +477,37 @@ mod tests {
         evaluate_response(&config, &view, &response)
     }
 
+    fn evaluate_bundled_response(config: &CompiledConfig, path: &str, body: &[u8]) -> EvalOutcome {
+        evaluate_bundled_response_with_status(config, StatusCode::OK, path, body)
+    }
+
+    fn evaluate_bundled_response_with_status(
+        config: &CompiledConfig,
+        status: StatusCode,
+        path: &str,
+        body: &[u8],
+    ) -> EvalOutcome {
+        let method = Method::GET;
+        let uri: Uri = path.parse().expect("valid URI");
+        let request_headers = HeaderMap::new();
+        let view = RequestView::new(
+            &method,
+            &uri,
+            &request_headers,
+            b"",
+            "127.0.0.1".parse().expect("valid IP"),
+        );
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(
+            "content-type",
+            "text/html; charset=UTF-8"
+                .parse()
+                .expect("valid content type"),
+        );
+        let response = ResponseView::new(status, &response_headers, body, false);
+        evaluate_response(config, &view, &response)
+    }
+
     fn evaluate_websocket_response_for(
         yaml: &str,
         headers: &HeaderMap,
@@ -703,5 +734,81 @@ mod tests {
         let outcome = evaluate_websocket_response_for(&yaml, &headers, b"secret");
         let blocked = outcome.blocked.expect("the 101 rule matches");
         assert_eq!(blocked.rule, "upgrade-body");
+    }
+
+    #[test]
+    fn bundled_default_page_rules_block_vendor_pages() {
+        let config = config::parse(include_str!("../../rules.example.yaml"))
+            .expect("example configuration must parse");
+        let cases = [
+            (
+                "/",
+                "<html><head><title>Apache2 Ubuntu Default Page: It works</title></head>\
+                 <body><h1>It works!</h1></body></html>",
+            ),
+            (
+                "/index.html",
+                "<html><head><title>It works!</title></head>\
+                 <body><h1>It works!</h1></body></html>",
+            ),
+            (
+                "/index.nginx-debian.html",
+                "<html><head><title>Welcome to nginx!</title></head>\
+                 <body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web \
+                 server is successfully installed and working.</p></body></html>",
+            ),
+            (
+                "/iisstart.htm",
+                "<html><head><title>IIS Windows Server</title></head>\
+                 <body><h1>Internet Information Services</h1></body></html>",
+            ),
+        ];
+        for (path, body) in cases {
+            let outcome = evaluate_bundled_response(&config, path, body.as_bytes());
+            let blocked = outcome
+                .blocked
+                .unwrap_or_else(|| panic!("{path} must be blocked"));
+            assert_eq!(blocked.category, "default-pages", "{path}");
+        }
+
+        let outcome = evaluate_bundled_response_with_status(
+            &config,
+            StatusCode::FORBIDDEN,
+            "/",
+            b"<html><head><title>Red Hat Enterprise Linux Test Page</title></head></html>",
+        );
+        let blocked = outcome
+            .blocked
+            .expect("the RHEL 403 default page must be blocked");
+        assert_eq!(blocked.category, "default-pages");
+    }
+
+    #[test]
+    fn bundled_default_page_rules_keep_application_pages() {
+        let config = config::parse(include_str!("../../rules.example.yaml"))
+            .expect("example configuration must parse");
+        let cases = [
+            (
+                "/",
+                "<html><head><title>Acme</title></head>\
+                 <body>Welcome to Acme</body></html>",
+            ),
+            (
+                "/index.html",
+                "<html><head><title>Acme</title></head></html>",
+            ),
+            (
+                "/iisstart.htm",
+                "<html><head><title>Acme</title></head></html>",
+            ),
+            (
+                "/not-a-default-document.html",
+                "<html><head><title>It works!</title></head></html>",
+            ),
+        ];
+        for (path, body) in cases {
+            let outcome = evaluate_bundled_response(&config, path, body.as_bytes());
+            assert!(outcome.blocked.is_none(), "{path} must pass");
+        }
     }
 }

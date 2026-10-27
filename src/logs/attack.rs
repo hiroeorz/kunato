@@ -176,7 +176,12 @@ const ATTACK_CLASSES: &[AttackClass] = &[
     AttackClass {
         name: "info-disclosure",
         aliases: &["infodisclosure", "leaks"],
-        categories: &["sensitive-files", "response-leaks", "directory-index"],
+        categories: &[
+            "sensitive-files",
+            "response-leaks",
+            "directory-index",
+            "default-pages",
+        ],
     },
     AttackClass {
         name: "bypass",
