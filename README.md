@@ -4,7 +4,7 @@
 
 Kunato is a lightweight Web Application Firewall (WAF) written in Rust, built for personal users who want an easy-to-deploy protection layer in front of their web applications.
 
-![Kunato-chan, the project mascot: a chibi character holding a shield marked with an X](./kunato-chan.png)
+![Kunato-chan, the project mascot: a chibi character holding a shield](./kunato-chan-200x200.png)
 
 It runs as a reverse proxy between clients (browsers, apps) and your HTTP server,
 inspects incoming requests against categorized, YAML-defined rules, and applies one
