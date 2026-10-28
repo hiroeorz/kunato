@@ -1303,7 +1303,7 @@ sudo kunato log --attack cve-2025 --format json | jq .
 | `protocol` | `protocol-anomalies`, `bad-methods`, `nginx-capture-overflow`, `webdav-and-digest` |
 | `scanner` | `scanners-and-bots` |
 | `brute-force` (`login-throttle`) | `login-throttle` |
-| `discovery` | `api-discovery`, `admin-interfaces` |
+| `discovery` | `api-discovery`, `admin-interfaces`, `wordpress-enumeration` |
 | `exposure` | `rails-debug-endpoints`, `django-debug-endpoints`, `nextjs-dev-endpoints`, `laravel-debug-endpoints`, `vite-dev-endpoints`, `spring-actuator`, `ai-service-management`, `ci-cd-servers` |
 | `info-disclosure` (`leaks`) | `sensitive-files`, `response-leaks`, `directory-index`, `default-pages` |
 | `bypass` | `framework-routing-bypass` |

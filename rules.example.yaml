@@ -309,8 +309,6 @@ categories:
         match: { path: '(?i)^/system/console' }
       - name: phpmailer-exim-expansion
         match: { regex: '(?i)(\$\{run\{|spool_directory|substr\{)', in: [headers] }
-      - name: wordpress-author-enumeration
-        match: { path: '^/$', regex: '(?i)(^|&)author=\d+(&|$)', in: [query] }
       - name: wd-mycloud-cookie-command
         match: { regex: '(?i)username=[^;]*(%7c|\||\x60|%60)', in: [headers] }
       - name: netgear-apply-noauth-overflow
@@ -1453,6 +1451,26 @@ categories:
       # signed /rails/active_storage URLs, never directly.
       - name: active-storage-root
         match: { regex: '(?i)^/storage(/|$)', in: [path] }
+
+  # WordPress leaks login names through the numeric author archive query and
+  # the public REST users endpoint. The returned `slug` is usually the login
+  # name, which feeds credential stuffing against wp-login.php and xmlrpc.php.
+  # The route also travels in a POST body via `?_method=GET`, so the route rule
+  # inspects query and body forms. The rest of the public REST surface (posts,
+  # pages, comments, categories) stays reachable; a deployment that renders
+  # author data from the users endpoint needs an override.
+  - name: wordpress-enumeration
+    action: BLOCK
+    rules:
+      - name: author-archive-query
+        # A WordPress home URL is `/`, `/<subdir>/`, or the `index.php` form;
+        # the author query is only honoured on that main query, so the rule
+        # does not touch `?author=` filters on application paths.
+        match: { path: '(?i)^/([^/]+/)*(index\.php)?$', regex: '(?i)(^|&)author=\d+(&|$)', in: [query] }
+      - name: rest-users-route
+        match: { regex: '(?i)(^|[?&])rest_route=(%2f|/)*wp/v2/users(/|&|$)', in: [query, body] }
+      - name: rest-users-path
+        match: { path: '(?i)(^|/)wp-json/wp/v2/users(/|$)' }
 
   # API discovery surfaces are logged by default. Public API documentation is
   # common, so raise this category to BLOCK only when the docs are not meant to

@@ -4731,3 +4731,19 @@ GET /protocol.csp?opt=ovpn_file&type=del&file_id=;id header="IP-FROM: 127.0.0.1"
 # --- CVE-2026-53995 (MLflow): a crafted trace_id escapes the FileStore trace
 #     directory and writes trace metadata elsewhere. ---
 POST /api/3.0/mlflow/traces header="Content-Type: application/json" body="{\"trace_id\":\"../../../../tmp/kunato-trace\",\"experiment_id\":\"1\"}"
+
+# --- WordPress user enumeration: the numeric author archive query and the
+#     public REST users endpoint return login names (slug) without
+#     authentication. Both route shapes and the POST `_method=GET` form are
+#     covered by `wordpress-enumeration` in rules.example.yaml. ---
+GET /?rest_route=/wp/v2/users
+GET /?rest_route=/wp/v2/users&per_page=100
+GET /?rest_route=/wp/v2/users/1
+GET /?rest_route=%2Fwp%2Fv2%2Fusers
+GET /index.php?rest_route=/wp/v2/users
+GET /wp-json/wp/v2/users
+GET /wp-json/wp/v2/users?per_page=100
+GET /wp-json/wp/v2/users/1
+GET /blog/wp-json/wp/v2/users
+GET /index.php?author=1
+POST /?_method=GET header="Content-Type: application/x-www-form-urlencoded" body="rest_route=/wp/v2/users"

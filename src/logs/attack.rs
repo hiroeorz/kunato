@@ -157,7 +157,7 @@ const ATTACK_CLASSES: &[AttackClass] = &[
     AttackClass {
         name: "discovery",
         aliases: &[],
-        categories: &["api-discovery", "admin-interfaces"],
+        categories: &["api-discovery", "admin-interfaces", "wordpress-enumeration"],
     },
     AttackClass {
         name: "exposure",

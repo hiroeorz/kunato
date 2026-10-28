@@ -646,3 +646,10 @@ POST /htdocs/web/diagnostic.php header="Content-Type: application/x-www-form-url
 GET /scripts/logdownload.php?path=logs%2F2026-10-27.log
 GET /protocol.csp?opt=ovpn_file&type=del&file_id=vpn-profile.ovpn header="IP-FROM: 127.0.0.1"
 POST /api/3.0/mlflow/traces header="Content-Type: application/json" body="{\"trace_id\":\"tr-2026-10-27-0001\",\"experiment_id\":\"1\"}"
+
+# --- WordPress REST near-misses: public content endpoints and author-name
+#     bookmarks stay reachable while the users endpoint is blocked. ---
+GET /wp-json/
+GET /wp-json/wp/v2/pages
+GET /wp-json/wp/v2/posts/42
+GET /?author_name=tanaka

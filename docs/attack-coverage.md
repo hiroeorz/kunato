@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-28; the managed set carried 520 rules then.
+2026-10-28; the managed set carried 528 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -171,7 +171,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, author enumeration, xmlrpc logged, and `wp-login.php` / `xmlrpc.php` under `login-throttle`). Plugin CVEs are out of scope by policy |
+| WordPress Exploits | 🔶 | CVE rules plus WP paths (wp-config, xmlrpc logged, and `wp-login.php` / `xmlrpc.php` under `login-throttle`). `wordpress-enumeration` blocks the numeric author archive query (`?author=N` and `/index.php?author=N`) and the unauthenticated REST users endpoint in both the `?rest_route=/wp/v2/users` and `/wp-json/wp/v2/users` shapes, including the `?_method=GET` POST-body form; other public REST collections stay reachable. Plugin CVEs are out of scope by policy |
 | Joomla / Drupal and other CMS | ✅ | Many CVE-specific signatures |
 | Apache / nginx / IIS Exploits | ✅ | Same (nginx capture overflow, Range abuse, many httpd CVEs) |
 | PHP / Laravel Exploits | 🔶 | `laravel-debug-endpoints` (`/telescope`, `/_debugbar`), Composer file discovery, generic PHP object-injection shapes, and Horizon LOGging; Laravel/Symfony CVE signatures remain thin, and WordPress plugin CVEs are out of scope by policy (details below); PHP engine memory-corruption shapes are covered in the php2shell subsection below |
