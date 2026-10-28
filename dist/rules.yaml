@@ -1636,6 +1636,22 @@ categories:
       # parameter name is never part of a real table identifier.
       - name: slims-admin-identifier-sqli
         match: { path: '(?i)^/admin/(AJAX_lookup_handler|AJAX_check_id|AJAX_vocabolary_control)\.php$', regex: '(?i)(tableName|tableFields)\s*=\s*[^&\s]*(\(|\bselect\b|\bfrom\b|extractvalue|sleep\s*\(|0x[0-9a-f]+)', in: [body] }
+      # CVE-2026-116818 (OpenPanel): the unauthenticated live-visitors
+      # WebSocket interpolates the projectId path segment into a ClickHouse
+      # query. Real project IDs are cuids without quotes or SQL separators, so
+      # a quote or OR/UNION token in the segment is an attack.
+      - name: openpanel-live-visitors-sqli
+        match: { regex: '(?i)^/live/visitors/[^/]*(?:%27|%22|[''`]|%20(?:or|and|union)\b|\bunion\s+(?:all\s+)?select\b|\bsleep\s*\()', in: [path] }
+      # CVE-2026-48356 (Magento/Adobe Commerce "PolyShell"): the anonymous
+      # guest-cart REST item endpoint accepts an embedded file_info object,
+      # keeps the caller's extension, and writes it under
+      # pub/media/custom_options/quote. Only executable extensions are matched;
+      # ordinary product image uploads keep passing.
+      - name: magento-polyshell-guest-cart-upload
+        match:
+          path: '(?i)^/rest/(?:[^/]+/)?V1/guest-carts/[^/]+/items(?:/[^/?]+)?$'
+          regex: '(?i)"name"\s*:\s*"[^"]{0,256}\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh)"'
+          in: [body]
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

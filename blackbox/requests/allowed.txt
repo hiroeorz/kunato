@@ -653,3 +653,22 @@ GET /wp-json/
 GET /wp-json/wp/v2/pages
 GET /wp-json/wp/v2/posts/42
 GET /?author_name=tanaka
+
+# --- Near-misses for the 2026-10-28 KEV and SQLi/traversal/command/SSRF/XSS
+#     signatures: the same endpoints and parameters with ordinary values must
+#     keep passing. ---
+GET /index.php?option=com_gridbox&view=store&sort-by=created_at
+POST /index.php?option=com_icagenda&task=event.submit header="Content-Type: application/x-www-form-urlencoded" body="title=Test&custom_url=https%3A%2F%2Fexample.com%2Fevent"
+GET /radarUpdater.cgi?filename=logs%2F2026-10-28.log
+GET /networkDiag.cgi?mode=ping&ipAddr=192.0.2.1
+GET /networkDiag.cgi?mode=nslookup&dnsAddr=example.com
+GET /live/visitors/clx123abc456
+POST /api/2.0/mlflow/model-versions/create header="Content-Type: application/json" body="{\"name\":\"m\",\"source\":\"runs:/abc123/model\",\"run_id\":\"r\"}"
+GET /api/2.0/mlflow/model-versions/get-artifact?name=m&version=1&path=model.pkl
+GET /maj.php?forcemaj=0
+POST /api/pages/PageTag/duplicate header="Content-Type: application/json" body="{\"files\":[\"https://example.com/page.md\"]}"
+POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"w\",\"connections\":{\"Slack\":{\"main\":[]}}}"
+GET /admin/task.php?run=dashboard
+POST /admin/task.php?mod=qbanner&run=edit.php header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /rest/default/V1/guest-carts/abc123/items header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"1\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/gif\",\"name\":\"artwork.png\"}}}]}}}}"
+PUT /rest/V1/guest-carts/abc123/items/42 header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"1\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/jpeg\",\"name\":\"photo.jpg\"}}}]}}}}"
