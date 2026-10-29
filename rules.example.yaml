@@ -1362,12 +1362,28 @@ categories:
       - name: digest-authentication-abuse
         match: { headers: { Authorization: '(?i)^digest\s' } }
 
-  # Executable files disguised as uploads.
+  # Executable files disguised as uploads. The filename patterns accept the
+  # quoted, unquoted, and RFC 5987 (`filename*=`) forms; the trailing `\b`
+  # keeps the double-extension bypass (`shell.php.jpg`) covered.
   - name: malicious-upload
     action: BLOCK
     rules:
       - name: executable-filenames
-        match: { method: [POST, PUT], regex: '(?i)filename\s*=\s*"[^"]*\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b', in: [body] }
+        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b', in: [body] }
+      # Ruby, extra shells, and Windows script hosts are not executable names
+      # for the upload check, so the rule set carries them.
+      - name: script-filenames
+        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(rb|pyc|pyo|bash|zsh|ksh|csh|tcsh|fish|ps1|psm1|bat|cmd|vbs|vbe|wsf|hta|lua|tcl)\b', in: [body] }
+      # Shared libraries and JVM archives execute code once the origin loads
+      # them. Disable this rule for applications that accept plugins.
+      - name: binary-filenames
+        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(jar|ear|so|dylib|elf)\b', in: [body] }
+      # Uploading a server configuration file can make a benign extension
+      # executable (for example an .htaccess that maps .jpg to the PHP
+      # handler). Disable this rule when the application manages its own
+      # per-directory configuration through the request body.
+      - name: server-config-filenames
+        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(htaccess|user\.ini)\b', in: [body] }
       - name: traversal-in-filename
         match: { regex: '(?i)filename\s*=\s*"[^"]*(\.\.[/\\]|\.\.%2f|\.\.%5c)', in: [body] }
 
@@ -1819,7 +1835,11 @@ limits:
   websocket_message_bytes: 1048576
   max_response_body_bytes: 1048576
   body_inspection: strict
-  upload_inspection: mismatch
+  # `strict` also rejects executable and script bytes behind a generic or
+  # explicitly executable declared type, so an ELF sent as
+  # `application/octet-stream` is a 403. Use `mismatch` when the application
+  # legitimately stores downloads, firmware, or source archives.
+  upload_inspection: strict
   max_concurrent_streams: 100
   form:
     enabled: true

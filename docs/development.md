@@ -1007,8 +1007,22 @@ boundary interpretation, never copies the body, and runs under the process-wide
 inspection budget.
 
 ```yaml
-limits: { upload_inspection: mismatch }
+limits: { upload_inspection: strict }
 ```
+
+The bundled `rules.example.yaml` enables `strict`; the engine default is
+`mismatch`. Use `mismatch` when the application legitimately stores downloads,
+firmware, or source archives whose bytes start with a script marker or an
+executable header, and `off` only where another control covers the upload path.
+
+The check is content-based, so an explicitly named upload (`.php`, `.rb`,
+`.sh`, `.exe`) is the bundled `malicious-upload` category's job. Its
+`executable-filenames`, `script-filenames`, `binary-filenames`, and
+`server-config-filenames` rules match the quoted, unquoted, and RFC 5987
+(`filename*=`) parameter forms and reject PHP/JSP/ASP/CGI, Ruby, extra shells
+and Windows script hosts, JVM archives and shared libraries, and
+`.htaccess`/`.user.ini`. Disable an individual rule in `overrides_file` when
+the application accepts that file type (for example a plugin `.jar`).
 
 In the default `body_inspection: strict`, a multipart upload larger than
 `max_body_bytes` is rejected with `413` unless a rule allows the request,

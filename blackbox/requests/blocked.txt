@@ -529,6 +529,22 @@ POST /upload body="filename=\"shell.py\""
 POST /upload body="filename=\"shell.sh\""
 POST /upload body="filename=\"shell.exe\""
 POST /upload body="filename=\"shell.dll\""
+POST /upload body="filename=\"shell.rb\""
+POST /upload body="filename=\"shell.bash\""
+POST /upload body="filename=\"shell.zsh\""
+POST /upload body="filename=\"shell.ps1\""
+POST /upload body="filename=\"shell.bat\""
+POST /upload body="filename=\"shell.cmd\""
+POST /upload body="filename=\"shell.jar\""
+POST /upload body="filename=\"shell.so\""
+POST /upload body="filename=\"shell.elf\""
+POST /upload body="filename=\".htaccess\""
+POST /upload body="filename=\".user.ini\""
+# Unquoted and RFC 5987 parameter forms are valid Content-Disposition
+# spellings and must not bypass the filename rules.
+POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=shell.php"
+POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=run.bash"
+POST /upload body="Content-Disposition: form-data; name=\"file\"; filename*=UTF-8''shell.rb"
 PUT /files/shell body="filename=\"shell.war\""
 POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=\"shell.php\""
 
@@ -540,6 +556,9 @@ POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=pa
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-in-pdf.bin
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-elf-in-png.bin
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-gif-php.bin
+# The example configuration enables `upload_inspection: strict`, so executable
+# bytes behind a generic declared type are rejected as well.
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-generic-elf.bin
 # The script marker is beyond the first 1 KiB, after a valid GIF header and
 # padding; the full-part scan must still reject it.
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-gif-php-deep.bin

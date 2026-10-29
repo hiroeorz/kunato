@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-28; the managed set carried 528 rules then.
+2026-10-29; the managed set carried 533 rules then.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -62,10 +62,10 @@ body coverage on those routes and does not change the bundled verdicts.
 | Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match. The lab-only CVE-2021-41773 fixture confirms the direct `.%2e` traversal canary extraction is blocked by the decoded path rule |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
 | Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
-| Malicious File Upload | 🔶 | Extension-based blocking (php/phtml/jsp/asp/exe/war, ...) plus `limits.upload_inspection` (default `mismatch`), which rejects an executable header or active markup at the leading position and server-side script markers (`<?php`, `<?=`, `<%`) anywhere in the inspected part. Padding cannot hide a script polyglot behind an image/PDF/office/media/font claim. Archive contents, executable/markup bytes beyond the leading position, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
-| Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths); the upload check scans the whole inspected part for server-side script markers, so a `GIF89a` + padding + `<?php` polyglot is rejected at any offset. Archive contents, active markup/executable bytes beyond the leading position, and parts outside the inspected prefix remain uninspected |
-| Double Extension | ✅ | The extension regex also matches `shell.php.jpg` (`\b` boundary) |
-| MIME Type Spoofing | ✅ | `limits.upload_inspection` (default `mismatch`) checks every multipart file part against its declared type or safe filename extension and rejects executable, server-side script, or HTML/XML/SVG content with `403` before rule evaluation; `strict` also covers generic `application/octet-stream` claims, `off` disables the check, and an upload over `max_body_bytes` is prefix-only under `body_inspection: stream` |
+| Malicious File Upload | 🔶 | Filename rules (`executable-filenames`, `script-filenames`, `binary-filenames`, `server-config-filenames`) reject PHP/JSP/ASP/CGI/Python/shell/executable names, Ruby and extra shell or Windows script hosts, JVM archives and shared libraries, and `.htaccess`/`.user.ini`, in quoted, unquoted, and RFC 5987 (`filename*=`) parameter forms. `limits.upload_inspection` (engine default `mismatch`; the bundled example enables `strict`) rejects an executable header or active markup at the leading position and server-side script markers (`<?php`, `<?=`, `<%`) anywhere in the inspected part, so padding cannot hide a script polyglot behind an image/PDF/office/media/font claim. Archive contents, executable/markup bytes beyond the leading position, non-multipart bodies, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
+| Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths); the upload check scans the whole inspected part for server-side script markers, so a `GIF89a` + padding + `<?php` polyglot is rejected at any offset, and `server-config-filenames` rejects the `.htaccess` handler remap that would make an image executable. Archive contents, active markup/executable bytes beyond the leading position, and parts outside the inspected prefix remain uninspected |
+| Double Extension | ✅ | The filename regexes keep the `\b` boundary, so `shell.php.jpg` is still rejected |
+| MIME Type Spoofing | ✅ | `limits.upload_inspection` (engine default `mismatch`, bundled example `strict`) checks every multipart file part against its declared type or safe filename extension and rejects executable, server-side script, or HTML/XML/SVG content with `403` before rule evaluation; `strict` also covers generic `application/octet-stream` claims, `off` disables the check, and an upload over `max_body_bytes` is prefix-only under `body_inspection: stream` |
 | Null Byte Injection | ✅ | `protocol-anomalies.null-byte` (`%00`) |
 | Arbitrary File Reference / Download | 🔶 | Traversal and `sensitive-files` block known shapes; IDOR-style download abuse is undetectable in principle |
 
@@ -330,7 +330,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Path Traversal / LFI / RFI | ✅ |
 | SSRF | ✅ |
 | XXE / RCE payloads | ✅ |
-| Malicious file upload | 🔶 (extension plus declared-type/content check) |
+| Malicious file upload | 🔶 (script, binary, and server-config filename rules plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
 | Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, and an opt-in global auth block) |
 | Bot | 🔶 (User-Agent signatures plus behavioral probing/auth-failure flags; no JS challenge or 200-only scraping detection) |

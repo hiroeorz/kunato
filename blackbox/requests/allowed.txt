@@ -367,14 +367,19 @@ POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_fil
 POST /api/upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-benign.txt
 POST /api/search header="Content-Type: application/json" chunked=1 body="{\"query\":\"rust\"}"
 
-# --- Upload content near-misses: matching bytes behind a safe type, an
-#     explicitly active type, and an executable behind a generic type (which
-#     only `upload_inspection: strict` rejects) must keep passing ---
+# --- Upload content near-misses: matching bytes behind a safe type and an
+#     explicitly active type must keep passing ---
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg.bin
 # A large safe image with no script marker must still pass the full-part scan.
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg-deep.bin
-POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-generic-elf.bin
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-page.bin
+
+# --- Filename near-misses: names that merely resemble a script extension, and
+#     parameters that mention one without being an upload filename, must pass ---
+POST /api/upload body="filename=\"app.rbs\""
+POST /api/upload body="filename=\"my.rb2\""
+POST /api/upload body="{ \"filename\": \"app.rb\", \"note\": \"backup\" }" header="Content-Type: application/json"
+POST /api/upload body="name=report&path=app.rb" header="Content-Type: application/x-www-form-urlencoded"
 
 # --- Django, Next.js, and Node.js near-misses: benign look-alikes must pass ---
 GET /api/settings
