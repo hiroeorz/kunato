@@ -2348,6 +2348,42 @@ async fn upload_inspection_strict_blocks_generic_executables() {
 }
 
 #[tokio::test]
+async fn upload_inspection_defaults_to_strict() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    for (filename, content_type, value) in [
+        ("photo.jpg", "text/html", b"<?php echo 1;".as_slice()),
+        ("tool", "application/octet-stream", b"\x7fELF\x02\x01\x01"),
+    ] {
+        let body = multipart_upload(filename, content_type, value);
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::POST,
+            "/upload",
+            body,
+            &[("content-type", "multipart/form-data; boundary=X")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{filename} ({content_type})");
+    }
+
+    let body = multipart_upload("photo.jpg", "image/jpeg", b"\xff\xd8\xff\xe0JFIF");
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn upload_inspection_is_not_bypassed_by_allow_rules() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(

@@ -977,10 +977,10 @@ using behavioral `BLOCK` behind a proxy.
 Multipart file parts are checked against the type they claim to be before rule
 evaluation. A part that carries a `filename` is a file upload; its declared
 `Content-Type` (or, when that is generic or absent, its filename extension) must
-not hide an executable, server-side script, or markup payload. The default
-`mismatch` mode rejects a part that claims an image, PDF, office document, media
-file, or font (by type, or by a safe extension such as `.jpg`, `.png`, `.pdf`, or
-`.docx`) while its content contains any of:
+not hide an executable, server-side script, or markup payload. `mismatch` mode
+rejects a part that claims an image, PDF, office document, media file, or font
+(by type, or by a safe extension such as `.jpg`, `.png`, `.pdf`, or `.docx`)
+while its content contains any of:
 
 - an executable header (ELF, PE, Mach-O, a Java class, or WebAssembly) at the
   leading position;
@@ -1018,13 +1018,13 @@ API uploads that bypass the multipart envelope. The scan rejects with `403` and
 request for scanning, so a `.php` route that receives an ordinary body (JSON,
 form data) is unaffected; the body content decides the rejection.
 
-A declared type that is itself active (`text/html`, `image/svg+xml`,
-JavaScript) or explicitly executable (`application/x-msdownload`, ...) is
-respected: markup behind an active claim and an executable behind an executable
-claim pass. `strict` additionally rejects executable and script content even
-behind a generic or explicit executable claim, and markup unless the part
-declares an active web type; an active web part still passes its markup. `off`
-disables the check.
+In `mismatch` mode a declared type that is itself active (`text/html`,
+`image/svg+xml`, JavaScript) or explicitly executable
+(`application/x-msdownload`, ...) is respected: markup behind an active claim
+and an executable behind an executable claim pass. `strict`, the default, also
+rejects executable and script content behind a generic or explicit executable
+claim, and markup unless the part declares an active web type; an active web
+part still passes its markup. `off` disables the check.
 
 The rejection is answered with `403` and counted in
 `kunato_upload_rejected_total`. The check is an engine limit: it runs before
@@ -1038,10 +1038,10 @@ inspection budget.
 limits: { upload_inspection: strict }
 ```
 
-The bundled `rules.example.yaml` enables `strict`; the engine default is
-`mismatch`. Use `mismatch` when the application legitimately stores downloads,
-firmware, or source archives whose bytes start with a script marker or an
-executable header, and `off` only where another control covers the upload path.
+The engine default is `strict`. Use `mismatch` (safe claims only) when the
+application legitimately stores downloads, firmware, or source archives whose
+bytes start with a script marker or an executable header, and `off` only where
+another control covers the upload path.
 
 The check is content-based, so an explicitly named upload (`.php`, `.rb`,
 `.sh`, `.exe`) is the bundled `malicious-upload` category's job. Its

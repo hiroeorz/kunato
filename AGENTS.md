@@ -136,7 +136,7 @@ rule-set updates.
   body is rejected with `413` when body rules, a GraphQL endpoint, or upload
   inspection need it. `stream` inspects the prefix and forwards the rest, and
   logs a warning while body rules or upload inspection are enabled.
-- `limits.upload_inspection` defaults to `mismatch`: multipart file parts are
+- `limits.upload_inspection` defaults to `strict`: multipart file parts are
   checked against their declared type (or safe filename extension) and rejected
   with `403` when executable, script, or markup content hides behind an image,
   PDF, office, media, or font claim, or when the part does not start with the
@@ -145,8 +145,9 @@ rule-set updates.
   signature-checked) or contains a PHP short tag that looks like code.
   Non-multipart `POST`/`PUT`/`PATCH` requests whose `Content-Type` or path names
   an executable or script have their raw body scanned for the same markers.
-  `strict` also covers generic binary claims; `off` disables both checks. It
-  runs before rule evaluation, so `ALLOW` does not bypass it.
+  `strict` also covers generic and explicitly executable claims; `mismatch`
+  inspects safe claims only, and `off` disables both checks. It runs before rule
+  evaluation, so `ALLOW` does not bypass it.
 - `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
   must be complete and pass field/part/header/name/nesting/complexity limits
   before ALLOW or forwarding. This also applies in body `stream` mode; explicitly

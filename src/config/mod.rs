@@ -110,10 +110,10 @@ pub enum UploadInspection {
     Off,
     /// Reject executable, script, or markup content behind an image, PDF,
     /// office, media, or font claim (or a safe filename extension).
-    #[default]
     Mismatch,
     /// Also reject executable and script content behind an explicitly generic
-    /// claim, and markup behind a generic claim.
+    /// or explicitly executable claim, and markup behind a generic claim.
+    #[default]
     Strict,
 }
 
@@ -3787,7 +3787,7 @@ mod tests {
         assert!(config.categories.is_empty());
         assert_eq!(config.limits.max_body_bytes, 8 * 1024 * 1024);
         assert_eq!(config.limits.body_inspection, BodyInspection::Strict);
-        assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
+        assert_eq!(config.limits.upload_inspection, UploadInspection::Strict);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
     }
@@ -5197,7 +5197,7 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
     #[test]
     fn parses_upload_inspection_policy() {
         let config = parse_with(BASE, "").expect("valid config");
-        assert_eq!(config.limits.upload_inspection, UploadInspection::Mismatch);
+        assert_eq!(config.limits.upload_inspection, UploadInspection::Strict);
 
         let config =
             parse_with(BASE, "limits: { upload_inspection: strict }\n").expect("valid config");

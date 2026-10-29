@@ -1835,10 +1835,10 @@ limits:
   websocket_message_bytes: 1048576
   max_response_body_bytes: 1048576
   body_inspection: strict
-  # `strict` also rejects executable and script bytes behind a generic or
-  # explicitly executable declared type, so an ELF sent as
-  # `application/octet-stream` is a 403. Use `mismatch` when the application
-  # legitimately stores downloads, firmware, or source archives.
+  # The engine default. `strict` also rejects executable and script bytes
+  # behind a generic or explicitly executable declared type, so an ELF sent as
+  # `application/octet-stream` is a 403. Use `mismatch` (safe claims only) when
+  # the application legitimately stores downloads, firmware, or source archives.
   upload_inspection: strict
   max_concurrent_streams: 100
   form:

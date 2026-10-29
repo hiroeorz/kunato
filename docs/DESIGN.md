@@ -220,8 +220,9 @@ has its raw body scanned for the same markers, which covers uploads that skip
 the multipart envelope. A matching part or body is rejected with `403` and
 counted in `kunato_upload_rejected_total`. The check is an engine limit: it runs
 before rule evaluation, so an `ALLOW` rule cannot bypass it.
-`upload_inspection: strict` also rejects executable and script content behind a
-generic `application/octet-stream` claim, and `off` disables the check. It shares
+The default `upload_inspection: strict` also rejects executable and script
+content behind a generic `application/octet-stream` claim; `mismatch` inspects
+safe claims only, and `off` disables the check. It shares
 the multipart boundary and part limits with rule inspection, so a body with an
 unsupported boundary interpretation, a malformed multipart body, a file part
 outside the inspected prefix (in `stream` mode), archive contents, or
