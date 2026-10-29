@@ -1307,6 +1307,32 @@ mod tests {
     }
 
     #[test]
+    fn real_world_images_with_marker_like_bytes_pass() {
+        for (filename, media_type, value) in [
+            (
+                "photo.png",
+                "image/png",
+                include_bytes!("../tests/fixtures/real-world-infographic.png").as_slice(),
+            ),
+            (
+                "diagram.webp",
+                "image/webp",
+                include_bytes!("../tests/fixtures/real-world-response-diagram.webp").as_slice(),
+            ),
+        ] {
+            let body = body(&[(filename, Some(media_type), value)]);
+            assert!(
+                inspect_mismatch(&body).is_none(),
+                "{filename} rejected as mismatch"
+            );
+            assert!(
+                inspect(&headers(), &body, UploadInspection::Strict).is_none(),
+                "{filename} rejected in strict mode"
+            );
+        }
+    }
+
+    #[test]
     fn asp_and_echo_markers_still_match_when_code_follows() {
         for marker in [
             b"<% out.print(1); %>".as_slice(),

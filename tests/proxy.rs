@@ -2384,6 +2384,39 @@ async fn upload_inspection_defaults_to_strict() {
 }
 
 #[tokio::test]
+async fn upload_inspection_accepts_real_world_images_with_marker_bytes() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    for (filename, content_type, value) in [
+        (
+            "photo.png",
+            "image/png",
+            include_bytes!("fixtures/real-world-infographic.png").as_slice(),
+        ),
+        (
+            "diagram.webp",
+            "image/webp",
+            include_bytes!("fixtures/real-world-response-diagram.webp").as_slice(),
+        ),
+    ] {
+        let body = multipart_upload(filename, content_type, value);
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::POST,
+            "/upload",
+            body,
+            &[("content-type", "multipart/form-data; boundary=X")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{filename}");
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn upload_inspection_is_not_bypassed_by_allow_rules() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
