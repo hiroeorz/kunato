@@ -20,10 +20,12 @@
 //! fully inspected.
 
 use http::header::{CONTENT_TYPE, HeaderMap};
+use http::{Method, Uri};
 
 use crate::config::UploadInspection;
 use crate::decoding::{
     MAX_MULTIPART_BOUNDARIES, MultipartPart, multipart_boundaries, multipart_parts,
+    percent_decode_forms,
 };
 
 const SAFE_EXTENSIONS: &[&str] = &[
@@ -124,6 +126,94 @@ pub(crate) fn inspect(
     None
 }
 
+/// True when a non-multipart write request names an executable or server-side
+/// script in its `Content-Type` or path, so its raw body must be scanned too.
+/// Applications that store generated or authored script files through an API
+/// disable this by setting `upload_inspection: off`.
+pub(crate) fn wants_raw_inspection(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
+    matches!(*method, Method::POST | Method::PUT | Method::PATCH)
+        && raw_claim_is_dangerous(uri, headers)
+}
+
+fn raw_claim_is_dangerous(uri: &Uri, headers: &HeaderMap) -> bool {
+    let script_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let media_type = value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            is_explicit_dangerous_media_type(&media_type) || is_script_media_type(&media_type)
+        });
+    if script_type {
+        return true;
+    }
+    let path = uri.path();
+    if !path.contains('.') && !path.contains('%') {
+        return false;
+    }
+    percent_decode_forms(path)
+        .iter()
+        .any(|form| path_claims_dangerous_extension(form))
+}
+
+fn path_claims_dangerous_extension(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|segment| extension_claim(segment) == Claim::ExplicitDangerous)
+}
+
+/// Checks the raw body of a non-multipart request whose declared type or path
+/// names executable or server-side script content. Returns the first
+/// rejection, or `None` when the request is not in scope or the body carries
+/// no executable header, shebang, or script marker.
+pub(crate) fn inspect_raw(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &[u8],
+    mode: UploadInspection,
+) -> Option<Rejection> {
+    if mode == UploadInspection::Off || body.is_empty() || is_multipart(headers) {
+        return None;
+    }
+    if !wants_raw_inspection(method, uri, headers) {
+        return None;
+    }
+    let kind = raw_script_content(body)?;
+    Some(Rejection {
+        filename: uri
+            .path()
+            .rsplit('/')
+            .next()
+            .unwrap_or_else(|| uri.path())
+            .to_owned(),
+        declared: declared_media_type(headers),
+        kind,
+    })
+}
+
+fn declared_media_type(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(CONTENT_TYPE)?.to_str().ok()?;
+    let media_type = value.split(';').next()?.trim();
+    (!media_type.is_empty()).then(|| media_type.to_ascii_lowercase())
+}
+
+fn raw_script_content(value: &[u8]) -> Option<DangerousKind> {
+    if is_executable(value) {
+        return Some(DangerousKind::Executable);
+    }
+    if value[leading_content_start(value)..].starts_with(b"#!") {
+        return Some(DangerousKind::Script);
+    }
+    if contains_script_marker(value) || contains_short_script_tag(value) {
+        return Some(DangerousKind::Script);
+    }
+    None
+}
+
 fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejection> {
     let filename = part.filename()?;
     if part.value.is_empty() {
@@ -147,11 +237,15 @@ fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejec
         _ => match dangerous_content(part.value) {
             Some(kind) => kind,
             None if claim == Claim::Safe => {
-                let format = expected_format(declared.as_deref(), &filename)?;
-                if format.matches(part.value) {
-                    return None;
+                if contains_short_script_tag(part.value) {
+                    DangerousKind::Script
+                } else {
+                    let format = expected_format(declared.as_deref(), &filename)?;
+                    if format.matches(part.value) {
+                        return None;
+                    }
+                    DangerousKind::FormatMismatch
                 }
-                DangerousKind::FormatMismatch
             }
             None => return None,
         },
@@ -264,6 +358,28 @@ fn is_explicit_dangerous_media_type(media_type: &str) -> bool {
             | "application/java-archive"
             | "application/wasm"
     ) || media_type == "application/vnd.microsoft.portable-executable"
+}
+
+fn is_script_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "application/php"
+            | "text/php"
+            | "text/x-php"
+            | "text/x-shellscript"
+            | "text/x-sh"
+            | "application/x-csh"
+            | "application/x-perl"
+            | "text/x-perl"
+            | "application/x-ruby"
+            | "text/x-ruby"
+            | "application/x-python"
+            | "text/x-python"
+            | "application/x-bat"
+            | "text/x-bat"
+            | "application/x-powershell"
+            | "text/x-powershell"
+    )
 }
 
 fn blocks(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
@@ -519,6 +635,183 @@ fn contains_script_marker(bytes: &[u8]) -> bool {
                 .windows(marker.len())
                 .any(|window| window.eq_ignore_ascii_case(marker))
     })
+}
+
+/// PHP short open tags (`<?`) are only detected when what follows looks like
+/// code: a variable, a call, a parenthesized callable, or a language keyword.
+/// Whitespace, `@`, and comments may sit between the tag and the first
+/// expression. A bare two-byte scan would match random bytes inside compressed
+/// images and media, and XML processing instructions (`<?xml`, `<?xpacket`,
+/// `<?mso-application`) must not match.
+fn contains_short_script_tag(bytes: &[u8]) -> bool {
+    // Bound on the prefix consumed for one tag. Every skipped byte also moves
+    // the outer index forward, and the comment search itself is bounded, so the
+    // whole scan stays linear in the inspected part.
+    const MAX_PREFIX_BYTES: usize = 4096;
+
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if bytes[index] != b'<' || bytes[index + 1] != b'?' {
+            index += 1;
+            continue;
+        }
+        let mut rest = &bytes[index + 2..];
+        let mut consumed = 0;
+        loop {
+            let before = rest.len();
+            rest = skip_ascii_spaces(rest);
+            let suppressed = rest
+                .iter()
+                .take(8)
+                .take_while(|byte| **byte == b'@')
+                .count();
+            rest = &rest[suppressed..];
+            if let Some(tail) = strip_block_comment(rest) {
+                rest = tail;
+            } else if let Some(tail) = strip_line_comment(rest) {
+                rest = tail;
+            }
+            consumed += before - rest.len();
+            if rest.len() == before || consumed > MAX_PREFIX_BYTES {
+                break;
+            }
+        }
+        if short_tag_body(rest) {
+            return true;
+        }
+        index += 2 + consumed;
+    }
+    false
+}
+
+fn strip_block_comment(value: &[u8]) -> Option<&[u8]> {
+    const MAX_BYTES: usize = 256;
+
+    let body = value.strip_prefix(b"/*")?;
+    let window = &body[..body.len().min(MAX_BYTES)];
+    let end = window.windows(2).position(|window| window == b"*/")?;
+    Some(&body[end + 2..])
+}
+
+fn strip_line_comment(value: &[u8]) -> Option<&[u8]> {
+    const MAX_BYTES: usize = 256;
+
+    let body = value
+        .strip_prefix(b"//")
+        .or_else(|| value.strip_prefix(b"#"))?;
+    let window = &body[..body.len().min(MAX_BYTES)];
+    let end = window.iter().position(|byte| *byte == b'\n')?;
+    Some(&body[end + 1..])
+}
+
+fn short_tag_body(rest: &[u8]) -> bool {
+    const KEYWORDS: &[&[u8]] = &[
+        b"echo",
+        b"print",
+        b"system",
+        b"exec",
+        b"eval",
+        b"shell_exec",
+        b"passthru",
+        b"assert",
+        b"include",
+        b"include_once",
+        b"require",
+        b"require_once",
+        b"if",
+        b"foreach",
+        b"while",
+        b"switch",
+        b"function",
+        b"class",
+        b"return",
+        b"die",
+        b"exit",
+        b"isset",
+        b"unset",
+        b"empty",
+        b"global",
+        b"static",
+        b"new",
+        b"use",
+        b"fn",
+        b"match",
+        b"var_dump",
+        b"file_get_contents",
+        b"call_user_func",
+        b"declare",
+        b"namespace",
+        b"trait",
+        b"interface",
+        b"abstract",
+        b"final",
+        b"throw",
+        b"try",
+        b"yield",
+    ];
+    const MAX_NAME_BYTES: usize = 64;
+
+    let rest = skip_ascii_spaces(rest);
+    let Some(&first) = rest.first() else {
+        return false;
+    };
+    if first == b'$' {
+        return true;
+    }
+    if first == b'(' {
+        return parenthesized_callable(rest);
+    }
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    let name_len = rest
+        .iter()
+        .take(MAX_NAME_BYTES)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+        .count();
+    let name = &rest[..name_len];
+    if name.eq_ignore_ascii_case(b"xml") {
+        return false;
+    }
+    if skip_ascii_spaces(&rest[name_len..]).first() == Some(&b'(') {
+        return true;
+    }
+    KEYWORDS
+        .iter()
+        .any(|keyword| name.eq_ignore_ascii_case(keyword))
+}
+
+/// A parenthesized callable (`(system)(...)`, `($f)(...)`) is only treated as
+/// code when an identifier or variable fills the parentheses and the closing
+/// paren is followed by something that can start a call or argument list.
+fn parenthesized_callable(rest: &[u8]) -> bool {
+    const MAX_NAME_BYTES: usize = 64;
+
+    let inner = skip_ascii_spaces(&rest[1..]);
+    let name_len = inner
+        .iter()
+        .take(MAX_NAME_BYTES)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_' || **byte == b'$')
+        .count();
+    if name_len == 0 {
+        return false;
+    }
+    let after = skip_ascii_spaces(&inner[name_len..]);
+    if after.first() != Some(&b')') {
+        return false;
+    }
+    matches!(
+        skip_ascii_spaces(&after[1..]).first(),
+        Some(b'(' | b';' | b',' | b'[' | b'-' | b':')
+    )
+}
+
+fn skip_ascii_spaces(value: &[u8]) -> &[u8] {
+    let skip = value
+        .iter()
+        .take_while(|byte| matches!(**byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .count();
+    &value[skip..]
 }
 
 #[cfg(test)]
@@ -863,6 +1156,183 @@ mod tests {
         value.extend(std::iter::repeat_n(b'A', 4096));
         let body = body(&[("photo.jpg", Some("image/jpeg"), &value)]);
         assert!(inspect_mismatch(&body).is_none());
+    }
+
+    fn uri(path: &str) -> Uri {
+        format!("http://example.com{path}").parse().expect("uri")
+    }
+
+    fn raw(method: Method, path: &str, content_type: &str, value: &[u8]) -> Option<Rejection> {
+        let mut headers = HeaderMap::new();
+        if !content_type.is_empty() {
+            headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_str(content_type).expect("type"),
+            );
+        }
+        inspect_raw(
+            &method,
+            &uri(path),
+            &headers,
+            value,
+            UploadInspection::Mismatch,
+        )
+    }
+
+    #[test]
+    fn short_tags_are_detected_only_when_the_body_looks_like_code() {
+        for value in [
+            b"<? system($_GET['cmd']);".as_slice(),
+            b"<?$x=$_GET['cmd'];",
+            b"<?\n echo 'hi';",
+            b"<?phpinfo();",
+            b"<?@eval($_GET['cmd']);",
+            b"<?@ system('id');",
+            b"<?/*x*/system($_GET['cmd']);",
+            b"<?/* a */ @ include('x');",
+            b"<?//x\nsystem('id');",
+            b"<?#x\nsystem('id');",
+            b"<?(system)(\"id\");",
+            b"<?($f)(1);",
+            b"\xff\xd8\xff\xe0JFIF<? shell_exec('id');",
+        ] {
+            assert!(contains_short_script_tag(value), "{value:?}");
+        }
+        for value in [
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>".as_slice(),
+            b"<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>",
+            b"<?mso-application progid=\"Word.Document\"?>",
+            b"<? not a tag ?",
+            b"<?/* unterminated system('id');",
+            b"<?(1)",
+            b"<?(system) nonsense",
+            b"\x3c\x3f\x00\x01\x02",
+        ] {
+            assert!(!contains_short_script_tag(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_short_tag_behind_an_image_claim_is_rejected() {
+        let body = body(&[(
+            "photo.jpg",
+            Some("image/jpeg"),
+            b"\xff\xd8\xff\xe0JFIF<? system($_GET['cmd']); ?>".as_slice(),
+        )]);
+        let rejection = inspect_mismatch(&body).expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::Script);
+    }
+
+    #[test]
+    fn a_short_tag_is_detected_even_for_an_unverifiable_safe_type() {
+        let body = body(&[(
+            "photo.heic",
+            Some("image/heic"),
+            b"\xff\xd8\xff\xe0<? system('id');".as_slice(),
+        )]);
+        let rejection = inspect_mismatch(&body).expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::Script);
+    }
+
+    #[test]
+    fn xml_processing_instructions_in_a_safe_claim_pass() {
+        let body = body(&[(
+            "report.docx",
+            Some("application/octet-stream"),
+            b"PK\x03\x04<?xml version=\"1.0\"?><Types/>".as_slice(),
+        )]);
+        assert!(inspect_mismatch(&body).is_none());
+    }
+
+    #[test]
+    fn raw_bodies_with_a_dangerous_claim_are_inspected() {
+        for (path, content_type, value) in [
+            (
+                "/upload/polyglot.php",
+                "application/x-httpd-php",
+                b"<?php eval($_GET['cmd']);?>".as_slice(),
+            ),
+            (
+                "/upload/notes",
+                "text/x-php",
+                b"\xff\xd8\xff\xe0JFIF<? system('id');",
+            ),
+            ("/files/shell.PHP", "application/octet-stream", b"<?= 1 ?>"),
+            (
+                "/upload/polyglot%2Ephp",
+                "application/octet-stream",
+                b"<?php echo 1;",
+            ),
+            ("/upload/tool.php", "image/jpeg", b"\x7fELF\x02\x01\x01"),
+            ("/upload/tool.sh", "text/plain", b"#!/bin/sh\necho hi"),
+        ] {
+            let rejection = raw(Method::PUT, path, content_type, value)
+                .unwrap_or_else(|| panic!("accepted {path} ({content_type})"));
+            assert_eq!(rejection.filename, path.rsplit('/').next().unwrap_or(path));
+        }
+    }
+
+    #[test]
+    fn raw_bodies_without_a_dangerous_claim_are_not_inspected() {
+        for (path, content_type) in [
+            ("/api/notes", "application/json"),
+            ("/upload/photo.jpg", "image/jpeg"),
+            ("/upload/report.pdf", "application/pdf"),
+            ("/index.html", "text/html"),
+        ] {
+            assert!(
+                raw(Method::POST, path, content_type, b"<?php echo 1;").is_none(),
+                "inspected {path} ({content_type})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_php_route_with_an_ordinary_body_is_not_rejected() {
+        let value = b"{\"query\":\"annual report\",\"page\":2}";
+        assert!(raw(Method::POST, "/api/items.php", "application/json", value).is_none());
+        assert!(
+            raw(
+                Method::PUT,
+                "/upload/polyglot.php",
+                "image/jpeg",
+                b"JPEGDATA"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn raw_inspection_covers_write_methods_and_skips_the_rest() {
+        assert!(raw(Method::POST, "/x.php", "", b"<?php echo 1;").is_some());
+        assert!(raw(Method::PUT, "/x.php", "", b"<?php echo 1;").is_some());
+        assert!(raw(Method::PATCH, "/x.php", "", b"<?php echo 1;").is_some());
+        assert!(raw(Method::GET, "/x.php", "", b"<?php echo 1;").is_none());
+    }
+
+    #[test]
+    fn raw_inspection_skips_multipart_and_disabled_modes() {
+        let headers = headers();
+        assert!(
+            inspect_raw(
+                &Method::POST,
+                &uri("/upload/x.php"),
+                &headers,
+                b"<?php echo 1;",
+                UploadInspection::Mismatch,
+            )
+            .is_none()
+        );
+        assert!(
+            inspect_raw(
+                &Method::PUT,
+                &uri("/upload/x.php"),
+                &HeaderMap::new(),
+                b"<?php echo 1;",
+                UploadInspection::Off,
+            )
+            .is_none()
+        );
     }
 
     #[test]

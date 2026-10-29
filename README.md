@@ -53,8 +53,9 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
   declared type, filename extension, and leading bytes: a part that claims an
   image, PDF, office, media, or font type must start with that format's
   signature, so source code renamed to `.jpg` or `.pdf` is rejected together
-  with executable, script, or markup content behind a safe claim. `strict` mode
-  also covers generic binary claims.
+  with executable, script, or markup content behind a safe claim, PHP short
+  tags, and raw write bodies sent to an executable or script path. `strict`
+  mode also covers generic binary claims.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.

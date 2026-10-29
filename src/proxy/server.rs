@@ -1531,9 +1531,14 @@ async fn process(
         ));
     }
     let inspect_body = (body_rules && !body_rules_exempt) || graphql_path;
-    let inspect_uploads = config.limits.upload_inspection != UploadInspection::Off
+    let inspect_multipart = config.limits.upload_inspection != UploadInspection::Off
         && crate::upload::is_multipart(&parts.headers)
         && !body.is_empty();
+    let inspect_raw_body = config.limits.upload_inspection != UploadInspection::Off
+        && !crate::upload::is_multipart(&parts.headers)
+        && !body.is_empty()
+        && crate::upload::wants_raw_inspection(&parts.method, &parts.uri, &parts.headers);
+    let inspect_uploads = inspect_multipart || inspect_raw_body;
     let encoded = parts.headers.contains_key(CONTENT_ENCODING);
     let decode_body = inspect_body || ((inspect_uploads || inspect_form) && encoded);
     if (decode_body || inspect_uploads) && !body.is_empty() {
@@ -1671,7 +1676,7 @@ async fn process(
             return Err(HttpError::new(status, violation.message()));
         }
     }
-    if inspect_uploads
+    if inspect_multipart
         && let Some(rejection) = crate::upload::inspect(
             &parts.headers,
             inspected_body.as_ref(),
@@ -1693,6 +1698,32 @@ async fn process(
         return Err(HttpError::new(
             StatusCode::FORBIDDEN,
             "upload content does not match its declared type",
+        ));
+    }
+    if inspect_raw_body
+        && let Some(rejection) = crate::upload::inspect_raw(
+            &parts.method,
+            &parts.uri,
+            &parts.headers,
+            inspected_body.as_ref(),
+            config.limits.upload_inspection,
+        )
+    {
+        context
+            .metrics
+            .upload_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        debug!(
+            client = %source.client_ip, peer = %source.peer,
+            path = %parts.uri.path(),
+            filename = %rejection.filename,
+            declared = rejection.declared.as_deref().unwrap_or("-"),
+            kind = rejection.kind.as_str(),
+            "request body content rejected"
+        );
+        return Err(HttpError::new(
+            StatusCode::FORBIDDEN,
+            "request body carries executable content",
         ));
     }
     if graphql_path

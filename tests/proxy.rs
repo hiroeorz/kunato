@@ -2165,6 +2165,109 @@ async fn upload_inspection_rejects_content_that_is_not_the_claimed_format() {
 }
 
 #[tokio::test]
+async fn upload_inspection_rejects_raw_bodies_to_script_paths() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::PUT,
+        "/upload/polyglot.php",
+        b"<?php eval($_GET['cmd']);?>".to_vec(),
+        &[("content-type", "application/x-httpd-php")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::PUT,
+        "/upload/tool",
+        b"\x7fELF\x02\x01\x01".to_vec(),
+        &[("content-type", "application/x-shellscript")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::PUT,
+        "/api/items.php",
+        b"{\"query\":\"annual report\"}".to_vec(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_upload_rejected_total 2"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_inspection_rejects_short_tag_polyglots() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = multipart_upload(
+        "photo.jpg",
+        "image/jpeg",
+        b"\xff\xd8\xff\xe0JFIF<? system($_GET['cmd']); ?>",
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let body = multipart_upload(
+        "photo.jpg",
+        "image/jpeg",
+        b"\xff\xd8\xff\xe0JFIF<?/*x*/system($_GET['cmd']);",
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let body = multipart_upload(
+        "report.docx",
+        "application/octet-stream",
+        b"PK\x03\x04<?xml version=\"1.0\"?><Types/>",
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn upload_inspection_accepts_benign_and_explicit_uploads() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(

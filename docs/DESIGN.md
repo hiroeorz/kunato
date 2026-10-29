@@ -208,20 +208,24 @@ Multipart uploads are additionally checked against the type they claim to be.
 A file part whose declared type (or, when generic or absent, filename extension)
 claims an image, PDF, office document, media file, or font must not contain an
 executable header or active markup at the leading position, or a server-side
-script marker anywhere, and must start with the claimed format's signature
-(JPEG, PNG, GIF, PDF, ZIP/OOXML/ODF, OLE/RTF, media containers, and fonts), so
-source text renamed to `.jpg` or `.pdf` is rejected even without a marker.
-Formats the check cannot verify, such as `image/heic`, are exempt. Script markers (`<?php`, `<?=`, `<%`) are scanned across
-the whole inspected part, bounded by `max_body_bytes`, so a valid image header
-followed by padding and a marker is rejected regardless of offset. A matching
-part is rejected with `403` and counted in `kunato_upload_rejected_total`. The
-check is an engine limit: it runs before rule evaluation, so an `ALLOW` rule
-cannot bypass it. `upload_inspection: strict` also rejects executable and script
-content behind a generic `application/octet-stream` claim, and `off` disables the
-check. It shares the multipart boundary and part limits with rule inspection, so
-a body with an unsupported boundary interpretation, a malformed multipart body,
-a file part outside the inspected prefix (in `stream` mode), archive contents,
-or executable/markup content embedded beyond the leading bytes is not covered.
+script marker anywhere - including PHP short tags whose body looks like code -
+and must start with the claimed format's signature (JPEG, PNG, GIF, PDF,
+ZIP/OOXML/ODF, OLE/RTF, media containers, and fonts), so source text renamed to
+`.jpg` or `.pdf` is rejected even without a marker. Formats the check cannot
+verify, such as `image/heic`, are exempt. Markers are scanned across the whole
+inspected part, bounded by `max_body_bytes`, so a valid image header followed by
+padding and a marker is rejected regardless of offset. A non-multipart write
+request whose `Content-Type` or path names an executable or server-side script
+has its raw body scanned for the same markers, which covers uploads that skip
+the multipart envelope. A matching part or body is rejected with `403` and
+counted in `kunato_upload_rejected_total`. The check is an engine limit: it runs
+before rule evaluation, so an `ALLOW` rule cannot bypass it.
+`upload_inspection: strict` also rejects executable and script content behind a
+generic `application/octet-stream` claim, and `off` disables the check. It shares
+the multipart boundary and part limits with rule inspection, so a body with an
+unsupported boundary interpretation, a malformed multipart body, a file part
+outside the inspected prefix (in `stream` mode), archive contents, or
+executable/markup content embedded beyond the leading bytes is not covered.
 In strict body mode an over-limit upload is rejected with `413` unless an
 `ALLOW` rule decides, because the file bytes must be complete for inspection.
 

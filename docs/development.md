@@ -1000,6 +1000,24 @@ cannot verify (for example `image/heic`), generic claims in `mismatch` mode, and
 active-web claims are not signature-checked, and only the leading bytes are
 compared, so a valid signature followed by script code still passes.
 
+PHP short tags (`<?`) are detected as well when the tag body looks like code: a
+variable, a function call, a parenthesized callable (`(system)(...)`), or a
+language keyword (`echo`, `system`, `eval`, `include`, ...), after skipping
+whitespace, `@`, and `/* ... */`, `// ...`, or `# ...` comments. This catches
+`<?/*x*/system(...)` behind an image signature without matching XML processing
+instructions (`<?xml`, `<?xpacket`, `<?mso-application`) or random bytes inside
+compressed media.
+
+A non-multipart write request (`POST`, `PUT`, `PATCH`) whose `Content-Type` or
+path names an executable or server-side script — for example
+`application/x-httpd-php`, `text/x-shellscript`, or a path segment ending in
+`.php`, `.rb`, or `.sh` — has its raw body scanned for an executable header, a
+leading `#!`, and script markers (including short tags). This covers WebDAV and
+API uploads that bypass the multipart envelope. The scan rejects with `403` and
+`request body carries executable content`. The path or type only selects the
+request for scanning, so a `.php` route that receives an ordinary body (JSON,
+form data) is unaffected; the body content decides the rejection.
+
 A declared type that is itself active (`text/html`, `image/svg+xml`,
 JavaScript) or explicitly executable (`application/x-msdownload`, ...) is
 respected: markup behind an active claim and an executable behind an executable

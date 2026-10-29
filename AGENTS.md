@@ -142,9 +142,11 @@ rule-set updates.
   PDF, office, media, or font claim, or when the part does not start with the
   claimed format's signature (JPEG, PNG, GIF, PDF, ZIP/OOXML/ODF, OLE/RTF,
   media containers, and fonts; unverifiable types such as `image/heic` are not
-  signature-checked). `strict` also covers generic binary claims; `off`
-  disables the check. It runs before rule evaluation, so `ALLOW` does not
-  bypass it.
+  signature-checked) or contains a PHP short tag that looks like code.
+  Non-multipart `POST`/`PUT`/`PATCH` requests whose `Content-Type` or path names
+  an executable or script have their raw body scanned for the same markers.
+  `strict` also covers generic binary claims; `off` disables both checks. It
+  runs before rule evaluation, so `ALLOW` does not bypass it.
 - `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
   must be complete and pass field/part/header/name/nesting/complexity limits
   before ALLOW or forwarding. This also applies in body `stream` mode; explicitly
