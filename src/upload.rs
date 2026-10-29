@@ -628,13 +628,132 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn contains_script_marker(bytes: &[u8]) -> bool {
-    const MARKERS: &[&[u8]] = &[b"<?php", b"<?=", b"<%"];
-    MARKERS.iter().copied().any(|marker| {
-        bytes.len() >= marker.len()
-            && bytes
-                .windows(marker.len())
-                .any(|window| window.eq_ignore_ascii_case(marker))
-    })
+    if bytes.len() >= 5
+        && bytes
+            .windows(5)
+            .any(|window| window.eq_ignore_ascii_case(b"<?php"))
+    {
+        return true;
+    }
+    contains_open_echo(bytes) || contains_asp_scriptlet(bytes)
+}
+
+/// `<?=` is only three bytes, so scrambled image or media content contains it
+/// by chance; the expression that follows must look like one.
+fn contains_open_echo(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && bytes
+            .windows(4)
+            .any(|window| window[..3].eq_ignore_ascii_case(b"<?=") && is_code_start(window[3]))
+}
+
+/// `<%` starts an ASP or JSP scriptlet. Two- and three-byte coincidences are
+/// common in compressed media, so the tag must be followed by a real scriptlet
+/// opening: an echo or directive marker, a language keyword, or a longer
+/// identifier used as a call or member access.
+fn contains_asp_scriptlet(bytes: &[u8]) -> bool {
+    const KEYWORDS: &[&[u8]] = &[
+        b"out",
+        b"if",
+        b"for",
+        b"while",
+        b"do",
+        b"switch",
+        b"int",
+        b"long",
+        b"float",
+        b"double",
+        b"char",
+        b"boolean",
+        b"byte",
+        b"short",
+        b"void",
+        b"String",
+        b"Object",
+        b"request",
+        b"response",
+        b"session",
+        b"application",
+        b"pageContext",
+        b"Runtime",
+        b"System",
+        b"Class",
+        b"Thread",
+        b"new",
+        b"try",
+        b"catch",
+        b"finally",
+        b"throw",
+        b"return",
+        b"break",
+        b"continue",
+        b"print",
+        b"write",
+        b"eval",
+        b"import",
+        b"include",
+        b"taglib",
+        b"page",
+        b"Response",
+        b"Request",
+        b"Server",
+        b"class",
+        b"public",
+        b"private",
+        b"protected",
+        b"static",
+        b"else",
+        b"case",
+        b"package",
+        b"interface",
+        b"extends",
+        b"implements",
+        b"this",
+        b"super",
+    ];
+
+    let mut index = 0;
+    while index + 2 < bytes.len() {
+        if bytes[index] == b'<' && bytes[index + 1] == b'%' {
+            let rest = &bytes[index + 2..];
+            let Some(&first) = rest.first() else {
+                break;
+            };
+            let hit = match first {
+                b'=' | b'@' | b'!' | b'#' => rest.get(1).is_some_and(|byte| is_code_start(*byte)),
+                _ => {
+                    let rest = skip_ascii_spaces(rest);
+                    let name_len = rest
+                        .iter()
+                        .take(64)
+                        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+                        .count();
+                    if name_len == 0 {
+                        false
+                    } else {
+                        let name = &rest[..name_len];
+                        let after = skip_ascii_spaces(&rest[name_len..]);
+                        let call =
+                            name_len >= 3 && matches!(after.first(), Some(b'(' | b'.' | b'['));
+                        call || KEYWORDS
+                            .iter()
+                            .any(|keyword| name.eq_ignore_ascii_case(keyword))
+                    }
+                }
+            };
+            if hit {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn is_code_start(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || byte.is_ascii_whitespace()
+        || matches!(byte, b'$' | b'(' | b'[' | b'"' | b'\'' | b'_')
 }
 
 /// PHP short open tags (`<?`) are only detected when what follows looks like
@@ -1177,6 +1296,34 @@ mod tests {
             value,
             UploadInspection::Mismatch,
         )
+    }
+
+    #[test]
+    fn marker_bytes_inside_compressed_media_do_not_match() {
+        let mut value = b"\x89PNG\r\n\x1a\n".to_vec();
+        value.extend_from_slice(b"<%u\xae\xd3\x0f<%i#E<?=\xedi\xbb<%\xdd\x1c<%Wt=\x83<%I\x8c\xd9");
+        let body = body(&[("photo.png", Some("image/png"), &value)]);
+        assert!(inspect_mismatch(&body).is_none());
+    }
+
+    #[test]
+    fn asp_and_echo_markers_still_match_when_code_follows() {
+        for marker in [
+            b"<% out.print(1); %>".as_slice(),
+            b"<%= 1 %>",
+            b"<%if (x) {}%>",
+            b"<%@ page import=\"java.io.*\" %>",
+            b"<%! int x; %>",
+            b"<%Runtime.getRuntime();%>",
+            b"<%response.getWriter().print(1);%>",
+            b"<?= $x ?>",
+            b"<?=htmlspecialchars($x)?>",
+            b"<?= 1 ?>",
+            b"<?php echo 1; ?>",
+            b"<?PHP echo 1; ?>",
+        ] {
+            assert!(contains_script_marker(marker), "{marker:?}");
+        }
     }
 
     #[test]

@@ -376,6 +376,9 @@ POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_fil
 # Only the leading bytes are compared with the claimed signature, so a real
 # JPEG with a plain-text tail must keep passing.
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg-text-tail.bin
+# Two- and three-byte marker sequences that occur by chance inside compressed
+# images must not be treated as scripts.
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-marker-bytes.bin
 # XML processing instructions inside a ZIP container are not PHP short tags.
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-docx-xml.bin
 # Raw-body inspection reacts to a dangerous claim, not to a PHP path: an
