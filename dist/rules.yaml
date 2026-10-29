@@ -1674,6 +1674,32 @@ categories:
           path: '(?i)^/rest/(?:[^/]+/)?V1/guest-carts/[^/]+/items(?:/[^/?]+)?$'
           regex: '(?i)"name"\s*:\s*"[^"]{0,256}\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh)"'
           in: [body]
+      # CVE-2026-61564 (AVideo): the unauthenticated installer writes
+      # videos/configuration.php by interpolating webSiteRootURL and
+      # systemRootPath into single-quoted PHP literals. A quote followed by a
+      # PHP execution function is the injection shape; a normal base URL keeps
+      # passing.
+      - name: avideo-installer-php-injection
+        match:
+          path: '(?i)^/install/checkConfiguration\.php$'
+          regex: '(?i)(?:%3c\?php|<\?php|(?:%27|%22|[''"])(?:\s|%20)*(?:;|%3b)(?:\s|%20)*(?:system|exec|shell_exec|passthru|popen|proc_open|phpinfo|assert)\s*\()'
+          in: [body, query]
+      # CVE-2026-117607 (Xerte Online Toolkits): a language pack ZIP may carry
+      # an .inc file that is later included through the language parameter.
+      # The language import endpoint never accepts an executable filename.
+      - name: xerte-language-pack-executable
+        match:
+          path: '(?i)^/website_code/php/language/import_language\.php$'
+          regex: '(?i)filename\s*=\s*"[^"]{0,256}\.(inc|php[0-9]?|phtml|phar)\b'
+          in: [body]
+      # CVE-2026-58255 (Cronicle): a non-administrator with create_events can
+      # inject top-level uid/gid fields that survive into the child-process
+      # launch. A legitimate event does not set the run-as identity.
+      - name: cronicle-event-uid-gid-injection
+        match:
+          path: '(?i)^/api/app/(create|update)_event$'
+          regex: '(?i)"(uid|gid)"\s*:\s*(?:0|"0"|"root")\s*[,}]'
+          in: [body]
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

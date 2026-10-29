@@ -693,3 +693,20 @@ GET /admin/task.php?run=dashboard
 POST /admin/task.php?mod=qbanner&run=edit.php header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
 POST /rest/default/V1/guest-carts/abc123/items header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"1\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/gif\",\"name\":\"artwork.png\"}}}]}}}}"
 PUT /rest/V1/guest-carts/abc123/items/42 header="Content-Type: application/json" body="{\"cartItem\":{\"sku\":\"shirt\",\"qty\":1,\"product_option\":{\"extension_attributes\":{\"custom_options\":[{\"option_id\":\"1\",\"option_value\":\"file\",\"extension_attributes\":{\"file_info\":{\"base64_encoded_data\":\"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==\",\"type\":\"image/jpeg\",\"name\":\"photo.jpg\"}}}]}}}}"
+
+# --- Near-misses for the 2026-10-29 AVideo/CMS/traversal/XXE/XSS/SQLi and
+#     command-injection signatures: the same endpoints and parameters with
+#     ordinary values must keep passing. ---
+GET /admin/debug_content.php?path=content/about.md
+POST /admin/debug_save_flow.php header="Content-Type: application/x-www-form-urlencoded" body="path=content/blog/post.md&content=Hello%20world"
+GET /artifacts/get?source=volume&path=mlpipeline/artifacts/model
+GET /api/flows/sales-diagram
+DELETE /api/flows/obsolete-diagram
+POST /api/item header="Content-Type: application/xml" body="<item><metadata><name>Quiz%201</name></metadata></item>"
+POST /index.php?m=home&a=ajaxCalls header="Content-Type: application/x-www-form-urlencoded" body="mode=callDataGrid&period=custom&startDate=2026-01-01&endDate=2026-02-01"
+POST /exec/init header="Content-Type: application/json" body="{\"username\":\"developer\",\"namespace\":\"default\"}"
+POST /api/dashboards/1/widgets/2 header="Content-Type: application/json" body="{\"desc\":\"Revenue by region\",\"text\":\"Q4\"}"
+POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"x\",\"nodes\":[],\"connections\":{},\"settings\":{\"responseMode\":\"responseNode\"}}"
+POST /website_code/php/language/import_language.php header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /api/app/create_event header="Content-Type: application/json" body="{\"title\":\"maintenance\",\"plugin\":\"shellplug\",\"params\":{}}"
+PUT /fog/storagenode/1/edit header="Content-Type: application/json" body="{\"name\":\"node\",\"user\":\"fog\",\"pass\":\"secret\",\"ftppath\":\"/images\"}"
