@@ -545,6 +545,11 @@ POST /upload body="filename=\".user.ini\""
 POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=shell.php"
 POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=run.bash"
 POST /upload body="Content-Disposition: form-data; name=\"file\"; filename*=UTF-8''shell.rb"
+# Null-byte filename tricks: the dangerous extension is matched on either side
+# of the terminator, and the RFC 5987 parameter form is covered too.
+POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=\"webshell.jpg%00.php\""
+POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=\"webshell.php%00.jpg\""
+POST /upload body="Content-Disposition: form-data; name=\"file\"; filename*=UTF-8''webshell.jpg%00.php"
 PUT /files/shell body="filename=\"shell.war\""
 POST /upload body="Content-Disposition: form-data; name=\"file\"; filename=\"shell.php\""
 
