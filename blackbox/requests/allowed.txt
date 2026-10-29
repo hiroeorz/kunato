@@ -373,6 +373,9 @@ POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_fil
 # A large safe image with no script marker must still pass the full-part scan.
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg-deep.bin
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-page.bin
+# Only the leading bytes are compared with the claimed signature, so a real
+# JPEG with a plain-text tail must keep passing.
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-jpeg-text-tail.bin
 
 # --- Filename near-misses: names that merely resemble a script extension, and
 #     parameters that mention one without being an upload filename, must pass ---

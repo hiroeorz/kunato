@@ -139,8 +139,11 @@ rule-set updates.
 - `limits.upload_inspection` defaults to `mismatch`: multipart file parts are
   checked against their declared type (or safe filename extension) and rejected
   with `403` when executable, script, or markup content hides behind an image,
-  PDF, office, media, or font claim. `strict` also covers generic binary claims;
-  `off` disables the check. It runs before rule evaluation, so `ALLOW` does not
+  PDF, office, media, or font claim, or when the part does not start with the
+  claimed format's signature (JPEG, PNG, GIF, PDF, ZIP/OOXML/ODF, OLE/RTF,
+  media containers, and fonts; unverifiable types such as `image/heic` are not
+  signature-checked). `strict` also covers generic binary claims; `off`
+  disables the check. It runs before rule evaluation, so `ALLOW` does not
   bypass it.
 - `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
   must be complete and pass field/part/header/name/nesting/complexity limits

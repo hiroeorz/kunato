@@ -208,7 +208,10 @@ Multipart uploads are additionally checked against the type they claim to be.
 A file part whose declared type (or, when generic or absent, filename extension)
 claims an image, PDF, office document, media file, or font must not contain an
 executable header or active markup at the leading position, or a server-side
-script marker anywhere. Script markers (`<?php`, `<?=`, `<%`) are scanned across
+script marker anywhere, and must start with the claimed format's signature
+(JPEG, PNG, GIF, PDF, ZIP/OOXML/ODF, OLE/RTF, media containers, and fonts), so
+source text renamed to `.jpg` or `.pdf` is rejected even without a marker.
+Formats the check cannot verify, such as `image/heic`, are exempt. Script markers (`<?php`, `<?=`, `<%`) are scanned across
 the whole inspected part, bounded by `max_body_bytes`, so a valid image header
 followed by padding and a marker is rejected regardless of offset. A matching
 part is rejected with `403` and counted in `kunato_upload_rejected_total`. The

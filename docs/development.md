@@ -990,6 +990,16 @@ file, or font (by type, or by a safe extension such as `.jpg`, `.png`, `.pdf`, o
 - active HTML/XML/SVG markup (a leading `<` after an optional BOM and
   whitespace).
 
+A part that claims a safe type must also start with that format's signature:
+JPEG (`FF D8 FF`), PNG, GIF, WebP/WAV/AVI (RIFF sub-type), BMP, TIFF, ICO, PDF
+(`%PDF-` within the first 1 KiB), ZIP containers (OOXML and ODF documents), OLE
+or RTF (legacy Office), MP3, MP4/MOV, Ogg, FLAC, Matroska/WebM, WOFF, WOFF2, and
+SFNT fonts. Text or source code renamed to `.jpg` or `.pdf` is therefore
+rejected even when it contains no script marker. Claims whose format the check
+cannot verify (for example `image/heic`), generic claims in `mismatch` mode, and
+active-web claims are not signature-checked, and only the leading bytes are
+compared, so a valid signature followed by script code still passes.
+
 A declared type that is itself active (`text/html`, `image/svg+xml`,
 JavaScript) or explicitly executable (`application/x-msdownload`, ...) is
 respected: markup behind an active claim and an executable behind an executable

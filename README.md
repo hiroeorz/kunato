@@ -50,9 +50,11 @@ of three actions: **BLOCK**, **ALLOW**, or **LOG**.
   by content type (`application/x-www-form-urlencoded` and JSON escapes).
   Forwarded traffic is never modified.
 - **Upload content inspection** — Multipart file parts are checked against their
-  declared type and filename extension; executable, script, or markup content
-  behind an image, PDF, office, media, or font claim is rejected before rules run.
-  `strict` mode also covers generic binary claims.
+  declared type, filename extension, and leading bytes: a part that claims an
+  image, PDF, office, media, or font type must start with that format's
+  signature, so source code renamed to `.jpg` or `.pdf` is rejected together
+  with executable, script, or markup content behind a safe claim. `strict` mode
+  also covers generic binary claims.
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule
   file are detected at runtime and reloaded on the fly without restarting the
   process or dropping connections.

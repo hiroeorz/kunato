@@ -1,0 +1,7 @@
+--X
+Content-Disposition: form-data; name="file"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+puts "hi"
+
+--X--

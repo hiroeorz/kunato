@@ -2131,6 +2131,40 @@ async fn upload_inspection_rejects_spoofed_content() {
 }
 
 #[tokio::test]
+async fn upload_inspection_rejects_content_that_is_not_the_claimed_format() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ upload_inspection: mismatch }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for (filename, content_type, value) in [
+        ("photo.jpg", "image/jpeg", b"puts \"hi\"".as_slice()),
+        ("report.pdf", "application/pdf", b"puts 1\n"),
+        ("pixel.png", "image/png", b"\xff\xd8\xff\xe0JFIF"),
+    ] {
+        let body = multipart_upload(filename, content_type, value);
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::POST,
+            "/upload",
+            body,
+            &[("content-type", "multipart/form-data; boundary=X")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{filename}");
+    }
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_upload_rejected_total 3"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn upload_inspection_accepts_benign_and_explicit_uploads() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
@@ -2339,12 +2373,12 @@ async fn graphql_depth_and_field_limits_reject_complex_queries() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let multipart = "--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\nPNG\r\n--X--\r\n";
+    let multipart = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\n\x89PNG\r\n\x1a\n\r\n--X--\r\n";
     let (status, _) = send_bytes(
         running.addr,
         Method::POST,
         "/graphql",
-        multipart.as_bytes().to_vec(),
+        multipart.to_vec(),
         &[("content-type", "multipart/form-data; boundary=X")],
     )
     .await;

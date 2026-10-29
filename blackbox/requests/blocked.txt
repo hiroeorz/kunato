@@ -556,6 +556,10 @@ POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=pa
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-html-in-pdf.bin
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-elf-in-png.bin
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-gif-php.bin
+# A safe claim must start with the claimed format's signature, so source code
+# renamed to an image or PDF is rejected even without a script marker.
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-ruby-in-jpeg.bin
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-ruby-in-pdf.bin
 # The example configuration enables `upload_inspection: strict`, so executable
 # bytes behind a generic declared type are rejected as well.
 POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-generic-elf.bin

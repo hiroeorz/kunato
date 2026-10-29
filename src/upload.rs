@@ -4,16 +4,20 @@
 //! `Content-Type` (or, when that is generic or absent, its filename extension)
 //! is compared with the bytes of the part: executable, server-side script, or
 //! markup content behind an image, PDF, office, media, or font claim is
-//! rejected. This closes the MIME-spoofing class where an upload filter trusts
-//! the declared type while the upstream stores an executable or HTML file.
+//! rejected. A part that claims such a type must also start with that format's
+//! signature, so plain text or source code renamed to `.jpg` or `.pdf` is
+//! rejected even when it contains no dangerous marker. This closes the
+//! MIME-spoofing class where an upload filter trusts the declared type while
+//! the upstream stores an executable or HTML file.
 //!
 //! The check shares the multipart boundary, part, and body limits with rule
 //! inspection and never copies the body. It runs before rule evaluation, so an
 //! `ALLOW` rule cannot bypass it. It is deliberately a heuristic: server-side
 //! script markers are scanned throughout the inspected part, but executable and
-//! markup detection beyond the leading bytes, an unsupported boundary
-//! interpretation, archive contents, or an upload larger than `max_body_bytes`
-//! without `body_inspection: stream` is not fully inspected.
+//! markup detection beyond the leading bytes, a matching signature followed by
+//! script code, an unsupported boundary interpretation, archive contents, or an
+//! upload larger than `max_body_bytes` without `body_inspection: stream` is not
+//! fully inspected.
 
 use http::header::{CONTENT_TYPE, HeaderMap};
 
@@ -44,6 +48,8 @@ pub(crate) enum DangerousKind {
     Executable,
     Script,
     ActiveWeb,
+    /// The part claims a safe type but its leading bytes are not that format.
+    FormatMismatch,
 }
 
 impl DangerousKind {
@@ -52,6 +58,7 @@ impl DangerousKind {
             Self::Executable => "executable",
             Self::Script => "script",
             Self::ActiveWeb => "active-web",
+            Self::FormatMismatch => "format-mismatch",
         }
     }
 }
@@ -137,7 +144,17 @@ fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejec
             }
             DangerousKind::Executable
         }
-        _ => dangerous_content(part.value)?,
+        _ => match dangerous_content(part.value) {
+            Some(kind) => kind,
+            None if claim == Claim::Safe => {
+                let format = expected_format(declared.as_deref(), &filename)?;
+                if format.matches(part.value) {
+                    return None;
+                }
+                DangerousKind::FormatMismatch
+            }
+            None => return None,
+        },
     };
     blocks(mode, claim, kind).then_some(Rejection {
         filename,
@@ -258,10 +275,187 @@ fn blocks(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
             Claim::ExplicitDangerous | Claim::Generic => false,
         },
         UploadInspection::Strict => match kind {
-            DangerousKind::Executable | DangerousKind::Script => true,
+            DangerousKind::Executable | DangerousKind::Script | DangerousKind::FormatMismatch => {
+                true
+            }
             DangerousKind::ActiveWeb => claim != Claim::ActiveWeb,
         },
     }
+}
+
+/// The format a safe claim promises, verified from the leading bytes of the
+/// part. Claims for formats without an entry here are not verified, so
+/// uncommon but legitimate types keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedFormat {
+    Jpeg,
+    Png,
+    Gif,
+    Webp,
+    Bmp,
+    Tiff,
+    Icon,
+    Pdf,
+    Zip,
+    LegacyOffice,
+    Rtf,
+    Mp3,
+    Mp4,
+    Ogg,
+    Wav,
+    Avi,
+    Flac,
+    Ebml,
+    Woff,
+    Woff2,
+    Sfnt,
+}
+
+impl ExpectedFormat {
+    fn matches(self, value: &[u8]) -> bool {
+        match self {
+            Self::Jpeg => value.starts_with(b"\xff\xd8\xff"),
+            Self::Png => value.starts_with(b"\x89PNG\r\n\x1a\n"),
+            Self::Gif => value.starts_with(b"GIF87a") || value.starts_with(b"GIF89a"),
+            Self::Webp => riff(value, b"WEBP"),
+            Self::Wav => riff(value, b"WAVE"),
+            Self::Avi => riff(value, b"AVI "),
+            Self::Bmp => value.starts_with(b"BM"),
+            Self::Tiff => {
+                value.starts_with(b"II*\x00")
+                    || value.starts_with(b"MM\x00*")
+                    || value.starts_with(b"II+\x00")
+                    || value.starts_with(b"MM\x00+")
+            }
+            Self::Icon => value.starts_with(b"\x00\x00\x01\x00"),
+            Self::Pdf => value
+                .get(..value.len().min(1024))
+                .is_some_and(|head| head.windows(5).any(|window| window == b"%PDF-")),
+            Self::Zip => {
+                value.starts_with(b"PK\x03\x04")
+                    || value.starts_with(b"PK\x05\x06")
+                    || value.starts_with(b"PK\x07\x08")
+            }
+            Self::LegacyOffice => {
+                value.starts_with(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+                    || value.starts_with(b"{\\rtf")
+            }
+            Self::Rtf => value.starts_with(b"{\\rtf"),
+            Self::Mp3 => {
+                value.starts_with(b"ID3")
+                    || (value.len() >= 2 && value[0] == 0xff && value[1] & 0xe0 == 0xe0)
+            }
+            Self::Mp4 => {
+                if value.len() < 8 {
+                    return false;
+                }
+                let atom = &value[4..8];
+                atom == b"ftyp"
+                    || atom == b"moov"
+                    || atom == b"mdat"
+                    || atom == b"wide"
+                    || atom == b"free"
+                    || atom == b"skip"
+            }
+            Self::Ogg => value.starts_with(b"OggS"),
+            Self::Flac => value.starts_with(b"fLaC"),
+            Self::Ebml => value.starts_with(b"\x1a\x45\xdf\xa3"),
+            Self::Woff => value.starts_with(b"wOFF"),
+            Self::Woff2 => value.starts_with(b"wOF2"),
+            Self::Sfnt => {
+                value.starts_with(b"\x00\x01\x00\x00")
+                    || value.starts_with(b"true")
+                    || value.starts_with(b"ttcf")
+                    || value.starts_with(b"OTTO")
+            }
+        }
+    }
+}
+
+fn riff(value: &[u8], kind: &[u8; 4]) -> bool {
+    value.len() >= 12 && value.starts_with(b"RIFF") && value[8..12] == *kind
+}
+
+/// The format a safe claim promises. A declared safe type wins over the
+/// filename, mirroring [`claim_for`]; a declared type the inspection cannot
+/// verify disables the signature check instead of guessing from the name.
+fn expected_format(declared: Option<&str>, filename: &str) -> Option<ExpectedFormat> {
+    if let Some(media_type) = declared {
+        if let Some(format) = format_for_media_type(media_type) {
+            return Some(format);
+        }
+        if is_safe_media_type(media_type) {
+            return None;
+        }
+    }
+    format_for_extension(filename)
+}
+
+fn format_for_media_type(media_type: &str) -> Option<ExpectedFormat> {
+    let format = match media_type {
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => ExpectedFormat::Jpeg,
+        "image/png" | "image/apng" => ExpectedFormat::Png,
+        "image/gif" => ExpectedFormat::Gif,
+        "image/webp" => ExpectedFormat::Webp,
+        "image/bmp" | "image/x-bmp" | "image/x-ms-bmp" => ExpectedFormat::Bmp,
+        "image/tiff" | "image/x-tiff" => ExpectedFormat::Tiff,
+        "image/x-icon" | "image/vnd.microsoft.icon" => ExpectedFormat::Icon,
+        "application/pdf" => ExpectedFormat::Pdf,
+        "application/msword" | "application/vnd.ms-excel" | "application/vnd.ms-powerpoint" => {
+            ExpectedFormat::LegacyOffice
+        }
+        "application/rtf" | "text/rtf" => ExpectedFormat::Rtf,
+        "audio/mpeg" | "audio/mp3" => ExpectedFormat::Mp3,
+        "audio/mp4" | "audio/x-m4a" | "video/mp4" | "video/quicktime" => ExpectedFormat::Mp4,
+        "audio/ogg" | "video/ogg" | "application/ogg" => ExpectedFormat::Ogg,
+        "audio/wav" | "audio/wave" | "audio/x-wav" => ExpectedFormat::Wav,
+        "video/x-msvideo" | "video/avi" => ExpectedFormat::Avi,
+        "audio/flac" | "audio/x-flac" => ExpectedFormat::Flac,
+        "video/webm" | "video/x-matroska" | "audio/webm" => ExpectedFormat::Ebml,
+        "font/woff" | "application/font-woff" => ExpectedFormat::Woff,
+        "font/woff2" | "application/font-woff2" => ExpectedFormat::Woff2,
+        "font/ttf"
+        | "font/otf"
+        | "application/font-sfnt"
+        | "application/x-font-ttf"
+        | "application/x-font-otf" => ExpectedFormat::Sfnt,
+        _ if media_type.starts_with("application/vnd.openxmlformats-officedocument.")
+            || media_type.starts_with("application/vnd.oasis.opendocument.") =>
+        {
+            ExpectedFormat::Zip
+        }
+        _ => return None,
+    };
+    Some(format)
+}
+
+fn format_for_extension(filename: &str) -> Option<ExpectedFormat> {
+    let extension = extension(filename)?;
+    let format = match extension.as_str() {
+        "jpg" | "jpeg" | "jpe" => ExpectedFormat::Jpeg,
+        "png" => ExpectedFormat::Png,
+        "gif" => ExpectedFormat::Gif,
+        "webp" => ExpectedFormat::Webp,
+        "bmp" => ExpectedFormat::Bmp,
+        "tif" | "tiff" => ExpectedFormat::Tiff,
+        "ico" => ExpectedFormat::Icon,
+        "pdf" => ExpectedFormat::Pdf,
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => ExpectedFormat::Zip,
+        "doc" | "xls" | "ppt" => ExpectedFormat::LegacyOffice,
+        "rtf" => ExpectedFormat::Rtf,
+        "mp3" => ExpectedFormat::Mp3,
+        "mp4" | "m4a" | "mov" => ExpectedFormat::Mp4,
+        "ogg" => ExpectedFormat::Ogg,
+        "wav" => ExpectedFormat::Wav,
+        "avi" => ExpectedFormat::Avi,
+        "flac" => ExpectedFormat::Flac,
+        "webm" | "mkv" => ExpectedFormat::Ebml,
+        "woff" => ExpectedFormat::Woff,
+        "woff2" => ExpectedFormat::Woff2,
+        "ttf" | "otf" => ExpectedFormat::Sfnt,
+        _ => return None,
+    };
+    Some(format)
 }
 
 fn dangerous_content(value: &[u8]) -> Option<DangerousKind> {
@@ -587,6 +781,88 @@ mod tests {
         let body = b"--safe\r\nContent-Disposition: form-data; filename=\"safe.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8\xff\xe0OK\r\n--safe--\r\n--other\r\nContent-Disposition: form-data; filename=\"evil.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n<?php echo 1;\r\n--other--\r\n";
         let rejection = inspect(&headers, body, UploadInspection::Mismatch).expect("rejected");
         assert_eq!(rejection.filename, "evil.jpg");
+    }
+
+    #[test]
+    fn content_that_is_not_the_claimed_format_is_rejected() {
+        for (filename, media_type, value) in [
+            ("photo.jpg", "image/jpeg", b"puts \"hi\"".as_slice()),
+            ("photo.png", "image/png", b"\xff\xd8\xff\xe0JFIF"),
+            ("report.pdf", "application/pdf", b"puts 1\n"),
+            ("sheet.docx", "application/octet-stream", b"puts 1\n"),
+            ("pixel.gif", "image/gif", b"\x89PNG\r\n\x1a\n"),
+            ("photo.jpg", "text/plain", b"echo hi\n"),
+        ] {
+            let body = body(&[(filename, Some(media_type), value)]);
+            let rejection = inspect_mismatch(&body)
+                .unwrap_or_else(|| panic!("accepted {filename} ({media_type})"));
+            assert_eq!(rejection.kind, DangerousKind::FormatMismatch, "{filename}");
+        }
+    }
+
+    #[test]
+    fn matching_signatures_pass_for_every_verifiable_family() {
+        for (filename, media_type, value) in [
+            ("a.jpg", "image/jpeg", b"\xff\xd8\xff\xe0JFIF".as_slice()),
+            ("a.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+            ("a.webp", "image/webp", b"RIFF\x24\x00\x00\x00WEBPVP8 "),
+            ("a.gif", "image/gif", b"GIF89a\x01\x00"),
+            ("a.bmp", "image/bmp", b"BM\x00\x00\x00\x00"),
+            ("a.tiff", "image/tiff", b"II*\x00\x08\x00"),
+            ("a.ico", "image/x-icon", b"\x00\x00\x01\x00\x01\x00"),
+            ("a.pdf", "application/pdf", b"%PDF-1.7\n"),
+            ("a.docx", "application/octet-stream", b"PK\x03\x04docx"),
+            (
+                "a.doc",
+                "application/octet-stream",
+                b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1doc",
+            ),
+            ("a.rtf", "application/rtf", b"{\\rtf1\\ansi"),
+            ("a.mp3", "audio/mpeg", b"ID3\x04\x00"),
+            ("a.mp4", "video/mp4", b"\x00\x00\x00\x18ftypmp42"),
+            ("a.ogg", "audio/ogg", b"OggS\x00\x02"),
+            ("a.wav", "audio/wav", b"RIFF\x24\x00\x00\x00WAVEfmt "),
+            ("a.avi", "video/x-msvideo", b"RIFF\x24\x00\x00\x00AVI LIST"),
+            ("a.flac", "audio/flac", b"fLaC\x00\x00"),
+            ("a.webm", "video/webm", b"\x1a\x45\xdf\xa3\x01\x00"),
+            ("a.woff", "font/woff", b"wOFF\x00\x01"),
+            ("a.woff2", "font/woff2", b"wOF2\x00\x01"),
+            ("a.ttf", "font/ttf", b"\x00\x01\x00\x00\x00\x0c"),
+            ("a.otf", "font/otf", b"OTTO\x00\x0c"),
+        ] {
+            let body = body(&[(filename, Some(media_type), value)]);
+            assert!(
+                inspect_mismatch(&body).is_none(),
+                "false positive for {filename} ({media_type})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pdf_header_may_follow_a_short_junk_prefix() {
+        let value = b"\xef\xbb\xbfjunk\r\n%PDF-1.4\n";
+        let body = body(&[("report.pdf", Some("application/pdf"), value)]);
+        assert!(inspect_mismatch(&body).is_none());
+    }
+
+    #[test]
+    fn unverifiable_safe_claims_are_not_signature_checked() {
+        for (filename, media_type) in [("photo.heic", "image/heic"), ("track.opus", "audio/x-opus")]
+        {
+            let body = body(&[(filename, Some(media_type), b"not that format")]);
+            assert!(
+                inspect_mismatch(&body).is_none(),
+                "signature check applied to {media_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_signature_check_reads_only_the_leading_bytes() {
+        let mut value = b"\xff\xd8\xff\xe0JFIF".to_vec();
+        value.extend(std::iter::repeat_n(b'A', 4096));
+        let body = body(&[("photo.jpg", Some("image/jpeg"), &value)]);
+        assert!(inspect_mismatch(&body).is_none());
     }
 
     #[test]
