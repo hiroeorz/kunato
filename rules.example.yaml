@@ -805,7 +805,7 @@ categories:
       - name: confluence-uri-ognl
         match: { regex: '(?i)(%24%7B(%23|%40)|\$\{[#@])', in: [path] }
       - name: common-webshell-artifacts
-        match: { regex: '(?i)(^|/)(pwn|shell|test|webshell|taint)\.(jsp|jspx|aspx|php[0-9]?)$', in: [path] }
+        match: { regex: '(?i)(^|/)(pwn|shell|test|webshell|taint|b374k|c99|r57|wso|alfa|indoxploit|p0wny|filesman)\.(jsp|jspx|aspx|php[0-9]?)$', in: [path] }
       - name: zimbra-admin-jsp
         match: { regex: '(?i)^/zimbraAdmin/[^/]*\.jsp$', in: [path] }
       - name: pfblockerng-host-injection
@@ -1386,6 +1386,12 @@ categories:
         match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(htaccess|user\.ini)\b', in: [body] }
       - name: traversal-in-filename
         match: { regex: '(?i)filename\s*=\s*"[^"]*(\.\.[/\\]|\.\.%2f|\.\.%5c)', in: [body] }
+      # Executing a script stored in a file-upload directory is the second half
+      # of a webshell upload. The CVE rules cover only a few directory names and
+      # extensions, so widen it for directories that hold user files. Upload API
+      # routes such as `/upload/avatar.php` are intentionally not matched.
+      - name: uploaded-script-access
+        match: { regex: '(?i)(^|/)(uploads|uploadfiles|attachments?|avatars?|userfiles)/.*\.(php[0-9]?|phtml|pht|phar|phps|jspx?|asp|aspx|ashx|asmx|cgi|pl)(/|$)', in: [path] }
 
   # Development-only Rails endpoints; they must not exist in production.
   - name: rails-debug-endpoints
@@ -1739,6 +1745,21 @@ categories:
           in: [response_body]
       - name: server-version-leak
         match: { response_headers: { Server: '(?i)(apache|nginx|microsoft-iis|lighttpd)/[0-9]' } }
+
+  # A webshell page names itself in its title. Blocking the response does not
+  # undo the command that already ran, but it hides the output, cuts the
+  # interactive session, and records the hit. The request path must look like a
+  # script, so an article that merely discusses a shell is not blocked.
+  - name: webshell-response
+    phase: response
+    action: BLOCK
+    rules:
+      - name: webshell-page-title
+        match:
+          status: 200
+          path: '(?i)\.(php[0-9]?|phtml|pht|phar|jspx?|aspx?|ashx|asmx|cgi)$'
+          regex: '(?i)<title>[^<]{0,40}(b374k|c99|r57|wso|indoxploit|filesman|p0wny)[^<]{0,40}</title>'
+          in: [response_body]
 
   # Default HTML directory indexes expose file names. This blocks the common
   # Apache/nginx `Index of` and Python/Tomcat `Directory listing` pages with a

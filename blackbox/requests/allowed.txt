@@ -524,7 +524,12 @@ GET /api/posts?where%5Bid%5D%5Bin%5D=1,2,3
 POST /api/method/frappe.desk.reportview.get_count header="Content-Type: application/json" body="{\"doctype\":\"User\",\"filters\":{\"name\":\"Alice%\"}}"
 GET /calendar?sortEvents=start_time%20desc
 POST /otrs/index.pl header="Content-Type: application/x-www-form-urlencoded" body="Action=AgentTicketSearch&Subaction=Search&ContentSearch=invoice"
+# File storage stays usable for ordinary files, an upload API endpoint is not a
+# storage directory, and an article path that merely mentions a shell passes.
 GET /appimages/2026/10/avatar.png
+GET /wp-content/uploads/2026/10/photo.jpg
+GET /upload/avatar.php
+GET /blog/b374k-webshell-analysis
 GET /star-rating/images/star-5.png
 POST /api/fetch-rss header="Content-Type: application/json" body="{\"url\":\"https://example.com/feed.xml\"}"
 POST /api/ai-import/ header="Content-Type: application/json" body="{\"url\":\"https://ai.example.com/v1/chat/completions\"}"

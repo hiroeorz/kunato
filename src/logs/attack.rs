@@ -132,7 +132,7 @@ const ATTACK_CLASSES: &[AttackClass] = &[
     AttackClass {
         name: "malicious-upload",
         aliases: &["upload"],
-        categories: &["malicious-upload"],
+        categories: &["malicious-upload", "webshell-response"],
     },
     AttackClass {
         name: "protocol",

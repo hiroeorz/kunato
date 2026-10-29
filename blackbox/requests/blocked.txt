@@ -580,6 +580,14 @@ POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=pa
 # multipart envelope.
 PUT /upload/polyglot.php header="Content-Type: application/x-httpd-php" body="<?php system($_GET[cmd]);?>"
 
+# --- Executing a script that is already stored on the origin ---
+# Known webshell names are rejected wherever they sit, and any script extension
+# under a file-upload directory is refused, not just the CVE-specific paths.
+GET /b374k.php
+GET /wp-content/uploads/2026/10/b374k.php
+GET /uploads/theme.php5
+GET /uploads/theme.phar
+
 # --- Sensitive files and backups ---
 GET /.env
 GET /.env.local
