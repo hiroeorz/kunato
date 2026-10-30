@@ -1724,6 +1724,34 @@ categories:
           path: '(?i)^/api/app/(create|update)_event$'
           regex: '(?i)"(uid|gid)"\s*:\s*(?:0|"0"|"root")\s*[,}]'
           in: [body]
+      # CVE-2026-119655 / CVE-2026-119656 (CoreShop): the unauthenticated
+      # GetGoodsPageList endpoints append the caller's order parameter to an
+      # ORDER BY clause after only a field-name check. A real sort token is a
+      # column name with an optional direction; parenthesized subqueries,
+      # SELECT/CASE keywords, comments, and quotes are injection.
+      - name: coreshop-getgoodspagelist-order-sqli
+        match:
+          path: '(?i)^/api/(Good|Agent)/GetGoodsPageList$'
+          regex: '(?i)(^|[?&])order=[^&]*(\(|\bselect\b|\bcase\b|--|%23|[''"]|\bsleep\s*\()'
+          in: [query]
+      # CVE-2026-64618 / CVE-2026-65874 (Apache Fineract): the advance-search
+      # condition and the centers/datatable ordering parameters are concatenated
+      # into SQL. Real ordering values are column names and ascending/descending
+      # tokens without parentheses, keywords, comments, or quotes.
+      - name: fineract-order-by-sqli
+        match:
+          path: '(?i)^/(?:fineract-provider/)?api/v1/(?:centers|datatables/[^/?]+/[^/?]+(?:/[^/?]+)?)$'
+          regex: '(?i)(^|[?&])(orderBy|sortOrder|order)=[^&]*(\(|\bselect\b|\bcase\b|--|%23|[''"]|\bsleep\s*\()'
+          in: [query]
+      # CVE-2026-118988 (CallBackery): the unauthenticated /doc route passes the
+      # name parameter to Pod::Simple::Search, which joins "::"-separated parts
+      # into a path and escapes @INC. Documentation module names never contain
+      # parent-directory segments.
+      - name: callbackery-doc-path-traversal
+        match:
+          path: '(?i)^/doc$'
+          regex: '(?i)(^|[?&])name=[^&]*(\.\.::|::\.\.|%2e%2e)'
+          in: [query]
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

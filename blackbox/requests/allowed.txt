@@ -710,3 +710,19 @@ POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"x
 POST /website_code/php/language/import_language.php header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
 POST /api/app/create_event header="Content-Type: application/json" body="{\"title\":\"maintenance\",\"plugin\":\"shellplug\",\"params\":{}}"
 PUT /fog/storagenode/1/edit header="Content-Type: application/json" body="{\"name\":\"node\",\"user\":\"fog\",\"pass\":\"secret\",\"ftppath\":\"/images\"}"
+
+# --- Near-misses for the 2026-10-30 CoreShop/Fineract/Paperclip/OPNsense/Tenda/
+#     Moodle/CallBackery/ArcadeDB/traversal signatures: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+GET /api/Good/GetGoodsPageList?order=created_at%20desc&pageIndex=1&pageSize=20
+GET /api/Agent/GetGoodsPageList?order=created_at%20desc&pageIndex=1&pageSize=20
+PATCH /api/execution-workspaces/ws-1 header="Content-Type: application/json" body="{\"cleanupCommand\":\"tar czf /tmp/workspace.tgz .\",\"teardownCommand\":\"true\"}"
+POST /api/core/firmware/set header="Content-Type: application/json" body="{\"mirror\":\"https://mirror.example.com/pkg\"}"
+POST /goform/setDiagnose header="Content-Type: application/json" body="{\"protocol\":\"icmp\",\"targetDevice\":\"192.0.2.1\"}"
+POST /question/format/blackboard_six/import.php header="Content-Type: application/zip" body="<img src=\"images/diagram.png\">"
+GET /doc?name=CallBackery::Manual
+POST /fineract-provider/api/v1/search/advance header="Content-Type: application/json" body="{\"outStandingAmountPercentageCondition\":\"1\"}"
+GET /api/v1/centers?orderBy=id&sortOrder=asc&order=1
+GET /api/v1/datatables/m_center/1?orderBy=id&sortOrder=asc&order=1
+POST /api/v1/command header="Content-Type: application/json" body="{\"language\":\"sql\",\"command\":\"LOAD CSV FROM 'https://example.com/data.csv' WITH headers = false\"}"
+GET /admin/style.css
