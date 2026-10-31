@@ -180,13 +180,24 @@ read the canary before the protected request is evaluated.
 
 `cases/smoke.json` pairs SQLi, XSS, traversal, and comment-obfuscated UNION
 probes with benign counterparts and includes legitimate 302/401/404 responses.
-The recording origin proves receipt, method, target, body hash, and nonce. The
-goTestWAF plan derives one payload, encoder, and placement per applicable case
-and uses the fixed lab User-Agent. Direct controls must receive every planned
-case before the protected results are evaluated. Every case executes with an
-ordinary fixed User-Agent; scanner-fingerprint recognition is deliberately not
-claimed here. The lab removes the whole private-source `trusted-sources`
-category and disables automatic protection.
+The recording origin proves receipt, method, target, body hash, cookie, lab
+payload header, and nonce. Each sweep case expands into one goTestWAF case per
+placement and encoder: SQL injection uses query, form, JSON, and cookie
+placements; XSS uses query, form, JSON, header, and cookie placements;
+traversal uses query, form, and JSON. Form bodies and cookies run with `Plain` and
+percent-encoded (`URL`) payloads, JSON bodies with `Plain` and JSON `\u` escapes
+(`JSUnicode`), and query and header placements with `Plain`. Cookie values are
+percent-decoded before matching, so an encoded payload is not treated as a
+different value. The wire form is checked against the plan, so a scanner that
+changes the target, body, header, or cookie fails the suite. Base64 and XML
+entity encodings, and JSUnicode outside a JSON body,
+change the value the origin receives and are not asserted: a missing block there
+would report a false detection gap. The plan uses the fixed lab User-Agent, and
+direct controls must receive every planned case before the protected results
+are evaluated. Every case executes with an ordinary fixed User-Agent;
+scanner-fingerprint recognition is deliberately not claimed here. The lab
+removes the whole private-source `trusted-sources` category and disables
+automatic protection.
 
 ### Benign workflows
 

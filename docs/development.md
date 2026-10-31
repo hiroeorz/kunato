@@ -553,10 +553,15 @@ values are matched raw and through up to two decode passes, so
 `application/x-www-form-urlencoded` conventions, so `+` is decoded to a space
 (`?q=union+select` matches like `?q=union%20select`); paths are additionally
 matched in normalized form (dot segments resolved, duplicate slashes merged), so
-`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. `BLOCK` and
-`LOG` rules match any form, so an attack hidden in one representation is still
-caught. An `ALLOW` rule disables the WAF for the request, so its trust has to be
-unanimous instead: it must match every path form, every value of a repeated
+`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. Cookie
+values are matched raw and through the same percent-decode passes, because
+clients percent-encode cookie values and application frameworks decode them;
+`+` stays literal in cookies, unlike queries. This applies to named `cookies`
+conditions and to the `cookies` target; other header values are matched as
+received. `BLOCK` and `LOG` rules match any form, so an attack hidden in one
+representation is still caught. An `ALLOW` rule disables the WAF for the
+request, so its trust has to be unanimous instead: it must match every path
+form, every decoded form of each cookie value, every value of a repeated
 `headers` or `cookies` entry, and every form of the `in` targets, and the
 patterns of an `ALLOW` rule may only use `headers`, `cookies`, `response_headers`,
 and `regex` values that are anchored at both ends (`^...$`); the configuration is

@@ -78,6 +78,10 @@ POST /search body="q=1 or (1)=(1)"
 GET / header="Cookie: sid=1 or 1=1"
 GET / header="Cookie: sid=1 union select 1"
 GET / header="Cookie: token=1' or '1'='1'"
+# Cookie values are percent-decoded by application frameworks, so the encoded
+# and double-encoded spellings must match the same rule.
+GET / header="Cookie: sid=1%20union%20select%201"
+GET / header="Cookie: sid=1%2520union%2520select%25201"
 
 # --- SQL injection: blind inference and exfiltration channels ---
 # `', (SELECT sleep(3))#` closes the INSERT string literal, evaluates the
@@ -185,6 +189,11 @@ GET / ua="<img src=x onerror=alert(1)>"
 GET / header="X-Forwarded-Host: javascript:alert(1)"
 GET / header="Referer: data:text/html,<script>alert(1)</script>"
 GET / header="Cookie: theme=<script>alert(1)</script>"
+# Cookie values are percent-decoded by application frameworks; the encoded and
+# double-encoded spellings must match the same XSS rules.
+GET / header="Cookie: theme=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+GET / header="Cookie: theme=%253Cscript%253Ealert(1)%253C%252Fscript%253E"
+GET / header="Cookie: view=onload%3Dalert(1)"
 
 # --- CSS injection: style-context breakout, scriptable CSS, remote stylesheet
 #     loads, and attribute-selector url() data exfiltration ---

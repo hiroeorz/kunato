@@ -5,11 +5,14 @@ import json
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from controller import make_config, write_gotestwaf_cases
+from controller import (go_js_unicode, go_path_escape, gotestwaf_variants,
+                        gotestwaf_wire, make_config, verify_gotestwaf_wire,
+                        write_gotestwaf_cases)
 from evidence import (USER_AGENT, judge_availability, judge_ban_recovery, judge_connect,
                       judge_crs, judge_ffuf, judge_ffuf_behavior, judge_gotestwaf, judge_h2, judge_h3, judge_backpressure,
                       judge_mutations, judge_nuclei, judge_load, judge_protocol,
@@ -162,22 +165,87 @@ class EvidenceTests(unittest.TestCase):
         result = judge_gotestwaf(report, self.events, [], "attempt", {"sample": "allow"})
         self.assertEqual(result[0]["verdict"], "passed")
 
-    def test_gotestwaf_payload_placement_is_preserved(self):
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory)
-            write_gotestwaf_cases(destination, [self.case])
-            template = json.loads((destination / "attacks/sample.yml").read_text())
-            request = template["placeholder"][0]["RawRequest"]
-            self.assertEqual(request["path"], "/case/sample?{{payload}}")
-            self.assertEqual(request["body"], "")
-
-    def test_gotestwaf_does_not_double_encode_the_preencoded_query(self):
-        case = {**self.case, "target": "/search?q=O%27Reilly"}
+    def test_gotestwaf_sweep_preserves_payload_placement(self):
+        case = {**self.case, "sweep": "sql-injection"}
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory)
             write_gotestwaf_cases(destination, [case])
-            template = json.loads((destination / "attacks/sample.yml").read_text())
-            self.assertEqual(template["payload"], ["q=O'Reilly"])
+            names = sorted(path.name for path in destination.glob("*/*.yml"))
+            self.assertEqual(names, [
+                "sample--cookie-plain.yml", "sample--cookie-url.yml",
+                "sample--form-plain.yml", "sample--form-url.yml",
+                "sample--json-jsunicode.yml", "sample--json-plain.yml",
+                "sample--query-plain.yml",
+            ])
+            query = json.loads((destination / "attacks/sample--query-plain.yml").read_text())
+            request = query["placeholder"][0]["RawRequest"]
+            self.assertEqual(request["path"], "/case/sample--query-plain?q={{payload}}")
+            self.assertEqual(request["body"], "")
+            self.assertEqual(request["method"], "GET")
+            form = json.loads((destination / "attacks/sample--form-url.yml").read_text())
+            self.assertEqual(form["encoder"], ["URL"])
+            self.assertEqual(form["placeholder"][0]["RawRequest"]["body"], "q={{payload}}")
+            self.assertEqual(form["placeholder"][0]["RawRequest"]["method"], "POST")
+
+    def test_gotestwaf_xss_sweep_uses_header_and_cookie_placements(self):
+        case = {"id": "sample", "expect": "block", "sweep": "xss", "method": "GET",
+                "target": "/search?q=%3Cscript%3E"}
+        variants = gotestwaf_variants([case])
+        self.assertEqual([variant["placement"] for variant in variants],
+                         ["query", "form", "form", "json", "json", "header",
+                          "cookie", "cookie"])
+        self.assertEqual([variant["encoder"] for variant in variants],
+                         ["Plain", "Plain", "URL", "Plain", "JSUnicode", "Plain",
+                          "Plain", "URL"])
+        header = [variant for variant in variants if variant["placement"] == "header"][0]
+        self.assertEqual(header["headers"], {"X-Kunato-Lab-Payload": "{{payload}}"})
+        self.assertEqual(header["method"], "GET")
+        cookie = [variant for variant in variants if variant["placement"] == "cookie"]
+        self.assertEqual([variant["encoder"] for variant in cookie], ["Plain", "URL"])
+
+    def test_smoke_sweep_covers_every_placement_and_encoder(self):
+        root = Path(__file__).resolve().parents[2]
+        cases = json.loads((root / "lab/cases/smoke.json").read_text())
+        variants = gotestwaf_variants(cases)
+        placements = Counter((variant["placement"], variant["encoder"]) for variant in variants)
+        self.assertEqual(placements, {
+            ("query", "Plain"): 10, ("form", "Plain"): 10, ("form", "URL"): 10,
+            ("json", "Plain"): 10, ("json", "JSUnicode"): 10,
+            ("cookie", "Plain"): 8, ("cookie", "URL"): 8, ("header", "Plain"): 2,
+        })
+        self.assertEqual({variant["encoder"] for variant in variants},
+                         {"Plain", "URL", "JSUnicode"})
+        self.assertEqual(len({variant["id"] for variant in variants}), len(variants))
+        self.assertEqual({variant["id"].split("--")[0] for variant in variants},
+                         {case["id"] for case in cases if case.get("sweep")})
+
+    def test_gotestwaf_wire_matches_go_encoders(self):
+        self.assertEqual(go_path_escape("1 UNION,'/"), "1%20UNION%2C%27%2F")
+        self.assertEqual(go_js_unicode("a<"), "\\u0061\\u003c")
+
+    def test_gotestwaf_wire_verification_rejects_changed_requests(self):
+        case = {**self.case, "sweep": "sql-injection"}
+        variant = [variant for variant in gotestwaf_variants([case])
+                   if variant["placement"] == "form" and variant["encoder"] == "URL"][0]
+        target, body, payload_header, cookie = gotestwaf_wire(variant)
+        event = {"event": "completed", "target": target, "method": variant["method"],
+                 "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                 "payload_header": payload_header, "cookie": cookie,
+                 "user_agent": USER_AGENT}
+        verify_gotestwaf_wire([variant], [event])
+        for field, value in (("target", "/case/sample--form-url?x=1"),
+                             ("method", "GET"),
+                             ("body_sha256", hashlib.sha256(b"q=attack&extra=1").hexdigest())):
+            with self.assertRaises(ValueError):
+                verify_gotestwaf_wire([variant], [{**event, field: value}])
+
+    def test_gotestwaf_does_not_double_encode_the_preencoded_query(self):
+        case = {**self.case, "sweep": "sql-injection", "target": "/search?q=O%27Reilly"}
+        variant = [variant for variant in gotestwaf_variants([case])
+                   if variant["placement"] == "query"][0]
+        self.assertEqual(variant["payload"], "O'Reilly")
+        self.assertEqual(gotestwaf_wire(variant)[0],
+                         "/case/sample--query-plain?q=O%27Reilly")
 
     def test_private_test_sources_cannot_retain_allow_rule(self):
         original = (Path(__file__).resolve().parents[2] / "rules.example.yaml").read_text()

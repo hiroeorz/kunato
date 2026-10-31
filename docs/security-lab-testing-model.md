@@ -287,7 +287,13 @@ payload semantics remain outside this suite.
 
 goTestWAF, sqlmap, Nuclei, ffuf, and ZAP run the same bounded scan against the
 direct control and through Kunato. Their reports, the origin receipts, and
-Kunato's block records are joined per case. ZAP runs the authenticated
+Kunato's block records are joined per case. goTestWAF expands each smoke case
+into the placements and encodings whose decoded value is still the attack:
+query, form, JSON, cookie, and header placements where the rule class inspects
+that part, percent-encoded form and cookie values, and JSON `\u` escapes. The origin's
+target, body hash, lab payload header, and cookie fields must match the plan
+before the block verdicts count, so a scanner or proxy that changes the wire
+form fails the suite. ZAP runs the authenticated
 spider/passive baseline; its active scan is not part of the passing plan. An
 endpoint-scoped, observation-only active plan was attempted (SQLi and reflected
 XSS paths; file-inclusion/setup/security/logout excluded; `failOnError: false`),

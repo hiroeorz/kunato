@@ -263,9 +263,12 @@ class Recorder(BaseHTTPRequestHandler):
             return
         case_id = self.headers.get("X-Kunato-Lab-Case", "")
         debug_id = self.headers.get("X-GoTestWAF-Test", "")
+        payload_header = self.headers.get("X-Kunato-Lab-Payload", "")
+        cookie = self.headers.get("Cookie", "")
         self.emit("received", case_id=case_id, debug_id=debug_id,
                   method=self.command, target=self.path[:8192],
-                  user_agent=self.headers.get("User-Agent", "")[:512])
+                  user_agent=self.headers.get("User-Agent", "")[:512],
+                  payload_header=payload_header[:2048], cookie=cookie[:2048])
         try:
             body = self.read_body()
         except (ValueError, OSError, socket.timeout) as error:
@@ -282,6 +285,7 @@ class Recorder(BaseHTTPRequestHandler):
         result = {"origin": os.environ["LAB_NONCE"], "case_id": case_id,
                   "method": self.command, "target": self.path,
                   "user_agent": self.headers.get("User-Agent", ""),
+                  "payload_header": payload_header[:2048], "cookie": cookie[:2048],
                   "body_sha256": hashlib.sha256(body).hexdigest()}
         payload = json.dumps(result).encode()
         self.emit("completed", **result, debug_id=debug_id, status=status, body_bytes=len(body))

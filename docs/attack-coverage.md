@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-10-29; the managed set carried 535 rules then.
+2026-11-01; the managed set carries 541 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -46,8 +46,8 @@ body coverage on those routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Reflected XSS | ✅ | `xss`: script/iframe/object/embed, broad event-handler list, `javascript:`/`vbscript:`, `data:text/html`, DOM sinks |
-| Stored XSS | 🔶 | Input-side detection uses the same rules and `xss` matches header values, so header-injection stored XSS (Crafty Controller CVE-2026-18516) is stopped at the input; output-time context escaping is the application's job. `response-leaks` ships no XSS signatures |
+| Reflected XSS | ✅ | `xss`: script/iframe/object/embed, broad event-handler list, `javascript:`/`vbscript:`, `data:text/html`, DOM sinks; matched in query, body, header, and decoded cookie values |
+| Stored XSS | 🔶 | Input-side detection uses the same rules and `xss` matches header and decoded cookie values, so header-injection stored XSS (Crafty Controller CVE-2026-18516) is stopped at the input; output-time context escaping is the application's job. `response-leaks` ships no XSS signatures |
 | DOM Based XSS | 🔶 | `dom-sinks` (`document.cookie`, `eval(` etc.) exists but the root cause is client-side |
 | HTML Injection | 🔶 | script/iframe-like tags are blocked; generic tags (`<div>`) pass |
 | JavaScript Injection | ✅ | `javascript-uri` plus `dom-sinks` |
@@ -305,7 +305,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| URL Encoding / Double URL Encoding | ✅ | Raw plus up to two percent-decode passes are matched uniformly |
+| URL Encoding / Double URL Encoding | ✅ | Raw plus up to two percent-decode passes are matched for path, query, body, and cookie values (`+` stays literal in cookies); other header values are matched as received |
 | Unicode Encoding | 🔶 | JSON `\u0075` is decoded, but no Unicode normalization (documented in `docs/development.md`) |
 | Overlong UTF-8 | 🔶 | No normalization; specific byte patterns (e.g. `%c0%af`) are caught by raw patterns only |
 | Case Variation | ✅ | Main rules use `(?i)` |

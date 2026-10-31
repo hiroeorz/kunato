@@ -1121,15 +1121,15 @@ categories:
     action: BLOCK
     rules:
       - name: script-tags
-        match: { regex: '(?i)<\s*/?\s*(script|iframe|object|embed|applet)\b', in: [query, body, headers] }
+        match: { regex: '(?i)<\s*/?\s*(script|iframe|object|embed|applet)\b', in: [query, body, headers, cookies] }
       - name: event-handlers
-        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|animationstart|animationend|transitionend|toggle|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend)\s*=', in: [query, body, headers] }
+        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|animationstart|animationend|transitionend|toggle|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend)\s*=', in: [query, body, headers, cookies] }
       - name: javascript-uri
-        match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers] }
+        match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers, cookies] }
       - name: data-html-uri
-        match: { regex: '(?i)data\s*:\s*(text/html|text/javascript|application/javascript|application/xhtml)', in: [query, body, headers] }
+        match: { regex: '(?i)data\s*:\s*(text/html|text/javascript|application/javascript|application/xhtml)', in: [query, body, headers, cookies] }
       - name: dom-sinks
-        match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body] }
+        match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body, cookies] }
 
   # Web cache deception: an authenticated request addressed as a static asset
   # can be stored by a cache that keys only on the URL. Static assets normally

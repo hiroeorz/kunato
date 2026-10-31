@@ -5,6 +5,7 @@ use http::header::HeaderName;
 use regex::Regex;
 
 use crate::cidr::IpNet;
+use crate::decoding::percent_decode_forms;
 use crate::request_view::{RequestView, ResponseView, cookie_pairs};
 
 pub const TARGET_PATH: u8 = 1 << 0;
@@ -30,6 +31,23 @@ impl StatusRange {
 /// an otherwise matching value (RFC 9110 allows obs-text bytes in field values).
 fn header_text(value: &http::HeaderValue) -> Cow<'_, str> {
     String::from_utf8_lossy(value.as_bytes())
+}
+
+/// Cookie values are conventionally percent-encoded by clients and decoded by
+/// application frameworks, so cookie rules match every decoded form. A BLOCK
+/// matches any form; an ALLOW must match all of them so one representation
+/// cannot shadow another. Header values other than cookies stay as received.
+fn cookie_regex_hits(value: &str, regexes: &[Regex], allow_mode: bool) -> bool {
+    let forms = percent_decode_forms(value);
+    if allow_mode {
+        forms
+            .iter()
+            .all(|form| regexes.iter().any(|regex| regex.is_match(form)))
+    } else {
+        forms
+            .iter()
+            .any(|form| regexes.iter().any(|regex| regex.is_match(form)))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -188,11 +206,11 @@ impl Matcher {
                 !values.is_empty()
                     && values
                         .iter()
-                        .all(|(_, value)| regexes.iter().any(|re| re.is_match(value.as_ref())))
+                        .all(|(_, value)| cookie_regex_hits(value.as_ref(), regexes, true))
             } else {
                 values
                     .iter()
-                    .any(|(_, value)| regexes.iter().any(|re| re.is_match(value.as_ref())))
+                    .any(|(_, value)| cookie_regex_hits(value.as_ref(), regexes, false))
             };
             if !matched {
                 return false;
@@ -246,9 +264,14 @@ impl PayloadMatcher {
         if self.targets & TARGET_COOKIES != 0 {
             let pairs = cookie_pairs(view.headers);
             let hit = if allow_mode {
-                !pairs.is_empty() && pairs.iter().all(|(_, value)| self.hits(value.as_ref()))
+                !pairs.is_empty()
+                    && pairs
+                        .iter()
+                        .all(|(_, value)| self.hits_cookie(value.as_ref(), true))
             } else {
-                pairs.iter().any(|(_, value)| self.hits(value.as_ref()))
+                pairs
+                    .iter()
+                    .any(|(_, value)| self.hits_cookie(value.as_ref(), false))
             };
             if hit {
                 return true;
@@ -313,6 +336,15 @@ impl PayloadMatcher {
 
     fn hits(&self, text: &str) -> bool {
         self.regexes.iter().any(|regex| regex.is_match(text))
+    }
+
+    fn hits_cookie(&self, value: &str, allow_mode: bool) -> bool {
+        let forms = percent_decode_forms(value);
+        if allow_mode {
+            forms.iter().all(|form| self.hits(form))
+        } else {
+            forms.iter().any(|form| self.hits(form))
+        }
     }
 }
 
@@ -561,6 +593,106 @@ mod tests {
 
         let truncated = ResponseView::new(StatusCode::OK, &headers, b"secret", true);
         assert!(!matcher.matches_response(&request, &truncated));
+    }
+
+    #[test]
+    fn cookie_payload_matches_percent_encoded_values() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)union\s+select")],
+                targets: TARGET_COOKIES,
+            }),
+            ..Matcher::default()
+        };
+
+        for cookie in ["q=1%20UNION%20SELECT", "q=1%2520UNION%2520SELECT"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(COOKIE, HeaderValue::from_static(cookie));
+            assert!(
+                matcher.matches(&view(&method, &uri, &headers, b"")),
+                "encoded cookie must match: {cookie}"
+            );
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static("q=1%20union%20meeting"));
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn named_cookie_condition_matches_decoded_value() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            cookies: vec![("session".to_owned(), vec![regex("^admin$")])],
+            ..Matcher::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static("session=%61dmin"));
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn allow_mode_cookie_condition_requires_every_decoded_form() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            cookies: vec![("session".to_owned(), vec![regex("^admin$")])],
+            allow_mode: true,
+            ..Matcher::default()
+        };
+
+        let mut encoded = HeaderMap::new();
+        encoded.insert(COOKIE, HeaderValue::from_static("session=%61dmin"));
+        assert!(!matcher.matches(&view(&method, &uri, &encoded, b"")));
+
+        let mut plain = HeaderMap::new();
+        plain.insert(COOKIE, HeaderValue::from_static("session=admin"));
+        assert!(matcher.matches(&view(&method, &uri, &plain, b"")));
+    }
+
+    #[test]
+    fn allow_mode_cookie_payload_requires_every_decoded_form() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("^tokenfree$")],
+                targets: TARGET_COOKIES,
+            }),
+            allow_mode: true,
+            ..Matcher::default()
+        };
+
+        let mut encoded = HeaderMap::new();
+        encoded.insert(COOKIE, HeaderValue::from_static("q=%74okenfree"));
+        assert!(!matcher.matches(&view(&method, &uri, &encoded, b"")));
+
+        let mut plain = HeaderMap::new();
+        plain.insert(COOKIE, HeaderValue::from_static("q=tokenfree"));
+        assert!(matcher.matches(&view(&method, &uri, &plain, b"")));
+    }
+
+    #[test]
+    fn header_payloads_stay_as_received() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("<script")],
+                targets: TARGET_HEADERS,
+            }),
+            ..Matcher::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", HeaderValue::from_static("%3Cscript%3E"));
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+        headers.insert("x-test", HeaderValue::from_static("<script>"));
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
     }
 
     #[test]

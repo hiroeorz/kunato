@@ -17,7 +17,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote_plus, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from evidence import (USER_AGENT, judge_agentic, judge_availability, judge_ban_recovery,
                       judge_connect, judge_crs, judge_ffuf, judge_ffuf_behavior,
@@ -495,20 +495,146 @@ def make_config(source, upstream="http://origin:8080", protection=None, timeouts
     return source
 
 
-def write_gotestwaf_cases(destination, cases):
-    # JSON is a YAML subset accepted by goTestWAF; no Python YAML dependency.
+# Placements are limited to the request parts each rule class inspects: SQL
+# injection matches query, body, and cookies; XSS matches query, body, and
+# headers; traversal matches query and body. Encoders are limited to forms whose
+# decoded value is still the attack: percent encoding is decoded by form and
+# JSON applications and by the cookie matcher, and JSON \u escapes are decoded
+# by the body inspector. Base64, XML entities, and JSUnicode outside JSON change
+# the value the origin receives, so asserting a block for them would report a
+# false detection gap.
+GOTESTWAF_SWEEPS = {
+    "sql-injection": ("query", "form", "json", "cookie"),
+    "xss": ("query", "form", "json", "header", "cookie"),
+    "path-traversal": ("query", "form", "json"),
+}
+GOTESTWAF_ENCODERS = {
+    "query": ("Plain",),
+    "form": ("Plain", "URL"),
+    "json": ("Plain", "JSUnicode"),
+    "header": ("Plain",),
+    "cookie": ("Plain", "URL"),
+}
+GOTESTWAF_PAYLOAD_HEADER = "X-Kunato-Lab-Payload"
+GOTESTWAF_COOKIE_PREFIX = "session=lab-session"
+_GO_PATH_SAFE = "$&+:=@-._~"
+
+
+def go_path_escape(value):
+    """Escape one path segment the way Go's url.PathEscape does."""
+    return quote(value, safe=_GO_PATH_SAFE)
+
+
+def go_js_unicode(value):
+    """Encode UTF-16BE code units the way goTestWAF's JSUnicode encoder does."""
+    encoded = value.encode("utf-16-be")
+    return "".join(f"\\u{encoded[index]:02x}{encoded[index + 1]:02x}"
+                   for index in range(0, len(encoded), 2))
+
+
+def gotestwaf_payload(case):
+    """Return the parameter name and attack value a smoke case carries."""
+    if "body" in case:
+        name, separator, value = case["body"].partition("=")
+        if separator and name and all(character.isalnum() or character in "_-" for character in name):
+            return name, value
+        return "q", case["body"]
+    pairs = parse_qsl(urlsplit(case["target"]).query, keep_blank_values=True)
+    if len(pairs) != 1:
+        raise ValueError("Sweep cases must carry exactly one query parameter")
+    return pairs[0]
+
+
+def gotestwaf_variant(case, name, payload, placement, encoder):
+    case_id = f"{case['id']}--{placement}-{encoder.lower()}"
+    request = {"method": "POST" if placement in {"form", "json"} else "GET",
+               "path": f"/case/{case_id}", "headers": {}, "body": ""}
+    if placement == "query":
+        request["path"] += "?" + name + "={{payload}}"
+    elif placement == "form":
+        request["headers"] = {"Content-Type": "application/x-www-form-urlencoded"}
+        request["body"] = name + "={{payload}}"
+    elif placement == "json":
+        request["headers"] = {"Content-Type": "application/json"}
+        request["body"] = '{"%s":"{{payload}}"}' % name
+    elif placement == "header":
+        request["headers"] = {GOTESTWAF_PAYLOAD_HEADER: "{{payload}}"}
+    elif placement == "cookie":
+        request["headers"] = {"Cookie": GOTESTWAF_COOKIE_PREFIX + "; " + name + "={{payload}}"}
+    else:
+        raise ValueError(f"Unknown goTestWAF placement: {placement}")
+    return {"id": case_id, "expect": case["expect"], "placement": placement,
+            "encoder": encoder, "name": name, "payload": payload, **request}
+
+
+def gotestwaf_variants(cases):
+    """Expand sweep cases into one goTestWAF case per encoder and placement."""
+    variants = []
     for case in cases:
-        directory = destination / ("attacks" if case["expect"] == "block" else "false-pos")
-        directory.mkdir(parents=True, exist_ok=True)
-        payload = case.get("body") or unquote_plus(case["target"].partition("?")[2])
-        if not payload:
+        sweep = case.get("sweep")
+        if sweep is None:
             continue
-        has_body = "body" in case
-        request = {"method": case["method"], "path": f"/case/{case['id']}" + ("" if has_body else "?{{payload}}"),
-                   "headers": case.get("headers", {}), "body": "{{payload}}" if has_body else ""}
-        data = {"payload": [payload], "encoder": ["Plain"], "type": "Kunato smoke",
-                "placeholder": [{"RawRequest": request}]}
-        write_json(directory / (case["id"] + ".yml"), data)
+        if sweep not in GOTESTWAF_SWEEPS:
+            raise ValueError(f"Unknown goTestWAF sweep class: {sweep}")
+        name, payload = gotestwaf_payload(case)
+        if not payload:
+            raise ValueError("Sweep cases must carry a payload")
+        for placement in GOTESTWAF_SWEEPS[sweep]:
+            for encoder in GOTESTWAF_ENCODERS[placement]:
+                variants.append(gotestwaf_variant(case, name, payload, placement, encoder))
+    if not variants:
+        raise ValueError("Sweep cases produced no goTestWAF variants")
+    return variants
+
+
+def gotestwaf_wire(variant):
+    """Return the exact target, body, payload header, and cookie the tool sends."""
+    payload = variant["payload"]
+    encoded = {"Plain": payload, "URL": go_path_escape(payload),
+               "JSUnicode": go_js_unicode(payload)}[variant["encoder"]]
+    if variant["placement"] == "query":
+        return f"/case/{variant['id']}?{variant['name']}={go_path_escape(payload)}", "", "", ""
+    return (variant["path"], variant["body"].replace("{{payload}}", encoded),
+            encoded if variant["placement"] == "header" else "",
+            variant["headers"].get("Cookie", "").replace("{{payload}}", encoded))
+
+
+def verify_gotestwaf_wire(variants, origin):
+    """Require every expected request to reach the origin unchanged."""
+    receipts = {}
+    for event in origin:
+        if event.get("event") == "completed":
+            receipts.setdefault(urlsplit(event.get("target", "")).path, []).append(event)
+    for variant in variants:
+        events = receipts.get(f"/case/{variant['id']}", [])
+        if len(events) != 1:
+            raise ValueError(f"Expected one origin receipt for {variant['id']}")
+        event = events[0]
+        target, body, payload_header, cookie = gotestwaf_wire(variant)
+        if event.get("method") != variant["method"]:
+            raise ValueError(f"goTestWAF changed the method for {variant['id']}")
+        if event.get("target") != target:
+            raise ValueError(f"goTestWAF changed the target for {variant['id']}")
+        if event.get("body_sha256") != hashlib.sha256(body.encode()).hexdigest():
+            raise ValueError(f"goTestWAF changed the body for {variant['id']}")
+        if event.get("payload_header") != payload_header:
+            raise ValueError(f"goTestWAF changed the payload header for {variant['id']}")
+        if event.get("cookie") != cookie:
+            raise ValueError(f"goTestWAF changed the cookie for {variant['id']}")
+        if event.get("user_agent") != USER_AGENT:
+            raise ValueError(f"goTestWAF changed the user agent for {variant['id']}")
+
+
+def write_gotestwaf_cases(destination, cases):
+    """Write one goTestWAF case per encoder and placement variant."""
+    # JSON is a YAML subset accepted by goTestWAF; no Python YAML dependency.
+    for variant in gotestwaf_variants(cases):
+        directory = destination / ("attacks" if variant["expect"] == "block" else "false-pos")
+        directory.mkdir(parents=True, exist_ok=True)
+        request = {key: variant[key] for key in ("method", "path", "headers", "body")}
+        data = {"payload": [variant["payload"]], "encoder": [variant["encoder"]],
+                "type": "Kunato sweep", "placeholder": [{"RawRequest": request}]}
+        write_json(directory / (variant["id"] + ".yml"), data)
 
 
 class SandboxSuite:
@@ -1300,26 +1426,17 @@ class SandboxSuite:
         return nonce, origin, waf, report
 
     def gotestwaf(self):
+        cases = json.loads((self.input / "lab/cases/smoke.json").read_text())
+        variants = gotestwaf_variants(cases)
+        planned = {variant["id"]: variant["expect"] for variant in variants}
         nonce, origin, _, report = self.tool_attempt("gotestwaf-control", "gotestwaf-control")
-        planned = {path.stem: ("allow" if path.parent.name == "false-pos" else "block")
-                   for path in (self.input / "lab/plans/gotestwaf").glob("*/*.yml")}
         controls = judge_gotestwaf(report, origin, [], nonce, planned, control=True)
         if not all(case["verdict"] == "passed" for case in controls):
             raise ValueError("goTestWAF direct receipt controls failed")
-        cases = json.loads((self.input / "lab/cases/smoke.json").read_text())
-        for case in cases:
-            if case["id"] not in planned:
-                continue
-            observed = [event for event in origin if event.get("event") == "completed"
-                        and urlsplit(event.get("target", "")).path == f"/case/{case['id']}"]
-            if len(observed) != 1 or observed[0]["method"] != case["method"]:
-                raise ValueError("goTestWAF changed the case method or execution count")
-            if observed[0]["body_sha256"] != hashlib.sha256(case.get("body", "").encode()).hexdigest():
-                raise ValueError("goTestWAF changed the case body")
-            if parse_qsl(urlsplit(observed[0]["target"]).query, keep_blank_values=True) != parse_qsl(
-                    urlsplit(case["target"]).query, keep_blank_values=True):
-                raise ValueError("goTestWAF changed decoded query parameters")
+        verify_gotestwaf_wire(variants, origin)
         nonce, origin, waf, report = self.tool_attempt("gotestwaf", "gotestwaf")
+        verify_gotestwaf_wire([variant for variant in variants if variant["expect"] == "allow"],
+                              origin)
         return summarize(judge_gotestwaf(report, origin, waf, nonce, planned))
 
     def reset_dvwa(self, phase, *, config="rules-dvwa.yaml", disable_protection=True,
