@@ -1752,6 +1752,44 @@ categories:
           path: '(?i)^/doc$'
           regex: '(?i)(^|[?&])name=[^&]*(\.\.::|::\.\.|%2e%2e)'
           in: [query]
+      # CVE-2026-62853 (ThingLinks): the rule engine compiles and instantiates
+      # caller-supplied Groovy without a sandbox. A legitimate test script does
+      # not start a process or call the runtime shell helper.
+      - name: thinglinks-groovy-script-rce
+        match:
+          path: '(?i)^/groovyScriptTest/registerScript$'
+          regex: '(?i)(Runtime\s*\.\s*getRuntime\s*\(\s*\)|ProcessBuilder|\.execute\s*\(|GroovyShell\s*\()'
+          in: [body]
+      # CVE-2026-120201 (Jpom): the JPOM-USER-TOKEN value reaches Hutool's
+      # Condition parser, so a quote followed by a comparison or boolean
+      # operator turns the login lookup into an OR condition. Real tokens are
+      # opaque hex strings without quotes, spaces, or comparison operators.
+      - name: jpom-user-token-condition-injection
+        match:
+          headers:
+            JPOM-USER-TOKEN: '(?i)^\s*[''"\x60]?\s*(is\s+(not\s+)?null|(or|and)\s+[''"]?\d+\s*=\s*\d+|(<>|!=|>=|<=)\s*[''"]?)'
+      # CVE-2026-59387 (Cloud Foundry): the staging callbacks under
+      # /internal/v3 are meant to be reachable only through the internal mTLS
+      # listener; the public Nginx route omits that deny rule.
+      - name: cloudfoundry-internal-v3-staging-callback
+        match: { method: POST, path: '(?i)^/internal/v3/staging/[^/]+/(droplet|build)_completed$' }
+      # CVE-2026-120203 (ShowDoc): a Mock template reaches mockjs' eval through
+      # a placeholder that walks constructor.constructor into child_process.
+      # Ordinary mock placeholders use @name and friends without host objects.
+      - name: showdoc-mock-template-code-exec
+        match:
+          path: '(?i)^/server/index\.php$'
+          regex: '(?i)(constructor\s*\.\s*constructor|child_process|process\s*\.\s*mainModule|getBuiltinModule|execSync)'
+          in: [query, body]
+      # CVE-2026-119408 (n8n): deprecated Function, Function Item, and
+      # LangChain Code nodes run JavaScript in the main process outside the
+      # task runner. Workflow saves naming those hidden node types are blocked.
+      - name: n8n-deprecated-function-node
+        match:
+          method: [POST, PUT, PATCH]
+          path: '(?i)^/rest/workflows(?:/[^/]+)?$'
+          regex: '(?i)"type"\s*:\s*"n8n-nodes-base\.(function|functionItem|langchainCode|toolCode)"'
+          in: [body]
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
