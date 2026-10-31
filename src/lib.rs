@@ -2,6 +2,8 @@ pub mod acme;
 pub mod admin;
 pub mod admin_client;
 pub mod allowed_hosts;
+pub mod banner;
+mod banner_art;
 pub mod cidr;
 pub mod cli;
 pub mod client_ip;

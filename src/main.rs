@@ -50,6 +50,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             Command::Upgrade(args) => kunato::upgrade::run(args).await,
             Command::Log(args) => kunato::logs::run(*args).await,
             Command::Metrics(args) => kunato::admin_client::run(args).await,
+            Command::Banner(args) => kunato::banner::run(args),
         };
     }
 

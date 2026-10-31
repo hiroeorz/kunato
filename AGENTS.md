@@ -37,6 +37,8 @@ src/
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener exposing /metrics
   admin_client.rs  # `kunato metrics`: fetch the admin /metrics exposition
+  banner.rs        # `kunato banner`: colored mascot and wordmark for install success
+  banner_art.rs    # Generated mascot payload embedded by banner.rs
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching
@@ -70,7 +72,7 @@ dist/
 examples/
   upstream.rs      # Manual test upstream with access logs
   h3probe.rs       # HTTP/3 lab probe built by prepare
-scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box and lab runners
+scripts/           # curl installer, banner art generation, dist-rules regeneration, NVD delta fetch, black-box and lab runners
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md           # Overall design

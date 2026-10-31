@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use super::{
-    Cli, Command, DEFAULT_CONFIG_PATH, DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE,
+    BannerArgs, Cli, Command, DEFAULT_CONFIG_PATH, DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE,
     DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat, LogOutputFormat, MetricsArgs, UpgradeArgs,
 };
 
@@ -85,6 +85,7 @@ enum Kind {
     Upgrade,
     Log,
     Metrics,
+    Banner,
 }
 
 fn kind_from_name(name: &str) -> Option<Kind> {
@@ -95,6 +96,7 @@ fn kind_from_name(name: &str) -> Option<Kind> {
         "upgrade" => Some(Kind::Upgrade),
         "log" => Some(Kind::Log),
         "metrics" => Some(Kind::Metrics),
+        "banner" => Some(Kind::Banner),
         _ => None,
     }
 }
@@ -149,6 +151,11 @@ struct MetricsState {
     listen: Option<SocketAddr>,
 }
 
+#[derive(Default)]
+struct BannerState {
+    no_color: bool,
+}
+
 struct Parser {
     tokens: Vec<OsString>,
     index: usize,
@@ -162,6 +169,7 @@ struct Parser {
     upgrade: UpgradeState,
     log: LogState,
     metrics: MetricsState,
+    banner: BannerState,
 }
 
 impl Parser {
@@ -179,6 +187,7 @@ impl Parser {
             upgrade: UpgradeState::default(),
             log: LogState::default(),
             metrics: MetricsState::default(),
+            banner: BannerState::default(),
         }
     }
 
@@ -259,6 +268,7 @@ impl Parser {
             Some(Kind::Log) => self.parse_log_long(name, inline),
             Some(Kind::Upgrade) => self.parse_upgrade_long(name, inline),
             Some(Kind::Metrics) => self.parse_metrics_long(name, inline),
+            Some(Kind::Banner) => self.parse_banner_long(name, inline),
             Some(Kind::Validate | Kind::UpdateRules) | None => {
                 Err(self.unexpected(format!("--{name}")))
             }
@@ -340,6 +350,17 @@ impl Parser {
             "dry-run" => {
                 self.no_value(inline, "--dry-run")?;
                 self.upgrade.dry_run = true;
+            }
+            _ => return Err(self.unexpected(format!("--{name}"))),
+        }
+        Ok(())
+    }
+
+    fn parse_banner_long(&mut self, name: &str, inline: Option<&str>) -> Result<(), ParseError> {
+        match name {
+            "no-color" => {
+                self.no_value(inline, "--no-color")?;
+                self.banner.no_color = true;
             }
             _ => return Err(self.unexpected(format!("--{name}"))),
         }
@@ -522,6 +543,9 @@ impl Parser {
             })),
             Some(Kind::Metrics) => Some(Command::Metrics(MetricsArgs {
                 listen: self.metrics.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
+            })),
+            Some(Kind::Banner) => Some(Command::Banner(BannerArgs {
+                no_color: self.banner.no_color,
             })),
             Some(Kind::Log) => Some(Command::Log(Box::new(LogArgs {
                 follow: self.log.follow,
@@ -776,6 +800,7 @@ fn help_for(kind: Option<Kind>) -> String {
         Some(Kind::Upgrade) => upgrade_help(),
         Some(Kind::Log) => log_help(),
         Some(Kind::Metrics) => metrics_help(),
+        Some(Kind::Banner) => banner_help(),
     }
 }
 
@@ -792,6 +817,7 @@ Commands:
   upgrade       Upgrade the installed binary and systemd unit from a release
   log           Read the systemd journal for the Kunato service
   metrics       Print the Prometheus metrics served by the admin listener
+  banner        Print the Kunato banner
   help          Print this message or the help of the given subcommand(s)
 
 Options:
@@ -895,6 +921,21 @@ Options:
 
 {}"#,
         DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
+    )
+}
+
+fn banner_help() -> String {
+    format!(
+        r#"Print the Kunato banner: the mascot drawn with terminal colors and the
+Kunato wordmark.
+
+Usage: kunato banner [OPTIONS]
+
+Options:
+      --no-color  Disable ANSI colors (NO_COLOR and a non-terminal stdout do the same)
+
+{}"#,
+        GLOBAL_OPTIONS
     )
 }
 
@@ -1081,6 +1122,35 @@ mod tests {
         };
         assert_eq!(args.version.as_deref(), Some("v0.9.0"));
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_banner_and_no_color() {
+        let cli = parse(&["kunato", "banner"]).expect("parse");
+        let Some(Command::Banner(args)) = cli.command else {
+            panic!("expected the banner command");
+        };
+        assert!(!args.no_color);
+
+        let cli = parse(&["kunato", "banner", "--no-color"]).expect("parse");
+        let Some(Command::Banner(args)) = cli.command else {
+            panic!("expected the banner command");
+        };
+        assert!(args.no_color);
+
+        assert!(parse(&["kunato", "banner", "--unknown"]).is_err());
+    }
+
+    #[test]
+    fn banner_help_is_available() {
+        let error = parse(&["kunato", "help", "banner"]).expect_err("help exits");
+        match error {
+            ParseError::Help(text) => {
+                assert!(text.contains("Usage: kunato banner"));
+                assert!(text.contains("--no-color"));
+            }
+            other => panic!("expected help, got {other:?}"),
+        }
     }
 
     #[test]

@@ -64,6 +64,17 @@ pub enum Command {
 
     /// Print the Prometheus metrics served by the admin listener.
     Metrics(MetricsArgs),
+
+    /// Print the Kunato banner.
+    Banner(BannerArgs),
+}
+
+#[derive(Debug)]
+pub struct BannerArgs {
+    /// Disable ANSI colors.
+    ///
+    /// Colors are used only when stdout is a terminal and NO_COLOR is not set.
+    pub no_color: bool,
 }
 
 #[derive(Debug)]

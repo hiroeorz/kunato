@@ -156,8 +156,13 @@ restart:
 systemctl status kunato
 sudo kunato log -n 50
 kunato metrics                       # metric table from :9090
+kunato banner                        # print the mascot banner again
 sudo kunato validate
 ```
+
+A successful install or `kunato upgrade` ends with the same colored banner;
+`--no-banner` on the installer (or `KUNATO_NO_BANNER`) suppresses it, and
+`NO_COLOR` prints it without colors.
 
 `kunato metrics` prints one row per metric in a bordered table with the name and
 value columns, leaving out the Prometheus `# HELP` and `# TYPE` lines, aligning

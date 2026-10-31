@@ -115,6 +115,7 @@ configuration, and enables the service. Key options:
 | `--allowed-host HOST`     | Add a Host name or IP literal to `allowed_hosts`; repeatable.            |
 | `--rules-url URL`         | Managed rule set URL (see Managed Rules and Automatic Updates).          |
 | `--no-start`              | Install and validate without enabling or starting the service.            |
+| `--no-banner`             | Do not print the banner after a successful install.                       |
 | `--allow-empty-rules`     | Start even when the initial rules download fails (blocks nothing).        |
 | `--yes`                   | Never prompt; fail instead of asking.                                    |
 | `--uninstall`             | Stop and remove the service and binary.                                  |
@@ -145,6 +146,11 @@ NAME`; installs that manage certificates manually can opt in the same way (see
 
 Running the installer again upgrades the binary and unit while keeping the
 existing configuration.
+
+A successful install or `kunato upgrade` prints the banner produced by
+`kunato banner` when stdout is a terminal. `--no-banner` (or
+`KUNATO_NO_BANNER`) skips it, and `NO_COLOR` keeps the banner but drops the
+ANSI colors. Run `kunato banner` to print it again.
 
 The installer downloads only over HTTPS (`curl --proto '=https' --proto-redir
 '=https'`), validates the version tag, and extracts the archive with

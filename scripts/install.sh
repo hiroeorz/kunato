@@ -29,6 +29,7 @@ ACME_STAGING=0
 ALLOWED_HOSTS=""
 RULES_URL="$DEFAULT_RULES_URL"
 NO_START=0
+NO_BANNER=0
 ALLOW_EMPTY_RULES=0
 ASSUME_YES=0
 UNINSTALL=0
@@ -62,6 +63,7 @@ Options:
                        automatically.
   --rules-url URL      Managed rule set URL (default: dist/rules.yaml on main).
   --no-start           Install and validate, but do not enable/start the service.
+  --no-banner          Do not print the banner after a successful install.
   --allow-empty-rules  Start kunato even when the initial rules download fails
                        (an empty rule set blocks nothing).
   --yes                Never prompt; fail instead of asking.
@@ -71,6 +73,8 @@ Options:
 
 Environment:
   KUNATO_BASE_URL      Override the release download base URL (must be https://).
+  KUNATO_NO_BANNER     Skip the banner after a successful install.
+  NO_COLOR             Disable banner colors; the banner still prints.
 EOF
 }
 
@@ -131,6 +135,10 @@ while [ $# -gt 0 ]; do
             ;;
         --no-start)
             NO_START=1
+            shift
+            ;;
+        --no-banner)
+            NO_BANNER=1
             shift
             ;;
         --allow-empty-rules)
@@ -226,6 +234,15 @@ stop_service_if_present() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop kunato 2>/dev/null || true
     fi
+}
+
+show_banner() {
+    [ "$NO_BANNER" -eq 0 ] || return 0
+    [ -z "${KUNATO_NO_BANNER:-}" ] || return 0
+    [ -t 1 ] || return 0
+    [ -x "$BIN_PATH" ] || return 0
+    printf '\n'
+    "$BIN_PATH" banner 2>/dev/null || true
 }
 
 ensure_user() {
@@ -400,6 +417,7 @@ main() {
     fi
     if [ "$NO_START" -eq 1 ]; then
         log "installed $VERSION; service not started (--no-start)"
+        show_banner
         return
     fi
 
@@ -411,7 +429,8 @@ main() {
     systemctl restart kunato || true
     sleep 1
     if systemctl is-active --quiet kunato; then
-        log "kunato $VERSION is running; metrics: curl http://127.0.0.1:9090/metrics"
+        log "kunato $VERSION is running; metrics: 127.0.0.1:9090/metrics"
+        show_banner
     else
         stop_service_if_present
         die "kunato failed to start; inspect the logs with: kunato log -n 50 (or journalctl -u kunato -e)"
