@@ -390,8 +390,17 @@ Protocol::Http2 => {
 - 検証: `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `./scripts/check-deny.sh` / `cargo test`（659 unit + 統合）すべて成功。black-box も上記のとおり通過。
 - コミット: `Close the origin-defense gaps found in the security review`。
 
-### 8.3 残り
+### 8.3 方針決定後の追加対応
+
+方針を確定して実装した5件。
+
+- **ORIGIN-02**: `boundary` を RFC 2046 に沿って厳格に解析する。解釈できない宣言（未終端の引用符、制御文字・非 ASCII、トークン外の文字、4個超）と、境界のない `multipart/form-data` は body 読み取り前に `400`。引用符内の空白は合法として全解釈を検査する。
+- **ORIGIN-04**: 宣言 `Content-Type` と拡張子の不一致を拒否する。safe claim の背後にある実行可能・active 拡張子（`shell.php` + `image/heic`）は `strict`/`mismatch` の両方で、active/明示的危険 claim の背後にある safe 拡張子（`photo.jpg` + `text/html`）は `strict` で `403`。`page.html` + `text/html` は従来どおり通る。あわせて、署名を検証できない safe type は拡張子の形式で先頭バイトを検証する。
+- **ORIGIN-07**: JSP の `<jsp:` 要素と ASP.NET の `<script runat="server">` を検出対象に追加。PHP 短縮タグのコメント走査を長さ無制限にし（未終端は末尾まで）、`\` 始まりの名前空間呼び出し、バッククォート、`<?=`＋コメントを検出する。
+- **ORIGIN-12**: 確立済みの WebSocket トンネルがメッセージごとに最新の設定スナップショットで評価する（ハンドシェイク時の設定に固定しない）。`docs/development.md` の「in-flight requests are unaffected」も HTTP と WebSocket で区別する記述に更新。
+- **ORIGIN-14**: 検査できない charset（`utf-16`/`utf-32`/`utf-7`/EBCDIC、およびテキスト系 type の UTF-16/32 BOM）を body 検査が有効なときに `415` で拒否する。Shift_JIS など ASCII 互換の charset は受理を継続する。
+
+### 8.4 残り
 
 - 第3波: SELF-01（検査予算の縮小・書き込み期限）、SELF-02（シャード退避）、SELF-03（QUIC Retry）、SELF-04（WebSocket 課金）、SELF-06（更新ループ直列化）、SELF-12（署名基盤）。
-- 条件付き（方針決定が必要）: ORIGIN-02、ORIGIN-04、ORIGIN-07、ORIGIN-12、ORIGIN-14。
 - 未割当: SELF-05（YAML パーサの位置追跡）。

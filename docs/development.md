@@ -604,9 +604,19 @@ over-limit decoded body returns `413`, an unsupported or over-layered encoding
 returns `415`, and a malformed stream returns `400` (counted in
 `kunato_request_decode_truncated_total` /
 `kunato_request_decode_skipped_total`). Multipart parsing is
-bounded to 64 parts with 1 KiB names and file names; malformed multipart bodies
-are inspected raw only. No other normalization (Unicode folding, HTML entity
-decoding) is performed. Body targets are skipped entirely on configured
+bounded to 64 parts with 1 KiB names and file names; a `boundary` declaration
+the parser cannot read (an unterminated quote, a control or non-ASCII byte, a
+token outside RFC 2046's set, or more than four boundaries) is rejected with
+`400` before the body is read, so the origin cannot split the body differently
+from the inspection. A quoted boundary that contains spaces is legal and is
+inspected in every interpretation.
+
+A body that declares a charset the inspection cannot read (`utf-16`, `utf-32`,
+`utf-7`, or an EBCDIC code page, or a UTF-16/UTF-32 byte-order mark on a textual
+type) is rejected with `415` when body inspection is active: decoding it as
+UTF-8 would show bytes, not the text the origin executes. ASCII-compatible
+encodings such as `shift_jis` stay accepted. No other normalization (Unicode
+folding, HTML entity decoding) is performed. Body targets are skipped entirely on configured
 [content routes](#content-routes).
 
 | Field              | Description                                                                                                             |
@@ -810,7 +820,9 @@ larger message closes the tunnel with close code `1009`. Kunato does not
 negotiate WebSocket extensions, so frames remain uncompressed and inspectable.
 Client-to-server messages are matched against body-target rules: text messages
 must be valid UTF-8, binary messages are matched lossily, and rules with
-per-rule limits use the same source-keyed window as HTTP. Server-to-client
+per-rule limits use the same source-keyed window as HTTP. Each message is
+evaluated against the configuration current at that moment, so an established
+tunnel follows a hot reload and a `rules_update` without a reconnect. Server-to-client
 messages are matched against response-phase rules that inspect `response_body`;
 the handshake response (`101` plus its headers) scopes `status` and
 `response_headers`, rules without a `response_body` condition never apply to
@@ -1009,9 +1021,10 @@ while its content contains any of:
 
 - an executable header (ELF, PE, Mach-O, a Java class, or WebAssembly) at the
   leading position;
-- a server-side script marker (`<?php`, `<?=`, or `<%`) anywhere in the part, or
-  a `#!` shebang at the leading position (a `GIF89a` + padding + `<?php`
-  polyglot is caught no matter where the marker sits);
+- a server-side script marker (`<?php`, `<?=`, `<%`, a JSP `<jsp:` element, or
+  a `<script runat="server">` tag) anywhere in the part, or a `#!` shebang at
+  the leading position (a `GIF89a` + padding + `<?php` polyglot is caught no
+  matter where the marker sits);
 - active HTML/XML/SVG markup (a leading `<` after an optional BOM and
   whitespace).
 
@@ -1020,18 +1033,29 @@ JPEG (`FF D8 FF`), PNG, GIF, WebP/WAV/AVI (RIFF sub-type), BMP, TIFF, ICO, PDF
 (`%PDF-` within the first 1 KiB), ZIP containers (OOXML and ODF documents), OLE
 or RTF (legacy Office), MP3, MP4/MOV, Ogg, FLAC, Matroska/WebM, WOFF, WOFF2, and
 SFNT fonts. Text or source code renamed to `.jpg` or `.pdf` is therefore
-rejected even when it contains no script marker. Claims whose format the check
-cannot verify (for example `image/heic`), generic claims in `mismatch` mode, and
-active-web claims are not signature-checked, and only the leading bytes are
-compared, so a valid signature followed by script code still passes.
+rejected even when it contains no script marker. A claim whose format the check
+cannot verify (for example `image/heic`) still verifies the filename extension's
+format; generic claims in `mismatch` mode and active-web claims are not
+signature-checked, and only the leading bytes are compared, so a valid signature
+followed by script code still passes.
+
+The declared type and the filename extension must agree. A safe claim over an
+executable or active extension (`shell.php` declared `image/heic`) is rejected
+in both `strict` and `mismatch` mode, and in `strict` an active or explicitly
+executable claim over a safe extension (`photo.jpg` declared `text/html`) is
+rejected as well. Declaring both as active (`page.html` with `text/html`) keeps
+working.
 
 PHP short tags (`<?`) are detected as well when the tag body looks like code: a
 variable, a function call, a parenthesized callable (`(system)(...)`), or a
-language keyword (`echo`, `system`, `eval`, `include`, ...), after skipping
-whitespace, `@`, and `/* ... */`, `// ...`, or `# ...` comments. This catches
-`<?/*x*/system(...)` behind an image signature without matching XML processing
-instructions (`<?xml`, `<?xpacket`, `<?mso-application`) or random bytes inside
-compressed media.
+language keyword (`echo`, `system`, `eval`, `include`, ...), a leading
+backslash (global namespace call), or a backtick, after skipping whitespace,
+`@`, and `/* ... */`, `// ...`, or `# ...` comments. Comments are scanned to
+their end, so a long comment cannot hide the tag, and an unterminated comment
+runs to the end of the part. This catches `<?/*x*/system(...)`,
+`<?=/*c*/system(...)`, `<? \system(...)`, and `` <? `id` `` behind an image
+signature without matching XML processing instructions (`<?xml`, `<?xpacket`,
+`<?mso-application`) or random bytes inside compressed media.
 
 A non-multipart write request (`POST`, `PUT`, `PATCH`) whose `Content-Type` or
 path names an executable or server-side script — for example
@@ -1599,7 +1623,9 @@ Kunato watches the configuration file plus the configured `rules_file` and
 `overrides_file` for changes. When any of them is updated:
 
 - The new configuration is parsed and validated **before** it is applied.
-- A valid configuration is swapped in atomically; in-flight requests are unaffected.
+- A valid configuration is swapped in atomically; in-flight HTTP requests are
+  unaffected, while established WebSocket tunnels apply the new rules to each
+  subsequent message.
 - An invalid configuration is rejected and the last known good rules remain active,
   with the error reported in the logs.
 

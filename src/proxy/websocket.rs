@@ -24,6 +24,7 @@ use crate::proxy::server::{InspectionBudget, InspectionGuard};
 use crate::proxy::{ProxyBody, full_body};
 use crate::request_view::{RequestView, ResponseView};
 use crate::rules::eval::{evaluate_websocket, evaluate_websocket_response};
+use crate::snapshot::Snapshot;
 
 const OP_CONTINUATION: u8 = 0x0;
 const OP_TEXT: u8 = 0x1;
@@ -59,6 +60,7 @@ struct OwnedRequest {
 pub(crate) async fn forward_handshake(
     config: &CompiledConfig,
     snapshot: Arc<CompiledConfig>,
+    live_config: Arc<Snapshot<CompiledConfig>>,
     inspection: Arc<InspectionBudget>,
     protection: Arc<ProtectionState>,
     parts: &http::request::Parts,
@@ -199,7 +201,7 @@ pub(crate) async fn forward_handshake(
         upgrade.shutdown,
         guard,
         source,
-        snapshot,
+        live_config,
         inspection,
         protection,
         owned,
@@ -224,7 +226,7 @@ async fn tunnel(
     mut shutdown: watch::Receiver<bool>,
     guard: Option<ConnectionGuard>,
     source: ClientSource,
-    config: Arc<CompiledConfig>,
+    live_config: Arc<Snapshot<CompiledConfig>>,
     inspection: Arc<InspectionBudget>,
     protection: Arc<ProtectionState>,
     request: OwnedRequest,
@@ -255,12 +257,12 @@ async fn tunnel(
     let (down_read, down_write) = tokio::io::split(downstream);
     let (up_read, up_write) = tokio::io::split(upstream);
     let (close_tx, close_rx) = mpsc::channel(1);
-    let message_limit = config.limits.websocket_message_bytes;
+    let message_limit = live_config.load().limits.websocket_message_bytes;
     let to_client = pump_upstream_to_client(
         up_read,
         down_write,
         close_rx,
-        config.clone(),
+        Arc::clone(&live_config),
         inspection.clone(),
         request.clone(),
         source.client_ip,
@@ -271,7 +273,7 @@ async fn tunnel(
         down_read,
         up_write,
         close_tx,
-        config,
+        live_config,
         protection,
         inspection,
         request,
@@ -303,7 +305,7 @@ async fn pump_upstream_to_client<R, W>(
     mut reader: R,
     mut writer: W,
     mut close: mpsc::Receiver<CloseCommand>,
-    config: Arc<CompiledConfig>,
+    live_config: Arc<Snapshot<CompiledConfig>>,
     inspection: Arc<InspectionBudget>,
     request: OwnedRequest,
     source_ip: IpAddr,
@@ -376,6 +378,9 @@ async fn pump_upstream_to_client<R, W>(
                     &payload,
                     false,
                 );
+                // Established tunnels follow a hot reload: each message is
+                // evaluated against the configuration current at that moment.
+                let config = live_config.load();
                 let outcome = evaluate_websocket_response(&config, &view, &response);
                 if let Some(blocked) = outcome.blocked {
                     warn!(
@@ -433,7 +438,7 @@ async fn pump_client_to_upstream<R, W>(
     mut reader: R,
     mut writer: W,
     close: mpsc::Sender<CloseCommand>,
-    config: Arc<CompiledConfig>,
+    live_config: Arc<Snapshot<CompiledConfig>>,
     protection: Arc<ProtectionState>,
     inspection: Arc<InspectionBudget>,
     request: OwnedRequest,
@@ -504,6 +509,9 @@ async fn pump_client_to_upstream<R, W>(
             false,
         )
         .with_body_rules_exempt(body_rules_exempt);
+        // Established tunnels follow a hot reload: each message is evaluated
+        // against the configuration current at that moment.
+        let config = live_config.load();
         let outcome = evaluate_websocket(&config, &view, Some(protection.as_ref()));
         if let Some(blocked) = outcome.blocked {
             warn!(

@@ -749,8 +749,10 @@ fn collect_multipart_queries(body: &[u8], headers: &HeaderMap, candidates: &mut 
     else {
         return;
     };
-    let boundaries = crate::decoding::multipart_boundaries(content_type);
-    if boundaries.is_empty() || boundaries.len() > crate::decoding::MAX_MULTIPART_BOUNDARIES {
+    let Ok(boundaries) = crate::decoding::multipart_boundaries(content_type) else {
+        return;
+    };
+    if boundaries.is_empty() {
         return;
     }
     for boundary in boundaries {

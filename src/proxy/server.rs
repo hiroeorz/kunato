@@ -293,6 +293,12 @@ impl Context {
         self.config.load()
     }
 
+    /// The live configuration handle, for tasks that outlive one request and
+    /// must follow hot reloads (WebSocket tunnels).
+    pub(crate) fn config_snapshot(&self) -> Arc<Snapshot<CompiledConfig>> {
+        Arc::clone(&self.config)
+    }
+
     /// Return an upstream client built for the snapshot's connect timeout,
     /// rebuilding it after a hot reload changed the timeout.
     pub(crate) fn client_for(&self, config: &CompiledConfig) -> Arc<UpstreamClient> {
@@ -995,6 +1001,23 @@ pub(crate) fn request_head_error(
             "duplicate Content-Type header",
         ));
     }
+    if let Some(content_type) = parts.headers.get(CONTENT_TYPE)
+        && let Ok(value) = content_type.to_str()
+        && value
+            .split(';')
+            .next()
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("multipart/form-data"))
+        && !crate::decoding::multipart_boundaries(value)
+            .is_ok_and(|boundaries| !boundaries.is_empty())
+    {
+        // The origin may still read a boundary this parser cannot, so accepting
+        // the declaration would let it split the body differently from the
+        // inspection.
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "malformed multipart boundary",
+        ));
+    }
     if parts.headers.contains_key(CONTENT_LENGTH) && parts.headers.contains_key(TRANSFER_ENCODING) {
         return Some(HttpError::new(
             StatusCode::BAD_REQUEST,
@@ -1559,6 +1582,23 @@ async fn process(
     let inspect_uploads = inspect_multipart || inspect_raw_body;
     let encoded = parts.headers.contains_key(CONTENT_ENCODING);
     let decode_body = inspect_body || ((inspect_uploads || inspect_form) && encoded);
+    if (decode_body || inspect_uploads)
+        && !body.is_empty()
+        && let Some(charset) = crate::decoding::uninspectable_charset(&parts.headers, body)
+    {
+        // Inspecting the bytes as UTF-8 while the origin reads another
+        // encoding would let the body carry any payload past the rules.
+        warn!(
+            client = %source.client_ip, peer = %source.peer,
+            charset = %charset,
+            path = %parts.uri.path(),
+            "request body charset cannot be inspected; rejecting"
+        );
+        return Err(HttpError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported request body charset",
+        ));
+    }
     if (decode_body || inspect_uploads) && !body.is_empty() {
         // The read path reserved only the raw prefix. Reserve the decoded-form
         // worst case (or the bounded multipart-parse worst case) now,
@@ -1876,6 +1916,7 @@ async fn process(
         let result = websocket::forward_handshake(
             config,
             context.config(),
+            context.config_snapshot(),
             context.inspection_budget(),
             context.protection_state(),
             &parts,

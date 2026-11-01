@@ -4,8 +4,8 @@ use http::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::config::FormLimits;
 use crate::decoding::{
-    MAX_MULTIPART_BOUNDARIES, MultipartError, MultipartPart, disposition_parameters,
-    multipart_boundaries, multipart_parts_limited, percent_decode,
+    MultipartError, MultipartPart, disposition_parameters, multipart_boundaries,
+    multipart_parts_limited, percent_decode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +91,8 @@ pub(crate) fn inspect(
     if !media.eq_ignore_ascii_case("multipart/form-data") {
         return Err(Violation::Malformed);
     }
-    let boundaries = multipart_boundaries(content_type);
-    if boundaries.is_empty() || boundaries.len() > MAX_MULTIPART_BOUNDARIES {
+    let boundaries = multipart_boundaries(content_type).map_err(|_| Violation::Malformed)?;
+    if boundaries.is_empty() {
         return Err(Violation::Malformed);
     }
     for boundary in boundaries {

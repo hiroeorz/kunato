@@ -35,6 +35,82 @@ pub enum DecodeOutcome {
     Malformed,
 }
 
+/// A declared charset whose text the inspection cannot read. The body is
+/// decoded as UTF-8, while the origin reads UTF-16, UTF-32, UTF-7, or an EBCDIC
+/// code page, so every regex rule would see bytes instead of the text the
+/// application executes.
+const NON_INSPECTABLE_CHARSETS: &[&str] = &[
+    "utf-16", "utf-16le", "utf-16be", "ucs-2", "ucs-2le", "ucs-2be", "utf-32", "utf-32le",
+    "utf-32be", "ucs-4", "utf-7", "ebcdic", "ibm037", "cp037", "ibm500", "cp500", "ibm1047",
+    "cp1047", "ibm1140",
+];
+
+/// Returns the charset that makes a body uninspectable, if any. A UTF-16 or
+/// UTF-32 byte-order mark counts too: the declared type may be missing or
+/// generic, while the XML or JSON parser on the origin still reads the BOM.
+pub(crate) fn uninspectable_charset(headers: &HeaderMap, body: &[u8]) -> Option<String> {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    // Parts of a multipart body carry their own charset; the request-level
+    // declaration does not describe them.
+    if media_type == "multipart/form-data" {
+        return None;
+    }
+    if let Some(charset) = content_type_param(content_type, "charset") {
+        let charset = charset.trim().trim_matches('"').to_ascii_lowercase();
+        if NON_INSPECTABLE_CHARSETS.contains(&charset.as_str()) {
+            return Some(charset);
+        }
+    }
+    let textual = media_type.is_empty()
+        || media_type.starts_with("text/")
+        || matches!(
+            media_type.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/x-www-form-urlencoded"
+                | "application/graphql"
+                | "application/xhtml+xml"
+        )
+        || media_type.ends_with("+json")
+        || media_type.ends_with("+xml");
+    if textual && has_wide_bom(body) {
+        return Some("utf-16/utf-32 byte-order mark".to_owned());
+    }
+    None
+}
+
+fn has_wide_bom(body: &[u8]) -> bool {
+    body.starts_with(&[0xFE, 0xFF])
+        || body.starts_with(&[0xFF, 0xFE])
+        || body.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
+}
+
+/// The value of a `Content-Type` parameter such as `charset`.
+fn content_type_param(content_type: &str, name: &str) -> Option<String> {
+    for parameter in content_type.split(';').skip(1) {
+        let parameter = parameter.trim();
+        let Some((parameter_name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if parameter_name.trim().eq_ignore_ascii_case(name) {
+            let value = value.trim();
+            let value = value.strip_prefix('"').unwrap_or(value);
+            let value = value.strip_suffix('"').unwrap_or(value);
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
 pub fn decode_body_for_inspection(body: &[u8], headers: &HeaderMap, limit: usize) -> DecodeOutcome {
     if body.is_empty() {
         return DecodeOutcome::NotEncoded;
@@ -136,8 +212,10 @@ pub(crate) fn decode_body_formats(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u
     } else if media_type == "application/json" || media_type.ends_with("+json") {
         vec![json_unescape(body)]
     } else if media_type == "multipart/form-data" {
-        let boundaries = multipart_boundaries(&content_type);
-        if boundaries.is_empty() || boundaries.len() > MAX_MULTIPART_BOUNDARIES {
+        let Ok(boundaries) = multipart_boundaries(&content_type) else {
+            return Vec::new();
+        };
+        if boundaries.is_empty() {
             return Vec::new();
         }
         boundaries
@@ -442,36 +520,135 @@ impl MultipartPart<'_> {
 /// most servers the first), so each interpretation has to be inspected.
 /// Callers treat more than [`MAX_MULTIPART_BOUNDARIES`] candidates as
 /// uninspectable.
-pub(crate) fn multipart_boundaries(content_type: &str) -> Vec<String> {
+/// Boundary parameters declared by a `multipart/form-data` content type.
+///
+/// Parsing is strict on purpose: a declaration this parser cannot read (an
+/// unterminated quote, a control or non-ASCII byte, a value over 70 bytes, a
+/// token with characters outside RFC 2046's set, or more than
+/// [`MAX_MULTIPART_BOUNDARIES`] boundaries) is an error, so callers can fail
+/// closed instead of inspecting a body the origin splits differently.
+pub(crate) fn multipart_boundaries(
+    content_type: &str,
+) -> Result<Vec<String>, MultipartBoundaryError> {
+    let bytes = content_type.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index] != b';' {
+        index += 1;
+    }
     let mut boundaries = Vec::new();
-    for parameter in content_type.split(';').skip(1) {
-        let parameter = parameter.trim();
-        let Some((name, value)) = parameter.split_once('=') else {
-            continue;
-        };
-        if !name.trim().eq_ignore_ascii_case("boundary") {
+    while index < bytes.len() {
+        index += 1; // ';'
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        let name_start = index;
+        while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b';' {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            if index > name_start {
+                return Err(MultipartBoundaryError::Malformed);
+            }
             continue;
         }
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .unwrap_or(value);
+        let name = content_type[name_start..index].trim();
+        index += 1;
+        let boundary_name = name.eq_ignore_ascii_case("boundary");
+        let value = if index < bytes.len() && bytes[index] == b'"' {
+            index += 1;
+            let mut value = String::new();
+            let mut closed = false;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'"' => {
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                    b'\\' if index + 1 < bytes.len() => {
+                        index += 1;
+                        if bytes[index] < 0x20 || bytes[index] == 0x7f || !bytes[index].is_ascii() {
+                            return Err(MultipartBoundaryError::Malformed);
+                        }
+                        value.push(bytes[index] as char);
+                        index += 1;
+                    }
+                    byte if byte < 0x20 || byte == 0x7f || !byte.is_ascii() => {
+                        return Err(MultipartBoundaryError::Malformed);
+                    }
+                    byte => {
+                        value.push(byte as char);
+                        index += 1;
+                    }
+                }
+            }
+            if !closed {
+                return Err(MultipartBoundaryError::Malformed);
+            }
+            // Only whitespace or the next parameter may follow a quoted value.
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if index < bytes.len() && bytes[index] != b';' {
+                return Err(MultipartBoundaryError::Malformed);
+            }
+            value
+        } else {
+            let start = index;
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            let value = content_type[start..index].trim();
+            // A parameter we do not consume may use any token; only the
+            // boundary itself has to stay inside the RFC 2046 character set.
+            if boundary_name && !is_boundary_token(value) {
+                return Err(MultipartBoundaryError::Malformed);
+            }
+            value.to_owned()
+        };
+        if !boundary_name {
+            continue;
+        }
         if value.is_empty()
             || value.len() > MAX_MULTIPART_BOUNDARY_BYTES
             || !value.is_ascii()
-            || value.bytes().any(|byte| byte.is_ascii_whitespace())
+            || value.bytes().any(|byte| byte.is_ascii_control())
         {
-            continue;
+            return Err(MultipartBoundaryError::Malformed);
         }
-        if !boundaries.iter().any(|boundary| boundary == value) {
-            boundaries.push(value.to_owned());
+        if !boundaries.iter().any(|boundary| boundary == &value) {
+            boundaries.push(value);
         }
         if boundaries.len() > MAX_MULTIPART_BOUNDARIES {
-            break;
+            return Err(MultipartBoundaryError::TooMany);
         }
     }
-    boundaries
+    Ok(boundaries)
+}
+
+fn is_boundary_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'\''
+                        | b'('
+                        | b')'
+                        | b'+'
+                        | b'_'
+                        | b','
+                        | b'-'
+                        | b'.'
+                        | b'/'
+                        | b':'
+                        | b'='
+                        | b'?'
+                )
+        })
 }
 
 /// Splits a `multipart/form-data` body into parts without copying. Parts are
@@ -485,6 +662,12 @@ pub(crate) fn multipart_parts<'a>(
     boundary: &str,
 ) -> Option<Vec<MultipartPart<'a>>> {
     multipart_parts_limited(body, boundary, MAX_MULTIPART_PARTS).ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultipartBoundaryError {
+    Malformed,
+    TooMany,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1248,6 +1431,68 @@ mod tests {
         assert_eq!(forms.len(), 2);
         assert_eq!(forms[0], "%FF%FE");
         assert_eq!(forms[1], "\u{FFFD}\u{FFFD}");
+    }
+
+    #[test]
+    fn multipart_boundaries_are_parsed_strictly() {
+        assert_eq!(
+            multipart_boundaries("multipart/form-data; boundary=dummy").expect("valid"),
+            vec!["dummy".to_owned()]
+        );
+        assert_eq!(
+            multipart_boundaries("multipart/form-data; boundary=\"a b\"").expect("quoted space"),
+            vec!["a b".to_owned()]
+        );
+        assert_eq!(
+            multipart_boundaries("multipart/form-data; boundary=dummy; boundary=a b")
+                .expect_err("unquoted space"),
+            MultipartBoundaryError::Malformed
+        );
+        assert_eq!(
+            multipart_boundaries("multipart/form-data; boundary=\"unterminated")
+                .expect_err("unterminated"),
+            MultipartBoundaryError::Malformed
+        );
+        assert_eq!(
+            multipart_boundaries("multipart/form-data; boundary=").expect_err("empty"),
+            MultipartBoundaryError::Malformed
+        );
+        assert_eq!(
+            multipart_boundaries(
+                "multipart/form-data; boundary=a; boundary=b; boundary=c; boundary=d; boundary=e"
+            )
+            .expect_err("too many"),
+            MultipartBoundaryError::TooMany
+        );
+    }
+
+    #[test]
+    fn flags_charsets_and_boms_the_inspection_cannot_read() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-16"),
+        );
+        assert_eq!(
+            uninspectable_charset(&headers, br#"{"a":1}"#).as_deref(),
+            Some("utf-16")
+        );
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=shift_jis"),
+        );
+        assert_eq!(uninspectable_charset(&headers, b"hello"), None);
+
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/xml"));
+        assert!(uninspectable_charset(&headers, &[0xFF, 0xFE, 0x3C, 0x00]).is_some());
+        assert!(uninspectable_charset(&headers, b"<a/>").is_none());
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("multipart/form-data; boundary=X"),
+        );
+        assert_eq!(uninspectable_charset(&headers, &[0xFF, 0xFE]), None);
     }
 
     #[test]

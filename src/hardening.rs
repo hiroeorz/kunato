@@ -268,7 +268,10 @@ fn duplicate_in_multipart(
 /// declared boundary interpretation.
 fn multipart_fields<'a>(body: &'a [u8], content_type: &str) -> Vec<(String, &'a [u8], bool)> {
     let mut fields = Vec::new();
-    for boundary in multipart_boundaries(content_type) {
+    let Ok(boundaries) = multipart_boundaries(content_type) else {
+        return fields;
+    };
+    for boundary in boundaries {
         let Some(parts) = multipart_parts(body, &boundary) else {
             continue;
         };

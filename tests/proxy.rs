@@ -4396,6 +4396,59 @@ categories:
 }
 
 #[tokio::test]
+async fn websocket_tunnel_follows_a_hot_reload() {
+    let upstream = spawn_upgrade_upstream().await;
+    let base = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories: []
+"
+    );
+    let running = start_kunato(&base).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    stream
+        .write_all(&client_ws_frame(0x1, b"hello", true))
+        .await
+        .expect("write benign");
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(opcode, 0x1);
+    assert_eq!(payload, b"hello");
+
+    let blocking = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: ws-payload
+    action: BLOCK
+    rules:
+      - name: block-script
+        match: {{ regex: '(?i)<script', in: [body] }}
+"
+    );
+    running
+        .config
+        .store(Arc::new(config::parse(&blocking).expect("valid config")));
+
+    stream
+        .write_all(&client_ws_frame(0x1, b"<script>", true))
+        .await
+        .expect("write attack");
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(
+        opcode, 0x8,
+        "an established tunnel must apply the reloaded rules"
+    );
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn websocket_server_payload_is_inspected() {
     let upstream = spawn_upgrade_upstream().await;
     let yaml = format!(
@@ -5762,6 +5815,87 @@ async fn form_checks_reject_invalid_multipart_and_urlencoded_depth() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn rejects_a_multipart_boundary_the_inspection_cannot_parse() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\n"
+    ))
+    .await;
+
+    let body = "--dummy\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n--dummy--\r\n";
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: kunato.test\r\nContent-Type: multipart/form-data; boundary=dummy; boundary=a b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    assert_eq!(
+        send_raw_request(running.addr, &request).await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A multipart declaration without any boundary is just as unreadable.
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: kunato.test\r\nContent-Type: multipart/form-data\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    assert_eq!(
+        send_raw_request(running.addr, &request).await,
+        StatusCode::BAD_REQUEST
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn accepts_a_quoted_multipart_boundary_with_a_space() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\n"
+    ))
+    .await;
+
+    let body = "--a b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n--a b--\r\n";
+    let request = format!(
+        "POST /upload HTTP/1.1\r\nHost: kunato.test\r\nContent-Type: multipart/form-data; boundary=\"a b\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    assert_eq!(
+        send_raw_request(running.addr, &request).await,
+        StatusCode::OK
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn rejects_bodies_in_a_charset_it_cannot_inspect() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: body-marker
+    action: BLOCK
+    rules:
+      - name: marker
+        match: {{ regex: secret, in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = "{\"q\":\"secret\"}";
+    let request = format!(
+        "POST /search HTTP/1.1\r\nhost: kunato.test\r\ncontent-type: application/json; charset=utf-16\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    assert_eq!(
+        send_raw_request(running.addr, &request).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+
     running.stop().await;
 }
 
