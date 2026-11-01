@@ -4,6 +4,7 @@ pub mod admin_client;
 pub mod allowed_hosts;
 pub mod banner;
 mod banner_art;
+mod blake2b;
 pub mod cidr;
 pub mod cli;
 pub mod client_ip;

@@ -1,9 +1,10 @@
 //! Detached minisign signatures for managed rules and release assets.
 //!
-//! Only the non-prehashed `Ed` (Ed25519) algorithm is accepted: both artefacts
-//! are small, and accepting prehashed signatures would pull in a BLAKE2b
-//! implementation for no benefit. The parser understands the textual
-//! `minisign` formats:
+//! Both variants minisign produces are accepted: plain Ed25519 over the file
+//! (`Ed`) and the prehashed form (`ED`) that hashes the artifact with
+//! BLAKE2b-512 first. `minisign -S` uses the prehashed form by default; the
+//! digest is implemented in [`crate::blake2b`] because `ring` does not expose
+//! it. The parser understands the textual `minisign` formats:
 
 //! ```text
 //! untrusted comment: minisign public key <id>
@@ -25,9 +26,10 @@ use ring::signature::{ED25519, UnparsedPublicKey};
 
 use crate::error::Error;
 
-/// Algorithm bytes (little ASCII "Ed") of an Ed25519 signature over the whole
-/// file. "ED" would mean the BLAKE2b-prehashed variant, which is rejected.
+/// Algorithm bytes of an Ed25519 signature over the whole file.
 const ED25519_ALGORITHM: &[u8; 2] = b"Ed";
+/// Algorithm bytes of an Ed25519 signature over the BLAKE2b-512 digest.
+const ED25519_PREHASHED_ALGORITHM: &[u8; 2] = b"ED";
 const PUBLIC_KEY_BYTES: usize = 2 + 8 + 32;
 const SIGNATURE_BYTES: usize = 2 + 8 + 64;
 
@@ -73,8 +75,12 @@ impl PublicKey {
         if signature.key_id != self.key_id {
             return false;
         }
+        let digest = signature
+            .prehashed
+            .then(|| crate::blake2b::blake2b_512(message));
+        let signed = digest.as_ref().map_or(message, |digest| &digest[..]);
         UnparsedPublicKey::new(&ED25519, &self.key[..])
-            .verify(message, &signature.signature[..])
+            .verify(signed, &signature.signature[..])
             .is_ok()
     }
 }
@@ -83,6 +89,8 @@ impl PublicKey {
 pub struct Signature {
     key_id: [u8; 8],
     signature: [u8; 64],
+    /// The signature covers the BLAKE2b-512 digest instead of the bytes.
+    prehashed: bool,
 }
 
 impl Signature {
@@ -103,21 +111,24 @@ impl Signature {
 pub fn parse_signature(text: &str) -> Result<Signature, Error> {
     let payload = decode_payload(text, SIGNATURE_BYTES)
         .ok_or_else(|| Error::Message("signature is not a minisign signature".to_owned()))?;
-    if payload[..2] != *ED25519_ALGORITHM {
-        if payload[..2] == *b"ED" {
-            return Err(Error::Message(
-                "prehashed minisign signatures are not supported; sign without -H".to_owned(),
-            ));
-        }
+    let prehashed = if payload[..2] == *ED25519_ALGORITHM {
+        false
+    } else if payload[..2] == *ED25519_PREHASHED_ALGORITHM {
+        true
+    } else {
         return Err(Error::Message(
             "signature uses an algorithm this build does not verify".to_owned(),
         ));
-    }
+    };
     let mut key_id = [0u8; 8];
     key_id.copy_from_slice(&payload[2..10]);
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&payload[10..]);
-    Ok(Signature { key_id, signature })
+    Ok(Signature {
+        key_id,
+        signature,
+        prehashed,
+    })
 }
 
 /// The first line that decodes to exactly `expected` bytes, skipping the
@@ -256,15 +267,46 @@ mod tests {
     }
 
     #[test]
-    fn rejects_prehashed_and_unknown_algorithms() {
+    fn accepts_prehashed_signatures_and_rejects_unknown_algorithms() {
         let key = test_key();
+        let message = b"rules";
+        let digest = crate::blake2b::blake2b_512(message);
         let mut payload = Vec::new();
         payload.extend_from_slice(b"ED");
         payload.extend_from_slice(&key.key_id);
-        payload.extend_from_slice(&[0u8; 64]);
+        payload.extend_from_slice(key.pair.sign(&digest).as_ref());
         let text = format!("untrusted comment: x\n{}\n", base64(&payload));
-        let error = parse_signature(&text).expect_err("prehashed rejected");
-        assert!(error.to_string().contains("prehashed"), "{error}");
+
+        let public_key = PublicKey::parse(&public_key_text(&key)).expect("public key");
+        let signature = parse_signature(&text).expect("prehashed signature");
+        assert!(public_key.verify(message, &signature));
+        assert!(!public_key.verify(b"other", &signature));
+
+        let mut unknown = Vec::new();
+        unknown.extend_from_slice(b"XX");
+        unknown.extend_from_slice(&key.key_id);
+        unknown.extend_from_slice(&[0u8; 64]);
+        let text = format!("untrusted comment: x\n{}\n", base64(&unknown));
+        assert!(parse_signature(&text).is_err());
+    }
+
+    #[test]
+    fn verifies_a_real_minisign_signature() {
+        // Produced by `minisign -G -W` and `minisign -S -W` (0.11) over
+        // b"hello\n"; minisign signs the BLAKE2b-512 digest by default.
+        let public_key = "untrusted comment: minisign public key 7CEB65AF8CBD8130\n\
+                          RWQwgb2Mr2XrfDq1JYiM1C+oxuA1a5Qk1q368hPqDLJFUFPk/9e2ddMH";
+        let signature = "untrusted comment: signature from minisign secret key\n\
+                         RUQwgb2Mr2XrfMRPSR3kFI1dBAj87rJ2DoUvZk9BDYqki7krFPX2QpFwOybnl74br57PQl7opVVDRhgNyQxreWSPmVolFlN5uAs=";
+
+        let key = PublicKey::parse(public_key).expect("public key");
+        let signature = parse_signature(signature).expect("signature");
+        assert!(key.verify(b"hello\n", &signature));
+        assert!(!key.verify(b"hello", &signature));
+        assert!(
+            key.verify(b"hello\n", &signature),
+            "verification is repeatable"
+        );
     }
 
     #[test]
