@@ -1,0 +1,10 @@
+# Default owner for every path.
+* @hiroeorz
+
+# Changes to CI, signing material, and the trust store need an explicit
+# review from the maintainer: a modified workflow can sign or publish
+# artifacts, and the trust store decides which keys are accepted.
+/.github/workflows/ @hiroeorz
+/scripts/sign-*.sh @hiroeorz
+/src/trust.rs @hiroeorz
+/src/signing.rs @hiroeorz
