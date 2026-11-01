@@ -239,6 +239,11 @@ struct FlowCursor<'a> {
     text: &'a str,
     pos: usize,
     lines: &'a [FlowLine],
+    /// Index into `lines` and the column within it for `pos`, maintained
+    /// incrementally: recomputing them from the line start on every token made
+    /// single-line flow collections quadratic.
+    line_index: usize,
+    column: usize,
 }
 
 impl<'a> FlowCursor<'a> {
@@ -251,9 +256,36 @@ impl<'a> FlowCursor<'a> {
     }
 
     fn bump(&mut self) {
-        if let Some(ch) = self.peek() {
-            self.pos += ch.len_utf8();
+        let Some(ch) = self.peek() else {
+            return;
+        };
+        self.pos += ch.len_utf8();
+        if ch == '\n' {
+            self.sync_line();
+        } else {
+            self.column += 1;
         }
+    }
+
+    /// Recompute the line index and column after a jump or a newline.
+    fn sync_line(&mut self) {
+        let index = match self
+            .lines
+            .binary_search_by_key(&self.pos, |line| line.offset)
+        {
+            Ok(index) => index,
+            Err(0) => 0,
+            Err(index) => index - 1,
+        };
+        self.line_index = index;
+        let line = self.lines[index];
+        self.column = line.column + self.text[line.offset..self.pos].chars().count();
+    }
+
+    /// Move the cursor to `pos` (used when a scan consumed a run of bytes).
+    fn jump_to(&mut self, pos: usize) {
+        self.pos = pos;
+        self.sync_line();
     }
 
     fn skip_spaces(&mut self) {
@@ -277,25 +309,12 @@ impl<'a> FlowCursor<'a> {
         }
     }
 
-    fn location_at(&self, pos: usize) -> (usize, usize) {
-        let index = match self.lines.binary_search_by_key(&pos, |line| line.offset) {
-            Ok(index) => index,
-            Err(0) => 0,
-            Err(index) => index - 1,
-        };
-        let line = self.lines[index];
-        (
-            line.line,
-            line.column + self.text[line.offset..pos].chars().count(),
-        )
-    }
-
     fn line(&self) -> usize {
-        self.location_at(self.pos).0
+        self.lines[self.line_index].line
     }
 
     fn column(&self) -> usize {
-        self.location_at(self.pos).1
+        self.column
     }
 }
 
@@ -1033,6 +1052,8 @@ impl<'a> Parser<'a> {
             text: &buffer,
             pos: 0,
             lines: &lines,
+            line_index: 0,
+            column,
         };
         let value = self.parse_flow_value(&mut cursor, 0)?;
         cursor.skip_spaces();
@@ -1066,7 +1087,7 @@ impl<'a> Parser<'a> {
                 let line = cursor.line();
                 let column = cursor.column();
                 let (text, consumed) = parse_quoted_text(cursor.rest(), line, column)?;
-                cursor.pos += consumed;
+                cursor.jump_to(cursor.pos + consumed);
                 self.count_node(line, column)?;
                 Ok(Value::Scalar(Scalar {
                     text,
@@ -1312,7 +1333,7 @@ impl<'a> Parser<'a> {
             }
             Some('\'') | Some('"') => {
                 let (text, consumed) = parse_quoted_text(cursor.rest(), line, column)?;
-                cursor.pos += consumed;
+                cursor.jump_to(cursor.pos + consumed);
                 self.count_node(line, column)?;
                 Ok((
                     Value::Scalar(Scalar {

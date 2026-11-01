@@ -56,6 +56,23 @@ mod tests {
     }
 
     #[test]
+    fn a_large_single_line_flow_collection_parses_without_quadratic_cost() {
+        // Recomputing the cursor column from the line start on every token made
+        // this shape quadratic; 50k items took well over a minute before.
+        let items: Vec<String> = (0..50_000).map(|index| index.to_string()).collect();
+        let text = format!("values: [{}]\n", items.join(", "));
+
+        let start = std::time::Instant::now();
+        let value: serde_json::Value = from_str(&text).expect("parse the flow sequence");
+        assert_eq!(value["values"].as_array().map(Vec::len), Some(items.len()));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "flow parsing took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
     fn parses_the_published_rule_set() {
         let spec: RulesFileSpec =
             from_str(include_str!("../../dist/rules.yaml")).expect("dist/rules.yaml");

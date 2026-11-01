@@ -399,7 +399,10 @@ conditional request (`If-None-Match`/`If-Modified-Since`), downloads any new
 file, verifies its SHA256 digest against `checksum_url`, validates it with the
 full rule compiler (regex and ReDoS guards included) together with the inline
 and overrides sources, replaces the file
-atomically, and lets the hot reload path apply it. Any failure — network,
+atomically, and installs that already-compiled snapshot directly. The file
+watcher shares the source timestamps of the applied snapshot, so one update
+compiles the rule set once instead of once for validation, once for the reload,
+and once more on the watcher's next tick. Any failure — network,
 checksum mismatch, invalid rules, size limit — leaves the current rules
 untouched and is reported in the logs and metrics. The updater state (last
 success, next due time, HTTP validators) is stored next to the rules file.

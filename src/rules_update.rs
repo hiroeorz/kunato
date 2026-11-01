@@ -74,7 +74,7 @@ pub async fn run(
         }
 
         let outcome = tokio::select! {
-            result = update_once(&main_config, &settings, &rules_file, &state_file) => result,
+            result = update_candidate(&main_config, &settings, &rules_file, &state_file) => result,
             _ = shutdown.changed() => {
                 info!("rules update cancelled for shutdown");
                 break;
@@ -82,32 +82,25 @@ pub async fn run(
         };
 
         let succeeded = match outcome {
-            Ok(UpdateOutcome::Updated) => {
+            Ok(Some(compiled)) => {
                 metrics.rules_update_success.fetch_add(1, Ordering::Relaxed);
                 metrics
                     .rules_last_success
                     .store(unix_now(), Ordering::Relaxed);
                 info!(path = %rules_file.display(), "rules file updated");
-                // Compiling rules and regexes blocks; keep it off the async
-                // worker so the proxy keeps serving during a refresh.
-                let reload_path = main_config.clone();
-                let reload_config = Arc::clone(&config);
-                let reload_metrics = Arc::clone(&metrics);
-                if let Err(err) = tokio::task::spawn_blocking(move || {
-                    watcher::reload(
-                        &reload_path,
-                        &reload_config,
-                        &reload_metrics,
-                        disable_protection,
-                    );
-                })
-                .await
-                {
-                    error!(error = %err, "rules reload task failed");
-                }
+                // The candidate is already compiled; install it directly. The
+                // shared source stamps tell the file watcher not to compile
+                // the same files again.
+                watcher::apply(
+                    &main_config,
+                    compiled,
+                    &config,
+                    &metrics,
+                    disable_protection,
+                );
                 true
             }
-            Ok(UpdateOutcome::NotModified) => {
+            Ok(None) => {
                 metrics
                     .rules_update_not_modified
                     .fetch_add(1, Ordering::Relaxed);
@@ -163,6 +156,21 @@ pub async fn update_once(
     rules_file: &Path,
     state_file: &Path,
 ) -> Result<UpdateOutcome, Error> {
+    match update_candidate(main_config, settings, rules_file, state_file).await? {
+        Some(_) => Ok(UpdateOutcome::Updated),
+        None => Ok(UpdateOutcome::NotModified),
+    }
+}
+
+/// The update path that keeps the compiled configuration: validating the
+/// candidate already compiled it, so the caller can install that snapshot
+/// instead of re-reading and recompiling the same files.
+async fn update_candidate(
+    main_config: &Path,
+    settings: &RulesUpdate,
+    rules_file: &Path,
+    state_file: &Path,
+) -> Result<Option<CompiledConfig>, Error> {
     let Some(url) = &settings.url else {
         return Err(Error::Message(
             "rules update URL is not configured".to_owned(),
@@ -213,7 +221,7 @@ pub async fn update_once(
                 rules_file.display()
             )));
         }
-        return Ok(UpdateOutcome::NotModified);
+        return Ok(None);
     };
 
     let expected = fetch_checksum(&client, checksum_url).await?;
@@ -262,7 +270,7 @@ pub async fn update_once(
         last_modified,
     };
     write_state(&next, state_file);
-    Ok(UpdateOutcome::Updated)
+    Ok(Some(candidate))
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {

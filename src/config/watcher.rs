@@ -33,6 +33,36 @@ fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+type Stamp = Option<(SystemTime, u64)>;
+type Stamps = BTreeMap<PathBuf, Stamp>;
+
+/// Stamps of the sources that produced the active snapshot. Shared so a reload
+/// triggered by the rules updater (or SIGHUP) also tells the file watcher that
+/// it already applied the change; otherwise the watcher would compile the very
+/// same files again on its next tick.
+static APPLIED_STAMPS: std::sync::Mutex<Option<Stamps>> = std::sync::Mutex::new(None);
+
+fn record_stamps(sources: &[PathBuf]) {
+    let mut applied = APPLIED_STAMPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *applied = Some(source_stamps(sources));
+}
+
+fn applied_stamps() -> Option<Stamps> {
+    APPLIED_STAMPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+fn reset_applied_stamps() {
+    *APPLIED_STAMPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
 pub async fn watch(
     path: PathBuf,
     config: Arc<Snapshot<CompiledConfig>>,
@@ -42,7 +72,11 @@ pub async fn watch(
 ) {
     let main = absolute(&path);
     let initial = source_paths(&main, &config.load());
-    let mut stamps = source_stamps(&initial);
+    // Seed the shared stamps with what the active snapshot was built from so
+    // the first tick does not look like a change.
+    if applied_stamps().is_none() {
+        record_stamps(&initial);
+    }
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -60,11 +94,9 @@ pub async fn watch(
             _ = poll.tick() => {
                 let sources = source_paths(&main, &config.load());
                 let current = source_stamps(&sources);
-                if current.keys().ne(stamps.keys()) {
-                    stamps = current;
-                    false
-                } else {
-                    current != stamps
+                match applied_stamps() {
+                    Some(applied) => current != applied,
+                    None => true,
                 }
             }
         };
@@ -79,7 +111,8 @@ pub async fn watch(
             {
                 error!(error = %err, "configuration reload task failed");
             }
-            stamps = source_stamps(&source_paths(&main, &config.load()));
+            // The reload records the applied stamps itself; a failed reload
+            // leaves them unchanged so the next tick retries.
         }
     }
 }
@@ -111,65 +144,9 @@ pub fn reload(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match config::load(path) {
-        Ok(mut new_config) => {
+        Ok(new_config) => {
             metrics.reload_success.fetch_add(1, Ordering::Relaxed);
-            if disable_protection {
-                new_config.protection.enabled = false;
-            }
-            let (active_listen, active_tls, active_http3, active_admin) = {
-                let current = config.load();
-                (
-                    current.listen,
-                    current.tls.clone(),
-                    current.http3,
-                    current.admin.clone(),
-                )
-            };
-            if new_config.listen != active_listen {
-                warn!(
-                    configured = %new_config.listen,
-                    active = %active_listen,
-                    "listen address changes require a restart; keeping the active listener"
-                );
-                new_config.listen = active_listen;
-            }
-            if new_config.tls != active_tls {
-                warn!(
-                    "TLS settings changes require a restart; keeping the active TLS configuration"
-                );
-                new_config.tls = active_tls;
-            }
-            if new_config.http3 != active_http3 {
-                warn!(
-                    "HTTP/3 settings changes require a restart; keeping the active HTTP/3 configuration"
-                );
-                new_config.http3 = active_http3;
-            }
-            if new_config.admin != active_admin {
-                warn!(
-                    "admin settings changes require a restart; keeping the active admin listener"
-                );
-                new_config.admin = active_admin;
-            }
-
-            let sources = source_paths(path, &new_config);
-            let categories = new_config.categories.len();
-            let rules: usize = new_config
-                .categories
-                .iter()
-                .map(|category| category.rules.len())
-                .sum();
-            let body_inspection_warning = new_config.body_inspection_warning();
-            let allowed_hosts_warning = new_config.allowed_hosts_warning();
-            config.store(Arc::new(new_config));
-            if let Some(warning) = body_inspection_warning {
-                warn!("{warning}");
-            }
-            if let Some(warning) = allowed_hosts_warning {
-                warn!("{warning}");
-            }
-            info!(categories, rules, "configuration reloaded");
-            Some(sources)
+            Some(install(path, new_config, config, disable_protection))
         }
         Err(err) => {
             metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
@@ -179,6 +156,85 @@ pub fn reload(
     }
 }
 
+/// Install a configuration that was already parsed and compiled — the rules
+/// updater validates the candidate before writing it, so re-reading and
+/// recompiling the same files here would repeat that work.
+pub fn apply(
+    path: &Path,
+    new_config: CompiledConfig,
+    config: &Snapshot<CompiledConfig>,
+    metrics: &Metrics,
+    disable_protection: bool,
+) -> Option<Vec<PathBuf>> {
+    let _serialized = RELOAD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    metrics.reload_success.fetch_add(1, Ordering::Relaxed);
+    Some(install(path, new_config, config, disable_protection))
+}
+
+fn install(
+    path: &Path,
+    mut new_config: CompiledConfig,
+    config: &Snapshot<CompiledConfig>,
+    disable_protection: bool,
+) -> Vec<PathBuf> {
+    if disable_protection {
+        new_config.protection.enabled = false;
+    }
+    let (active_listen, active_tls, active_http3, active_admin) = {
+        let current = config.load();
+        (
+            current.listen,
+            current.tls.clone(),
+            current.http3,
+            current.admin.clone(),
+        )
+    };
+    if new_config.listen != active_listen {
+        warn!(
+            configured = %new_config.listen,
+            active = %active_listen,
+            "listen address changes require a restart; keeping the active listener"
+        );
+        new_config.listen = active_listen;
+    }
+    if new_config.tls != active_tls {
+        warn!("TLS settings changes require a restart; keeping the active TLS configuration");
+        new_config.tls = active_tls;
+    }
+    if new_config.http3 != active_http3 {
+        warn!("HTTP/3 settings changes require a restart; keeping the active HTTP/3 configuration");
+        new_config.http3 = active_http3;
+    }
+    if new_config.admin != active_admin {
+        warn!("admin settings changes require a restart; keeping the active admin listener");
+        new_config.admin = active_admin;
+    }
+
+    let sources = source_paths(path, &new_config);
+    let categories = new_config.categories.len();
+    let rules: usize = new_config
+        .categories
+        .iter()
+        .map(|category| category.rules.len())
+        .sum();
+    let body_inspection_warning = new_config.body_inspection_warning();
+    let allowed_hosts_warning = new_config.allowed_hosts_warning();
+    config.store(Arc::new(new_config));
+    // The snapshot is live: remember exactly which sources produced it so the
+    // watcher does not compile the same files again.
+    record_stamps(&sources);
+    if let Some(warning) = body_inspection_warning {
+        warn!("{warning}");
+    }
+    if let Some(warning) = allowed_hosts_warning {
+        warn!("{warning}");
+    }
+    info!(categories, rules, "configuration reloaded");
+    sources
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +242,46 @@ mod tests {
 
     fn write(path: &Path, contents: &str) {
         std::fs::write(path, contents).expect("write config");
+    }
+
+    #[test]
+    fn a_reload_records_the_stamps_it_applied() {
+        reset_applied_stamps();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kunato.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
+        );
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
+        let sources = reload(&path, &config, &Metrics::new(), false).expect("reload");
+        assert_eq!(
+            applied_stamps(),
+            Some(source_stamps(&sources)),
+            "the watcher must see the applied files as current"
+        );
+        reset_applied_stamps();
+    }
+
+    #[test]
+    fn applying_a_compiled_configuration_records_its_stamps() {
+        reset_applied_stamps();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kunato.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n",
+        );
+        let config = Snapshot::new(config::load(&path).expect("initial config"));
+        let compiled = config::parse("listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n")
+            .expect("compiled config");
+        apply(&path, compiled, &config, &Metrics::new(), false).expect("apply");
+        assert_eq!(
+            applied_stamps(),
+            Some(source_stamps(&source_paths(&path, &config.load()))),
+            "an updater-driven apply must not be reloaded again by the watcher"
+        );
+        reset_applied_stamps();
     }
 
     #[test]
