@@ -83,6 +83,7 @@ docs/
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
   release-signing.md  # Detached minisign signing: keys, signing, rotation, limits
+  signing-key-backup.md # Encrypted backup, storage, restore test, rotation rules
   security-lab-testing-model.md # Lab control/evidence model, verdicts, and diagrams
   security-testing.md # Local attack-tool lab design and verification process
 packaging/

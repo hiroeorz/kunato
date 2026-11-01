@@ -375,6 +375,7 @@ contributing notes live in the
 | [Design & Architecture](docs/DESIGN.md) | Concurrency model, request/response lifecycle, body/form/upload inspection policies, and design invariants. |
 | [Attack Coverage](docs/attack-coverage.md) | Living tracker of covered, partial, and gap attack classes across the bundled rules and engine mechanisms. |
 | [Rule Updates & Compatibility](docs/rule-updates.md) | How daily rule updates and binary/schema version compatibility work. |
+| [Signing Key Backup](docs/signing-key-backup.md) | Encrypted backup, storage, restore test, and rotation rules for the signing keys. |
 | [Behavioral Detection](docs/behavioral-detection.md) | Design and configuration of per-source enumeration and authentication-abuse detection. |
 | [Behavioral Readiness Checklist](docs/behavioral-readiness.md) | Pre-deployment checklist for trusted proxies and authentication observation. |
 | [Security Lab Testing Model](docs/security-lab-testing-model.md) | Isolated container topology, control/evidence model, and verification process. |

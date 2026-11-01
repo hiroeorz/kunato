@@ -302,6 +302,7 @@ scripts/security-lab.sh run --sandbox-suite load
 | [Design & Architecture](docs/DESIGN.md) | 並行処理モデル、リクエスト／レスポンスのライフサイクル、ボディ・フォーム・アップロード検査ポリシー、設計上の不変条件。 |
 | [Attack Coverage](docs/attack-coverage.md) | 同梱ルールとエンジン機構における攻撃クラスごとの対応状況（Covered / Partial / Gap）トラッカー。 |
 | [Rule Updates & Compatibility](docs/rule-updates.md) | 日次ルール更新の仕組みと、バイナリ／スキーマ間のバージョン互換性ポリシー。 |
+| [Signing Key Backup](docs/signing-key-backup.md) | 署名鍵の暗号化バックアップ、保管場所、復元テスト、ローテーションの手順。 |
 | [Behavioral Detection](docs/behavioral-detection.md) | 送信元ごとのパス列挙および認証悪用検知の設計と設定方法。 |
 | [Behavioral Readiness Checklist](docs/behavioral-readiness.md) | 信頼されたプロキシ設定および認証監視を有効化する前のデプロイチェックリスト。 |
 | [Security Lab Testing Model](docs/security-lab-testing-model.md) | 隔離コンテナトポロジ、コントロール／エビデンスモデル、および検証プロセス。 |

@@ -143,12 +143,10 @@ set), so announce the rotation with the release.
 ## Backups
 
 The private keys are passphrase-protected, so a stolen backup is not directly
-usable. Still:
-
-- Keep a copy in a password manager attachment and an `age`-encrypted copy on
-  an offline medium.
-- Keep passphrases separate from the key files (paper or a second vault).
-- Restore-test once a year by signing a scratch file with the backup key.
+usable, but a lost key cannot be recovered from GitHub (environment secrets are
+write-only). Follow [signing-key-backup.md](signing-key-backup.md) for the
+archive command, the three storage locations, the yearly restore test, and the
+rotation rules.
 
 ## Release checklist
 
