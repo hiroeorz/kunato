@@ -743,3 +743,12 @@ GET /plus/carbuyaction.php?code=pay
 POST /api/v1/projects/00000000-0000-0000-0000-000000000000/dbt-cloud/webhook header="Content-Type: application/json" body="{\"eventType\":\"job.run.completed\",\"accountId\":\"12345\",\"data\":{\"runId\":\"1\"}}"
 POST /server/index.php?s=/api/mock/add header="Content-Type: application/x-www-form-urlencoded" body="user_token=abc&page_id=1&path=/poc&template=%7B%22poc%22%3A%22%40name%22%7D"
 POST /rest/workflows header="Content-Type: application/json" body="{\"name\":\"code\",\"nodes\":[{\"name\":\"Code\",\"type\":\"n8n-nodes-base.httpRequest\",\"parameters\":{\"url\":\"https://example.com\"}}],\"connections\":{}}"
+
+# --- Near-misses for the 2026-11-01 CoPilot/WeGIA/SABnzbd/Prefab UI
+#     signatures: the same endpoints and parameters with ordinary values. ---
+POST /api/incidents/db_operations/alert/comment header="Content-Type: application/json" body="{\"alert_id\":1,\"comment\":\"Investigating the alert\"}"
+POST /controle/control.php header="Content-Type: application/x-www-form-urlencoded" body="nomeClasse=SaudeControle&metodo=alterarProntuario&id_fichamedica=1&textoProntuario=Paciente%20estavel"
+POST /case-report-template/upload header="Content-Type: application/x-www-form-urlencoded" body="name=report&template={{ incident.title }}"
+GET /api/scoutsuite/report/default
+POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_prefab_ui\",\"arguments\":{\"code\":\"from prefab_ui import Prefab; Prefab.text('hello')\"}}}"
+GET /api?mode=status&name=delete_orphan&value=downloads/complete

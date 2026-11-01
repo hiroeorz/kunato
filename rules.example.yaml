@@ -1790,6 +1790,18 @@ categories:
           path: '(?i)^/rest/workflows(?:/[^/]+)?$'
           regex: '(?i)"type"\s*:\s*"n8n-nodes-base\.(function|functionItem|langchainCode|toolCode)"'
           in: [body]
+      # CVE-2026-61730 (SOCFortress CoPilot): the unauthenticated
+      # /scoutsuite-report static mount serves generated cloud reports and the
+      # uploaded Google service-account key. Public clients never fetch those
+      # files through the application route.
+      - name: copilot-scoutsuite-report-exposure
+        match: { path: '(?i)^/scoutsuite-report(/|$)' }
+      # CVE-2026-120338 (Prefab UI): the FastMCP generate_prefab_ui tool feeds
+      # caller code into a Pyodide/Deno subprocess that keeps read, write, and
+      # network permissions. Legitimate prefab code does not call Deno file
+      # APIs; the sandbox escape does.
+      - name: prefab-ui-deno-file-access
+        match: { regex: '(?i)Deno\s*\.\s*(readTextFileSync|writeTextFileSync|readFileSync|writeFileSync|removeSync|renameSync|chmodSync|mkdirSync|readDirSync)', in: [body] }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
