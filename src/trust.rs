@@ -14,10 +14,14 @@ use crate::signing::{self, PublicKey};
 
 /// Minisign public keys trusted for release assets (`install.sh`,
 /// `SHA256SUMS`). Paste the full public key file text or its base64 payload.
-pub const RELEASE_KEYS: &[&str] = &[];
+pub const RELEASE_KEYS: &[&str] = &[
+    "untrusted comment: minisign public key 20760B594385E3BB\nRWS744VDWQt2ID29WdV+zUCBjEe7s64K6tCDCKK6cpRbmYL4k5E3RLwQ",
+];
 
 /// Minisign public keys trusted for `dist/rules.yaml`.
-pub const RULES_KEYS: &[&str] = &[];
+pub const RULES_KEYS: &[&str] = &[
+    "untrusted comment: minisign public key 173A1541FCAE2A26\nRWQmKq78QRU6F0UVR296AqxfBcGiYBDbSiD67xcKL5ZRLvNXbFx+n5Zh",
+];
 
 /// Outcome of a signature check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +110,18 @@ mod tests {
         payload.extend_from_slice(&key_id);
         payload.extend_from_slice(pair.sign(message).as_ref());
         format!("untrusted comment: signature\n{}\n", base64(&payload))
+    }
+
+    #[test]
+    fn the_committed_rules_signature_is_valid() {
+        let rules = include_bytes!("../dist/rules.yaml");
+        let signature = include_str!("../dist/rules.yaml.minisig");
+        assert_eq!(
+            verify_rules(rules, signature).expect("the committed signature must verify"),
+            Verification::Verified,
+            "dist/rules.yaml is not signed by a trusted key; \n\
+             run scripts/sign-artifact.sh <rules key> dist/rules.yaml and commit the .minisig"
+        );
     }
 
     #[test]

@@ -187,6 +187,18 @@ cargo run -- --config rules.example.yaml
 
 その後、`http://127.0.0.1:8080/` にリクエストを送信してください（ローカルからブロックルールを試す場合は、`rules.example.yaml` の `trusted-sources` から `127.0.0.1/32` を除外してください）。
 
+### 6. リリースとルールの署名（メンテナー向け）
+
+署名が必要なのは配布物を作るときだけです。インストール済みのバイナリは埋め込み鍵で署名を検証するため、利用者が `minisign` を入れる必要はありません。
+
+```sh
+sudo apt-get update
+sudo apt-get install -y minisign
+./scripts/generate-signing-keys.sh
+```
+
+表示された公開鍵を `src/trust.rs` に貼り付けたあと、`./scripts/sign-artifact.sh KEY FILE` でルールセットやリリース資産に署名します。鍵の保管・ローテーション・残る信頼境界は [Release and rules signing](docs/release-signing.md) を参照してください。
+
 ## CLI コマンド早見表 (CLI at a Glance)
 
 | コマンド | 説明 |

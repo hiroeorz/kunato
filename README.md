@@ -223,6 +223,22 @@ cargo run -- --config rules.example.yaml
 Then send requests to `http://127.0.0.1:8080/` (remove `127.0.0.1/32` from
 `trusted-sources` in `rules.example.yaml` to test block rules locally).
 
+### 6. Sign Releases and Rules (Maintainers)
+
+Signing is only needed when publishing artifacts: the installed binary verifies
+signatures with its embedded keys, so end users do not install `minisign`.
+
+```sh
+sudo apt-get update
+sudo apt-get install -y minisign
+./scripts/generate-signing-keys.sh
+```
+
+Paste the printed public keys into `src/trust.rs`, then sign the rule set or a
+release asset with `./scripts/sign-artifact.sh KEY FILE`. See
+[Release and rules signing](docs/release-signing.md) for key storage, rotation,
+and the remaining trust limits.
+
 ## CLI at a Glance
 
 | Command | Description |

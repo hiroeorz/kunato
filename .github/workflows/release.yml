@@ -80,4 +80,5 @@ jobs:
             dist/SHA256SUMS
             dist/rules.yaml
             dist/rules.yaml.sha256
+            dist/rules.yaml.minisig
             scripts/install.sh

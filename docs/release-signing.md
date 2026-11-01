@@ -12,6 +12,14 @@ embedded in the binary:
 The trust store lives in `src/trust.rs`. Signing keys never enter the
 repository, the build, or CI.
 
+| Key id | Purpose | Added |
+| --- | --- | --- |
+| `20760B594385E3BB` | release assets | 2026-11-01 |
+| `173A1541FCAE2A26` | managed rules | 2026-11-01 |
+
+Both keys are password-protected and live under `~/.config/kunato/keys` on the
+signing machine. Record a key id here when a key is added or retired.
+
 ## Why minisign
 
 Minisign produces a small Ed25519 signature file next to the artifact, has an
@@ -20,11 +28,21 @@ offline-friendly CLI, and allows the verifier to be a few hundred lines with
 trade-off is that a key file exists on the signing machine while a signature is
 being produced (see "Limits" below).
 
-Only the plain `Ed` algorithm is accepted. Sign without `-H`: prehashed
-signatures (`ED`) are rejected because they would pull in a BLAKE2b
-implementation for no benefit.
+Both variants minisign produces are accepted: plain Ed25519 over the file
+(`Ed`) and the prehashed form (`ED`). `minisign -S` uses the prehashed form by
+default, hashing the artifact with BLAKE2b-512 first; the digest is implemented
+in-tree because `ring` does not expose it.
 
 ## Generate the keys
+
+Install the CLI first (Ubuntu/Debian):
+
+```sh
+sudo apt-get update
+sudo apt-get install -y minisign
+```
+
+Then create the key pairs:
 
 ```sh
 scripts/generate-signing-keys.sh          # ~/.config/kunato/keys
@@ -87,6 +105,34 @@ usable. Still:
 - Keep passphrases separate from the key files (paper or a second vault).
 - Restore-test once a year by signing a scratch file with the backup key.
 
+## Release checklist
+
+A release that ships a binary with embedded keys must publish signatures, or
+installs on that binary will refuse to upgrade (a missing signature is a hard
+failure when keys are configured):
+
+1. `scripts/sign-artifact.sh ~/.config/kunato/keys/rules.key dist/rules.yaml`
+   and commit `dist/rules.yaml.minisig` (before or with the rules change).
+2. After the release workflow publishes the assets, sign and upload the two
+   release signatures. `install.sh` and `SHA256SUMS` are **release assets**, not
+   repository files (`scripts/install.sh` is the source of the first; the
+   second is built by the workflow), so the helper reads `install.sh` from the
+   tag and downloads `SHA256SUMS`:
+   ```sh
+   scripts/sign-release.sh vX.Y.Z
+   ```
+   The manual equivalent, in a scratch directory:
+   ```sh
+   dir=$(mktemp -d)
+   git show vX.Y.Z:scripts/install.sh >"$dir/install.sh"
+   gh release download vX.Y.Z --pattern SHA256SUMS --dir "$dir"
+   scripts/sign-artifact.sh ~/.config/kunato/keys/release.key "$dir/install.sh"
+   scripts/sign-artifact.sh ~/.config/kunato/keys/release.key "$dir/SHA256SUMS"
+   gh release upload vX.Y.Z "$dir/install.sh.minisig" "$dir/SHA256SUMS.minisig"
+   ```
+3. Sanity-check with the new binary: `kunato update-rules --config ...` against
+   the published rules must report the signature as valid.
+
 ## Limits
 
 - A freshly installed host still trusts TLS for the first `curl | sudo sh`;
@@ -100,3 +146,6 @@ usable. Still:
   only what is about to be published.
 - The displayed trusted comment is not authenticated by this verifier; only the
   file signature is checked.
+- A rules URL that uses plain HTTP (only accepted for loopback, the documented
+  development path) skips the signature check with a warning; HTTPS rules URLs
+  enforce it.

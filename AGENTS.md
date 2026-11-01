@@ -238,6 +238,7 @@ cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ./scripts/generate-signing-keys.sh  # Create the release and rules signing keys
 ./scripts/sign-artifact.sh KEY FILE # Detached minisign signature (FILE.minisig)
+./scripts/sign-release.sh vX.Y.Z # Sign and upload a release's install.sh and SHA256SUMS
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,

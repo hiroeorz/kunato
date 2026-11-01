@@ -9,7 +9,11 @@ set -eu
 dir=${1:-"$HOME/.config/kunato/keys"}
 
 command -v minisign >/dev/null 2>&1 || {
-    echo "minisign is required" >&2
+    cat >&2 <<'MSG'
+minisign is required. Install it with:
+    sudo apt-get install -y minisign
+or build it from https://github.com/jedisct1/minisign
+MSG
     exit 1
 }
 mkdir -p "$dir"

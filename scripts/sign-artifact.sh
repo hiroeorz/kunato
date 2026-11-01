@@ -15,7 +15,11 @@ key=$1
 artifact=$2
 
 command -v minisign >/dev/null 2>&1 || {
-    echo "minisign is required to sign artifacts" >&2
+    cat >&2 <<'MSG'
+minisign is required. Install it with:
+    sudo apt-get install -y minisign
+or build it from https://github.com/jedisct1/minisign
+MSG
     exit 1
 }
 [ -f "$key" ] || {
@@ -27,8 +31,8 @@ command -v minisign >/dev/null 2>&1 || {
     exit 1
 }
 
-# Never sign a prehashed variant: Kunato verifies the plain Ed25519 signature
-# over the artifact bytes.
+# minisign's default prehashed signature (ED) and the plain form (Ed) are both
+# verified by Kunato.
 minisign -S -s "$key" -m "$artifact" -x "$artifact.minisig" \
     -t "$(basename "$artifact") $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "signed $artifact -> $artifact.minisig"

@@ -473,6 +473,13 @@ async fn verify_rules_signature(
         warn_once_no_rules_key();
         return Ok(());
     }
+    // Loopback HTTP is the documented development/local-mirror path (plain
+    // HTTP is rejected for any other host). Requiring a signature there would
+    // make the local test setup impossible, so it is skipped with a warning.
+    if rules_url.scheme_str() == Some("http") {
+        warn_once_http_rules_url();
+        return Ok(());
+    }
     let signature_url = signature_url(rules_url)?;
     let fetched = fetch(
         client,
@@ -502,6 +509,15 @@ fn check_rules_signature(keys: &[&str], bytes: &[u8], signature: &[u8]) -> Resul
     {
         crate::trust::Verification::Verified | crate::trust::Verification::NoTrustedKeys => Ok(()),
     }
+}
+
+fn warn_once_http_rules_url() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        warn!(
+            "rules update URL uses plain HTTP; detached signature verification is skipped for this development path"
+        );
+    });
 }
 
 fn warn_once_no_rules_key() {
