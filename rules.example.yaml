@@ -71,29 +71,29 @@ categories:
     action: BLOCK
     rules:
       - name: duplicate-role-parameter
-        match: { regex: '(?i)(?:^|[?&\s])role=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?role=', in: [query, body] }
+        match: { regex: '(?i)(?:^|[?&\s])role=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*role=', in: [query, body] }
       - name: duplicate-is-admin-parameter
-        match: { regex: '(?i)(?:^|[?&\s])is_admin=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?is_admin=', in: [query, body] }
+        match: { regex: '(?i)(?:^|[?&\s])is_admin=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*is_admin=', in: [query, body] }
       - name: duplicate-admin-parameter
-        match: { regex: '(?i)(?:^|[?&\s])admin=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?admin=', in: [query, body] }
+        match: { regex: '(?i)(?:^|[?&\s])admin=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*admin=', in: [query, body] }
       - name: duplicate-permission-parameter
-        match: { regex: '(?i)(?:^|[?&\s])permissions?=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?permissions?=', in: [query, body] }
+        match: { regex: '(?i)(?:^|[?&\s])permissions?=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*permissions?=', in: [query, body] }
       - name: duplicate-account-type-parameter
-        match: { regex: '(?i)(?:^|[?&\s])account_type=[^&\s]{0,128}&(?:[^&\s]{0,256}&)?account_type=', in: [query, body] }
+        match: { regex: '(?i)(?:^|[?&\s])account_type=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*account_type=', in: [query, body] }
       - name: duplicate-redirect-uri-parameter
-        match: { regex: '(?i)(?:^|[?&\s])redirect_uri=[^&\s]{0,128}&(?:[^&\s]{0,64}&)?redirect_uri=', in: [query, body] }
+        match: { regex: '(?i)(?:^|[?&\s])redirect_uri=[^&\s]{0,128}&(?:[^&\s]{1,64}&)*redirect_uri=', in: [query, body] }
       - name: duplicate-role-json-key
-        match: { regex: '(?i)"role"\s*:[^}]{0,256}"role"\s*:', in: [body] }
+        match: { regex: '(?i)"role"\s*:(?:\{\}|[^}]){0,256}"role"\s*:', in: [body] }
       - name: duplicate-is-admin-json-key
-        match: { regex: '(?i)"is_admin"\s*:[^}]{0,256}"is_admin"\s*:', in: [body] }
+        match: { regex: '(?i)"is_admin"\s*:(?:\{\}|[^}]){0,256}"is_admin"\s*:', in: [body] }
       - name: duplicate-admin-json-key
-        match: { regex: '(?i)"admin"\s*:[^}]{0,256}"admin"\s*:', in: [body] }
+        match: { regex: '(?i)"admin"\s*:(?:\{\}|[^}]){0,256}"admin"\s*:', in: [body] }
       - name: duplicate-permission-json-key
-        match: { regex: '(?i)"permissions?"\s*:[^}]{0,256}"permissions?"\s*:', in: [body] }
+        match: { regex: '(?i)"permissions?"\s*:(?:\{\}|[^}]){0,256}"permissions?"\s*:', in: [body] }
       - name: duplicate-account-type-json-key
-        match: { regex: '(?i)"account_type"\s*:[^}]{0,256}"account_type"\s*:', in: [body] }
+        match: { regex: '(?i)"account_type"\s*:(?:\{\}|[^}]){0,256}"account_type"\s*:', in: [body] }
       - name: duplicate-redirect-uri-json-key
-        match: { regex: '(?i)"redirect_uri"\s*:[^}]{0,256}"redirect_uri"\s*:', in: [body] }
+        match: { regex: '(?i)"redirect_uri"\s*:(?:\{\}|[^}]){0,256}"redirect_uri"\s*:', in: [body] }
 
   # Privileged-field assignment in ordinary API requests. Admin APIs that
   # legitimately set these fields need a scoped override.
@@ -552,7 +552,7 @@ categories:
       # The shared subquery signature; cookie values carry the same predicate
       # in session-based injection.
       - name: lansweeper-sqli
-        match: { regex: '(?i)\(select\b', in: [query, body, cookies] }
+        match: { regex: '(?i)\(\s*select\b', in: [query, body, cookies] }
       - name: grafana-anonymous-snapshots
         match: { path: '(?i)^/api/snapshots$' }
       - name: webmin-rpc-command
@@ -1029,9 +1029,9 @@ categories:
       # Whitespace or SQL comments may separate UNION and SELECT. A fixed gap
       # let a padded /*...*/ comment bypass the rule in the local lab.
       - name: union-select
-        match: { regex: '(?i)\bunion\b(?:\s|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)*(?:all\b|distinct\b)?(?:\s|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)*\bselect\b', in: [query, body, cookies] }
+        match: { regex: '(?i)\bunion\b(?:\s|\(|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)*(?:all\b|distinct\b)?(?:\s|\(|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)*\bselect\b', in: [query, body, cookies] }
       - name: boolean-taunts
-        match: { regex: '(?i)\b(or|and)\b[\s+]+[\x27"\(\)]?\d+[\x27"\(\)]?[\s+]*=[\s+]*[\x27"\(\)]?\d+[\x27"\(\)]?', in: [query, body, cookies] }
+        match: { regex: '(?i)\b(or|and)\b(?:\s|\+|\(|/\*(?:[^*]|\*[^/])*\*/|--[^\n]*\n|#[^\n]*\n)+[\x27"\(\)]?\d+[\x27"\(\)]?[\s+]*=[\s+]*[\x27"\(\)]?\d+[\x27"\(\)]?', in: [query, body, cookies] }
       - name: stacked-queries
         match: { regex: '(?i);\s*(select|insert|update|delete|drop|alter|create|truncate)\b', in: [query, body, cookies] }
       # MySQL accepts comments between a function name and its parenthesis, so
@@ -1147,7 +1147,7 @@ categories:
       - name: script-tags
         match: { regex: '(?i)<\s*/?\s*(script|iframe|object|embed|applet)\b', in: [query, body, headers, cookies] }
       - name: event-handlers
-        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|animationstart|animationend|transitionend|toggle|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend)\s*=', in: [query, body, headers, cookies] }
+        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focusin|focusout|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|begin|end|repeat|animationstart|animationend|transitionend|toggle|beforetoggle|pageshow|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend|contentvisibilityautostatechange)\s*=', in: [query, body, headers, cookies] }
       - name: javascript-uri
         match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers, cookies] }
       - name: data-html-uri
@@ -1259,11 +1259,11 @@ categories:
       - name: metadata-endpoints
         match: { regex: '(?i)(169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)', in: [query, body] }
       - name: internal-addresses
-        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(127\.[0-9]|localhost([/:?#&"\x27\s]|$)|0\.0\.0\.0|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|\[::1\]|\[::\]|\[(f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?):|\[::ffff:(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|7f00:1\]))', in: [query, body] }
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?(127\.[0-9]|localhost([/:?#&"\x27\s]|$)|0\.0\.0\.0|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|\[::1\]|\[::\]|\[(f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?):|\[::ffff:(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|7f00:1\]))', in: [query, body] }
       - name: encoded-addresses
         match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(2130706433|017700000001|0x7f0{5}1|0x7f\.0\.0\.1|0x7f\.1|0177\.0\.0\.1)([/:?#&"\x27\s]|$)', in: [query, body] }
       - name: single-label-host
-        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://[a-z0-9_-]+([:/?#&"\x27\s]|$)', in: [query, body] }
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?[a-z0-9_-]+\.?([:/?#&"\x27\s]|$)', in: [query, body] }
       - name: protocol-relative-internal
         match: { regex: '(?i)//(127\.[0-9]|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|localhost([/:?#&"\x27\s]|$)|\[::1\])', in: [query, body] }
       - name: file-scheme
@@ -1369,21 +1369,21 @@ categories:
     action: BLOCK
     rules:
       - name: executable-filenames
-        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b', in: [body] }
+        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b', in: [body] }
       # Ruby, extra shells, and Windows script hosts are not executable names
       # for the upload check, so the rule set carries them.
       - name: script-filenames
-        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(rb|pyc|pyo|bash|zsh|ksh|csh|tcsh|fish|ps1|psm1|bat|cmd|vbs|vbe|wsf|hta|lua|tcl)\b', in: [body] }
+        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(rb|pyc|pyo|bash|zsh|ksh|csh|tcsh|fish|ps1|psm1|bat|cmd|vbs|vbe|wsf|hta|lua|tcl)\b', in: [body] }
       # Shared libraries and JVM archives execute code once the origin loads
       # them. Disable this rule for applications that accept plugins.
       - name: binary-filenames
-        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(jar|ear|so|dylib|elf)\b', in: [body] }
+        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(jar|ear|so|dylib|elf)\b', in: [body] }
       # Uploading a server configuration file can make a benign extension
       # executable (for example an .htaccess that maps .jpg to the PHP
       # handler). Disable this rule when the application manages its own
       # per-directory configuration through the request body.
       - name: server-config-filenames
-        match: { method: [POST, PUT], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(htaccess|user\.ini)\b', in: [body] }
+        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=[^\r\n;]{0,512}\.(htaccess|user\.ini)\b', in: [body] }
       - name: traversal-in-filename
         match: { regex: '(?i)filename\s*=\s*"[^"]*(\.\.[/\\]|\.\.%2f|\.\.%5c)', in: [body] }
       # Executing a script stored in a file-upload directory is the second half
@@ -1525,7 +1525,7 @@ categories:
     action: BLOCK
     rules:
       - name: none-algorithm
-        match: { regex: '(?i)(eyJhbGciOiJub25lI|eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lI|eyJhbGciOiAibm9uZS|eyJ0eXAiOiJKV1QiLCJhbGciOiAibm9uZS|eyJhbGciOiJOb25lI|eyJhbGciOiJOT05FI|eyJhbGciOiJuT25FI|"alg"\s*:\s*"none"[^}]{0,80}"typ"\s*:\s*"JWT"|"typ"\s*:\s*"JWT"[^}]{0,80}"alg"\s*:\s*"none")', in: [query, body, cookies, headers] }
+        match: { regex: '(?i)(eyJhbGciOiJub25lI|eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lI|eyAiYWxnIjoibm9uZS|eyJhbGciIDogIm5vbmUi|eyJ0eXAiOiJqd3QiLCJhbGciOiJub25lI|eyJhbGciOiAibm9uZS|eyJ0eXAiOiJKV1QiLCJhbGciOiAibm9uZS|eyJhbGciOiJOb25lI|eyJhbGciOiJOT05FI|eyJhbGciOiJuT25FI|"alg"\s*:\s*"none"[^}]{0,80}"typ"\s*:\s*"JWT"|"typ"\s*:\s*"JWT"[^}]{0,80}"alg"\s*:\s*"none")', in: [query, body, cookies, headers] }
       - name: missing-signature
         match: { regex: '(?:^|[\s=,;:"(\[{])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.(?:\s|$|["&;,)\]}])|(?:^|[\s=,;:"(\[{])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}(?:\s|$|["&;,)\]}])', in: [query, body, cookies, headers] }
       - name: key-header-injection
