@@ -86,6 +86,22 @@ gh release upload vX.Y.Z install.sh.minisig SHA256SUMS.minisig
 `dist/rules.yaml.minisig` must be committed together with the rule set: the
 updater fetches `<rules url>.minisig` and verifies it over the downloaded bytes.
 
+## Repository protections
+
+- `Protect Main Branch` ruleset: blocks deletion and non-fast-forward updates
+  of `main`; direct pushes are still allowed so the scheduled workflow can
+  publish rules.
+- `Protect release tags` ruleset: blocks deletion and movement of `v*` tags.
+- `.github/CODEOWNERS` marks the workflows, signing scripts, `src/signing.rs`,
+  and `src/trust.rs` for maintainer review. Review cannot be *required* while
+  the repository is owned by a single user: GitHub rejects the GitHub Actions
+  app as a bypass actor for user-owned repositories, and without a bypass a
+  PR-only rule would block the unattended nightly push. Enforcing review needs
+  either a second reviewer account (and a manual daily approval) or a
+  credential-based bypass that defeats the purpose for that credential.
+- The `rules-signing` environment only permits deployments from `main`, so a
+  workflow on another branch cannot read the signing secrets.
+
 ## Continuous integration
 
 The daily CVE workflow signs the regenerated rule set itself. The rules signing
