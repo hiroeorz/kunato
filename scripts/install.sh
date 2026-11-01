@@ -380,7 +380,9 @@ initialize_configuration() {
         else
             die "the initial rules download failed; fix the network or --rules-url and re-run the installer (kunato update-rules --config $CONFIG_PATH retries it; --allow-empty-rules starts without rules anyway)"
         fi
-        chown kunato:kunato "$RULES_FILE" 2>/dev/null || true
+        # `update-rules` also writes the adjacent `.update-state` file; hand the
+        # whole state directory to the service user so later reloads can read it.
+        chown -R kunato:kunato "$STATE_DIR" 2>/dev/null || true
     fi
 
     "$BIN_PATH" validate --config "$CONFIG_PATH"

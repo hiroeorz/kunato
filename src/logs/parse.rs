@@ -316,13 +316,35 @@ fn parse_fields(input: &str) -> Option<BTreeMap<String, String>> {
                     }
                     b'\\' if index + 1 < bytes.len() => {
                         index += 1;
-                        value.push(match bytes[index] {
-                            b'n' => '\n',
-                            b'r' => '\r',
-                            b't' => '\t',
-                            byte => byte as char,
-                        });
-                        index += 1;
+                        match bytes[index] {
+                            b'n' => {
+                                value.push('\n');
+                                index += 1;
+                            }
+                            b'r' => {
+                                value.push('\r');
+                                index += 1;
+                            }
+                            b't' => {
+                                value.push('\t');
+                                index += 1;
+                            }
+                            b'x' if index + 2 < bytes.len()
+                                && bytes[index + 1].is_ascii_hexdigit()
+                                && bytes[index + 2].is_ascii_hexdigit() =>
+                            {
+                                if let Ok(code) =
+                                    u8::from_str_radix(&input[index + 1..index + 3], 16)
+                                {
+                                    value.push(code as char);
+                                }
+                                index += 3;
+                            }
+                            byte => {
+                                value.push(byte as char);
+                                index += 1;
+                            }
+                        }
                     }
                     _ => {
                         let ch = input[index..].chars().next()?;
@@ -395,6 +417,16 @@ mod tests {
         assert_eq!(entry.field("reason"), Some("host not allowed"));
         assert_eq!(entry.field("status"), Some("421"));
         assert_eq!(entry.event(), "reject");
+    }
+
+    #[test]
+    fn parses_hex_and_control_escapes_in_quoted_fields() {
+        let line = format!(
+            "{PREFIX}2026-10-21T09:35:17.234772Z  WARN kunato::proxy::server: request rejected reason=\"line\\nnext\\tx\\x1b[31m\""
+        );
+        let entry = parse_line(&line);
+        assert_eq!(entry.field("reason"), Some("line\nnext\tx\u{1b}[31m"));
+        assert_eq!(entry.message, "request rejected");
     }
 
     #[test]

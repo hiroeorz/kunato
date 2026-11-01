@@ -387,14 +387,13 @@ async fn send_response(
 
     while let Some(frame) = body.frame().await {
         match frame {
-            Ok(frame) => match frame.into_data() {
-                Ok(data) => stream.send_data(data).await?,
-                Err(frame) => {
-                    if let Ok(trailers) = frame.into_trailers() {
-                        stream.send_trailers(trailers).await?;
-                    }
+            Ok(frame) => {
+                // Drop trailer fields: they are not inspected, so they must
+                // not reach the client.
+                if let Ok(data) = frame.into_data() {
+                    stream.send_data(data).await?;
                 }
-            },
+            }
             Err(_) => {
                 stream.stop_stream(Code::H3_INTERNAL_ERROR);
                 return Ok(());

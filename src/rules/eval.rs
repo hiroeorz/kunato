@@ -290,6 +290,26 @@ mod tests {
     }
 
     #[test]
+    fn allow_prefix_cannot_shadow_a_path_decoded_one_stage_less() {
+        let yaml = format!(
+            "{BASE}categories:
+  - name: allow-static
+    action: ALLOW
+    rules:
+      - name: allowed-prefix
+        match: {{ path: '^/allowed' }}
+  - name: protect
+    action: BLOCK
+    rules:
+      - name: secret
+        match: {{ path: '^/secret' }}
+"
+        );
+        let outcome = evaluate_request(&yaml, "/allowed/a%252fb/../../secret");
+        assert_eq!(outcome.blocked.expect("blocked").rule, "secret");
+    }
+
+    #[test]
     fn category_action_applies_to_rules() {
         let yaml = format!(
             "{BASE}categories:
@@ -810,5 +830,144 @@ mod tests {
             let outcome = evaluate_bundled_response(&config, path, body.as_bytes());
             assert!(outcome.blocked.is_none(), "{path} must pass");
         }
+    }
+
+    fn evaluate_bundled_request(
+        method: Method,
+        uri: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> EvalOutcome {
+        let config = config::parse(include_str!("../../rules.example.yaml"))
+            .expect("example configuration must parse");
+        let uri: Uri = uri.parse().expect("valid URI");
+        let source = "198.51.100.9".parse().expect("valid IP");
+        let view = RequestView::with_body_decoding(&method, &uri, headers, body, source, true);
+        evaluate(&config, &view, None)
+    }
+
+    fn bundled_rule(uri: &str) -> Option<String> {
+        evaluate_bundled_request(Method::GET, uri, &HeaderMap::new(), b"")
+            .blocked
+            .map(|blocked| blocked.rule)
+    }
+
+    #[test]
+    fn bundled_rules_cover_commented_and_parenthesized_sqli() {
+        for uri in [
+            "/p?id=1%20UNION(%20SELECT%201",
+            "/p?id=1%20OR/**/1=1",
+            "/p?id=1%20OR(1)=1",
+        ] {
+            assert!(bundled_rule(uri).is_some(), "{uri} must be blocked");
+        }
+    }
+
+    #[test]
+    fn bundled_parameter_pollution_tolerates_intervening_parameters() {
+        assert_eq!(
+            bundled_rule("/p?role=user&a=1&b=2&role=admin").as_deref(),
+            Some("duplicate-role-parameter")
+        );
+    }
+
+    #[test]
+    fn bundled_rules_cover_svg_and_focus_event_handlers() {
+        for uri in [
+            "/p?q=%3Canimate%20onbegin%3Dalert(1)%3E",
+            "/p?q=%3Cinput%20onfocusin%3Dalert(1)%3E",
+        ] {
+            assert_eq!(
+                bundled_rule(uri).as_deref(),
+                Some("event-handlers"),
+                "{uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_ssrf_rules_cover_userinfo_and_trailing_dot() {
+        assert_eq!(
+            bundled_rule("/p?url=http://evil@127.0.0.1/").as_deref(),
+            Some("internal-addresses")
+        );
+        assert_eq!(
+            bundled_rule("/p?url=http://localhost./").as_deref(),
+            Some("single-label-host")
+        );
+        assert!(
+            bundled_rule("/p?url=http://example.com/path").is_none(),
+            "public URLs must keep passing"
+        );
+    }
+
+    #[test]
+    fn bundled_jwt_rule_covers_whitespace_variants() {
+        assert_eq!(
+            bundled_rule("/p?jwt=eyAiYWxnIjoibm9uZSJ9.eyJzdWIiOiJhZG1pbiJ9.").as_deref(),
+            Some("none-algorithm")
+        );
+    }
+
+    #[test]
+    fn bundled_upload_rules_cover_patch() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "multipart/form-data; boundary=X"
+                .parse()
+                .expect("header value"),
+        );
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"f\"; filename=\"shell.php\"\r\n\r\n<?php echo 1; ?>\r\n--X--\r\n";
+        let outcome = evaluate_bundled_request(Method::PATCH, "/upload", &headers, body);
+        assert_eq!(
+            outcome.blocked.expect("PATCH upload").rule,
+            "executable-filenames"
+        );
+    }
+
+    #[test]
+    fn bundled_upload_rules_match_rfc5987_filenames() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "multipart/form-data; boundary=X"
+                .parse()
+                .expect("header value"),
+        );
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"f\"; filename*=UTF-8''.%68taccess\r\n\r\nAddType application/x-httpd-php .jpg\r\n--X--\r\n";
+        let outcome = evaluate_bundled_request(Method::POST, "/upload", &headers, body);
+        assert_eq!(
+            outcome.blocked.expect("rfc5987 upload").rule,
+            "server-config-filenames"
+        );
+    }
+
+    #[test]
+    fn bundled_duplicate_json_key_rules_cover_nested_objects() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/json".parse().expect("header value"),
+        );
+
+        let outcome = evaluate_bundled_request(
+            Method::POST,
+            "/api",
+            &headers,
+            br#"{"role":"user","n":{},"role":"admin"}"#,
+        );
+        assert_eq!(
+            outcome.blocked.expect("duplicate key").rule,
+            "duplicate-role-json-key"
+        );
+
+        let outcome = evaluate_bundled_request(
+            Method::POST,
+            "/api",
+            &headers,
+            br#"{"role":"user","admin":false}"#,
+        );
+        assert!(outcome.blocked.is_none(), "distinct keys must pass");
     }
 }

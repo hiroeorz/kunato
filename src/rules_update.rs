@@ -515,21 +515,41 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "rules.yaml".to_owned());
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        random_suffix()
+    ));
+    let (owner, mode) = target_attributes(path, parent);
     // Flush to stable storage before the rename commit and sync the directory
     // afterwards: a crash in between must not leave an empty or truncated
     // rules file behind on the next restart.
     let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&temporary)?;
+        // A rename replaces the inode, so the new file inherits the owner and
+        // mode of the file it replaces (or a readable default). Otherwise a
+        // root `update-rules` run would leave a root-owned 0600 file that the
+        // service user can no longer read.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&temporary)?;
         file.write_all(bytes)?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.sync_all()?;
         drop(file);
+        if let Some((uid, gid)) = owner
+            && let Err(err) = set_owner(&temporary, uid, gid)
+        {
+            warn!(error = %err, path = %temporary.display(), "failed to keep the rule file owner");
+        }
         std::fs::rename(&temporary, path)?;
         if let Ok(dir) = std::fs::File::open(parent) {
             // Best effort; some filesystems do not support directory fsync.
@@ -547,6 +567,55 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             )))
         }
     }
+}
+
+/// Owner and mode the replaced file should keep: the existing file's, or the
+/// state directory's with a readable default for a fresh install.
+fn target_attributes(path: &Path, parent: &Path) -> (Option<(u32, u32)>, u32) {
+    use std::os::unix::fs::MetadataExt;
+
+    if let Ok(metadata) = std::fs::metadata(path) {
+        return (
+            Some((metadata.uid(), metadata.gid())),
+            metadata.mode() & 0o777,
+        );
+    }
+    let owner = std::fs::metadata(parent)
+        .ok()
+        .map(|metadata| (metadata.uid(), metadata.gid()));
+    (owner, 0o640)
+}
+
+fn set_owner(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("path contains a NUL byte"))?;
+    // SAFETY: `path` is a valid NUL-terminated string and the ids are plain
+    // integers; the call does not retain the pointer.
+    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// An unpredictable suffix so a temporary file cannot be pre-created or
+/// guessed by another local user.
+fn random_suffix() -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    let mut bytes = [0u8; 4];
+    if SystemRandom::new().fill(&mut bytes).is_err() {
+        return std::process::id().to_string();
+    }
+    let mut suffix = String::with_capacity(8);
+    for byte in bytes {
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    suffix
 }
 
 fn write_state(state: &UpdateState, path: &Path) {
@@ -880,5 +949,24 @@ mod tests {
             read.last_modified.as_deref(),
             Some("Wed, 21 Oct 2015 07:28:00 GMT")
         );
+    }
+
+    #[test]
+    fn write_atomic_keeps_the_replaced_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        std::fs::write(&path, b"old").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("set mode");
+
+        write_atomic(&path, b"new").expect("atomic write");
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the reader must keep access after the swap");
     }
 }

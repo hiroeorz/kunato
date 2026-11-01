@@ -20,7 +20,7 @@ pub(crate) fn write_entry(
     color: bool,
 ) -> io::Result<()> {
     match format {
-        LogOutputFormat::Raw => writeln!(out, "{}", entry.raw),
+        LogOutputFormat::Raw => writeln!(out, "{}", sanitize(&entry.raw)),
         LogOutputFormat::Json => write_json(out, entry),
         LogOutputFormat::Table => write_table(out, entry, color),
     }

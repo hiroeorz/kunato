@@ -134,9 +134,62 @@ fn write_text(
         write!(writer, " {message}")?;
     }
     for (key, value) in &fields.values {
-        write!(writer, " {key}={}", value.text())?;
+        write!(writer, " {key}=")?;
+        match value {
+            FieldValue::Text(text) => write_text_value(writer, text)?,
+            _ => write!(writer, "{}", value.text())?,
+        }
     }
     writeln!(writer)
+}
+
+/// Write a text field value so `kunato log` can split it back out: values that
+/// contain whitespace, `=`, quotes, backslashes, or control characters are
+/// quoted and escaped. Control characters never reach a terminal raw.
+fn write_text_value(writer: &mut dyn io::Write, value: &str) -> io::Result<()> {
+    // `record_debug` renders `?value` through `{:?}`, which already produced a
+    // quoted, escaped literal for strings. Re-quoting it would double-escape.
+    if is_quoted_literal(value) {
+        return write!(writer, "{value}");
+    }
+    let needs_quotes = value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '"' | '\\' | '='));
+    if !needs_quotes {
+        return write!(writer, "{value}");
+    }
+    write!(writer, "\"")?;
+    for ch in value.chars() {
+        match ch {
+            '"' => write!(writer, "\\\"")?,
+            '\\' => write!(writer, "\\\\")?,
+            '\n' => write!(writer, "\\n")?,
+            '\r' => write!(writer, "\\r")?,
+            '\t' => write!(writer, "\\t")?,
+            ch if ch.is_control() => write!(writer, "\\x{:02x}", ch as u32)?,
+            ch => write!(writer, "{ch}")?,
+        }
+    }
+    write!(writer, "\"")
+}
+
+fn is_quoted_literal(value: &str) -> bool {
+    let inner = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'));
+    let Some(inner) = inner else {
+        return false;
+    };
+    let mut escaped = false;
+    for ch in inner.chars() {
+        match ch {
+            '\\' if !escaped => escaped = true,
+            '"' if !escaped => return false,
+            _ => escaped = false,
+        }
+    }
+    true
 }
 
 fn write_json(
@@ -221,6 +274,46 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("utf-8"),
             "1970-01-01T00:00:00.000000Z  INFO kunato::proxy: request blocked answer=42 action=\"BLOCK\" rate_limited=false\n"
+        );
+    }
+
+    #[test]
+    fn text_quotes_fields_with_spaces_and_escapes_control_characters() {
+        let fields = Fields {
+            message: Some("request rejected".to_owned()),
+            values: vec![
+                (
+                    "reason".to_owned(),
+                    FieldValue::Text("host not allowed".to_owned()),
+                ),
+                (
+                    "injected".to_owned(),
+                    FieldValue::Text("a\nb\u{1b}[31m".to_owned()),
+                ),
+                (
+                    "client".to_owned(),
+                    FieldValue::Text("203.0.113.7".to_owned()),
+                ),
+            ],
+        };
+        let mut output = Vec::new();
+        write(
+            &mut output,
+            LogFormat::Text,
+            timestamp(0, 0),
+            Level::WARN,
+            "kunato::proxy",
+            &fields,
+            false,
+        )
+        .expect("write text");
+        let text = String::from_utf8(output).expect("utf-8");
+        assert!(text.contains("reason=\"host not allowed\""), "{text}");
+        assert!(text.contains("injected=\"a\\nb\\x1b[31m\""), "{text}");
+        assert!(text.contains("client=203.0.113.7"), "{text}");
+        assert!(
+            !text.contains('\u{1b}'),
+            "raw escape sequences must not be logged"
         );
     }
 

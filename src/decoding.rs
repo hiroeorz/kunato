@@ -561,8 +561,19 @@ fn flatten_part(part: MultipartPart<'_>, output: &mut Vec<u8>) {
         output.push(b'\n');
     }
     if let Some(filename) = part.filename() {
-        output.extend_from_slice(truncate_utf8(filename, MAX_MULTIPART_NAME_BYTES).as_bytes());
-        output.push(b'\n');
+        // Emit the `filename=` spelling the signatures match, including the
+        // RFC 5987 (`filename*=UTF-8''...`) forms flattened to their decoded
+        // name. Without the prefix a percent-encoded name never matched the
+        // upload rules.
+        let filename = truncate_utf8(filename, MAX_MULTIPART_NAME_BYTES);
+        output.extend_from_slice(b"filename=\"");
+        output.extend_from_slice(
+            filename
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .as_bytes(),
+        );
+        output.extend_from_slice(b"\"\n");
     }
     // Preserve empty-upload metadata in a canonical spelling for signatures;
     // the forwarded body remains byte-for-byte unchanged.

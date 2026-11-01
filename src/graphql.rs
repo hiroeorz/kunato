@@ -29,7 +29,6 @@ const MAX_INLINE_NESTING: usize = 64;
 /// `query` fields). More than this is rejected rather than silently ignored.
 const MAX_CANDIDATES: usize = 256;
 /// How many JSON-looking lines are tried in a flattened multipart body.
-const MAX_MULTIPART_JSON_ATTEMPTS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -632,7 +631,8 @@ fn contains_introspection(text: &str) -> bool {
     let mut in_comment = false;
     while index < bytes.len() {
         if in_comment {
-            if bytes[index] == b'\n' {
+            // GraphQL comments end at either line terminator.
+            if matches!(bytes[index], b'\n' | b'\r') {
                 in_comment = false;
             }
             index += 1;
@@ -640,7 +640,15 @@ fn contains_introspection(text: &str) -> bool {
         }
         if in_string {
             if block_string {
-                if index + 2 < bytes.len() && &bytes[index..index + 3] == b"\"\"\"" {
+                // Inside a block string, `\\\"\"\"` is an escaped quote
+                // sequence, not the terminator. The parser treats it the same
+                // way, so the scanner must not end the string early.
+                if bytes[index] == b'\\'
+                    && index + 3 < bytes.len()
+                    && &bytes[index + 1..index + 4] == b"\"\"\""
+                {
+                    index += 4;
+                } else if index + 2 < bytes.len() && &bytes[index..index + 3] == b"\"\"\"" {
                     in_string = false;
                     block_string = false;
                     index += 3;
@@ -730,25 +738,36 @@ fn candidates(uri_query: Option<&str>, headers: &HeaderMap, body: &[u8]) -> Opti
     Some(candidates)
 }
 
+/// Collect GraphQL documents from the parts of a multipart body. Each part is
+/// parsed on its own, so a binary file part next to `operations` cannot hide
+/// the query by failing a whole-body UTF-8 conversion, and decoy lines in
+/// another part cannot consume a per-body attempt budget.
 fn collect_multipart_queries(body: &[u8], headers: &HeaderMap, candidates: &mut Vec<String>) {
-    for form in crate::decoding::decode_body_formats(body, headers) {
-        let Ok(text) = std::str::from_utf8(&form) else {
+    let Some(content_type) = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return;
+    };
+    let boundaries = crate::decoding::multipart_boundaries(content_type);
+    if boundaries.is_empty() || boundaries.len() > crate::decoding::MAX_MULTIPART_BOUNDARIES {
+        return;
+    }
+    for boundary in boundaries {
+        let Some(parts) = crate::decoding::multipart_parts(body, &boundary) else {
             continue;
         };
-        let mut offset = 0;
-        let mut attempts = 0;
-        for line in text.split_inclusive('\n') {
-            let start = offset;
-            offset += line.len();
-            let trimmed = line.trim_start();
-            if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        for part in parts {
+            if part.filename().is_some() {
                 continue;
             }
-            if attempts >= MAX_MULTIPART_JSON_ATTEMPTS {
-                break;
+            let Ok(text) = std::str::from_utf8(part.value) else {
+                continue;
+            };
+            if serde_json::from_str::<serde_json::Value>(text).is_err() {
+                continue;
             }
-            attempts += 1;
-            collect_json_text_queries(&text[start..], candidates);
+            collect_json_text_queries(text, candidates);
         }
     }
 }
@@ -1307,6 +1326,52 @@ mod tests {
     }
 
     #[test]
+    fn introspection_scanner_matches_the_lexer() {
+        let headers = HeaderMap::new();
+        let limits = Limits {
+            max_depth: 20,
+            max_fields: 1000,
+            block_introspection: true,
+        };
+
+        // A bare CR ends a GraphQL comment, so the query after it is real.
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                b"# note\r{__schema{types{name}}}",
+                false,
+                limits
+            ),
+            Some(Violation::Introspection)
+        );
+
+        // `\\\"\"\"` inside a block string is an escape, not the terminator.
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                b"query Q { search(text: \"\"\"\\\"\"\" \"\"\") { id } __schema { types { name } } }",
+                false,
+                limits
+            ),
+            Some(Violation::Introspection)
+        );
+
+        // A real block string still hides the marker.
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                b"query Q { search(text: \"\"\"__schema\"\"\") { id } }",
+                false,
+                limits
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn detects_a_bare_application_graphql_body() {
         let violation = inspect_with(
             None,
@@ -1349,6 +1414,42 @@ mod tests {
                 false
             ),
             Some(Violation::Uninspectable)
+        );
+    }
+
+    #[test]
+    fn reads_operations_next_to_a_binary_part() {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            b"--X\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n",
+        );
+        body.extend_from_slice(&json_body(&nested(21)));
+        body.extend_from_slice(
+            b"\r\n--X\r\nContent-Disposition: form-data; name=\"0\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n",
+        );
+        body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0xFF, 0x00]);
+        body.extend_from_slice(b"\r\n--X--\r\n");
+        assert!(matches!(
+            inspect_with(None, Some("multipart/form-data; boundary=X"), &body, false),
+            Some(Violation::TooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_a_shallow_operations_document_next_to_a_binary_part() {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            b"--X\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n",
+        );
+        body.extend_from_slice(&json_body("query { a }"));
+        body.extend_from_slice(
+            b"\r\n--X\r\nContent-Disposition: form-data; name=\"0\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n",
+        );
+        body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0xFF, 0x00]);
+        body.extend_from_slice(b"\r\n--X--\r\n");
+        assert_eq!(
+            inspect_with(None, Some("multipart/form-data; boundary=X"), &body, false),
+            None
         );
     }
 

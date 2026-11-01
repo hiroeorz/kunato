@@ -51,9 +51,9 @@ where
                 pending.push(Frame::data(data));
                 true
             }
-            Err(frame) => {
-                // Trailers carry no inspected data; the body ends here.
-                pending.push(frame);
+            Err(_) => {
+                // Trailers carry no inspected data; the body ends here and the
+                // fields are dropped rather than forwarded uninspected.
                 false
             }
         },
@@ -157,5 +157,48 @@ impl Body for PrefixBody {
             hint.set_upper(upper + buffered);
         }
         hint
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FrameBody {
+        frames: Vec<Frame<Bytes>>,
+    }
+
+    impl Body for FrameBody {
+        type Data = Bytes;
+        type Error = BoxError;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let this = self.get_mut();
+            if this.frames.is_empty() {
+                Poll::Ready(None)
+            } else {
+                Poll::Ready(Some(Ok(this.frames.remove(0))))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn trailers_are_dropped_from_the_forwarded_body() {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("x-hidden", "1".parse().expect("header value"));
+        let mut body = FrameBody {
+            frames: vec![
+                Frame::data(Bytes::from_static(b"hello")),
+                Frame::trailers(trailers),
+            ],
+        };
+        let mut pending = Vec::new();
+        assert!(settle_body_end(&mut body, None, &mut pending).await);
+        assert!(!settle_body_end(&mut body, None, &mut pending).await);
+        assert_eq!(pending.len(), 1, "the trailer frame must be dropped");
+        assert!(pending[0].data_ref().is_some());
     }
 }

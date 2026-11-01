@@ -969,8 +969,21 @@ fn auth_path_matches(paths: &RegexSet, path: &str) -> bool {
         if paths.is_match(candidate) {
             return true;
         }
+        // Servlet containers accept matrix parameters (`/login;jsessionid=...`)
+        // and route them to the same handler, so the login regexes must see
+        // the path without them.
+        if paths.is_match(&without_matrix_params(candidate)) {
+            return true;
+        }
     }
     false
+}
+
+fn without_matrix_params(path: &str) -> String {
+    path.split('/')
+        .map(|segment| segment.split(';').next().unwrap_or(segment))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn is_static_asset(path: &str) -> bool {
@@ -2112,5 +2125,14 @@ mod tests {
         let outcome =
             state.observe_response(ip("10.0.0.1"), "/missing", StatusCode::NOT_FOUND, &config);
         assert!(outcome.source.is_none());
+    }
+
+    #[test]
+    fn auth_paths_match_servlet_matrix_parameters() {
+        let paths = auth_paths(&[r"^/login$"]);
+        assert!(auth_path_matches(&paths, "/login"));
+        assert!(auth_path_matches(&paths, "/login;jsessionid=ABC"));
+        assert!(auth_path_matches(&paths, "/login%3bjsessionid=ABC"));
+        assert!(!auth_path_matches(&paths, "/login/extra"));
     }
 }

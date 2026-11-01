@@ -66,12 +66,16 @@ impl AcmeResolver {
     }
 }
 
+/// RFC 8737 §3: serve the challenge certificate only when `acme-tls/1` is the
+/// sole protocol offered. A client that also lists `h2` or `h3` is negotiating
+/// regular service, not the TLS-ALPN-01 challenge.
+fn serves_challenge<'a>(mut protocols: impl Iterator<Item = &'a [u8]>) -> bool {
+    protocols.next() == Some(ACME_TLS_ALPN) && protocols.next().is_none()
+}
+
 impl ResolvesServerCert for AcmeResolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let wants_acme = hello
-            .alpn()
-            .map(|mut protocols| protocols.any(|protocol| protocol == ACME_TLS_ALPN))
-            .unwrap_or(false);
+        let wants_acme = hello.alpn().map(serves_challenge).unwrap_or(false);
         if !wants_acme {
             return self.current.load();
         }
@@ -97,5 +101,23 @@ impl ResolvesServerCert for AcmeResolver {
 impl fmt::Debug for AcmeResolver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("AcmeResolver")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn challenge_is_served_only_for_the_sole_alpn() {
+        assert!(serves_challenge([b"acme-tls/1".as_slice()].into_iter()));
+        assert!(!serves_challenge(
+            [b"acme-tls/1".as_slice(), b"h2".as_slice()].into_iter()
+        ));
+        assert!(!serves_challenge(
+            [b"h3".as_slice(), b"acme-tls/1".as_slice()].into_iter()
+        ));
+        assert!(!serves_challenge([b"h2".as_slice()].into_iter()));
+        assert!(!serves_challenge(std::iter::empty()));
     }
 }

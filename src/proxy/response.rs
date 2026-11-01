@@ -42,23 +42,22 @@ pub async fn buffer_prefix(
 
     while let Some(frame) = body.frame().await {
         let frame = frame?;
-        match frame.into_data() {
-            Ok(data) => {
-                let room = limit.saturating_sub(prefix.len());
-                if data.len() >= room {
-                    let take = room.min(data.len());
-                    prefix.extend_from_slice(&data[..take]);
-                    let remainder = data.slice(take..);
-                    if !remainder.is_empty() {
-                        pending.push(Frame::data(remainder));
-                        overflowed = true;
-                    }
-                    hit_limit = true;
-                    break;
+        // Downstream trailer fields carry no inspected data and are dropped
+        // for the same reason as request trailers.
+        if let Ok(data) = frame.into_data() {
+            let room = limit.saturating_sub(prefix.len());
+            if data.len() >= room {
+                let take = room.min(data.len());
+                prefix.extend_from_slice(&data[..take]);
+                let remainder = data.slice(take..);
+                if !remainder.is_empty() {
+                    pending.push(Frame::data(remainder));
+                    overflowed = true;
                 }
-                prefix.extend_from_slice(&data);
+                hit_limit = true;
+                break;
             }
-            Err(frame) => pending.push(frame),
+            prefix.extend_from_slice(&data);
         }
     }
 

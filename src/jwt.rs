@@ -17,7 +17,6 @@ use crate::request_view::cookie_pairs;
 
 const MAX_TOKEN_BYTES: usize = 8192;
 const MAX_HEADER_BYTES: usize = 1024;
-const MAX_PAYLOAD_BYTES: usize = 16384;
 
 /// Returns a human-readable policy violation for the first matching JWT.
 pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
@@ -28,7 +27,10 @@ pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
         let Ok(value) = value.to_str() else {
             continue;
         };
-        let Some((scheme, token)) = value.split_once(' ') else {
+        // RFC 9110 allows any amount of optional whitespace between the
+        // scheme and the credentials, including a tab.
+        let mut parts = value.splitn(2, char::is_whitespace);
+        let (Some(scheme), Some(token)) = (parts.next(), parts.next()) else {
             continue;
         };
         if !scheme.eq_ignore_ascii_case("bearer") {
@@ -42,14 +44,40 @@ pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
         if let Some(reason) = check_token(value.as_ref(), policy) {
             return Some(reason);
         }
+        // Frameworks decode the cookie before handing the token to the
+        // application, so the encoded form must be inspected too.
+        let decoded = crate::decoding::percent_decode(value.as_ref());
+        if decoded.as_ref() != value.as_ref()
+            && let Some(reason) = check_token(&decoded, policy)
+        {
+            return Some(reason);
+        }
     }
     None
 }
 
+/// Whether a token has the three base64url segments of a JWT and a header
+/// segment that decodes to a JSON object.
+fn looks_like_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let (Some(header), Some(_), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    decode_base64url(header).is_some_and(|decoded| decoded.starts_with(b"{"))
+}
+
 fn check_token(token: &str, policy: &Jwt) -> Option<String> {
-    let token = token.trim();
-    if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
+    let token = token.trim().trim_matches('"');
+    if token.is_empty() {
         return None;
+    }
+    // An opaque token is out of scope, but a token shaped like a JWT that is
+    // too large to inspect must fail closed: the algorithm check cannot see
+    // its header.
+    if token.len() > MAX_TOKEN_BYTES {
+        return looks_like_jwt(token).then(|| "jwt is too large to inspect".to_owned());
     }
     let mut parts = token.split('.');
     let (Some(header), Some(payload), Some(_signature), None) =
@@ -58,9 +86,14 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
         return None;
     };
     if header.len() > MAX_HEADER_BYTES {
-        return None;
+        return Some("jwt header is too large to inspect".to_owned());
     }
     let decoded = decode_base64url(header)?;
+    if crate::hardening::has_duplicate_json_key(&decoded) {
+        // The WAF and the application may read different duplicate keys
+        // (`{"alg":"none","alg":"RS256"}`), so any duplicate is rejected.
+        return Some("jwt header has duplicate keys".to_owned());
+    }
     let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
     let algorithm = value.get("alg")?.as_str()?;
     if !policy
@@ -75,9 +108,6 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
         && policy.allowed_audiences.is_empty()
     {
         return None;
-    }
-    if payload.len() > MAX_PAYLOAD_BYTES {
-        return Some("jwt payload is too large to inspect".to_owned());
     }
     let Some(payload) = decode_base64url(payload) else {
         return Some("jwt payload is not valid base64url".to_owned());
@@ -291,5 +321,53 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn oversized_jwt_headers_fail_closed() {
+        let padding = "a".repeat(1200);
+        let header = encode(&format!("{{\"alg\":\"HS256\",\"x\":\"{padding}\"}}"));
+        let oversized = token(&header, "e30");
+        assert_eq!(
+            violation(&bearer(&oversized), &policy()),
+            Some("jwt header is too large to inspect".to_owned())
+        );
+
+        let long = format!("{header}.{}.c2ln", "e".repeat(9000));
+        assert_eq!(
+            violation(&bearer(&long), &policy()),
+            Some("jwt is too large to inspect".to_owned())
+        );
+
+        let opaque = "a".repeat(9000);
+        assert_eq!(violation(&bearer(&opaque), &policy()), None);
+    }
+
+    #[test]
+    fn duplicate_header_keys_are_rejected() {
+        let header = encode(r#"{"alg":"RS256","alg":"none"}"#);
+        assert_eq!(
+            violation(&bearer(&token(&header, "e30")), &policy()),
+            Some("jwt header has duplicate keys".to_owned())
+        );
+    }
+
+    #[test]
+    fn whitespace_and_encoded_cookies_are_inspected() {
+        let hs = token("eyJhbGciOiJIUzI1NiJ9", "e30");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer\t{hs}")).unwrap(),
+        );
+        assert!(violation(&headers, &policy()).is_some());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_str(&format!("access={}", hs.replace('.', "%2E"))).unwrap(),
+        );
+        assert!(violation(&headers, &policy()).is_some());
     }
 }

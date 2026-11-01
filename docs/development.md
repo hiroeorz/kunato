@@ -402,7 +402,10 @@ checksum mismatch, invalid rules, size limit — leaves the current rules
 untouched and is reported in the logs and metrics. The updater state (last
 success, next due time, HTTP validators) is stored next to the rules file.
 `kunato update-rules` performs a single check and exits; the installer uses it
-for the first download.
+for the first download. The replacement file keeps the owner and mode of the
+file it replaces (a fresh file is `0640` and owned by the state directory's
+owner), so running `sudo kunato update-rules` does not leave a root-owned file
+the service user cannot read.
 
 The SHA256 digest guards against corrupted or truncated downloads; it is
 fetched over the same TLS connection as the rules file, so it does not add
@@ -558,8 +561,10 @@ values are matched raw and through up to two decode passes, so
 `%253Cscript%253E`, `%3Cscript%3E`, and `<script>` all match. Queries follow
 `application/x-www-form-urlencoded` conventions, so `+` is decoded to a space
 (`?q=union+select` matches like `?q=union%20select`); paths are additionally
-matched in normalized form (dot segments resolved, duplicate slashes merged), so
-`//admin`, `/x/../admin`, and `/%2fadmin` are all seen as `/admin`. Cookie
+matched in normalized form at every decode stage (dot segments resolved,
+duplicate slashes merged), so `//admin`, `/x/../admin`, `/%2fadmin`, and the
+`/allowed/a%252fb/../../secret` shape an origin resolves to `/secret` are all
+seen, not just the fully decoded form. Cookie
 values are matched raw and through the same percent-decode passes, because
 clients percent-encode cookie values and application frameworks decode them;
 `+` stays literal in cookies, unlike queries. This applies to named `cookies`
@@ -584,7 +589,7 @@ are decoded with UTF-8 replacement, so a single invalid byte cannot hide a value
 from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
 escapes such as `\u0075`, and `multipart/form-data` flattened to field values and
-file names), then through the same percent-decode passes; bodies whose content
+`filename="..."` entries), then through the same percent-decode passes; bodies whose content
 type is unknown still get the percent passes. A `multipart/form-data` message
 that declares several boundaries is flattened once per boundary (up to four),
 because parsers disagree on which one wins (Rack takes the last); messages that
@@ -662,6 +667,15 @@ in `body_inspection: stream` mode; malformed or ambiguous metadata gets `400`.
 Resource-limit violations get `413`. Limits apply to actual received/decoded
 bytes over HTTP/1.1 (including chunked), HTTP/2, HTTP/3, and WebSocket handshakes,
 not the declared Content-Length. Forwarded bytes are never rewritten.
+
+An ambiguous or non-canonical request head is rejected with `400` before the
+body is read: duplicate `Host`, `Content-Length`, or `Content-Type` fields, a
+`Content-Length` together with `Transfer-Encoding`, a non-chunked
+`Transfer-Encoding`, and a non-canonical method. Duplicate `Content-Type`
+matters because a parser that keeps the last field can decode a body that the
+first field hid from inspection. Chunked trailer fields are dropped in both
+directions: they are never inspected, so they are not forwarded either (HTTP/2
+and HTTP/3 would otherwise replay them past the header limits and the rules).
 
 | Field under `limits.form` | Default | Valid range |
 | --- | --- | --- |
@@ -1174,7 +1188,12 @@ header `alg` is not in the list are rejected with `403` before rule evaluation.
 `require_exp`, `allowed_issuers`, `allowed_audiences`, and `leeway` add claim
 checks; signatures are not verified because the WAF does not hold the
 application keys. Opaque session tokens and malformed JWTs are ignored when no
-claim policy applies, so this is not a general token validator. The check is part of `limits` and therefore remains
+claim policy applies, so this is not a general token validator. A token that has
+the three-segment JWT shape but exceeds the inspection size, or whose header
+repeats a JSON key (the WAF and the application could read different values), is
+rejected instead of skipped. `Authorization` separates the scheme with any
+optional whitespace (including a tab), and cookies are inspected both raw and
+after percent-decoding. The check is part of `limits` and therefore remains
 active with `--disable-protection`. Algorithm names are compared
 case-insensitively after normalization; each entry is 1-32 ASCII letters,
 digits, `-`, or `_`, and at most 16 entries are accepted.
@@ -1206,12 +1225,19 @@ limits:
 ```
 
 `ssrf` rejects URL values whose host is a configured internal host or suffix.
-`duplicate_parameters` rejects conflicting duplicate query/form parameters and
-duplicate JSON object keys; `allow_parameters` exempts intentional list
-parameters. `cache_deception` rejects a request for a configured static suffix
-when an authentication cookie is present. `redirects` rejects an absolute or
-protocol-relative redirect target whose host is not in `allowed_hosts` on the
-configured parameter names.
+Each query value, the raw body (not only its decoded forms), every decoded body
+form, and every header value is searched, and all URLs in a value are examined,
+so a public URL cannot hide an internal one behind it. `duplicate_parameters`
+rejects conflicting duplicate query, form, multipart, and JSON fields or keys
+(`+` decodes to a space in parameter names and values, matching form parsers);
+`allow_parameters` exempts intentional list parameters, and multipart file parts
+are not compared. `cache_deception` rejects a request for a configured static
+suffix when an authentication cookie is present, checking every decoded and
+normalized path form. `redirects` rejects an absolute or protocol-relative
+redirect target whose host is not in `allowed_hosts` on the configured parameter
+names, in query, form, multipart, and nested JSON values; control characters and
+surrounding whitespace are ignored and `\` is read as `/`, matching what a
+browser resolves.
 
 ### Response headers
 

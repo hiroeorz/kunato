@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{
-    CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, HOST, HeaderMap, HeaderValue, TRANSFER_ENCODING,
-    UPGRADE,
+    CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderValue,
+    TRANSFER_ENCODING, UPGRADE,
 };
 use http::{Request, Response, StatusCode};
 use hyper::body::{Body, Frame, Incoming};
@@ -298,6 +298,15 @@ impl Context {
     pub(crate) fn client_for(&self, config: &CompiledConfig) -> Arc<UpstreamClient> {
         let current = self.client.load();
         if current.connect_timeout() == config.timeouts.upstream_connect {
+            return current;
+        }
+        // A request that started before a reload still holds the previous
+        // snapshot. Letting it rebuild the client would make it race with
+        // requests from the new snapshot and churn the connection pool until
+        // the last in-flight request finished, so only the current snapshot
+        // may replace it.
+        let latest = self.config.load();
+        if !std::ptr::eq(latest.as_ref(), config) {
             return current;
         }
         drop(current);
@@ -977,6 +986,15 @@ pub(crate) fn request_head_error(
             "duplicate Content-Length header",
         ));
     }
+    // RFC 9110 defines Content-Type as a single field. Downstream parsers pick
+    // the first or the last header, so a duplicate pair can hide a JSON or
+    // script body from inspection while the origin decodes it.
+    if parts.headers.get_all(CONTENT_TYPE).iter().count() > 1 {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "duplicate Content-Type header",
+        ));
+    }
     if parts.headers.contains_key(CONTENT_LENGTH) && parts.headers.contains_key(TRANSFER_ENCODING) {
         return Some(HttpError::new(
             StatusCode::BAD_REQUEST,
@@ -1162,28 +1180,28 @@ async fn read_body(
             Ok(Some(Ok(frame))) => frame,
         };
 
-        match frame.into_data() {
-            Ok(data) => {
-                let observed = prefix.len().saturating_add(data.len());
-                if !grow_request_inspection_raw(&mut inspection, config, observed) {
-                    context.record_overloaded();
-                    return Err(inspection_capacity_error());
-                }
-                let room = limit.saturating_sub(prefix.len());
-                if data.len() >= room {
-                    let take = room.min(data.len());
-                    prefix.extend_from_slice(&data[..take]);
-                    let remainder = data.slice(take..);
-                    if !remainder.is_empty() {
-                        pending.push(Frame::data(remainder));
-                        overflowed = true;
-                    }
-                    hit_limit = true;
-                    break;
-                }
-                prefix.extend_from_slice(&data);
+        // Trailer fields are not inspected and are not forwarded: they would
+        // otherwise reach the origin over HTTP/2 or HTTP/3 without header
+        // limits or rule evaluation.
+        if let Ok(data) = frame.into_data() {
+            let observed = prefix.len().saturating_add(data.len());
+            if !grow_request_inspection_raw(&mut inspection, config, observed) {
+                context.record_overloaded();
+                return Err(inspection_capacity_error());
             }
-            Err(frame) => pending.push(frame),
+            let room = limit.saturating_sub(prefix.len());
+            if data.len() >= room {
+                let take = room.min(data.len());
+                prefix.extend_from_slice(&data[..take]);
+                let remainder = data.slice(take..);
+                if !remainder.is_empty() {
+                    pending.push(Frame::data(remainder));
+                    overflowed = true;
+                }
+                hit_limit = true;
+                break;
+            }
+            prefix.extend_from_slice(&data);
         }
     }
 
@@ -2037,6 +2055,24 @@ mod tests {
             .expect("detected");
         assert_eq!(protocol, Protocol::Http1);
         assert!(prefix.starts_with(b"GET /"));
+    }
+
+    #[test]
+    fn duplicate_content_type_is_rejected_before_body_reads() {
+        let config =
+            crate::config::parse("listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n")
+                .expect("valid config");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header("content-type", "text/plain")
+            .header("content-type", "application/json")
+            .body(())
+            .expect("request");
+        let (parts, ()) = request.into_parts();
+        let error = request_head_error(&config, &parts).expect("duplicate content-type");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "duplicate Content-Type header");
     }
 
     #[test]

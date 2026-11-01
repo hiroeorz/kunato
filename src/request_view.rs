@@ -80,14 +80,26 @@ impl<'a> RequestView<'a> {
 /// segments would route on.
 pub(crate) fn path_forms(path: &str) -> Vec<Cow<'_, str>> {
     let mut forms = percent_decode_forms(path);
-    let last = forms.last().map(|form| form.as_ref()).unwrap_or(path);
-    if let Some(normalized) = normalize_path(last)
-        && !forms
-            .iter()
-            .any(|form| form.as_ref() == normalized.as_str())
-    {
-        forms.push(Cow::Owned(normalized));
+    // Normalize every decode stage, not just the last one. An origin that
+    // decodes exactly once and then resolves dot segments routes on a path
+    // that the last stage never produces, so matching only the final
+    // normalized form lets `%252f` plus `..` slip past path rules, ALLOW
+    // rules, and content routes.
+    let mut normalized = Vec::new();
+    for form in &forms {
+        let Some(candidate) = normalize_path(form.as_ref()) else {
+            continue;
+        };
+        if forms.iter().any(|existing| existing.as_ref() == candidate)
+            || normalized
+                .iter()
+                .any(|existing: &String| existing == &candidate)
+        {
+            continue;
+        }
+        normalized.push(candidate);
     }
+    forms.extend(normalized.into_iter().map(Cow::Owned));
     forms
 }
 
@@ -183,6 +195,19 @@ mod tests {
                 "/files/../etc",
                 "/etc"
             ]
+        );
+    }
+
+    #[test]
+    fn every_decode_stage_is_normalized() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/allowed/a%252fb/../../secret".parse().expect("valid URI");
+        let view = view(&uri, &headers, b"");
+        let forms: Vec<&str> = view.path_forms.iter().map(|form| form.as_ref()).collect();
+        assert!(forms.contains(&"/secret"), "{forms:?}");
+        assert!(
+            !forms.iter().all(|form| form.starts_with("/allowed/")),
+            "one decode stage routes outside the allowed prefix: {forms:?}"
         );
     }
 
