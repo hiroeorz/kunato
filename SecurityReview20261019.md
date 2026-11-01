@@ -361,3 +361,37 @@ Protocol::Http2 => {
 - **再現テスト先行**: 修正着手時に再現テストを先に書く。再現しない指摘は修正せず 7.1 に追加する。
 - **文書との整合**: ORIGIN-02 に関連して `docs/attack-coverage.md` の Multipart Boundary Abuse が実装より強い主張になっていないか確認し、必要なら実装か文書のどちらかを直す。
 - **レビュー工程**: 次回以降も §6 の修正可否検証を必須工程とし、重大度は本節の補正を経て確定する。
+---
+
+## 8. 実施状況（2026-11-01）
+
+§6.4 の第1波・第2波を実装し、テストと black-box で確認した。
+
+### 8.1 第1波（ルールのみ、リリース不要）
+
+- 対象: ORIGIN-15 の正規表現5件（SQLi の括弧・コメント、HPP の介在パラメータ／ネスト JSON、XSS のイベントハンドラ、SSRF の userinfo・末尾ドット、JWT `none` の空白挿入）と、ORIGIN-05 の `malicious-upload` への `PATCH` 追加。
+- `dist/rules.yaml` を再生成し、`scripts/blackbox-test.sh` を実行。**BLOCK 2,084 件・ALLOW 591 件すべて通過、失敗 0**。ルール形式は不変のため旧バイナリでも受理される。
+- コミット: `Cover parenthesized SQLi and PATCH uploads in the bundled rules`。
+
+### 8.2 第2波（エンジン修正）
+
+- ORIGIN-01: `path_forms` が全デコード段階を正規化。`%252f` + `..` で `ALLOW`/`content_routes` を迂回できない。
+- ORIGIN-03: 重複 `Content-Type` を `400` で拒否。
+- ORIGIN-05: `flatten_part` が `filename="..."` を出力し、RFC 5987 の percent エンコード名がルールに一致する。
+- ORIGIN-06/10: SSRF が raw body と全 URL を走査。重複・リダイレクト検査が `+` をデコードし、ネスト JSON と multipart を走査。リダイレクトは制御文字・先頭空白・`\` を正規化。
+- ORIGIN-08/09: GraphQL のイントロスペクションスキャナをレキサーに一致（`\r` コメント、`\"""`）。multipart は part 単位で解析し、バイナリ添付が `operations` を隠さない。
+- ORIGIN-11: JWT はサイズ超過の JWT 形状トークンをフェイルクローズ、重複ヘッダキーを拒否、タブ区切りとエンコード Cookie を検査。
+- ORIGIN-13: trailer フレームを両方向で破棄（未検査のまま転送しない）。
+- ORIGIN-15（engine 側）: `auth_path_matches` がマトリックスパラメータを除去。
+- SELF-07: `write_atomic` が置換前ファイルの所有者・モードを引き継ぎ、installer は state ディレクトリ全体を `kunato` に渡す。
+- SELF-09: ログのテキストフィールドを必要時に引用・エスケープ（`\xNN` を含む）。parser は両形式を読め、Raw 出力は制御文字を無害化。
+- SELF-10: ACME リゾルバは `acme-tls/1` が単独提示されたときだけチャレンジ証明書を返す。
+- SELF-11: reload 前のスナップショットを持つリクエストは upstream client を再生成しない。
+- 検証: `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `./scripts/check-deny.sh` / `cargo test`（659 unit + 統合）すべて成功。black-box も上記のとおり通過。
+- コミット: `Close the origin-defense gaps found in the security review`。
+
+### 8.3 残り
+
+- 第3波: SELF-01（検査予算の縮小・書き込み期限）、SELF-02（シャード退避）、SELF-03（QUIC Retry）、SELF-04（WebSocket 課金）、SELF-06（更新ループ直列化）、SELF-12（署名基盤）。
+- 条件付き（方針決定が必要）: ORIGIN-02、ORIGIN-04、ORIGIN-07、ORIGIN-12、ORIGIN-14。
+- 未割当: SELF-05（YAML パーサの位置追跡）。
