@@ -329,6 +329,11 @@ initialize_configuration() {
     copy_tls_material
     install -d -m 0750 -o kunato -g kunato "$STATE_DIR"
 
+    had_rules=0
+    if [ -f "$RULES_FILE" ]; then
+        had_rules=1
+    fi
+
     if [ -f "$CONFIG_PATH" ]; then
         log "keeping the existing configuration at $CONFIG_PATH"
     else
@@ -379,18 +384,9 @@ initialize_configuration() {
         if [ "$ACME_STAGING" -eq 1 ]; then
             set -- "$@" --acme-staging
         fi
-        had_rules=0
-        if [ -f "$RULES_FILE" ]; then
-            had_rules=1
-        fi
         "$BIN_PATH" init "$@"
         chown root:kunato "$CONFIG_PATH"
         chmod 0640 "$CONFIG_PATH"
-    else
-        had_rules=0
-        if [ -f "$RULES_FILE" ]; then
-            had_rules=1
-        fi
     fi
 
     if [ "$had_rules" -eq 0 ] || [ ! -f "$RULES_FILE.update-state" ]; then
