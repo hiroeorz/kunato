@@ -26,6 +26,9 @@ pub enum Error {
     #[error("the downloaded rule set needs a newer Kunato build: {0}")]
     RulesNeedNewerBuild(String),
 
+    #[error("artifact signature verification failed: {0}")]
+    Signature(String),
+
     #[error("{0}")]
     Message(String),
 

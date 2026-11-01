@@ -407,7 +407,7 @@ Protocol::Http2 => {
 - **SELF-03**: QUIC は送信元アドレス検証済みの接続だけが接続枠を取得し、未検証の Initial には Retry を返す。ハンドシェイク・HTTP/3 セットアップ・リクエストヘッドに `header_read` を適用する。
 - **SELF-04**: フレーム読み取りの上限を「メッセージ残量」にクランプし、宣言長による先行予約を防ぐ。クライアント→上流の各メッセージを送信元のリクエスト予算に課金し、レート制限・BAN は `1008`、全体過負荷は `1013` でトンネルを閉じる。
 - **SELF-06**: 期限が 0 秒のときは最低1秒待つ。状態ファイルを書けない場合も `interval` 待機して即時再取得ループを防ぐ。reload をプロセス全体で直列化し、SIGHUP と更新後 reload を `spawn_blocking` で実行する。
-- **SELF-12**: `kunato upgrade` の installer 起動時に環境変数をクリアし、`PATH` のみ引き継ぐ。**署名検証は未実施**（リリース署名鍵・CI 署名・公開鍵の埋め込みという基盤整備が必要）。
+- **SELF-12**: `kunato upgrade` の installer 起動時に環境変数をクリアし、`PATH` のみ引き継ぐ。署名基盤は minisign 方式で実装した（`src/signing.rs` の検証器、`src/trust.rs` の埋め込み公開鍵、`rules_update` の `rules.yaml.minisig` 検証、`kunato upgrade` の `install.sh.minisig` 検証、署名スクリプトと [docs/release-signing.md](docs/release-signing.md)）。**鍵の生成と信頼ストアへの登録は未実施**で、鍵リストが空の間は警告付きで検証をスキップする。
 
 ### 8.5 追加対応（SELF-05・SELF-06 の残り）
 

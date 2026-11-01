@@ -414,7 +414,11 @@ the service user cannot read.
 
 The SHA256 digest guards against corrupted or truncated downloads; it is
 fetched over the same TLS connection as the rules file, so it does not add
-authenticity. Detached signatures (minisign) are planned as a hardening step.
+authenticity by itself. A detached minisign signature
+(`<rules url>.minisig`) is verified against keys embedded in the binary when one
+is configured, and `kunato upgrade` verifies `install.sh.minisig` before running
+the installer as root. See [release-signing.md](release-signing.md) for key
+generation, signing, rotation, and the remaining trust limits.
 
 ### Content routes
 

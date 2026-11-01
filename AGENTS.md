@@ -82,6 +82,7 @@ docs/
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
+  release-signing.md  # Detached minisign signing: keys, signing, rotation, limits
   security-lab-testing-model.md # Lab control/evidence model, verdicts, and diagrams
   security-testing.md # Local attack-tool lab design and verification process
 packaging/
@@ -235,6 +236,8 @@ cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/security-lab.sh shell                        # Persistent manual attack shell
 ./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
+./scripts/generate-signing-keys.sh  # Create the release and rules signing keys
+./scripts/sign-artifact.sh KEY FILE # Detached minisign signature (FILE.minisig)
 ```
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,

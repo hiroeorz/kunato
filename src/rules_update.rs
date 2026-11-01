@@ -33,6 +33,8 @@ const MAX_REDIRECTS: usize = 5;
 /// hosts is refused: the configured origin is the only host the operator chose.
 const MAX_CROSS_HOST_REDIRECTS: usize = 2;
 const MAX_CHECKSUM_BYTES: usize = 4096;
+/// Detached minisign signatures are a few hundred bytes.
+const MAX_SIGNATURE_BYTES: usize = 8 * 1024;
 const MAX_STATE_BYTES: u64 = 16 * 1024;
 
 type RulesClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
@@ -112,6 +114,11 @@ pub async fn run(
             }
             Err(err) => {
                 metrics.rules_update_failure.fetch_add(1, Ordering::Relaxed);
+                if matches!(err, Error::Signature(_)) {
+                    metrics
+                        .rules_signature_failure
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 if matches!(err, Error::RulesNeedNewerBuild(_)) {
                     metrics
                         .rules_update_incompatible
@@ -231,6 +238,7 @@ async fn update_candidate(
             "rules checksum mismatch: expected {expected}, got {actual}"
         )));
     }
+    verify_rules_signature(&client, url, &bytes).await?;
 
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| Error::Message("rules file is not valid UTF-8".to_owned()))?;
@@ -451,6 +459,73 @@ fn header_string(headers: &http::HeaderMap, name: http::header::HeaderName) -> O
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+/// Verify the detached minisign signature published next to the rule set.
+/// With no trusted key configured this is skipped with a warning so existing
+/// installs keep updating until keys are embedded.
+async fn verify_rules_signature(
+    client: &RulesClient,
+    rules_url: &Uri,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    if crate::trust::RULES_KEYS.is_empty() {
+        warn_once_no_rules_key();
+        return Ok(());
+    }
+    let signature_url = signature_url(rules_url)?;
+    let fetched = fetch(
+        client,
+        &signature_url,
+        MAX_SIGNATURE_BYTES,
+        &UpdateState::default(),
+        "rules signature",
+    )
+    .await?;
+    let Fetched::Body {
+        bytes: signature, ..
+    } = fetched
+    else {
+        return Err(Error::Message(
+            "rules signature request was unexpectedly not modified".to_owned(),
+        ));
+    };
+    check_rules_signature(crate::trust::RULES_KEYS, bytes, &signature)
+}
+
+/// Verify the downloaded signature against the embedded rules keys.
+fn check_rules_signature(keys: &[&str], bytes: &[u8], signature: &[u8]) -> Result<(), Error> {
+    let signature = std::str::from_utf8(signature)
+        .map_err(|_| Error::Message("rules signature is not valid UTF-8".to_owned()))?;
+    match crate::trust::verify(keys, bytes, signature)
+        .map_err(|err| Error::Signature(err.to_string()))?
+    {
+        crate::trust::Verification::Verified | crate::trust::Verification::NoTrustedKeys => Ok(()),
+    }
+}
+
+fn warn_once_no_rules_key() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        warn!(
+            "no rules signing key is embedded in this build; rules are verified by checksum only"
+        );
+    });
+}
+
+/// The detached signature is published next to the rule set as
+/// `<rules url>.minisig`.
+fn signature_url(rules_url: &Uri) -> Result<Uri, Error> {
+    let text = rules_url.to_string();
+    if text.contains('?') || text.contains('#') {
+        return Err(Error::Message(
+            "rules update URL must not carry a query or fragment to locate its signature"
+                .to_owned(),
+        ));
+    }
+    format!("{text}.minisig")
+        .parse()
+        .map_err(|_| Error::Message("invalid rules signature URL".to_owned()))
 }
 
 async fn fetch_checksum(client: &RulesClient, url: &Uri) -> Result<String, Error> {
@@ -986,6 +1061,29 @@ mod tests {
             read.last_modified.as_deref(),
             Some("Wed, 21 Oct 2015 07:28:00 GMT")
         );
+    }
+
+    #[test]
+    fn the_signature_url_is_the_rules_url_plus_minisig() {
+        let url: Uri = "https://example.com/dist/rules.yaml"
+            .parse()
+            .expect("valid url");
+        assert_eq!(
+            signature_url(&url).expect("signature url").to_string(),
+            "https://example.com/dist/rules.yaml.minisig"
+        );
+        let url: Uri = "https://example.com/rules.yaml?token=1"
+            .parse()
+            .expect("valid url");
+        assert!(signature_url(&url).is_err(), "query strings are ambiguous");
+    }
+
+    #[test]
+    fn a_signature_is_checked_only_when_a_key_is_configured() {
+        assert!(check_rules_signature(&[], b"rules", b"not a signature").is_ok());
+        let error = check_rules_signature(&["not a key"], b"rules", b"not a signature")
+            .expect_err("configured key must enforce the check");
+        assert!(matches!(error, Error::Signature(_)), "{error:?}");
     }
 
     #[test]

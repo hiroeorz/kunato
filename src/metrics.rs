@@ -41,6 +41,7 @@ pub struct Metrics {
     pub rules_update_success: AtomicU64,
     pub rules_update_failure: AtomicU64,
     pub rules_update_incompatible: AtomicU64,
+    pub rules_signature_failure: AtomicU64,
     pub rules_update_not_modified: AtomicU64,
     pub rules_last_success: AtomicU64,
     pub acme_issued: AtomicU64,
@@ -89,6 +90,7 @@ impl Metrics {
             rules_update_success: AtomicU64::new(0),
             rules_update_failure: AtomicU64::new(0),
             rules_update_incompatible: AtomicU64::new(0),
+            rules_signature_failure: AtomicU64::new(0),
             rules_update_not_modified: AtomicU64::new(0),
             rules_last_success: AtomicU64::new(0),
             acme_issued: AtomicU64::new(0),
@@ -317,6 +319,12 @@ impl Metrics {
             "kunato_rules_update_incompatible_total",
             "Rules updates rejected because the published rule set needs a newer build.",
             self.rules_update_incompatible.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_rules_signature_failure_total",
+            "Rules updates rejected because the detached signature was missing or invalid.",
+            self.rules_signature_failure.load(Ordering::Relaxed),
         );
         counter(
             &mut out,

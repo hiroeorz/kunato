@@ -51,8 +51,9 @@ compiles it **together with the local configuration** (`overrides_file`, inline
 categories, size limits, regex compilation, ReDoS guards) before touching
 anything on disk. Only a candidate that passes everything replaces the file, by
 atomic rename; the state sidecar (`rules.yaml.update-state`) is written the same
-way. Any failure — network, checksum, UTF-8, size, validation — leaves the
-previous file exactly as it was.
+way. Any failure — network, checksum, UTF-8, size, validation, or a missing or
+invalid detached signature (`rules.yaml.minisig`) — leaves the previous file
+exactly as it was.
 
 The daemon keeps evaluating the last known good rules, logs the failure, and
 retries after `min(interval, 10 minutes)` (so the default 24h interval retries

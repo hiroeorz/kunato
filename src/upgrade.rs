@@ -21,6 +21,8 @@ const RELEASE_BASE: &str = "https://github.com/hiroeorz/kunato/releases";
 /// The installer script is a few kilobytes; the bound keeps a hostile or
 /// broken response from being read into memory.
 const MAX_INSTALLER_BYTES: usize = 256 * 1024;
+/// Detached minisign signature published next to the installer.
+const MAX_SIGNATURE_BYTES: usize = 8 * 1024;
 
 pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
     let tag = args.version.as_deref().map(normalize_tag).transpose()?;
@@ -46,6 +48,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
     }
 
     let installer = rules_update::fetch_release_asset(&url, MAX_INSTALLER_BYTES).await?;
+    verify_installer(&url, &installer).await?;
     if !installer.starts_with(b"#!/bin/sh") {
         return Err(Error::Message(
             "the downloaded installer does not look like a shell script".to_owned(),
@@ -73,6 +76,29 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// Verify the detached minisign signature of the installer before it runs as
+/// root. With no trusted release key embedded the check is skipped with a
+/// warning, so builds without keys can still upgrade.
+async fn verify_installer(url: &str, installer: &[u8]) -> Result<(), Error> {
+    if crate::trust::RELEASE_KEYS.is_empty() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "no release signing key is embedded in this build; the installer is not verified"
+            );
+        });
+        return Ok(());
+    }
+    let signature_url = format!("{url}.minisig");
+    let signature = rules_update::fetch_release_asset(&signature_url, MAX_SIGNATURE_BYTES).await?;
+    let signature = std::str::from_utf8(&signature)
+        .map_err(|_| Error::Message("installer signature is not valid UTF-8".to_owned()))?;
+    match crate::trust::verify_release(installer, signature)? {
+        crate::trust::Verification::Verified => Ok(()),
+        crate::trust::Verification::NoTrustedKeys => Ok(()),
+    }
 }
 
 /// Build the shell invocation for the downloaded installer. The environment is
