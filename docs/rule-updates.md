@@ -113,8 +113,8 @@ binary. It runs in two places, so an incompatible publication cannot reach
 
 The daily agent runs the same script inside its own loop
 (`.github/prompts/daily-cve.md` and the coverage skill) and is instructed to
-leave out a rule that would need a newer build, reporting the gap instead of
-breaking publication.
+leave out a rule that would need a newer build, recording the gap in
+`docs/engine-gaps.md` instead of breaking publication.
 
 ### What the gate does not cover
 
@@ -165,7 +165,8 @@ the offending field, repeated every ten minutes.
 
 1. Add the field, target, action, or phase to the engine, its tests, and
    `docs/development.md`. No published rule may use it yet; the gate stays green
-   because the published set has not changed.
+   because the published set has not changed. Delete the matching rows in
+   `docs/engine-gaps.md` once the release ships; git history keeps the record.
 2. Cut the release (`v*` tag) with `scripts/release.sh X.Y.Z`, which bumps and
    commits the `version` in `Cargo.toml` (so `kunato --version` identifies the
    release; `release.yml` fails the build when the tag and the package version
@@ -202,6 +203,7 @@ visible without reading logs.
 | Published rule set and checksum | `dist/rules.yaml`, `dist/rules.yaml.sha256` |
 | Generator (example → published set) | `scripts/update-dist-rules.sh` |
 | Compatibility gate | `scripts/check-rules-compat.sh` |
+| Engine-change backlog | `docs/engine-gaps.md` |
 | Workflow wiring | `.github/workflows/ci.yml`, `daily-cve.yml`, `release.yml` |
 | Agent instructions | `.github/prompts/daily-cve.md`, `.agents/skills/kunato-cve-coverage/SKILL.md` |
 | Updater (download, verify, swap, retry) | `src/rules_update.rs` |

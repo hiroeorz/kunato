@@ -35,14 +35,22 @@ order and stay inside the constraints at the end of this prompt.
 4. Update `docs/cve-coverage.md`: add one row per reviewed candidate
    (`covered` / `comment-only` / `out-of-scope` / `watch`), and refresh the
    summary counts and the "Last review" date.
-5. Run `scripts/update-dist-rules.sh` so `dist/rules.yaml` and its checksum
+5. If a selected CVE needs an engine construct the newest release does not
+   implement (a new match field, target, action, phase, decoder, or protocol
+   limit), do not add the rule. Append one row to `docs/engine-gaps.md` with
+   the CVE, product, the engine change needed, why a rule cannot express it,
+   today's date, and `open`. Keep the row on one line and do not put a `|`
+   inside a cell. Check the existing rows first, do not duplicate a CVE or
+   engine change, and update the row instead. The file is the durable backlog:
+   a gap left only in the final message is lost.
+6. Run `scripts/update-dist-rules.sh` so `dist/rules.yaml` and its checksum
    match `rules.example.yaml`.
-6. Run `scripts/blackbox-test.sh --color never` until every allowed request is
+7. Run `scripts/blackbox-test.sh --color never` until every allowed request is
    forwarded and every blocked request is stopped. Iterate on the rules until
    the run is green. Also run `scripts/check-rules-compat.sh`, `cargo fmt`,
    `cargo clippy --all-targets -- -D warnings`, `cargo deny check`, and
    `cargo test`.
-7. If no candidate qualifies, or you cannot make a change green, leave the
+8. If no candidate qualifies, or you cannot make a change green, leave the
    workspace without rule changes and explain the situation in your final
    message. The workflow fails on red gates and will not commit.
 
@@ -54,6 +62,7 @@ order and stay inside the constraints at the end of this prompt.
   - `rules.example.yaml`
   - `dist/rules.yaml`, `dist/rules.yaml.sha256`
   - `docs/cve-coverage.md`
+  - `docs/engine-gaps.md`
   Any other modification fails the workflow.
 - Do not commit, push, tag, or run any git write command. The workflow commits
   after the deterministic gates pass.
@@ -65,6 +74,7 @@ order and stay inside the constraints at the end of this prompt.
   a construct it rejects makes every install reject the whole published set and
   stop receiving updates. `scripts/check-rules-compat.sh` is the gate; run it
   after changing rules, and read `docs/rule-updates.md` when it fails. When a
-  CVE seems to need a new construct, leave the rule out and report the gap
-  instead.
-- Keep your final message short: selected CVEs, files changed, gate results.
+  CVE seems to need a new construct, leave the rule out and record the gap in
+  `docs/engine-gaps.md`; the final message alone is not enough.
+- Keep your final message short: selected CVEs, engine gaps recorded, files
+  changed, gate results.

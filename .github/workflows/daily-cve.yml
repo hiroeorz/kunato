@@ -103,7 +103,8 @@ jobs:
             case "$path" in
               blackbox/requests/blocked.txt | blackbox/requests/allowed.txt | \
                 rules.example.yaml | dist/rules.yaml | dist/rules.yaml.sha256 | \
-                dist/rules.yaml.minisig | docs/cve-coverage.md) ;;
+                dist/rules.yaml.minisig | docs/cve-coverage.md | \
+                docs/engine-gaps.md) ;;
               *)
                 echo "::error::unexpected change: $path"
                 status=1
@@ -121,6 +122,7 @@ jobs:
             blackbox/requests/allowed.txt
             rules.example.yaml
             docs/cve-coverage.md
+            docs/engine-gaps.md
           if-no-files-found: error
 
       - name: Save the patch artifact
@@ -147,7 +149,7 @@ jobs:
     permissions:
       contents: write
     # Signing and push run on a fresh runner VM isolated from the untrusted
-    # agent step: only the four allowlisted data files cross the job boundary.
+    # agent step: only the allowlisted data files cross the job boundary.
     environment: rules-signing
     steps:
       - name: Checkout
@@ -169,7 +171,8 @@ jobs:
             blackbox/requests/blocked.txt \
             blackbox/requests/allowed.txt \
             rules.example.yaml \
-            docs/cve-coverage.md; do
+            docs/cve-coverage.md \
+            docs/engine-gaps.md; do
             staged="$RUNNER_TEMP/staged-changes/$path"
             if [ -f "$staged" ] && [ ! -L "$staged" ]; then
               cp -- "$staged" "$path"
@@ -259,7 +262,22 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Update CVE rules and corpus" -m "Automated daily CVE intake."
+          gaps=$(git diff --cached -- docs/engine-gaps.md \
+            | grep '^+| CVE-' \
+            | grep -oE 'CVE-[0-9]{4}-[0-9]{4,}' \
+            | sort -u | paste -sd ',' - | sed 's/,/, /g' || true)
+          commit_args=(-m "Update CVE rules and corpus" -m "Automated daily CVE intake.")
+          if [ -n "$gaps" ]; then
+            commit_args+=(-m "Engine gaps needing a source change: $gaps")
+            {
+              echo "## Engine gaps needing a source change"
+              echo
+              echo "$gaps"
+              echo
+              echo "See docs/engine-gaps.md."
+            } >>"$GITHUB_STEP_SUMMARY"
+          fi
+          git commit "${commit_args[@]}"
           git remote set-url origin \
             "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin "HEAD:${GITHUB_REF_NAME}"
