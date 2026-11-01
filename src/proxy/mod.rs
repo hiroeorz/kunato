@@ -107,6 +107,18 @@ impl PrefixBody {
         }
     }
 
+    /// Bytes this body currently holds, used to right-size an inspection
+    /// reservation once buffering is finished.
+    pub(crate) fn held_bytes(&self) -> usize {
+        let pending: usize = self
+            .pending
+            .iter()
+            .filter_map(|frame| frame.data_ref())
+            .map(Bytes::len)
+            .sum();
+        self.prefix.len().saturating_add(pending)
+    }
+
     pub(crate) fn with_guard<G: Send + Sync + 'static>(mut self, guard: Arc<G>) -> Self {
         self.prefix = with_bytes_guard(self.prefix, Arc::clone(&guard));
         self.pending = self

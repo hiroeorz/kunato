@@ -97,6 +97,15 @@ pub async fn serve(
             incoming = endpoint.accept() => {
                 match incoming {
                     Some(incoming) => {
+                        // A spoofed Initial must not take a shared TCP/UDP
+                        // connection slot: require address validation first and
+                        // make the client prove reachability with a Retry.
+                        if !incoming.remote_address_validated() {
+                            if let Err(err) = incoming.retry() {
+                                debug!(error = %err, "HTTP/3 address validation failed");
+                            }
+                            continue;
+                        }
                         let peer = server::normalize_peer(incoming.remote_address());
                         match context.try_acquire_connection(peer.ip()) {
                             Some(guard) => {
@@ -141,6 +150,7 @@ async fn serve_connection(
     shutdown: watch::Receiver<bool>,
     _guard: ConnectionGuard,
 ) {
+    let handshake_timeout = context.config().timeouts.header_read;
     let connecting = match incoming.accept() {
         Ok(connecting) => connecting,
         Err(err) => {
@@ -148,12 +158,16 @@ async fn serve_connection(
             return;
         }
     };
-    let connection = match connecting.await {
-        Ok(connection) => connection,
-        Err(err) => {
+    let connection = match tokio::time::timeout(handshake_timeout, connecting).await {
+        Err(_) => {
+            debug!(client = %peer, "HTTP/3 handshake timed out");
+            return;
+        }
+        Ok(Err(err)) => {
             debug!(client = %peer, error = %err, "HTTP/3 handshake failed");
             return;
         }
+        Ok(Ok(connection)) => connection,
     };
     serve_h3(connection, peer, context, shutdown).await;
 }
@@ -164,16 +178,26 @@ async fn serve_h3(
     context: Context,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let handshake_timeout = context.config().timeouts.header_read;
     let max_field_section_size =
         u64::try_from(context.config().limits.max_header_bytes).unwrap_or(u64::MAX);
     let mut builder = h3::server::builder();
     builder.max_field_section_size(max_field_section_size);
-    let mut connection = match builder.build(h3_quinn::Connection::new(connection)).await {
-        Ok(connection) => connection,
-        Err(err) => {
+    let mut connection = match tokio::time::timeout(
+        handshake_timeout,
+        builder.build(h3_quinn::Connection::new(connection)),
+    )
+    .await
+    {
+        Err(_) => {
+            debug!(client = %peer, "HTTP/3 setup timed out");
+            return;
+        }
+        Ok(Err(err)) => {
             debug!(client = %peer, error = %err, "HTTP/3 setup failed");
             return;
         }
+        Ok(Ok(connection)) => connection,
     };
 
     let mut requests = JoinSet::new();
@@ -211,13 +235,19 @@ async fn handle_request(
     peer: SocketAddr,
     context: Context,
 ) {
-    let (request, stream) = match resolver.resolve_request().await {
-        Ok(value) => value,
-        Err(err) => {
-            debug!(client = %peer, error = %err, "malformed HTTP/3 request");
-            return;
-        }
-    };
+    let header_read = context.config().timeouts.header_read;
+    let (request, stream) =
+        match tokio::time::timeout(header_read, resolver.resolve_request()).await {
+            Err(_) => {
+                debug!(client = %peer, "HTTP/3 request head timed out");
+                return;
+            }
+            Ok(Err(err)) => {
+                debug!(client = %peer, error = %err, "malformed HTTP/3 request");
+                return;
+            }
+            Ok(Ok(value)) => value,
+        };
 
     let config = context.config();
     let head_request = request.method() == Method::HEAD;

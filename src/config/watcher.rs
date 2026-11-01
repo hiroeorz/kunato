@@ -96,12 +96,20 @@ fn source_stamps(paths: &[PathBuf]) -> BTreeMap<PathBuf, Option<(SystemTime, u64
         .collect()
 }
 
+/// Serializes reloads. The file watcher, SIGHUP handling, and the rules
+/// updater can all reload at once; without this, a snapshot built before the
+/// winner's write could be stored last and leave stale rules active.
+static RELOAD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn reload(
     path: &Path,
     config: &Snapshot<CompiledConfig>,
     metrics: &Metrics,
     disable_protection: bool,
 ) -> Option<Vec<PathBuf>> {
+    let _serialized = RELOAD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     match config::load(path) {
         Ok(mut new_config) => {
             metrics.reload_success.fetch_add(1, Ordering::Relaxed);

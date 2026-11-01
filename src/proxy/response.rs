@@ -236,6 +236,9 @@ pub(crate) async fn inspect(
         );
     }
 
+    // Only the buffered bytes stay alive while the client drains the
+    // response; release the rest of the worst-case reservation.
+    inspection.shrink_to(buffered.body.held_bytes());
     Ok(Response::from_parts(
         buffered.parts,
         buffered.body.with_guard(Arc::new(inspection)).boxed(),

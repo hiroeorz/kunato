@@ -4396,6 +4396,37 @@ categories:
 }
 
 #[tokio::test]
+async fn websocket_messages_consume_the_source_rate_budget() {
+    let upstream = spawn_upgrade_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection: {{ requests_per_second: 1, burst: 1 }}
+categories: []
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    stream
+        .write_all(&client_ws_frame(0x1, b"hello", true))
+        .await
+        .expect("write message");
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(
+        opcode, 0x8,
+        "a tunnel must not bypass the source rate limit"
+    );
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn websocket_tunnel_follows_a_hot_reload() {
     let upstream = spawn_upgrade_upstream().await;
     let base = format!(

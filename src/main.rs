@@ -244,7 +244,21 @@ fn spawn_sighup_reload(
         };
         while sighup.recv().await.is_some() {
             info!("SIGHUP received, reloading configuration");
-            watcher::reload(&path, &config, &metrics, disable_protection);
+            let reload_path = path.clone();
+            let reload_config = Arc::clone(&config);
+            let reload_metrics = Arc::clone(&metrics);
+            if let Err(err) = tokio::task::spawn_blocking(move || {
+                watcher::reload(
+                    &reload_path,
+                    &reload_config,
+                    &reload_metrics,
+                    disable_protection,
+                );
+            })
+            .await
+            {
+                tracing::error!(error = %err, "configuration reload task failed");
+            }
         }
     });
 }

@@ -14,6 +14,9 @@ use crate::decoding::{normalize_path, percent_decode_forms};
 
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
+/// Full-table sweeps are expensive (every shard, every entry), so a flood of
+/// new sources must not trigger one per request.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const GLOBAL_WINDOW: Duration = Duration::from_secs(1);
 /// Minimum interval between per-source rate-limit/ban log lines. Rejections
 /// inside the interval are counted and reported as `suppressed` on the next
@@ -95,6 +98,7 @@ pub struct ProtectionState {
     active_connections: AtomicU64,
     tracked_ips: AtomicUsize,
     tracked_rules: AtomicUsize,
+    last_sweep: Mutex<Option<Instant>>,
     global_requests: Mutex<GlobalWindow>,
     global_auth: Mutex<GlobalAuthWindow>,
 }
@@ -114,6 +118,7 @@ impl ProtectionState {
             active_connections: AtomicU64::new(0),
             tracked_ips: AtomicUsize::new(0),
             tracked_rules: AtomicUsize::new(0),
+            last_sweep: Mutex::new(None),
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
                 count: 0.0,
@@ -525,13 +530,7 @@ impl ProtectionState {
         }
         if !reserve_slot(&self.tracked_ips, config.max_tracked_ips) {
             drop(shard);
-            for shard in &self.shards {
-                let mut shard = lock(shard);
-                let before = shard.entries.len();
-                evict_stale(&mut shard.entries, now);
-                self.tracked_ips
-                    .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
-            }
+            self.sweep_stale(now);
             shard = lock(&self.shards[shard_index(key)]);
             if shard.entries.contains_key(&key) {
                 return Some(shard);
@@ -541,7 +540,17 @@ impl ProtectionState {
                 // least recently seen idle entry in this shard so a new client
                 // is still tracked; active connections and live bans stay.
                 if !evict_oldest(&mut shard.entries, now) {
-                    return None;
+                    // This shard is all active or banned, but another shard may
+                    // hold an idle entry: one shard must not be able to deny
+                    // tracking to every other.
+                    drop(shard);
+                    if !self.evict_oldest_any_shard(now) {
+                        return None;
+                    }
+                    shard = lock(&self.shards[shard_index(key)]);
+                    if !reserve_slot(&self.tracked_ips, config.max_tracked_ips) {
+                        return None;
+                    }
                 }
                 shard.entries.insert(key, Entry::new(now, config.burst));
                 return Some(shard);
@@ -549,6 +558,56 @@ impl ProtectionState {
         }
         shard.entries.insert(key, Entry::new(now, config.burst));
         Some(shard)
+    }
+
+    /// Drop entries that are stale in every shard, at most once per
+    /// [`SWEEP_INTERVAL`].
+    fn sweep_stale(&self, now: Instant) {
+        {
+            let mut last_sweep = lock(&self.last_sweep);
+            if last_sweep.is_some_and(|last| now.saturating_duration_since(last) < SWEEP_INTERVAL) {
+                return;
+            }
+            *last_sweep = Some(now);
+        }
+        for shard in &self.shards {
+            let mut shard = lock(shard);
+            let before = shard.entries.len();
+            evict_stale(&mut shard.entries, now);
+            self.tracked_ips
+                .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
+        }
+    }
+
+    /// Remove the least recently seen idle entry from any shard and free its
+    /// slot. Used when the target shard has nothing to evict.
+    fn evict_oldest_any_shard(&self, now: Instant) -> bool {
+        let mut oldest: Option<(Instant, usize)> = None;
+        for (index, shard) in self.shards.iter().enumerate() {
+            let shard = lock(shard);
+            let Some((_, entry)) = shard
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.connections == 0 && !entry.banned_until.is_some_and(|until| until > now)
+                })
+                .min_by_key(|(_, entry)| entry.last_seen)
+            else {
+                continue;
+            };
+            if oldest.is_none_or(|(seen, _)| entry.last_seen < seen) {
+                oldest = Some((entry.last_seen, index));
+            }
+        }
+        let Some((_, index)) = oldest else {
+            return false;
+        };
+        let mut shard = lock(&self.shards[index]);
+        if !evict_oldest(&mut shard.entries, now) {
+            return false;
+        }
+        self.tracked_ips.fetch_sub(1, Ordering::AcqRel);
+        true
     }
 
     fn check_client(&self, key: IpAddr, config: &Protection, cost: f64) -> Option<Decision> {
@@ -1729,6 +1788,33 @@ mod tests {
                 Decision::Allow
             ),
             "a full table must admit a new source by evicting an idle one"
+        );
+        assert_eq!(state.tracked_ips.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_shard_does_not_deny_tracking_to_other_shards() {
+        let state = Arc::new(ProtectionState::new());
+        let mut config = config();
+        config.max_tracked_ips = 2;
+
+        // 10.0.0.1 and .17 share shard 1; 10.0.0.2 maps elsewhere.
+        assert!(matches!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(
+            state.check_request(ip("10.0.0.17"), &config),
+            Decision::Allow
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            matches!(
+                state.check_request(ip("10.0.0.2"), &config),
+                Decision::Allow
+            ),
+            "a source from another shard must still be tracked"
         );
         assert_eq!(state.tracked_ips.load(Ordering::Relaxed), 2);
     }

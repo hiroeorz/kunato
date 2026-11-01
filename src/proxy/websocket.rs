@@ -18,7 +18,7 @@ use tracing::{debug, warn};
 
 use crate::client_ip::ClientSource;
 use crate::config::CompiledConfig;
-use crate::protection::{ConnectionGuard, ProtectionState};
+use crate::protection::{ConnectionGuard, Decision as ProtectionDecision, ProtectionState};
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::server::{InspectionBudget, InspectionGuard};
 use crate::proxy::{ProxyBody, full_body};
@@ -319,7 +319,12 @@ async fn pump_upstream_to_client<R, W>(
     let mut budget = MessageBudget::new(inspection);
     loop {
         tokio::select! {
-            frame = read_frame(&mut reader, message_limit, false, Some(&mut budget)) => {
+            frame = read_frame(
+                &mut reader,
+                message_limit.saturating_sub(message.payload_len()),
+                false,
+                Some(&mut budget),
+            ) => {
                 let frame = match frame {
                     Ok(frame) => frame,
                     Err(WsError::TooLarge) => {
@@ -452,7 +457,11 @@ async fn pump_client_to_upstream<R, W>(
     let mut message = Message::default();
     let mut budget = MessageBudget::new(inspection);
     loop {
-        let frame = match read_frame(&mut reader, message_limit, true, Some(&mut budget)).await {
+        // A frame header may declare the whole message limit again even when
+        // earlier fragments already filled it; clamp the read, and therefore
+        // the budget it may reserve, to what is actually left.
+        let remaining = message_limit.saturating_sub(message.payload_len());
+        let frame = match read_frame(&mut reader, remaining, true, Some(&mut budget)).await {
             Ok(frame) => frame,
             Err(WsError::TooLarge) => {
                 send_close(&close, 1009, "message too large").await;
@@ -512,6 +521,20 @@ async fn pump_client_to_upstream<R, W>(
         // Established tunnels follow a hot reload: each message is evaluated
         // against the configuration current at that moment.
         let config = live_config.load();
+        // Application messages are user traffic: charge the same per-source
+        // budget as an HTTP request so a tunnel cannot bypass rate limits and
+        // bans by staying open.
+        match protection.check_request(source_ip, &config.protection) {
+            ProtectionDecision::Allow => {}
+            ProtectionDecision::RateLimited { .. } | ProtectionDecision::Banned { .. } => {
+                send_close(&close, 1008, "rate limited").await;
+                return;
+            }
+            ProtectionDecision::Overloaded { .. } => {
+                send_close(&close, 1013, "service overloaded").await;
+                return;
+            }
+        }
         let outcome = evaluate_websocket(&config, &view, Some(protection.as_ref()));
         if let Some(blocked) = outcome.blocked {
             warn!(
@@ -608,6 +631,10 @@ impl Message {
         self.payload.extend_from_slice(&frame.payload);
         self.raw.push(frame.raw);
         Ok(())
+    }
+
+    fn payload_len(&self) -> usize {
+        self.payload.len()
     }
 
     fn finish(&mut self) -> (u8, Vec<u8>, Vec<Vec<u8>>) {

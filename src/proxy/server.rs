@@ -70,7 +70,7 @@ impl InspectionBudget {
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InspectionGuard> {
         self.add(bytes).then(|| InspectionGuard {
             budget: Arc::clone(self),
-            bytes,
+            bytes: AtomicUsize::new(bytes),
         })
     }
 
@@ -98,12 +98,15 @@ impl InspectionBudget {
 
 pub(crate) struct InspectionGuard {
     budget: Arc<InspectionBudget>,
-    bytes: usize,
+    /// Shared so a guard attached to a body stream can still release the
+    /// reservation once the decoded buffers are gone, without waiting for the
+    /// stream to finish.
+    bytes: AtomicUsize,
 }
 
 impl InspectionGuard {
     fn bytes(&self) -> usize {
-        self.bytes
+        self.bytes.load(Ordering::Relaxed)
     }
 
     pub(crate) fn grow(&mut self, additional: usize) -> bool {
@@ -113,14 +116,40 @@ impl InspectionGuard {
         if !self.budget.add(additional) {
             return false;
         }
-        self.bytes += additional;
+        self.bytes.fetch_add(additional, Ordering::AcqRel);
         true
+    }
+
+    /// Release the reservation above `target` immediately. Inspection reserves
+    /// a worst case before decoding, but only the buffers it actually keeps
+    /// should stay reserved while a slow client drains the response.
+    pub(crate) fn shrink_to(&self, target: usize) {
+        let mut current = self.bytes.load(Ordering::Acquire);
+        loop {
+            if target >= current {
+                return;
+            }
+            match self
+                .bytes
+                .compare_exchange(current, target, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    self.budget
+                        .reserved
+                        .fetch_sub(current - target, Ordering::AcqRel);
+                    return;
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 }
 
 impl Drop for InspectionGuard {
     fn drop(&mut self) {
-        self.budget.reserved.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.budget
+            .reserved
+            .fetch_sub(self.bytes.load(Ordering::Relaxed), Ordering::AcqRel);
     }
 }
 
@@ -573,8 +602,12 @@ async fn serve_connection(
                 debug!(client = %peer, "connection ended before HTTP version detection");
                 return;
             };
+            let write_idle = context.config().timeouts.connection_idle;
             serve_io(
-                TokioIo::new(PrefixedIo::new(stream, prefix)),
+                TokioIo::new(WriteIdleIo::new(
+                    PrefixedIo::new(stream, prefix),
+                    write_idle,
+                )),
                 protocol,
                 peer,
                 context,
@@ -604,8 +637,9 @@ async fn serve_tls_connection(
     } else {
         Protocol::Http1
     };
+    let write_idle = context.config().timeouts.connection_idle;
     serve_io(
-        TokioIo::new(tls),
+        TokioIo::new(WriteIdleIo::new(tls, write_idle)),
         protocol,
         peer,
         context,
@@ -702,6 +736,84 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<S> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// Disconnects a client that stops accepting response bytes. The inspection
+/// guard travels with the response body, so a client that reads nothing would
+/// otherwise keep its reservation (and its connection slot) forever.
+struct WriteIdleIo<I> {
+    inner: I,
+    idle: Duration,
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<I> WriteIdleIo<I> {
+    fn new(inner: I, idle: Duration) -> Self {
+        Self {
+            inner,
+            idle,
+            deadline: None,
+        }
+    }
+
+    fn poll_progress<F, T>(
+        &mut self,
+        cx: &mut TaskContext<'_>,
+        mut poll: F,
+    ) -> Poll<std::io::Result<T>>
+    where
+        F: FnMut(&mut I, &mut TaskContext<'_>) -> Poll<std::io::Result<T>>,
+    {
+        match poll(&mut self.inner, cx) {
+            Poll::Ready(result) => {
+                self.deadline = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => {
+                let idle = self.idle;
+                let deadline = self
+                    .deadline
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(idle)));
+                match deadline.as_mut().poll(cx) {
+                    Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "client made no write progress",
+                    ))),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for WriteIdleIo<I> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for WriteIdleIo<I> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        this.poll_progress(cx, |inner, cx| Pin::new(inner).poll_write(cx, buf))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        this.poll_progress(cx, |inner, cx| Pin::new(inner).poll_flush(cx))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
@@ -1685,6 +1797,10 @@ async fn process(
             ));
         }
     };
+    // Decoding needed the worst-case reservation; from here on only the raw
+    // prefix and the decoded buffer stay alive, so release the difference
+    // instead of holding it until the response body finishes.
+    inspection.shrink_to(payload.prefix.len().saturating_add(inspected_body.len()));
     if decode_body {
         let decision = context.protection.charge_inspection(
             source.client_ip,
@@ -2098,6 +2214,53 @@ mod tests {
         assert!(prefix.starts_with(b"GET /"));
     }
 
+    struct StalledWriter;
+
+    impl AsyncWrite for StalledWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_stops_accepting_writes_is_disconnected() {
+        let mut io = WriteIdleIo::new(StalledWriter, Duration::from_secs(60));
+        let write = tokio::io::AsyncWriteExt::write(&mut io, b"response");
+        let result = tokio::time::timeout(Duration::from_secs(120), write)
+            .await
+            .expect("the write must be bounded");
+        assert!(result.is_err(), "a stalled client must be dropped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn writes_that_make_progress_are_not_timed_out() {
+        let mut io = WriteIdleIo::new(tokio::io::sink(), Duration::from_secs(5));
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(3)).await;
+            tokio::io::AsyncWriteExt::write_all(&mut io, b"x")
+                .await
+                .expect("write");
+        }
+    }
+
     #[test]
     fn duplicate_content_type_is_rejected_before_body_reads() {
         let config =
@@ -2223,31 +2386,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_reservations_cover_upstream_waits_and_release_afterwards() {
+    async fn an_exhausted_inspection_budget_rejects_new_requests() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("upstream");
         let upstream = listener.local_addr().expect("address");
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let upstream_arrived = Arc::clone(&arrived);
-        let upstream_release = Arc::clone(&release);
         let upstream_task = tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.expect("accept");
-                let arrived = Arc::clone(&upstream_arrived);
-                let release = Arc::clone(&upstream_release);
                 tokio::spawn(async move {
-                    let service = service_fn(move |request: Request<Incoming>| {
-                        let arrived = Arc::clone(&arrived);
-                        let release = Arc::clone(&release);
-                        async move {
-                            let hold = request.uri().path() == "/hold";
-                            request.into_body().collect().await.expect("request body");
-                            if hold {
-                                arrived.notify_one();
-                                release.notified().await;
-                            }
-                            Ok::<_, Infallible>(Response::new(full_body("ok")))
-                        }
+                    let service = service_fn(|request: Request<Incoming>| async move {
+                        request.into_body().collect().await.expect("request body");
+                        Ok::<_, Infallible>(Response::new(full_body("ok")))
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
@@ -2271,31 +2419,20 @@ mod tests {
         .expect("server");
         let addr = server.local_addr().expect("address");
         let budget = Arc::clone(&server.context.inspection);
-        let _occupied = budget
-            .reserve(INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION)
-            .expect("leave one request slot");
         let (shutdown, receiver) = watch::channel(false);
         let server_task = tokio::spawn(server.run(receiver));
-        let first = tokio::spawn(test_request_status(addr, "/hold"));
-        tokio::time::timeout(Duration::from_secs(3), arrived.notified())
-            .await
-            .expect("upstream reached");
 
-        assert_eq!(
-            budget.reserved.load(Ordering::Relaxed),
-            INSPECTION_BUDGET_BYTES
-        );
+        let occupied = budget
+            .reserve(INSPECTION_BUDGET_BYTES)
+            .expect("exhaust the budget");
         assert_eq!(
             test_request_status(addr, "/probe").await,
             StatusCode::SERVICE_UNAVAILABLE
         );
-        release.notify_one();
-        assert_eq!(first.await.expect("first task"), StatusCode::OK);
+
+        drop(occupied);
         assert_eq!(test_request_status(addr, "/probe").await, StatusCode::OK);
-        assert_eq!(
-            budget.reserved.load(Ordering::Relaxed),
-            INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION
-        );
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
 
         shutdown.send(true).expect("shutdown");
         server_task.await.expect("server task");
@@ -2353,9 +2490,10 @@ categories:
         .await
         .expect("inspected response");
 
-        assert!(
-            budget.reserve(1).is_none(),
-            "response prefix remains buffered"
+        assert_eq!(
+            budget.reserved.load(Ordering::Relaxed),
+            INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION + 2,
+            "only the buffered prefix stays reserved after inspection"
         );
         drop(response);
         assert_eq!(

@@ -88,7 +88,23 @@ pub async fn run(
                     .rules_last_success
                     .store(unix_now(), Ordering::Relaxed);
                 info!(path = %rules_file.display(), "rules file updated");
-                watcher::reload(&main_config, &config, &metrics, disable_protection);
+                // Compiling rules and regexes blocks; keep it off the async
+                // worker so the proxy keeps serving during a refresh.
+                let reload_path = main_config.clone();
+                let reload_config = Arc::clone(&config);
+                let reload_metrics = Arc::clone(&metrics);
+                if let Err(err) = tokio::task::spawn_blocking(move || {
+                    watcher::reload(
+                        &reload_path,
+                        &reload_config,
+                        &reload_metrics,
+                        disable_protection,
+                    );
+                })
+                .await
+                {
+                    error!(error = %err, "rules reload task failed");
+                }
                 true
             }
             Ok(UpdateOutcome::NotModified) => {
@@ -119,6 +135,15 @@ pub async fn run(
         };
 
         if succeeded {
+            // The state file may be unwritable (read-only directory): never
+            // fall through into an immediate re-check loop. Reading the state
+            // again covers the normal case; otherwise wait one interval.
+            let delay = delay_until_due(&UpdateState::read(&state_file), &settings)
+                .filter(|delay| *delay <= settings.interval)
+                .unwrap_or(settings.interval);
+            if wait_for_shutdown(&mut shutdown, delay).await {
+                break;
+            }
             continue;
         }
         let delay = settings.interval.min(FAILURE_RETRY);
@@ -681,14 +706,18 @@ impl UpdateState {
 }
 
 fn delay_until_due(state: &UpdateState, settings: &RulesUpdate) -> Option<Duration> {
-    if let Some(next_due) = state.next_due {
-        let now = Duration::from_secs(unix_now());
-        return Duration::from_secs(next_due).checked_sub(now);
-    }
-    let last_success = state.last_success?;
-    let due = Duration::from_secs(last_success).saturating_add(settings.interval);
-    let now = Duration::from_secs(unix_now());
-    due.checked_sub(now)
+    let delay = if let Some(next_due) = state.next_due {
+        Duration::from_secs(next_due).checked_sub(Duration::from_secs(unix_now()))
+    } else {
+        let last_success = state.last_success?;
+        Duration::from_secs(last_success)
+            .saturating_add(settings.interval)
+            .checked_sub(Duration::from_secs(unix_now()))
+    };
+    // `next_due` has second granularity, so it equals `now` for up to a second
+    // after it is written; sleeping at least a second avoids a busy loop
+    // without re-checking the remote immediately.
+    delay.map(|delay| delay.max(Duration::from_secs(1)))
 }
 
 /// Randomize the next check by the configured percentage in both directions:
@@ -948,6 +977,33 @@ mod tests {
         assert_eq!(
             read.last_modified.as_deref(),
             Some("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
+    }
+
+    #[test]
+    fn a_due_timer_never_returns_a_zero_delay() {
+        use crate::config::RulesUpdate;
+
+        let settings = RulesUpdate::default();
+        let now = unix_now();
+        let state = UpdateState {
+            next_due: Some(now + 1),
+            ..UpdateState::default()
+        };
+        assert_eq!(
+            delay_until_due(&state, &settings),
+            Some(Duration::from_secs(1)),
+            "a timer that just came due must not spin"
+        );
+
+        let state = UpdateState {
+            next_due: Some(now + 60),
+            ..UpdateState::default()
+        };
+        let delay = delay_until_due(&state, &settings).expect("future delay");
+        assert!(
+            (58..=60).contains(&delay.as_secs()),
+            "unexpected delay: {delay:?}"
         );
     }
 

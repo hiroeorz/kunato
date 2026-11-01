@@ -156,9 +156,11 @@ The installer downloads only over HTTPS (`curl --proto '=https' --proto-redir
 '=https'`), validates the version tag, and extracts the archive with
 `--no-same-owner --no-same-permissions` before installing files as root.
 `KUNATO_BASE_URL` must therefore be an `https://` URL. `kunato upgrade` reruns
-the installer published with the target release; it trusts the GitHub release
-and tag, so signing release assets and verifying them in the installer remains
-a separate hardening task.
+the installer published with the target release in a cleared environment (only
+`PATH` is inherited, so a caller-supplied `KUNATO_BASE_URL` or a planted `curl`
+cannot steer the root install). It trusts the GitHub release and tag, so
+signing release assets and verifying them in the installer remains a separate
+hardening task.
 
 Without network access, or to build a custom binary, build from source (Rust
 1.89 or later, edition 2024):
@@ -810,6 +812,11 @@ Defaults:
 | `max_response_body_bytes` | 1 MiB   |
 | `max_concurrent_streams`  | 100     |
 
+Every served connection also has a write-progress deadline: a client that makes
+no write progress for `connection_idle` is disconnected, so a stalled reader
+cannot hold an inspection reservation or a connection slot forever. Streaming
+responses must therefore make progress (or send heartbeats) within that window.
+
 `max_path_bytes` bounds the whole request target (path plus query string), not
 just the path. Request-target length, header size/count, and method-case checks
 run before inspection memory is reserved or the body is read on all transports,
@@ -830,7 +837,11 @@ frames, and a matching `BLOCK` closes the tunnel with code `1008` instead of
 delivering the message. Text is matched lossily in that direction without a
 UTF-8 rejection, and an `ALLOW` ends evaluation for the current message only.
 Inspection reserves from the process-wide 256 MiB inspection budget in both
-directions; budget exhaustion closes the tunnel with code `1013`.
+directions; budget exhaustion closes the tunnel with code `1013`. A frame
+header may declare only the bytes left in the current message, so a large
+declared length cannot reserve budget ahead of the payload. Each client-to-server
+message is charged to the source's request budget like an HTTP request: a rate
+limit or ban closes the tunnel with `1008`, and global overload with `1013`.
 `max_concurrent_streams` caps concurrent request streams per
 HTTP/2 connection (and per QUIC connection for HTTP/3). HTTP/2 connections are
 pinged after 30 seconds without activity and closed when the ping is not
@@ -838,15 +849,18 @@ acknowledged within 20 seconds. In addition, the first HTTP/2 request must
 start within `header_read`, and a connection with no request in flight is closed
 after `connection_idle`; a client that completes the TLS/ALPN handshake but
 never sends a request therefore cannot hold a connection slot indefinitely.
-HTTP/3 uses the same `connection_idle` value for the QUIC idle timeout. The
-process-wide inspection budget (256 MiB, reserved from the configured body
-limits) bounds the total memory used by concurrent body buffering; requests
-reserve a baseline share and grow it as body bytes arrive, so a small request
-does not take a large body's share. Reservations remain held while a request
-context retains its body during an upstream exchange, and follow buffered
-request/response bytes through replay, clones, and slices. Response-prefix
-reservations are released when those bytes are released, even if an unbuffered
-streaming tail remains open. Exhausted capacity returns `503` with `Retry-After`.
+HTTP/3 uses the same `connection_idle` value for the QUIC idle timeout, applies
+`header_read` to the QUIC handshake, the HTTP/3 setup, and each request head,
+and answers a QUIC Initial from an unvalidated address with a Retry before it
+takes a connection slot. The process-wide inspection budget (256 MiB, reserved
+from the configured body limits) bounds the total memory used by concurrent body
+buffering; requests reserve a baseline share and grow it as body bytes arrive,
+so a small request does not take a large body's share. A worst-case reservation
+made for decoding is shrunk back to the buffers actually kept as soon as the
+decoded forms are built, and follows buffered request/response bytes through
+replay, clones, and slices. Response-prefix reservations are likewise shrunk to
+the buffered bytes once inspection is done, so a slow reader keeps only what is
+still queued. Exhausted capacity returns `503` with `Retry-After`.
 
 `body_inspection` defaults to `strict`: when request-body rules, a GraphQL
 endpoint, or multipart upload inspection need the body, the buffered prefix is
@@ -1626,6 +1640,9 @@ Kunato watches the configuration file plus the configured `rules_file` and
 - A valid configuration is swapped in atomically; in-flight HTTP requests are
   unaffected, while established WebSocket tunnels apply the new rules to each
   subsequent message.
+- Reloads are serialized across the file watcher, SIGHUP, and the rules updater,
+  and the parse/compile runs on a blocking worker, so two reloads cannot store
+  snapshots out of order and the async workers keep serving during a refresh.
 - An invalid configuration is rejected and the last known good rules remain active,
   with the error reported in the logs.
 

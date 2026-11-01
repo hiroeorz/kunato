@@ -53,12 +53,7 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
     }
     println!("running the installer from {url}");
 
-    let mut command = Command::new("sh");
-    command.arg("-s").arg("--");
-    if let Some(tag) = &tag {
-        command.arg("--version").arg(tag);
-    }
-    command.arg("--yes");
+    let mut command = installer_command(tag.as_deref());
     command.stdin(Stdio::piped());
     let mut child = command
         .spawn()
@@ -78,6 +73,28 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// Build the shell invocation for the downloaded installer. The environment is
+/// cleared: `kunato upgrade` runs as root, so a variable inherited from the
+/// caller (`KUNATO_BASE_URL`, `PATH` with a planted `curl`) must not steer the
+/// install. Only `PATH` is kept so the script can find `curl`, `tar`, and
+/// `sha256sum`.
+fn installer_command(tag: Option<&str>) -> Command {
+    const FALLBACK_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+    let mut command = Command::new("sh");
+    command.arg("-s").arg("--");
+    if let Some(tag) = tag {
+        command.arg("--version").arg(tag);
+    }
+    command.arg("--yes");
+    command.env_clear();
+    command.env(
+        "PATH",
+        std::env::var_os("PATH").unwrap_or_else(|| FALLBACK_PATH.into()),
+    );
+    command
 }
 
 /// Validate and normalize a release tag: `0.4.0` and `v0.4.0` name the same
@@ -167,6 +184,23 @@ mod tests {
             installer_url(Some("v0.4.0")).unwrap(),
             "https://github.com/hiroeorz/kunato/releases/download/v0.4.0/install.sh"
         );
+    }
+
+    #[test]
+    fn the_installer_runs_with_a_cleared_environment() {
+        let command = installer_command(Some("v0.4.0"));
+        let environment: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            environment.len(),
+            1,
+            "only PATH may be inherited: {environment:?}"
+        );
+        assert_eq!(environment[0].0, "PATH");
+        let arguments: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(arguments, ["-s", "--", "--version", "v0.4.0", "--yes"]);
     }
 
     #[test]
