@@ -43,6 +43,10 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # The rules signing key lives in this environment's secrets. Keep the
+    # environment unprotected so the scheduled run stays unattended; repository
+    # write access, workflow review, and push notifications are the controls.
+    environment: rules-signing
     env:
       MODEL: ${{ inputs.model || 'opencode-go/deepseek-v4.1-flash' }}
     steps:
@@ -103,7 +107,7 @@ jobs:
             case "$path" in
               blackbox/requests/blocked.txt | blackbox/requests/allowed.txt | \
                 rules.example.yaml | dist/rules.yaml | dist/rules.yaml.sha256 | \
-                docs/cve-coverage.md) ;;
+                dist/rules.yaml.minisig | docs/cve-coverage.md) ;;
               *)
                 echo "::error::unexpected change: $path"
                 status=1
@@ -112,8 +116,32 @@ jobs:
           done < "$RUNNER_TEMP/changed.txt"
           exit "$status"
 
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+
       - name: Regenerate the managed rule set
         run: scripts/update-dist-rules.sh
+
+      - name: Sign the managed rule set
+        env:
+          RULES_SIGNING_KEY: ${{ secrets.RULES_SIGNING_KEY }}
+          RULES_SIGNING_PASSPHRASE: ${{ secrets.RULES_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- dist/rules.yaml; then
+            echo "rule set unchanged; keeping the existing signature"
+            exit 0
+          fi
+          umask 077
+          key="$RUNNER_TEMP/rules.key"
+          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT INT TERM
+          printf '%s' "$RULES_SIGNING_KEY" >"$key"
+          printf '%s\n' "$RULES_SIGNING_PASSPHRASE" | minisign -S -s "$key" \
+            -m dist/rules.yaml -x dist/rules.yaml.minisig \
+            -t "rules.yaml $(date -u +%FT%TZ)"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

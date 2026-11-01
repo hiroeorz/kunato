@@ -86,6 +86,35 @@ gh release upload vX.Y.Z install.sh.minisig SHA256SUMS.minisig
 `dist/rules.yaml.minisig` must be committed together with the rule set: the
 updater fetches `<rules url>.minisig` and verifies it over the downloaded bytes.
 
+## Continuous integration
+
+The daily CVE workflow signs the regenerated rule set itself. The rules signing
+key (and only that key) is stored in the `rules-signing` GitHub environment:
+
+| Secret | Contents |
+| --- | --- |
+| `RULES_SIGNING_KEY` | the password-protected minisign secret key file |
+| `RULES_SIGNING_PASSPHRASE` | its passphrase |
+
+The job installs `minisign`, writes the key to `$RUNNER_TEMP` with mode `0600`,
+pipes the passphrase on stdin (minisign falls back to stdin when there is no
+terminal), signs `dist/rules.yaml`, and shreds the key in an `EXIT` trap. It
+signs only when `dist/rules.yaml` changed; otherwise the committed signature is
+kept. `cargo test` then verifies the committed pair, so an unsigned or stale
+rule set fails the job before anything is pushed.
+
+The environment has no protection rules so the scheduled run stays unattended.
+The compensating controls are: repository write access, required review for
+`.github/workflows/**` via CODEOWNERS, SHA-pinned actions, the smallest workflow
+permissions, and push notifications for `main`.
+
+**Residual risk:** anyone who can write to the repository and modify a workflow
+can make the job sign arbitrary rule sets. Rotate the key on any suspicion:
+generate a new pair, add its public key to `RULES_KEYS`, release, update both
+secrets, and remove the old key after installs have upgraded. A key change makes
+installs older than that release stop receiving rules (they keep their current
+set), so announce the rotation with the release.
+
 ## Rotation
 
 1. Generate the next key pair and add its public key to the matching list.

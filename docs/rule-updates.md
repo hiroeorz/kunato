@@ -67,6 +67,9 @@ and detect.
 
 - The published set stays readable by the **newest release**. Nothing older is
   guaranteed.
+- The daily workflow signs `dist/rules.yaml` with the detached minisign key
+  stored in the `rules-signing` environment; an unsigned or stale signature
+  fails the workflow before it pushes. See `release-signing.md`.
 - Adding a field, match target, action, or phase to the engine is a **release
   event**, not a rule-update event: rules may use it only after a release that
   understands it.
