@@ -41,16 +41,10 @@ pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
         }
     }
     for (_, value) in cookie_pairs(headers) {
-        if let Some(reason) = check_token(value.as_ref(), policy) {
-            return Some(reason);
-        }
-        // Frameworks decode the cookie before handing the token to the
-        // application, so the encoded form must be inspected too.
-        let decoded = crate::decoding::percent_decode(value.as_ref());
-        if decoded.as_ref() != value.as_ref()
-            && let Some(reason) = check_token(&decoded, policy)
-        {
-            return Some(reason);
+        for form in crate::decoding::percent_decode_forms(value.as_ref()) {
+            if let Some(reason) = check_token(form.as_ref(), policy) {
+                return Some(reason);
+            }
         }
     }
     None
@@ -65,7 +59,7 @@ fn looks_like_jwt(token: &str) -> bool {
     else {
         return false;
     };
-    decode_base64url(header).is_some_and(|decoded| decoded.starts_with(b"{"))
+    decode_base64url(header).is_some_and(|decoded| decoded.trim_ascii_start().starts_with(b"{"))
 }
 
 fn check_token(token: &str, policy: &Jwt) -> Option<String> {
@@ -112,6 +106,9 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
     let Some(payload) = decode_base64url(payload) else {
         return Some("jwt payload is not valid base64url".to_owned());
     };
+    if crate::hardening::has_duplicate_json_key(&payload) {
+        return Some("jwt payload has duplicate keys".to_owned());
+    }
     let claims: serde_json::Value = match serde_json::from_slice(&payload) {
         Ok(claims) => claims,
         Err(_) => return Some("jwt payload is not valid JSON".to_owned()),
@@ -349,6 +346,24 @@ mod tests {
         assert_eq!(
             violation(&bearer(&token(&header, "e30")), &policy()),
             Some("jwt header has duplicate keys".to_owned())
+        );
+
+        let mut claim_policy = policy();
+        claim_policy.require_exp = true;
+        let payload = encode(r#"{"exp":1,"exp":9999999999}"#);
+        assert_eq!(
+            violation(
+                &bearer(&token("eyJhbGciOiJSUzI1NiJ9", &payload)),
+                &claim_policy
+            ),
+            Some("jwt payload has duplicate keys".to_owned())
+        );
+
+        let whitespace_header = encode(r#" {"alg":"none"}"#);
+        let oversized = format!("{whitespace_header}.{}.c2ln", "e".repeat(9000));
+        assert_eq!(
+            violation(&bearer(&oversized), &policy()),
+            Some("jwt is too large to inspect".to_owned())
         );
     }
 

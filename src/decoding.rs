@@ -51,29 +51,31 @@ const NON_INSPECTABLE_CHARSETS: &[&str] = &[
 pub(crate) fn uninspectable_charset(headers: &HeaderMap, body: &[u8]) -> Option<String> {
     let content_type = headers
         .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+        .map(|value| String::from_utf8_lossy(value.as_bytes()))
+        .unwrap_or_default();
     let media_type = content_type
         .split(';')
         .next()
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    // Parts of a multipart body carry their own charset; the request-level
-    // declaration does not describe them.
+    if let Some(charset) = uninspectable_charset_in_header(&content_type) {
+        return Some(charset);
+    }
     if media_type == "multipart/form-data" {
-        return None;
+        return uninspectable_multipart_charset(&content_type, body);
     }
-    if let Some(charset) = content_type_param(content_type, "charset") {
-        let charset = charset.trim().trim_matches('"').to_ascii_lowercase();
-        if NON_INSPECTABLE_CHARSETS.contains(&charset.as_str()) {
-            return Some(charset);
-        }
+    if is_textual_media_type(&media_type) && has_wide_bom(body) {
+        return Some("utf-16/utf-32 byte-order mark".to_owned());
     }
-    let textual = media_type.is_empty()
+    None
+}
+
+fn is_textual_media_type(media_type: &str) -> bool {
+    media_type.is_empty()
         || media_type.starts_with("text/")
         || matches!(
-            media_type.as_str(),
+            media_type,
             "application/json"
                 | "application/xml"
                 | "application/x-www-form-urlencoded"
@@ -81,11 +83,9 @@ pub(crate) fn uninspectable_charset(headers: &HeaderMap, body: &[u8]) -> Option<
                 | "application/xhtml+xml"
         )
         || media_type.ends_with("+json")
-        || media_type.ends_with("+xml");
-    if textual && has_wide_bom(body) {
-        return Some("utf-16/utf-32 byte-order mark".to_owned());
-    }
-    None
+        || media_type.ends_with("+xml")
+        || media_type.contains("/json")
+        || media_type.contains("-json")
 }
 
 fn has_wide_bom(body: &[u8]) -> bool {
@@ -94,21 +94,199 @@ fn has_wide_bom(body: &[u8]) -> bool {
         || body.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
 }
 
-/// The value of a `Content-Type` parameter such as `charset`.
-fn content_type_param(content_type: &str, name: &str) -> Option<String> {
-    for parameter in content_type.split(';').skip(1) {
-        let parameter = parameter.trim();
-        let Some((parameter_name, value)) = parameter.split_once('=') else {
-            continue;
-        };
-        if parameter_name.trim().eq_ignore_ascii_case(name) {
-            let value = value.trim();
-            let value = value.strip_prefix('"').unwrap_or(value);
-            let value = value.strip_suffix('"').unwrap_or(value);
-            return Some(value.to_owned());
+fn is_uninspectable_charset_name(charset: &str) -> bool {
+    let trimmed = charset
+        .trim()
+        .trim_matches(|ch| ch == '"' || ch == '\'')
+        .trim()
+        .to_ascii_lowercase();
+    if NON_INSPECTABLE_CHARSETS.contains(&trimmed.as_str()) {
+        return true;
+    }
+    let compact: String = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    compact.starts_with("utf16")
+        || compact.starts_with("utf32")
+        || compact.starts_with("utf7")
+        || compact.ends_with("utf7")
+        || compact.starts_with("xutf16")
+        || compact.starts_with("xutf32")
+        || compact.starts_with("xutf7")
+        || compact.starts_with("ucs2")
+        || compact.starts_with("ucs4")
+        || compact.starts_with("iso10646ucs")
+        || compact == "csunicode"
+        || compact.starts_with("unicodefeff")
+        || compact.starts_with("unicodefffe")
+        || compact.contains("ebcdic")
+        || matches!(
+            compact.as_str(),
+            "ibm037"
+                | "cp037"
+                | "csibm037"
+                | "ibm500"
+                | "cp500"
+                | "csibm500"
+                | "ibm875"
+                | "cp875"
+                | "ibm1026"
+                | "cp1026"
+                | "ibm1047"
+                | "cp1047"
+                | "ibm1140"
+                | "cp1140"
+                | "ibm273"
+                | "cp273"
+                | "ibm277"
+                | "cp277"
+                | "ibm278"
+                | "cp278"
+                | "ibm280"
+                | "cp280"
+                | "ibm284"
+                | "cp284"
+                | "ibm285"
+                | "cp285"
+                | "ibm297"
+                | "cp297"
+                | "ibm420"
+                | "cp420"
+                | "ibm424"
+                | "cp424"
+        )
+}
+
+/// Checks every `charset` parameter on a `Content-Type` header value. Multiple
+/// distinct `charset` declarations are rejected too, so an origin that picks
+/// the last parameter cannot see a different encoding than the inspection.
+fn uninspectable_charset_in_header(content_type: &str) -> Option<String> {
+    let mut seen: Option<String> = None;
+    for raw in content_type_params(content_type, "charset") {
+        let normalized = raw
+            .trim()
+            .trim_matches(|ch| ch == '"' || ch == '\'')
+            .trim()
+            .to_ascii_lowercase();
+        if normalized.is_empty() || is_uninspectable_charset_name(&normalized) {
+            return Some(if normalized.is_empty() {
+                "empty".to_owned()
+            } else {
+                normalized
+            });
+        }
+        if let Some(previous) = &seen {
+            if previous != &normalized {
+                return Some(format!("{previous}, {normalized}"));
+            }
+        } else {
+            seen = Some(normalized);
         }
     }
     None
+}
+
+fn uninspectable_multipart_charset(content_type: &str, body: &[u8]) -> Option<String> {
+    let Ok(boundaries) = multipart_boundaries(content_type) else {
+        return None;
+    };
+    for boundary in boundaries {
+        let Some(parts) = multipart_parts(body, &boundary) else {
+            continue;
+        };
+        for part in parts {
+            let headers = String::from_utf8_lossy(part.headers);
+            if let Some(part_ct) = header_value(&headers, "content-type") {
+                if let Some(charset) = uninspectable_charset_in_header(part_ct) {
+                    return Some(charset);
+                }
+                let part_media = part_ct
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                if is_textual_media_type(&part_media) && has_wide_bom(part.value) {
+                    return Some("utf-16/utf-32 byte-order mark".to_owned());
+                }
+            } else if part.filename().is_none() && has_wide_bom(part.value) {
+                return Some("utf-16/utf-32 byte-order mark".to_owned());
+            }
+            if let Some(disposition) = header_value(&headers, "content-disposition")
+                && disposition_param(disposition, "name")
+                    .is_some_and(|name| name.eq_ignore_ascii_case("_charset_"))
+            {
+                let value = String::from_utf8_lossy(trim_line_end(part.value));
+                let charset = value.trim().to_ascii_lowercase();
+                if is_uninspectable_charset_name(&charset) {
+                    return Some(charset);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Values of every matching parameter (such as `charset`) in a `Content-Type`
+/// header, respecting quoted strings so a `;` inside another parameter cannot
+/// hide a trailing `charset=`.
+fn content_type_params(content_type: &str, target: &str) -> Vec<String> {
+    let bytes = content_type.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index] != b';' {
+        index += 1;
+    }
+    let mut matches = Vec::new();
+    while index < bytes.len() {
+        index += 1; // ';'
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let name_start = index;
+        while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b';' {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            continue;
+        }
+        let name = content_type[name_start..index].trim();
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let value = if index < bytes.len() && matches!(bytes[index], b'"' | b'\'') {
+            let quote = bytes[index];
+            index += 1;
+            let mut value = Vec::new();
+            while index < bytes.len() && bytes[index] != quote {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    value.push(bytes[index + 1]);
+                    index += 2;
+                } else {
+                    value.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            if index < bytes.len() {
+                index += 1;
+            }
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            String::from_utf8_lossy(&value).into_owned()
+        } else {
+            let start = index;
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            content_type[start..index].trim().to_owned()
+        };
+        if name.eq_ignore_ascii_case(target) {
+            matches.push(value);
+        }
+    }
+    matches
 }
 
 pub fn decode_body_for_inspection(body: &[u8], headers: &HeaderMap, limit: usize) -> DecodeOutcome {
@@ -198,18 +376,25 @@ pub(crate) fn decode_body_formats(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u
     if body.is_empty() {
         return Vec::new();
     }
-    let Some(content_type) = headers.get(CONTENT_TYPE) else {
-        return Vec::new();
-    };
-    let content_type = String::from_utf8_lossy(content_type.as_bytes());
-    let Some(media_type) = content_type.split(';').next() else {
-        return Vec::new();
-    };
-    let media_type = media_type.trim().to_ascii_lowercase();
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()))
+        .unwrap_or_default();
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
 
     if media_type == "application/x-www-form-urlencoded" {
         vec![form_decode(body)]
-    } else if media_type == "application/json" || media_type.ends_with("+json") {
+    } else if media_type == "application/json"
+        || media_type.ends_with("+json")
+        || media_type.contains("/json")
+        || media_type.contains("-json")
+        || looks_like_escaped_json(body)
+    {
         vec![json_unescape(body)]
     } else if media_type == "multipart/form-data" {
         let Ok(boundaries) = multipart_boundaries(&content_type) else {
@@ -225,6 +410,12 @@ pub(crate) fn decode_body_formats(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u
     } else {
         Vec::new()
     }
+}
+
+fn looks_like_escaped_json(body: &[u8]) -> bool {
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    let trimmed = body.trim_ascii_start();
+    matches!(trimmed.first(), Some(b'{' | b'[')) && trimmed.contains(&b'\\')
 }
 
 /// Decoded variants of a request body for inspection: the content-type decoded
@@ -555,7 +746,21 @@ pub(crate) fn multipart_boundaries(
             continue;
         }
         let name = content_type[name_start..index].trim();
+        if name.is_empty()
+            || name.bytes().any(|byte| {
+                byte.is_ascii_whitespace()
+                    || byte == b'"'
+                    || byte == b'\''
+                    || byte.is_ascii_control()
+                    || !byte.is_ascii()
+            })
+        {
+            return Err(MultipartBoundaryError::Malformed);
+        }
         index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
         let boundary_name = name.eq_ignore_ascii_case("boundary");
         let value = if index < bytes.len() && bytes[index] == b'"' {
             index += 1;
@@ -602,6 +807,13 @@ pub(crate) fn multipart_boundaries(
                 index += 1;
             }
             let value = content_type[start..index].trim();
+            if value.is_empty()
+                || value.bytes().any(|byte| {
+                    byte == b'"' || byte == b'\'' || byte.is_ascii_control() || !byte.is_ascii()
+                })
+            {
+                return Err(MultipartBoundaryError::Malformed);
+            }
             // A parameter we do not consume may use any token; only the
             // boundary itself has to stay inside the RFC 2046 character set.
             if boundary_name && !is_boundary_token(value) {
@@ -694,8 +906,13 @@ pub(crate) fn multipart_parts_limited<'a>(
             .position(|&byte| byte == b'\n')
             .map_or(body.len(), |index| offset + index + 1);
         let line = trim_line_end(&body[offset..line_end]);
-        let is_delimiter = line == delimiter.as_bytes();
-        let is_closing = line == closing.as_bytes();
+        let trimmed = if line.starts_with(b"--") {
+            line.trim_ascii_end()
+        } else {
+            line
+        };
+        let is_delimiter = trimmed == delimiter.as_bytes();
+        let is_closing = trimmed == closing.as_bytes();
         if is_delimiter || is_closing {
             if let Some(start) = part_start.take() {
                 if parts.len() == max_parts {
@@ -802,12 +1019,11 @@ fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
 
 fn disposition_filename(disposition: &str) -> Option<String> {
     if let Some(encoded) = disposition_param(disposition, "filename*") {
-        if let Some((_, rest)) = encoded.split_once('\'')
-            && let Some((_, value)) = rest.split_once('\'')
-        {
-            return Some(percent_decode(value).into_owned());
-        }
-        return Some(encoded);
+        let value = match encoded.split_once('\'') {
+            Some((_, rest)) => rest.split_once('\'').map_or(rest, |(_, value)| value),
+            None => encoded.as_str(),
+        };
+        return Some(percent_decode(value).into_owned());
     }
     disposition_param(disposition, "filename")
 }
@@ -839,19 +1055,42 @@ fn parse_disposition_parameters(
         while index < bytes.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
+        if index >= bytes.len() {
+            break;
+        }
         let name_start = index;
         while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b';' {
             index += 1;
         }
         if index >= bytes.len() || bytes[index] != b'=' {
+            if strict && index > name_start {
+                return None;
+            }
             continue;
         }
-        let name = &header[name_start..index];
+        let name = header[name_start..index].trim();
         index += 1;
         while index < bytes.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
         }
-        let value = if index < bytes.len() && matches!(bytes[index], b'"' | b'\'') {
+        let is_filename_star = name.eq_ignore_ascii_case("filename*");
+        let single_quote_closed_in_param = index < bytes.len()
+            && bytes[index] == b'\''
+            && !is_filename_star
+            && bytes[index + 1..]
+                .iter()
+                .take_while(|&&byte| byte != b';')
+                .any(|&byte| byte == b'\'');
+        if strict
+            && index < bytes.len()
+            && bytes[index] == b'\''
+            && !is_filename_star
+            && !single_quote_closed_in_param
+        {
+            return None;
+        }
+        let value = if index < bytes.len() && (bytes[index] == b'"' || single_quote_closed_in_param)
+        {
             let quote = bytes[index];
             index += 1;
             let mut out = Vec::new();
@@ -869,24 +1108,35 @@ fn parse_disposition_parameters(
             } else if strict {
                 return None;
             }
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if strict && index < bytes.len() && bytes[index] != b';' {
+                return None;
+            }
             String::from_utf8_lossy(&out).into_owned()
         } else {
             let value_start = index;
             while index < bytes.len() && bytes[index] != b';' {
                 index += 1;
             }
-            header[value_start..index].trim().to_owned()
+            let raw = header[value_start..index].trim();
+            if strict && !is_filename_star && raw.bytes().any(|byte| byte == b'"' || byte == b'\'')
+            {
+                return None;
+            }
+            raw.to_owned()
         };
         if let Some(target) = target {
-            if name.trim().eq_ignore_ascii_case(target) {
-                return Some(vec![(name.trim().to_owned(), value)]);
+            if name.eq_ignore_ascii_case(target) {
+                return Some(vec![(name.to_owned(), value)]);
             }
             continue;
         }
         if parameters.len() == MAX_DISPOSITION_PARAMETERS {
             return None;
         }
-        parameters.push((name.trim().to_owned(), value));
+        parameters.push((name.to_owned(), value));
     }
     Some(parameters)
 }
@@ -1464,6 +1714,13 @@ mod tests {
             .expect_err("too many"),
             MultipartBoundaryError::TooMany
         );
+        assert_eq!(
+            multipart_boundaries(
+                "multipart/form-data; foo= \"a; boundary=safe; x=\"; boundary=evil"
+            )
+            .expect("space after = before quote"),
+            vec!["evil".to_owned()]
+        );
     }
 
     #[test]
@@ -1493,6 +1750,28 @@ mod tests {
             HeaderValue::from_static("multipart/form-data; boundary=X"),
         );
         assert_eq!(uninspectable_charset(&headers, &[0xFF, 0xFE]), None);
+        assert_eq!(
+            uninspectable_charset(
+                &headers,
+                b"--X\r\nContent-Disposition: form-data; name=\"q\"\r\nContent-Type: text/plain; charset=utf16le\r\n\r\nhi\r\n--X--\r\n"
+            )
+            .as_deref(),
+            Some("utf16le")
+        );
+        assert_eq!(
+            uninspectable_charset(
+                &headers,
+                b"--X\r\nContent-Disposition: form-data; name=\"_charset_\"\r\n\r\nutf-7\r\n--X--\r\n"
+            )
+            .as_deref(),
+            Some("utf-7")
+        );
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8; charset=utf-16le"),
+        );
+        assert!(uninspectable_charset(&headers, br#"{"a":1}"#).is_some());
     }
 
     #[test]
@@ -1719,5 +1998,20 @@ mod tests {
             Some("photo.jpg")
         );
         assert!(disposition_parameters(&padded).is_none());
+        assert_eq!(
+            disposition_filename("form-data; name=\"f\"; dummy='; filename*=UTF-8''%73hell.%70hp")
+                .as_deref(),
+            Some("shell.php")
+        );
+        assert!(
+            disposition_parameters(
+                "form-data; name=\"f\"; dummy='; filename*=UTF-8''%73hell.%70hp"
+            )
+            .is_none()
+        );
+        assert_eq!(
+            disposition_filename("form-data; name=\"f\"; filename*=''%73hell.%70hp").as_deref(),
+            Some("shell.php")
+        );
     }
 }

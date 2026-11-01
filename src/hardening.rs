@@ -181,24 +181,25 @@ fn find_host(text: &str) -> Option<String> {
 }
 
 fn authority_host(rest: &str) -> Option<String> {
-    if let Some(bracketed) = rest.strip_prefix('[') {
-        let end = bracketed.find(']')?;
-        let host = bracketed[..end].trim_end_matches('.').to_ascii_lowercase();
-        return (!host.is_empty()).then_some(host);
-    }
     let end = rest
         .find(|character: char| {
             matches!(
                 character,
-                '/' | ':' | '?' | '#' | '&' | '"' | '\'' | ' ' | '\t' | '\r' | '\n'
+                '/' | '\\' | '?' | '#' | '&' | '"' | '\'' | ' ' | '\t' | '\r' | '\n'
             )
         })
         .unwrap_or(rest.len());
     let mut authority = &rest[..end];
-    if let Some((_, host)) = authority.rsplit_once('@') {
-        authority = host;
+    if let Some((_, host_port)) = authority.rsplit_once('@') {
+        authority = host_port;
     }
-    let host = authority
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        &bracketed[..end]
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    let host = host
         .trim_matches(|character| character == '[' || character == ']')
         .trim_end_matches('.')
         .to_ascii_lowercase();
@@ -228,11 +229,16 @@ fn duplicate_parameter(view: &RequestView<'_>, policy: &Hardening) -> Option<Str
     {
         return Some(name);
     }
+    let json_body = view
+        .body
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(view.body)
+        .trim_ascii_start();
     if policy.duplicates.json_keys
         && (content_type.contains("json")
-            || view.body.starts_with(b"{")
-            || view.body.starts_with(b"["))
-        && has_duplicate_json_key(view.body)
+            || json_body.starts_with(b"{")
+            || json_body.starts_with(b"["))
+        && has_duplicate_json_key(json_body)
     {
         return Some("json".to_owned());
     }
@@ -372,8 +378,13 @@ fn redirect_target(view: &RequestView<'_>, policy: &Hardening) -> Option<String>
             }
         }
     }
-    if (content_type.contains("json") || view.body.starts_with(b"{"))
-        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(view.body)
+    let json_body = view
+        .body
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(view.body)
+        .trim_ascii_start();
+    if (content_type.contains("json") || json_body.starts_with(b"{") || json_body.starts_with(b"["))
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(json_body)
         && let Some(host) = redirect_in_json(&value, policy, 0)
     {
         return Some(host);
@@ -422,7 +433,8 @@ fn absolute_redirect(value: &str) -> Option<String> {
         .filter(|ch| !matches!(ch, '\t' | '\n' | '\r'))
         .map(|ch| if ch == '\\' { '/' } else { ch })
         .collect();
-    let trimmed = normalized.trim_start();
+    let trimmed =
+        normalized.trim_start_matches(|ch: char| ch.is_whitespace() || ch.is_ascii_control());
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
         Some(trimmed.to_owned())
@@ -800,5 +812,25 @@ mod tests {
             inspect(&view(&uri, &headers, body), &policy()),
             Some(Violation::Redirect(_))
         ));
+    }
+
+    #[test]
+    fn userinfo_with_password_does_not_hide_authority_host() {
+        let headers = HeaderMap::new();
+        let uri: Uri = "/fetch?url=http%3A%2F%2Fuser%3Apass%40vuln.corp%2Fadmin"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            inspect(&view(&uri, &headers, b""), &policy()),
+            Some(Violation::InternalHost("vuln.corp".to_owned()))
+        );
+
+        let uri: Uri = "/login?redirect_uri=https%3A%2F%2Fapp.test%3Apass%40evil.example%2Fcb"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            inspect(&view(&uri, &headers, b""), &policy()),
+            Some(Violation::Redirect("evil.example".to_owned()))
+        );
     }
 }

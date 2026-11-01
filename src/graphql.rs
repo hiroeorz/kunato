@@ -760,15 +760,9 @@ fn collect_multipart_queries(body: &[u8], headers: &HeaderMap, candidates: &mut 
             continue;
         };
         for part in parts {
-            if part.filename().is_some() {
-                continue;
-            }
             let Ok(text) = std::str::from_utf8(part.value) else {
                 continue;
             };
-            if serde_json::from_str::<serde_json::Value>(text).is_err() {
-                continue;
-            }
             collect_json_text_queries(text, candidates);
         }
     }

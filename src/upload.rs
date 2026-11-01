@@ -38,8 +38,9 @@ const ACTIVE_WEB_EXTENSIONS: &[&str] = &["html", "htm", "xhtml", "shtml", "svg",
 /// application has been told what it is.
 const EXPLICIT_DANGEROUS_EXTENSIONS: &[&str] = &[
     "exe", "dll", "so", "dylib", "elf", "bin", "sh", "bash", "zsh", "ps1", "bat", "cmd", "vbs",
-    "wsf", "hta", "php", "php3", "php4", "php5", "php7", "php8", "phtml", "phar", "jsp", "jspx",
-    "asp", "aspx", "ashx", "asmx", "cgi", "pl", "py", "rb", "war", "jar",
+    "wsf", "hta", "php", "php3", "php4", "php5", "php7", "php8", "pht", "phtml", "phps", "pgif",
+    "phar", "inc", "htaccess", "ini", "jsp", "jspx", "asp", "aspx", "ashx", "asmx", "cgi", "pl",
+    "py", "rb", "war", "jar",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,15 +247,11 @@ fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejec
         _ => match dangerous_content(part.value) {
             Some(kind) => kind,
             None if claim == Claim::Safe => {
-                if contains_short_script_tag(part.value) {
-                    DangerousKind::Script
-                } else {
-                    let format = expected_format(declared.as_deref(), &filename)?;
-                    if format.matches(part.value) {
-                        return None;
-                    }
-                    DangerousKind::FormatMismatch
+                let format = expected_format(declared.as_deref(), &filename)?;
+                if format.matches(part.value) {
+                    return None;
                 }
+                DangerousKind::FormatMismatch
             }
             None => return None,
         },
@@ -279,7 +276,7 @@ fn claim_for(declared: Option<&str>, filename: &str) -> Claim {
         if is_active_web_media_type(media_type) {
             return Claim::ActiveWeb;
         }
-        if is_explicit_dangerous_media_type(media_type) {
+        if is_explicit_dangerous_media_type(media_type) || is_script_media_type(media_type) {
             return Claim::ExplicitDangerous;
         }
         if is_safe_media_type(media_type) {
@@ -421,8 +418,13 @@ fn claim_mismatch(mode: UploadInspection, declared: Option<&str>, filename: &str
     let from_extension = extension_claim(filename);
     match claimed {
         Claim::Safe => matches!(from_extension, Claim::ActiveWeb | Claim::ExplicitDangerous),
-        Claim::ActiveWeb | Claim::ExplicitDangerous => {
-            mode == UploadInspection::Strict && from_extension == Claim::Safe
+        Claim::ActiveWeb => {
+            from_extension == Claim::ExplicitDangerous
+                || (mode == UploadInspection::Strict && from_extension == Claim::Safe)
+        }
+        Claim::ExplicitDangerous => {
+            mode == UploadInspection::Strict
+                && matches!(from_extension, Claim::Safe | Claim::ActiveWeb)
         }
         Claim::Generic => false,
     }
@@ -615,14 +617,13 @@ fn dangerous_content(value: &[u8]) -> Option<DangerousKind> {
         || starts_with_ignore_ascii_case(leading, b"<?=")
         || leading.starts_with(b"<%")
         || leading.starts_with(b"#!")
+        || contains_script_marker(value)
+        || contains_short_script_tag(value)
     {
         return Some(DangerousKind::Script);
     }
     if leading.starts_with(b"<") {
         return Some(DangerousKind::ActiveWeb);
-    }
-    if contains_script_marker(value) {
-        return Some(DangerousKind::Script);
     }
     None
 }
@@ -683,22 +684,24 @@ fn contains_jsp_tag(bytes: &[u8]) -> bool {
 
 /// ASP.NET Web Forms put server code in a plain `<script runat="server">` tag.
 fn contains_server_script_tag(bytes: &[u8]) -> bool {
-    const ATTRIBUTE_BYTES: usize = 256;
-
     let mut index = 0;
     while index + 7 <= bytes.len() {
         if !bytes[index..index + 7].eq_ignore_ascii_case(b"<script") {
             index += 1;
             continue;
         }
-        let end = (index + 7 + ATTRIBUTE_BYTES).min(bytes.len());
-        let attributes = bytes[index + 7..end].to_ascii_lowercase();
+        let rest = &bytes[index + 7..];
+        let tag_len = rest
+            .iter()
+            .position(|&byte| byte == b'>')
+            .unwrap_or(rest.len());
+        let attributes = rest[..tag_len].to_ascii_lowercase();
         if attributes.windows(5).any(|window| window == b"runat")
             && attributes.windows(6).any(|window| window == b"server")
         {
             return true;
         }
-        index += 7;
+        index += 7 + tag_len;
     }
     false
 }
@@ -831,11 +834,6 @@ fn is_code_start(byte: u8) -> bool {
 /// images and media, and XML processing instructions (`<?xml`, `<?xpacket`,
 /// `<?mso-application`) must not match.
 fn contains_short_script_tag(bytes: &[u8]) -> bool {
-    // Bound on the prefix consumed for one tag. Every skipped byte also moves
-    // the outer index forward, and the comment search itself is bounded, so the
-    // whole scan stays linear in the inspected part.
-    const MAX_PREFIX_BYTES: usize = 4096;
-
     let mut index = 0;
     while index + 1 < bytes.len() {
         if bytes[index] != b'<' || bytes[index + 1] != b'?' {
@@ -865,7 +863,7 @@ fn contains_short_script_tag(bytes: &[u8]) -> bool {
                 rest = tail;
             }
             consumed += before - rest.len();
-            if rest.len() == before || consumed > MAX_PREFIX_BYTES {
+            if rest.len() == before {
                 break;
             }
         }
@@ -892,10 +890,17 @@ fn strip_line_comment(value: &[u8]) -> Option<&[u8]> {
     let body = value
         .strip_prefix(b"//")
         .or_else(|| value.strip_prefix(b"#"))?;
-    match body.iter().position(|byte| *byte == b'\n') {
-        Some(end) => Some(&body[end + 1..]),
-        None => Some(&[]),
+    for index in 0..body.len() {
+        if matches!(body[index], b'\n' | b'\r') {
+            return Some(&body[index + 1..]);
+        }
+        // In PHP a closing `?>` ends the script block even inside a `//` or
+        // `#` comment, so the comment must not swallow a following `<?` tag.
+        if body[index..].starts_with(b"?>") {
+            return Some(&body[index..]);
+        }
     }
+    Some(&[])
 }
 
 fn short_tag_body(rest: &[u8]) -> bool {
@@ -1142,6 +1147,23 @@ mod tests {
         // promises markup too.
         let page = body(&[("page.html", Some("text/html"), b"<html></html>")]);
         assert!(inspect(&headers(), &page, UploadInspection::Strict).is_none());
+
+        let php_as_html = body(&[(
+            "shell.php",
+            Some("text/html"),
+            b"<html><?php system($_GET['c']); ?></html>",
+        )]);
+        assert!(inspect_mismatch(&php_as_html).is_some());
+        assert!(inspect(&headers(), &php_as_html, UploadInspection::Strict).is_some());
+
+        let html_with_php = body(&[(
+            "page.html",
+            Some("text/html"),
+            b"<html><?php system($_GET['c']); ?></html>",
+        )]);
+        let rejection =
+            inspect(&headers(), &html_with_php, UploadInspection::Strict).expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::Script);
     }
 
     #[test]
@@ -1477,6 +1499,7 @@ mod tests {
             b"<? `id`;",
             b"<?=/*c*/system('id') ?>",
             b"\xff\xd8\xff\xe0JFIF<? shell_exec('id');",
+            b"\xff\xd8\xff\xe0<?#?><? system($_GET['c']); ?>",
         ] {
             assert!(contains_short_script_tag(value), "{value:?}");
         }

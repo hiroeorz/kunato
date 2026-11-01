@@ -183,13 +183,16 @@ fn is_quoted_literal(value: &str) -> bool {
     };
     let mut escaped = false;
     for ch in inner.chars() {
+        if ch.is_control() {
+            return false;
+        }
         match ch {
             '\\' if !escaped => escaped = true,
             '"' if !escaped => return false,
             _ => escaped = false,
         }
     }
-    true
+    !escaped
 }
 
 fn write_json(
@@ -315,6 +318,8 @@ mod tests {
             !text.contains('\u{1b}'),
             "raw escape sequences must not be logged"
         );
+        assert!(!is_quoted_literal("\"unterminated\\\""));
+        assert!(!is_quoted_literal("\"line1\nline2\""));
     }
 
     #[test]

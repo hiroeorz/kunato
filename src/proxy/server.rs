@@ -182,17 +182,19 @@ pub(crate) fn grow_request_inspection_raw(
     grow_inspection_to(inspection, target)
 }
 
-/// Request activity for one HTTP/2 connection. The idle watchdog observes it
-/// so a client that completes the handshake (or answers keep-alive pings)
-/// without ever sending a request cannot hold a connection slot forever.
-struct ConnectionActivity {
+/// Request activity for one multiplexed connection. The idle watchdog observes
+/// it so a client that completes the handshake (or answers keep-alive pings)
+/// without ever sending a request, or that stalls a response stream by
+/// withholding flow-control credits, cannot hold a connection slot or
+/// inspection reservation forever.
+pub(crate) struct ConnectionActivity {
     active: AtomicUsize,
     requests: AtomicU64,
     changed: watch::Sender<u64>,
 }
 
 impl ConnectionActivity {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (changed, _) = watch::channel(0);
         Self {
             active: AtomicUsize::new(0),
@@ -201,34 +203,68 @@ impl ConnectionActivity {
         }
     }
 
-    fn start(self: &Arc<Self>) -> ActiveRequest {
+    pub(crate) fn start(self: &Arc<Self>) -> ActiveRequest {
         self.active.fetch_add(1, Ordering::AcqRel);
-        let requests = self.requests.fetch_add(1, Ordering::AcqRel) + 1;
-        let _ = self.changed.send(requests);
+        self.notify();
         ActiveRequest {
             activity: Arc::clone(self),
+            counted: true,
         }
+    }
+
+    fn notify(&self) {
+        let requests = self.requests.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.changed.send(requests);
     }
 }
 
-struct ActiveRequest {
+pub(crate) struct ActiveRequest {
     activity: Arc<ConnectionActivity>,
+    counted: bool,
+}
+
+impl ActiveRequest {
+    /// Transition from an in-flight service call (bounded by `body_read` and
+    /// `upstream_response`) to response-body streaming, where forward progress
+    /// depends on the client draining frames within the idle timeout.
+    pub(crate) fn into_streaming(mut self) -> Self {
+        if self.counted {
+            self.counted = false;
+            self.activity.active.fetch_sub(1, Ordering::AcqRel);
+            self.activity.notify();
+        }
+        self
+    }
+
+    pub(crate) fn record_progress(&self) {
+        self.activity.notify();
+    }
 }
 
 impl Drop for ActiveRequest {
     fn drop(&mut self) {
-        self.activity.active.fetch_sub(1, Ordering::AcqRel);
-        let requests = self.activity.requests.load(Ordering::Acquire);
-        let _ = self.activity.changed.send(requests);
+        if self.counted {
+            self.activity.active.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.activity.notify();
     }
 }
 
-/// Keeps a request active until its response body has been streamed, so an
-/// HTTP/2 response that outlives the service future is not mistaken for an idle
-/// connection.
+/// Tracks response-body progress on an HTTP/2 stream: each frame pulled by the
+/// transport resets the idle watchdog, while a stream whose client stops
+/// granting flow-control window credits times out after `connection_idle`.
 struct ActivityBody {
     inner: ProxyBody,
-    _active: ActiveRequest,
+    active: ActiveRequest,
+}
+
+impl ActivityBody {
+    fn new(inner: ProxyBody, active: ActiveRequest) -> Self {
+        Self {
+            inner,
+            active: active.into_streaming(),
+        }
+    }
 }
 
 impl Body for ActivityBody {
@@ -239,7 +275,12 @@ impl Body for ActivityBody {
         self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_frame(cx);
+        if matches!(polled, Poll::Ready(Some(Ok(_)))) {
+            this.active.record_progress();
+        }
+        polled
     }
 
     fn is_end_stream(&self) -> bool {
@@ -251,11 +292,11 @@ impl Body for ActivityBody {
     }
 }
 
-/// Resolves when an HTTP/2 connection has no request in flight and has been
-/// idle for the configured duration. The first request gets the stricter
-/// header timeout, so a TLS/ALPN client that never sends a preface is closed
-/// quickly.
-async fn connection_is_idle(
+/// Resolves when a multiplexed connection has no request in flight and has
+/// made no stream progress for the configured duration. The first request gets
+/// the stricter header timeout, so a client that never sends a request is
+/// closed quickly.
+pub(crate) async fn connection_is_idle(
     activity: Arc<ConnectionActivity>,
     first_request: Duration,
     idle: Duration,
@@ -988,11 +1029,7 @@ async fn handle_request(
     }
     let (parts, body) = response.into_parts();
     let body = match active {
-        Some(active) => ActivityBody {
-            inner: body,
-            _active: active,
-        }
-        .boxed(),
+        Some(active) => ActivityBody::new(body, active).boxed(),
         None => body,
     };
     Ok(Response::from_parts(parts, body))
@@ -1113,22 +1150,28 @@ pub(crate) fn request_head_error(
             "duplicate Content-Type header",
         ));
     }
-    if let Some(content_type) = parts.headers.get(CONTENT_TYPE)
-        && let Ok(value) = content_type.to_str()
-        && value
+    if let Some(content_type) = parts.headers.get(CONTENT_TYPE) {
+        let Ok(value) = content_type.to_str() else {
+            return Some(HttpError::new(
+                StatusCode::BAD_REQUEST,
+                "malformed Content-Type header",
+            ));
+        };
+        if value
             .split(';')
             .next()
             .is_some_and(|media| media.trim().eq_ignore_ascii_case("multipart/form-data"))
-        && !crate::decoding::multipart_boundaries(value)
-            .is_ok_and(|boundaries| !boundaries.is_empty())
-    {
-        // The origin may still read a boundary this parser cannot, so accepting
-        // the declaration would let it split the body differently from the
-        // inspection.
-        return Some(HttpError::new(
-            StatusCode::BAD_REQUEST,
-            "malformed multipart boundary",
-        ));
+            && !crate::decoding::multipart_boundaries(value)
+                .is_ok_and(|boundaries| !boundaries.is_empty())
+        {
+            // The origin may still read a boundary this parser cannot, so accepting
+            // the declaration would let it split the body differently from the
+            // inspection.
+            return Some(HttpError::new(
+                StatusCode::BAD_REQUEST,
+                "malformed multipart boundary",
+            ));
+        }
     }
     if parts.headers.contains_key(CONTENT_LENGTH) && parts.headers.contains_key(TRANSFER_ENCODING) {
         return Some(HttpError::new(
@@ -1658,18 +1701,15 @@ async fn process(
         );
     }
 
-    let graphql_path = config.limits.graphql.enabled && {
-        let forms = crate::decoding::percent_decode_forms(parts.uri.path());
-        forms
+    let graphql_path = config.limits.graphql.enabled
+        && crate::request_view::path_forms(parts.uri.path())
             .iter()
-            .any(|form| config.limits.graphql.matches_path(form))
-            || forms
-                .last()
-                .and_then(|form| crate::decoding::normalize_path(form))
-                .is_some_and(|normalized| config.limits.graphql.matches_path(&normalized))
-    };
+            .any(|form| config.limits.graphql.matches_path(form));
     let body_rules = config.has_body_target_rules();
     let body_rules_exempt = config.is_content_route(&parts.method, &parts.uri);
+    let hardening_body = config.limits.hardening.ssrf.enabled
+        || config.limits.hardening.duplicates.enabled
+        || config.limits.hardening.redirects.enabled;
     let php_profile = config.php.matches(&parts);
     let form_body = crate::form::is_form(&parts.headers);
     let inspect_form = form_body && (config.limits.form.enabled || php_profile);
@@ -1683,7 +1723,7 @@ async fn process(
             "multipart is disabled by the PHP profile",
         ));
     }
-    let inspect_body = (body_rules && !body_rules_exempt) || graphql_path;
+    let inspect_body = (body_rules && !body_rules_exempt) || graphql_path || hardening_body;
     let inspect_multipart = config.limits.upload_inspection != UploadInspection::Off
         && crate::upload::is_multipart(&parts.headers)
         && !body.is_empty();
@@ -1694,7 +1734,7 @@ async fn process(
     let inspect_uploads = inspect_multipart || inspect_raw_body;
     let encoded = parts.headers.contains_key(CONTENT_ENCODING);
     let decode_body = inspect_body || ((inspect_uploads || inspect_form) && encoded);
-    if (decode_body || inspect_uploads)
+    if (decode_body || inspect_uploads || inspect_form)
         && !body.is_empty()
         && let Some(charset) = crate::decoding::uninspectable_charset(&parts.headers, body)
     {
@@ -1727,7 +1767,7 @@ async fn process(
         }
     }
     let body_truncated;
-    let inspected_body: Cow<'_, [u8]> = match if decode_body {
+    let mut inspected_body: Cow<'_, [u8]> = match if decode_body {
         crate::decoding::decode_body_for_inspection(
             body,
             &parts.headers,
@@ -1797,10 +1837,6 @@ async fn process(
             ));
         }
     };
-    // Decoding needed the worst-case reservation; from here on only the raw
-    // prefix and the decoded buffer stay alive, so release the difference
-    // instead of holding it until the response body finishes.
-    inspection.shrink_to(payload.prefix.len().saturating_add(inspected_body.len()));
     if decode_body {
         let decision = context.protection.charge_inspection(
             source.client_ip,
@@ -1942,7 +1978,7 @@ async fn process(
         &parts.headers,
         inspected_body.as_ref(),
         source.client_ip,
-        body_rules && !body_rules_exempt,
+        (body_rules && !body_rules_exempt) || config.limits.hardening.ssrf.enabled,
     )
     .with_body_truncated(body_truncated)
     .with_body_rules_exempt(body_rules_exempt);
@@ -2017,6 +2053,32 @@ async fn process(
     }
 
     drop(view);
+    // Request-phase decoding and body forms are gone. Drop the decompressed
+    // buffer too unless a response rule inspects the request body, and shrink
+    // the reservation to the buffers that actually stay alive across the
+    // upstream exchange.
+    let keep_inspected_body =
+        config.has_response_rules() && config.response_targets_request_body() && !body_rules_exempt;
+    if !keep_inspected_body {
+        inspected_body = Cow::Borrowed(&[]);
+    }
+    let owned_decoded = match &inspected_body {
+        Cow::Borrowed(_) => 0,
+        Cow::Owned(bytes) => bytes.len(),
+    };
+    let pending_bytes: usize = payload
+        .pending
+        .iter()
+        .filter_map(|frame| frame.data_ref())
+        .map(Bytes::len)
+        .sum();
+    inspection.shrink_to(
+        payload
+            .prefix
+            .len()
+            .saturating_add(pending_bytes)
+            .saturating_add(owned_decoded),
+    );
     // The request context retains its prefix across the upstream exchange.
     // Share the reservation with the outbound body, which can also outlive an
     // early upstream response while the client connection finishes sending it.
@@ -2053,7 +2115,11 @@ async fn process(
             websocket::Handshake::Response(response) => {
                 record_behavior(context, source, &parts, response.status(), config);
                 if !config.has_response_rules() && !php_profile {
-                    return Ok(response);
+                    let (parts, body) = response.into_parts();
+                    return Ok(Response::from_parts(
+                        parts,
+                        PrefixBody::new(Bytes::new(), Vec::new(), body).boxed(),
+                    ));
                 }
                 let Some(response_inspection) = context.reserve_response_inspection(config) else {
                     context.record_overloaded();
@@ -2120,7 +2186,11 @@ async fn process(
     record_behavior(context, source, &parts, response.status(), config);
 
     if !config.has_response_rules() && !php_profile {
-        return Ok(response);
+        let (parts, body) = response.into_parts();
+        return Ok(Response::from_parts(
+            parts,
+            PrefixBody::new(Bytes::new(), Vec::new(), body).boxed(),
+        ));
     }
 
     let Some(response_inspection) = context.reserve_response_inspection(config) else {

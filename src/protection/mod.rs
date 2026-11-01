@@ -99,6 +99,8 @@ pub struct ProtectionState {
     tracked_ips: AtomicUsize,
     tracked_rules: AtomicUsize,
     last_sweep: Mutex<Option<Instant>>,
+    last_rule_sweep: Mutex<Option<Instant>>,
+    last_failed_evict: Mutex<Option<Instant>>,
     global_requests: Mutex<GlobalWindow>,
     global_auth: Mutex<GlobalAuthWindow>,
 }
@@ -119,6 +121,8 @@ impl ProtectionState {
             tracked_ips: AtomicUsize::new(0),
             tracked_rules: AtomicUsize::new(0),
             last_sweep: Mutex::new(None),
+            last_rule_sweep: Mutex::new(None),
+            last_failed_evict: Mutex::new(None),
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
                 count: 0.0,
@@ -548,6 +552,9 @@ impl ProtectionState {
                         return None;
                     }
                     shard = lock(&self.shards[shard_index(key)]);
+                    if shard.entries.contains_key(&key) {
+                        return Some(shard);
+                    }
                     if !reserve_slot(&self.tracked_ips, config.max_tracked_ips) {
                         return None;
                     }
@@ -582,10 +589,16 @@ impl ProtectionState {
     /// Remove the least recently seen idle entry from any shard and free its
     /// slot. Used when the target shard has nothing to evict.
     fn evict_oldest_any_shard(&self, now: Instant) -> bool {
-        let mut oldest: Option<(Instant, usize)> = None;
+        {
+            let failed = lock(&self.last_failed_evict);
+            if failed.is_some_and(|last| now.saturating_duration_since(last) < GLOBAL_WINDOW) {
+                return false;
+            }
+        }
+        let mut oldest: Option<(Instant, usize, IpAddr)> = None;
         for (index, shard) in self.shards.iter().enumerate() {
             let shard = lock(shard);
-            let Some((_, entry)) = shard
+            let Some((&key, entry)) = shard
                 .entries
                 .iter()
                 .filter(|(_, entry)| {
@@ -595,19 +608,46 @@ impl ProtectionState {
             else {
                 continue;
             };
-            if oldest.is_none_or(|(seen, _)| entry.last_seen < seen) {
-                oldest = Some((entry.last_seen, index));
+            if oldest.is_none_or(|(seen, _, _)| entry.last_seen < seen) {
+                oldest = Some((entry.last_seen, index, key));
             }
         }
-        let Some((_, index)) = oldest else {
+        let Some((_, index, candidate)) = oldest else {
+            *lock(&self.last_failed_evict) = Some(now);
             return false;
         };
         let mut shard = lock(&self.shards[index]);
-        if !evict_oldest(&mut shard.entries, now) {
+        let evicted = if shard.entries.get(&candidate).is_some_and(|entry| {
+            entry.connections == 0 && !entry.banned_until.is_some_and(|until| until > now)
+        }) {
+            shard.entries.remove(&candidate).is_some()
+        } else {
+            evict_oldest(&mut shard.entries, now)
+        };
+        if !evicted {
             return false;
         }
         self.tracked_ips.fetch_sub(1, Ordering::AcqRel);
         true
+    }
+
+    fn sweep_stale_rules(&self, now: Instant) {
+        {
+            let mut last_sweep = lock(&self.last_rule_sweep);
+            if last_sweep.is_some_and(|last| now.saturating_duration_since(last) < SWEEP_INTERVAL) {
+                return;
+            }
+            *last_sweep = Some(now);
+        }
+        for shard in &self.rule_shards {
+            let mut shard = lock(shard);
+            let before = shard.entries.len();
+            shard.entries.retain(|_, bucket| {
+                now.saturating_duration_since(bucket.last_seen) < bucket.retention
+            });
+            self.tracked_rules
+                .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
+        }
     }
 
     fn check_client(&self, key: IpAddr, config: &Protection, cost: f64) -> Option<Decision> {
@@ -714,15 +754,7 @@ impl ProtectionState {
         if !shard.entries.contains_key(&map_key) {
             if !reserve_slot(&self.tracked_rules, config.max_tracked_ips) {
                 drop(shard);
-                for shard in &self.rule_shards {
-                    let mut shard = lock(shard);
-                    let before = shard.entries.len();
-                    shard.entries.retain(|_, bucket| {
-                        now.saturating_duration_since(bucket.last_seen) < bucket.retention
-                    });
-                    self.tracked_rules
-                        .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
-                }
+                self.sweep_stale_rules(now);
                 shard = lock(&self.rule_shards[shard_index(tracking)]);
                 if !shard.entries.contains_key(&map_key) {
                     if !reserve_slot(&self.tracked_rules, config.max_tracked_ips) {
@@ -1031,7 +1063,13 @@ fn auth_path_matches(paths: &RegexSet, path: &str) -> bool {
         // Servlet containers accept matrix parameters (`/login;jsessionid=...`)
         // and route them to the same handler, so the login regexes must see
         // the path without them.
-        if paths.is_match(&without_matrix_params(candidate)) {
+        let stripped = without_matrix_params(candidate);
+        if paths.is_match(&stripped) {
+            return true;
+        }
+        if let Some(normalized_stripped) = normalize_path(&stripped)
+            && paths.is_match(&normalized_stripped)
+        {
             return true;
         }
     }

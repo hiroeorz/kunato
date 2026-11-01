@@ -509,31 +509,43 @@ async fn pump_client_to_upstream<R, W>(
             send_close(&close, 1007, "invalid UTF-8").await;
             return;
         }
+        // Established tunnels follow a hot reload: each message is evaluated
+        // against the configuration current at that moment.
+        let config = live_config.load();
+        let exempt = body_rules_exempt || config.is_content_route(&request.method, &request.uri);
+        let decode_body =
+            !exempt && (config.has_body_target_rules() || config.limits.hardening.ssrf.enabled);
         let view = RequestView::with_body_decoding(
             &request.method,
             &request.uri,
             &request.headers,
             &payload,
             source_ip,
-            false,
+            decode_body,
         )
-        .with_body_rules_exempt(body_rules_exempt);
-        // Established tunnels follow a hot reload: each message is evaluated
-        // against the configuration current at that moment.
-        let config = live_config.load();
+        .with_body_rules_exempt(exempt);
         // Application messages are user traffic: charge the same per-source
         // budget as an HTTP request so a tunnel cannot bypass rate limits and
         // bans by staying open.
-        match protection.check_request(source_ip, &config.protection) {
-            ProtectionDecision::Allow => {}
-            ProtectionDecision::RateLimited { .. } | ProtectionDecision::Banned { .. } => {
-                send_close(&close, 1008, "rate limited").await;
-                return;
+        for decision in [
+            protection.check_request(source_ip, &config.protection),
+            protection.charge_inspection(source_ip, &config.protection, payload.len()),
+        ] {
+            match decision {
+                ProtectionDecision::Allow => {}
+                ProtectionDecision::RateLimited { .. } | ProtectionDecision::Banned { .. } => {
+                    send_close(&close, 1008, "rate limited").await;
+                    return;
+                }
+                ProtectionDecision::Overloaded { .. } => {
+                    send_close(&close, 1013, "service overloaded").await;
+                    return;
+                }
             }
-            ProtectionDecision::Overloaded { .. } => {
-                send_close(&close, 1013, "service overloaded").await;
-                return;
-            }
+        }
+        if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
+            send_close(&close, 1008, violation.reason()).await;
+            return;
         }
         let outcome = evaluate_websocket(&config, &view, Some(protection.as_ref()));
         if let Some(blocked) = outcome.blocked {
@@ -748,14 +760,8 @@ where
     if control && (!fin || len > 125) {
         return Err(WsError::Protocol("invalid control frame"));
     }
-    if len > max as u64 {
+    if !control && len > max as u64 {
         return Err(WsError::TooLarge);
-    }
-    if !control
-        && let Some(budget) = budget
-        && !budget.ensure(len as usize)
-    {
-        return Err(WsError::Budget);
     }
 
     let mut mask = [0u8; 4];
@@ -766,11 +772,27 @@ where
             .map_err(|_| WsError::Io)?;
         raw.extend_from_slice(&mask);
     }
-    let mut payload = vec![0u8; len as usize];
-    reader
-        .read_exact(&mut payload)
-        .await
-        .map_err(|_| WsError::Io)?;
+    const READ_CHUNK_BYTES: usize = 16 * 1024;
+    let total = len as usize;
+    let mut payload = Vec::with_capacity(total.min(READ_CHUNK_BYTES));
+    let mut budget = budget;
+    let mut remaining = total;
+    while remaining > 0 {
+        let step = remaining.min(READ_CHUNK_BYTES);
+        if !control
+            && let Some(budget) = budget.as_deref_mut()
+            && !budget.ensure(step)
+        {
+            return Err(WsError::Budget);
+        }
+        let start = payload.len();
+        payload.resize(start + step, 0);
+        reader
+            .read_exact(&mut payload[start..])
+            .await
+            .map_err(|_| WsError::Io)?;
+        remaining -= step;
+    }
     raw.extend_from_slice(&payload);
     if masked {
         for (index, byte) in payload.iter_mut().enumerate() {

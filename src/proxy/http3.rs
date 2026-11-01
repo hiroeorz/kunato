@@ -200,6 +200,10 @@ async fn serve_h3(
         Ok(Ok(connection)) => connection,
     };
 
+    let activity = Arc::new(server::ConnectionActivity::new());
+    let limits = context.config();
+    let header_read = limits.timeouts.header_read;
+    let idle = limits.timeouts.connection_idle;
     let mut requests = JoinSet::new();
     let mut closing = false;
     loop {
@@ -210,11 +214,21 @@ async fn serve_h3(
                     closing = true;
                 }
             }
+            _ = server::connection_is_idle(
+                Arc::clone(&activity),
+                header_read,
+                idle,
+            ) => {
+                debug!(client = %peer, "closing idle HTTP/3 connection");
+                let _ = connection.shutdown(0).await;
+                break;
+            }
             accepted = connection.accept() => {
                 match accepted {
                     Ok(Some(resolver)) => {
                         let context = context.clone();
-                        requests.spawn(handle_request(resolver, peer, context));
+                        let active = activity.start();
+                        requests.spawn(handle_request(resolver, peer, context, active));
                     }
                     Ok(None) => break,
                     Err(err) => {
@@ -234,6 +248,7 @@ async fn handle_request(
     resolver: RequestResolver<h3_quinn::Connection, Bytes>,
     peer: SocketAddr,
     context: Context,
+    active: server::ActiveRequest,
 ) {
     let header_read = context.config().timeouts.header_read;
     let (request, stream) =
@@ -278,7 +293,16 @@ async fn handle_request(
         server::rejected(source, &server::inspection_capacity_error())
     };
     config.response_headers.apply(response.headers_mut());
-    if let Err(err) = send_response(&mut send, response, head_request).await {
+    let active = active.into_streaming();
+    if let Err(err) = send_response(
+        &mut send,
+        response,
+        head_request,
+        config.timeouts.connection_idle,
+        &active,
+    )
+    .await
+    {
         debug!(client = %peer, error = %err, "failed to send HTTP/3 response");
     }
 }
@@ -404,15 +428,25 @@ async fn send_response(
     stream: &mut RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
     response: Response<ProxyBody>,
     head_request: bool,
+    idle: std::time::Duration,
+    active: &server::ActiveRequest,
 ) -> Result<(), StreamError> {
     let (parts, mut body) = response.into_parts();
     let mut head = Response::new(());
     *head.status_mut() = parts.status;
     *head.headers_mut() = parts.headers;
-    stream.send_response(head).await?;
+    let Ok(sent) = tokio::time::timeout(idle, stream.send_response(head)).await else {
+        stream.stop_stream(Code::H3_REQUEST_CANCELLED);
+        return Ok(());
+    };
+    sent?;
+    active.record_progress();
 
     if head_request {
-        return stream.finish().await;
+        if let Ok(finished) = tokio::time::timeout(idle, stream.finish()).await {
+            finished?;
+        }
+        return Ok(());
     }
 
     while let Some(frame) = body.frame().await {
@@ -421,7 +455,12 @@ async fn send_response(
                 // Drop trailer fields: they are not inspected, so they must
                 // not reach the client.
                 if let Ok(data) = frame.into_data() {
-                    stream.send_data(data).await?;
+                    let Ok(sent) = tokio::time::timeout(idle, stream.send_data(data)).await else {
+                        stream.stop_stream(Code::H3_REQUEST_CANCELLED);
+                        return Ok(());
+                    };
+                    sent?;
+                    active.record_progress();
                 }
             }
             Err(_) => {
@@ -431,5 +470,8 @@ async fn send_response(
         }
     }
 
-    stream.finish().await
+    if let Ok(finished) = tokio::time::timeout(idle, stream.finish()).await {
+        finished?;
+    }
+    Ok(())
 }

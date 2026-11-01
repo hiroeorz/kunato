@@ -37,16 +37,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  update:
+  generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    # The rules signing key lives in this environment's secrets. Keep the
-    # environment unprotected so the scheduled run stays unattended; repository
-    # write access, workflow review, and push notifications are the controls.
-    environment: rules-signing
+    timeout-minutes: 150
     env:
       MODEL: ${{ inputs.model || 'opencode-go/deepseek-v4.1-flash' }}
     steps:
@@ -116,6 +112,70 @@ jobs:
           done < "$RUNNER_TEMP/changed.txt"
           exit "$status"
 
+      - name: Upload allowlisted changes
+        uses: actions/upload-artifact@v7
+        with:
+          name: daily-cve-changes
+          path: |
+            blackbox/requests/blocked.txt
+            blackbox/requests/allowed.txt
+            rules.example.yaml
+            docs/cve-coverage.md
+          if-no-files-found: error
+
+      - name: Save the patch artifact
+        if: always()
+        run: |
+          git add -N .
+          git diff --binary > "$RUNNER_TEMP/daily-cve.patch" || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: daily-cve-diagnostics
+          path: |
+            ${{ runner.temp }}/daily-cve.patch
+            ${{ runner.temp }}/opencode.log
+            ${{ runner.temp }}/changed.txt
+          if-no-files-found: warn
+
+  sign-and-push:
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    # Signing and push run on a fresh runner VM isolated from the untrusted
+    # agent step: only the four allowlisted data files cross the job boundary.
+    environment: rules-signing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download allowlisted changes
+        uses: actions/download-artifact@v7
+        with:
+          name: daily-cve-changes
+          path: ${{ runner.temp }}/staged-changes
+
+      - name: Apply allowlisted data files
+        run: |
+          set -euo pipefail
+          for path in \
+            blackbox/requests/blocked.txt \
+            blackbox/requests/allowed.txt \
+            rules.example.yaml \
+            docs/cve-coverage.md; do
+            staged="$RUNNER_TEMP/staged-changes/$path"
+            if [ -f "$staged" ] && [ ! -L "$staged" ]; then
+              cp -- "$staged" "$path"
+            fi
+          done
+
       - name: Install minisign
         run: |
           set -euo pipefail
@@ -139,7 +199,7 @@ jobs:
           key="$RUNNER_TEMP/rules.key"
           trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT INT TERM
           printf '%s' "$RULES_SIGNING_KEY" >"$key"
-          printf '%s\n' "$RULES_SIGNING_PASSPHRASE" | minisign -S -s "$key" \
+          printf '%s\n' "$RULES_SIGNING_PASSPHRASE" | /usr/bin/minisign -S -s "$key" \
             -m dist/rules.yaml -x dist/rules.yaml.minisig \
             -t "rules.yaml $(date -u +%FT%TZ)"
 
@@ -178,22 +238,12 @@ jobs:
       - name: Run the black-box test
         run: scripts/blackbox-test.sh --color never --workdir "$RUNNER_TEMP/kunato-blackbox"
 
-      - name: Save the patch artifact
-        if: always()
-        run: |
-          git add -N .
-          git diff --binary > "$RUNNER_TEMP/daily-cve.patch" || true
-
-      - name: Upload diagnostics
+      - name: Upload blackbox logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: daily-cve-diagnostics
-          path: |
-            ${{ runner.temp }}/daily-cve.patch
-            ${{ runner.temp }}/opencode.log
-            ${{ runner.temp }}/changed.txt
-            ${{ runner.temp }}/kunato-blackbox/*.log
+          name: daily-cve-blackbox-logs
+          path: ${{ runner.temp }}/kunato-blackbox/*.log
           if-no-files-found: warn
 
       - name: Commit and push

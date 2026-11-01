@@ -54,9 +54,15 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
             "the downloaded installer does not look like a shell script".to_owned(),
         ));
     }
+    let checksums_url = checksums_url(tag.as_deref())?;
+    let checksums = rules_update::fetch_release_asset(&checksums_url, MAX_INSTALLER_BYTES).await?;
+    verify_release_asset(&checksums_url, &checksums, "SHA256SUMS").await?;
+    let verified_checksums = write_verified_checksums(&checksums)?;
+    let _cleanup = TempFileGuard(&verified_checksums);
     println!("running the installer from {url}");
 
     let mut command = installer_command(tag.as_deref());
+    command.env("KUNATO_VERIFIED_SHA256SUMS", &verified_checksums);
     command.stdin(Stdio::piped());
     let mut child = command
         .spawn()
@@ -82,11 +88,15 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
 /// root. With no trusted release key embedded the check is skipped with a
 /// warning, so builds without keys can still upgrade.
 async fn verify_installer(url: &str, installer: &[u8]) -> Result<(), Error> {
+    verify_release_asset(url, installer, "installer").await
+}
+
+async fn verify_release_asset(url: &str, asset: &[u8], label: &str) -> Result<(), Error> {
     if crate::trust::RELEASE_KEYS.is_empty() {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
-                "no release signing key is embedded in this build; the installer is not verified"
+                "no release signing key is embedded in this build; release assets are not verified"
             );
         });
         return Ok(());
@@ -94,32 +104,63 @@ async fn verify_installer(url: &str, installer: &[u8]) -> Result<(), Error> {
     let signature_url = format!("{url}.minisig");
     let signature = rules_update::fetch_release_asset(&signature_url, MAX_SIGNATURE_BYTES).await?;
     let signature = std::str::from_utf8(&signature)
-        .map_err(|_| Error::Message("installer signature is not valid UTF-8".to_owned()))?;
-    match crate::trust::verify_release(installer, signature)? {
+        .map_err(|_| Error::Message(format!("{label} signature is not valid UTF-8")))?;
+    match crate::trust::verify_release(asset, signature)? {
         crate::trust::Verification::Verified => Ok(()),
         crate::trust::Verification::NoTrustedKeys => Ok(()),
     }
 }
 
+struct TempFileGuard<'a>(&'a std::path::Path);
+
+impl Drop for TempFileGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
+fn write_verified_checksums(bytes: &[u8]) -> Result<std::path::PathBuf, Error> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut random = [0u8; 8];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| Error::Message("failed to generate temporary file name".to_owned()))?;
+    let mut suffix = String::with_capacity(16);
+    for byte in random {
+        suffix.push_str(&format!("{byte:02x}"));
+    }
+    let path = std::env::temp_dir().join(format!(
+        ".kunato-sha256sums.{}.{suffix}",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 /// Build the shell invocation for the downloaded installer. The environment is
 /// cleared: `kunato upgrade` runs as root, so a variable inherited from the
 /// caller (`KUNATO_BASE_URL`, `PATH` with a planted `curl`) must not steer the
-/// install. Only `PATH` is kept so the script can find `curl`, `tar`, and
-/// `sha256sum`.
+/// install. `PATH` is pinned to the standard system directories so the script
+/// finds `curl`, `tar`, and `sha256sum` without trusting the caller's `PATH`.
 fn installer_command(tag: Option<&str>) -> Command {
     const FALLBACK_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-    let mut command = Command::new("sh");
+    let mut command = Command::new("/bin/sh");
     command.arg("-s").arg("--");
     if let Some(tag) = tag {
         command.arg("--version").arg(tag);
     }
     command.arg("--yes");
     command.env_clear();
-    command.env(
-        "PATH",
-        std::env::var_os("PATH").unwrap_or_else(|| FALLBACK_PATH.into()),
-    );
+    command.env("PATH", FALLBACK_PATH);
     command
 }
 
@@ -144,11 +185,20 @@ pub fn normalize_tag(tag: &str) -> Result<String, Error> {
 
 /// URL of the installer asset for a pinned tag, or for the latest release.
 pub fn installer_url(tag: Option<&str>) -> Result<String, Error> {
+    release_asset_url(tag, "install.sh")
+}
+
+/// URL of the `SHA256SUMS` asset for a pinned tag, or for the latest release.
+pub fn checksums_url(tag: Option<&str>) -> Result<String, Error> {
+    release_asset_url(tag, "SHA256SUMS")
+}
+
+fn release_asset_url(tag: Option<&str>, asset: &str) -> Result<String, Error> {
     Ok(match tag {
         Some(tag) => {
-            format!("{RELEASE_BASE}/download/{}/install.sh", normalize_tag(tag)?)
+            format!("{RELEASE_BASE}/download/{}/{asset}", normalize_tag(tag)?)
         }
-        None => format!("{RELEASE_BASE}/latest/download/install.sh"),
+        None => format!("{RELEASE_BASE}/latest/download/{asset}"),
     })
 }
 

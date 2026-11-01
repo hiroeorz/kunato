@@ -146,7 +146,16 @@ impl Body for PrefixBody {
         if !this.pending.is_empty() {
             return Poll::Ready(Some(Ok(this.pending.remove(0))));
         }
-        Pin::new(&mut this.rest).poll_frame(cx)
+        loop {
+            match Pin::new(&mut this.rest).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        return Poll::Ready(Some(Ok(Frame::data(data))));
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     fn is_end_stream(&self) -> bool {

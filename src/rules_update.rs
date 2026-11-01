@@ -76,7 +76,17 @@ pub async fn run(
         }
 
         let outcome = tokio::select! {
-            result = update_candidate(&main_config, &settings, &rules_file, &state_file) => result,
+            result = update_candidate(
+                &main_config,
+                &settings,
+                &rules_file,
+                &state_file,
+                Some(LiveTarget {
+                    config: Arc::clone(&config),
+                    metrics: Arc::clone(&metrics),
+                    disable_protection,
+                }),
+            ) => result,
             _ = shutdown.changed() => {
                 info!("rules update cancelled for shutdown");
                 break;
@@ -84,25 +94,15 @@ pub async fn run(
         };
 
         let succeeded = match outcome {
-            Ok(Some(compiled)) => {
+            Ok(true) => {
                 metrics.rules_update_success.fetch_add(1, Ordering::Relaxed);
                 metrics
                     .rules_last_success
                     .store(unix_now(), Ordering::Relaxed);
                 info!(path = %rules_file.display(), "rules file updated");
-                // The candidate is already compiled; install it directly. The
-                // shared source stamps tell the file watcher not to compile
-                // the same files again.
-                watcher::apply(
-                    &main_config,
-                    compiled,
-                    &config,
-                    &metrics,
-                    disable_protection,
-                );
                 true
             }
-            Ok(None) => {
+            Ok(false) => {
                 metrics
                     .rules_update_not_modified
                     .fetch_add(1, Ordering::Relaxed);
@@ -163,10 +163,16 @@ pub async fn update_once(
     rules_file: &Path,
     state_file: &Path,
 ) -> Result<UpdateOutcome, Error> {
-    match update_candidate(main_config, settings, rules_file, state_file).await? {
-        Some(_) => Ok(UpdateOutcome::Updated),
-        None => Ok(UpdateOutcome::NotModified),
+    match update_candidate(main_config, settings, rules_file, state_file, None).await? {
+        true => Ok(UpdateOutcome::Updated),
+        false => Ok(UpdateOutcome::NotModified),
     }
+}
+
+struct LiveTarget {
+    config: Arc<Snapshot<CompiledConfig>>,
+    metrics: Arc<Metrics>,
+    disable_protection: bool,
 }
 
 /// The update path that keeps the compiled configuration: validating the
@@ -177,7 +183,8 @@ async fn update_candidate(
     settings: &RulesUpdate,
     rules_file: &Path,
     state_file: &Path,
-) -> Result<Option<CompiledConfig>, Error> {
+    live: Option<LiveTarget>,
+) -> Result<bool, Error> {
     let Some(url) = &settings.url else {
         return Err(Error::Message(
             "rules update URL is not configured".to_owned(),
@@ -228,7 +235,7 @@ async fn update_candidate(
                 rules_file.display()
             )));
         }
-        return Ok(None);
+        return Ok(false);
     };
 
     let expected = fetch_checksum(&client, checksum_url).await?;
@@ -240,45 +247,83 @@ async fn update_candidate(
     }
     verify_rules_signature(&client, url, &bytes).await?;
 
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| Error::Message("rules file is not valid UTF-8".to_owned()))?;
-    // A construct this build does not implement means the published set is newer
-    // than the running binary: that needs an upgrade, which is a different
-    // remedy than a transient failure, so it gets its own error variant.
-    let parsed = config::parse_rules(text).map_err(|err| match err.unsupported_construct() {
-        Some(construct) => Error::RulesNeedNewerBuild(construct),
-        None => err,
-    })?;
-    if !parsed.disabled_rules.is_empty() {
-        return Err(Error::Message(
-            "rules file must not contain `disabled_rules`; put them in overrides_file".to_owned(),
-        ));
-    }
+    let main_config = main_config.to_path_buf();
+    let rules_file = rules_file.to_path_buf();
+    let state_file = state_file.to_path_buf();
+    let settings = settings.clone();
 
-    let candidate = config::load_with_rules_candidate(main_config, text)?;
-    match &candidate.rules_file {
-        Some(installed) if same_path(installed, rules_file) => {}
-        _ => {
-            return Err(Error::Message(format!(
-                "`{}` does not point `rules_file` at `{}`",
-                main_config.display(),
-                rules_file.display()
-            )));
+    tokio::task::spawn_blocking(move || -> Result<(), Error> {
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::Message("rules file is not valid UTF-8".to_owned()))?;
+        // A construct this build does not implement means the published set is newer
+        // than the running binary: that needs an upgrade, which is a different
+        // remedy than a transient failure, so it gets its own error variant.
+        let parsed =
+            config::parse_rules(text).map_err(|err| match err.unsupported_construct() {
+                Some(construct) => Error::RulesNeedNewerBuild(construct),
+                None => err,
+            })?;
+        if !parsed.disabled_rules.is_empty() {
+            return Err(Error::Message(
+                "rules file must not contain `disabled_rules`; put them in overrides_file"
+                    .to_owned(),
+            ));
         }
-    }
 
-    write_atomic(rules_file, &bytes)?;
-    let now = unix_now();
-    let next = UpdateState {
-        last_success: Some(now),
-        next_due: Some(
-            now.saturating_add(jittered(settings.interval, settings.jitter_percent).as_secs()),
-        ),
-        etag,
-        last_modified,
-    };
-    write_state(&next, state_file);
-    Ok(Some(candidate))
+        let _serialized = watcher::lock_reload();
+        let main_abs = std::path::absolute(&main_config).unwrap_or_else(|_| main_config.clone());
+        let main_stamp = watcher::file_stamp(&main_abs);
+        let candidate = config::load_with_rules_candidate(&main_config, text)?;
+        match &candidate.rules_file {
+            Some(installed) if same_path(installed, &rules_file) => {}
+            _ => {
+                return Err(Error::Message(format!(
+                    "`{}` does not point `rules_file` at `{}`",
+                    main_config.display(),
+                    rules_file.display()
+                )));
+            }
+        }
+        let overrides_stamp = candidate
+            .overrides_file
+            .as_ref()
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.clone()))
+            .map(|path| (path.clone(), watcher::file_stamp(&path)));
+
+        write_atomic(&rules_file, &bytes)?;
+        let now = unix_now();
+        let next = UpdateState {
+            last_success: Some(now),
+            next_due: Some(
+                now.saturating_add(jittered(settings.interval, settings.jitter_percent).as_secs()),
+            ),
+            etag,
+            last_modified,
+        };
+        write_state(&next, &state_file);
+
+        if let Some(live) = live {
+            let mut stamps = std::collections::BTreeMap::new();
+            stamps.insert(main_abs, main_stamp);
+            let rules_abs = std::path::absolute(&rules_file).unwrap_or_else(|_| rules_file.clone());
+            stamps.insert(rules_abs, watcher::file_stamp(&rules_file));
+            if let Some((overrides_path, stamp)) = overrides_stamp {
+                stamps.insert(overrides_path, stamp);
+            }
+            watcher::apply_with_stamps(
+                &main_config,
+                candidate,
+                &live.config,
+                &live.metrics,
+                live.disable_protection,
+                stamps,
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| Error::Message(format!("rules update worker failed: {err}")))??;
+    Ok(true)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -698,16 +743,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 fn target_attributes(path: &Path, parent: &Path) -> (Option<(u32, u32)>, u32) {
     use std::os::unix::fs::MetadataExt;
 
-    if let Ok(metadata) = std::fs::metadata(path) {
-        return (
-            Some((metadata.uid(), metadata.gid())),
-            metadata.mode() & 0o777,
-        );
-    }
-    let owner = std::fs::metadata(parent)
+    let parent_owner = std::fs::metadata(parent)
         .ok()
         .map(|metadata| (metadata.uid(), metadata.gid()));
-    (owner, 0o640)
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let file_owner = (metadata.uid(), metadata.gid());
+        // If `kunato init` wrote a root-owned stub inside a state directory
+        // owned by the service user, hand the replaced file to the directory's
+        // owner so the service can read and update it.
+        let owner = match parent_owner {
+            Some(dir_owner) if file_owner.0 == 0 && dir_owner.0 != 0 => Some(dir_owner),
+            _ => Some(file_owner),
+        };
+        return (owner, metadata.mode() & 0o777);
+    }
+    (parent_owner, 0o640)
 }
 
 fn set_owner(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {

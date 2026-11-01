@@ -42,11 +42,27 @@ type Stamps = BTreeMap<PathBuf, Stamp>;
 /// same files again on its next tick.
 static APPLIED_STAMPS: std::sync::Mutex<Option<Stamps>> = std::sync::Mutex::new(None);
 
-fn record_stamps(sources: &[PathBuf]) {
+fn record_stamps_map(stamps: Stamps) {
     let mut applied = APPLIED_STAMPS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *applied = Some(source_stamps(sources));
+    *applied = Some(stamps);
+}
+
+fn record_stamps(sources: &[PathBuf]) {
+    record_stamps_map(source_stamps(sources));
+}
+
+pub(crate) fn lock_reload() -> std::sync::MutexGuard<'static, ()> {
+    RELOAD_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn file_stamp(path: &Path) -> Stamp {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len())))
 }
 
 fn applied_stamps() -> Option<Stamps> {
@@ -140,13 +156,40 @@ pub fn reload(
     metrics: &Metrics,
     disable_protection: bool,
 ) -> Option<Vec<PathBuf>> {
-    let _serialized = RELOAD_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialized = lock_reload();
+    let main_abs = absolute(path);
+    let main_stamp = file_stamp(&main_abs);
+    let prior_overrides = config
+        .load()
+        .overrides_file
+        .as_ref()
+        .map(|file| absolute(file));
+    let prior_overrides_stamp = prior_overrides.as_deref().map(file_stamp);
+    let prior_rules = config.load().rules_file.as_ref().map(|file| absolute(file));
+    let prior_rules_stamp = prior_rules.as_deref().map(file_stamp);
     match config::load(path) {
         Ok(new_config) => {
             metrics.reload_success.fetch_add(1, Ordering::Relaxed);
-            Some(install(path, new_config, config, disable_protection))
+            let sources = source_paths(path, &new_config);
+            let mut stamps = source_stamps(&sources);
+            stamps.insert(main_abs, main_stamp);
+            if let (Some(overrides), Some(stamp)) = (prior_overrides, prior_overrides_stamp)
+                && stamps.contains_key(&overrides)
+            {
+                stamps.insert(overrides, stamp);
+            }
+            if let (Some(rules), Some(stamp)) = (prior_rules, prior_rules_stamp)
+                && stamps.contains_key(&rules)
+            {
+                stamps.insert(rules, stamp);
+            }
+            Some(install_with_stamps(
+                path,
+                new_config,
+                config,
+                disable_protection,
+                Some(stamps),
+            ))
         }
         Err(err) => {
             metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
@@ -166,18 +209,41 @@ pub fn apply(
     metrics: &Metrics,
     disable_protection: bool,
 ) -> Option<Vec<PathBuf>> {
-    let _serialized = RELOAD_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialized = lock_reload();
     metrics.reload_success.fetch_add(1, Ordering::Relaxed);
-    Some(install(path, new_config, config, disable_protection))
+    Some(install_with_stamps(
+        path,
+        new_config,
+        config,
+        disable_protection,
+        None,
+    ))
 }
 
-fn install(
+pub(crate) fn apply_with_stamps(
+    path: &Path,
+    new_config: CompiledConfig,
+    config: &Snapshot<CompiledConfig>,
+    metrics: &Metrics,
+    disable_protection: bool,
+    stamps: Stamps,
+) -> Option<Vec<PathBuf>> {
+    metrics.reload_success.fetch_add(1, Ordering::Relaxed);
+    Some(install_with_stamps(
+        path,
+        new_config,
+        config,
+        disable_protection,
+        Some(stamps),
+    ))
+}
+
+fn install_with_stamps(
     path: &Path,
     mut new_config: CompiledConfig,
     config: &Snapshot<CompiledConfig>,
     disable_protection: bool,
+    stamps: Option<Stamps>,
 ) -> Vec<PathBuf> {
     if disable_protection {
         new_config.protection.enabled = false;
@@ -222,9 +288,13 @@ fn install(
     let body_inspection_warning = new_config.body_inspection_warning();
     let allowed_hosts_warning = new_config.allowed_hosts_warning();
     config.store(Arc::new(new_config));
-    // The snapshot is live: remember exactly which sources produced it so the
-    // watcher does not compile the same files again.
-    record_stamps(&sources);
+    // The snapshot is live: remember the stamps of the sources that were read
+    // to build it so the watcher does not compile the same files again, while
+    // any concurrent edit made during compilation still triggers a reload.
+    match stamps {
+        Some(stamps) => record_stamps_map(stamps),
+        None => record_stamps(&sources),
+    }
     if let Some(warning) = body_inspection_warning {
         warn!("{warning}");
     }

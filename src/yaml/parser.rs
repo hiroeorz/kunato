@@ -284,8 +284,13 @@ impl<'a> FlowCursor<'a> {
 
     /// Move the cursor to `pos` (used when a scan consumed a run of bytes).
     fn jump_to(&mut self, pos: usize) {
+        let skipped = &self.text[self.pos..pos];
         self.pos = pos;
-        self.sync_line();
+        if skipped.contains('\n') {
+            self.sync_line();
+        } else {
+            self.column += skipped.chars().count();
+        }
     }
 
     fn skip_spaces(&mut self) {

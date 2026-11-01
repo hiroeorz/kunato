@@ -1062,9 +1062,11 @@ impl Graphql {
             return false;
         }
         let path = trim_path(path);
-        let plain = path_without_matrix_params(path);
+        let stripped = path_without_matrix_params(path);
+        let normalized = crate::decoding::normalize_path(&stripped);
+        let plain = trim_path(normalized.as_deref().unwrap_or(&stripped));
         if self.paths.iter().any(|candidate| {
-            path_without_matrix_params(trim_path(candidate)).eq_ignore_ascii_case(&plain)
+            path_without_matrix_params(trim_path(candidate)).eq_ignore_ascii_case(plain)
         }) {
             return true;
         }

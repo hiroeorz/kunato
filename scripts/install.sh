@@ -9,6 +9,7 @@ set -eu
 REPO="hiroeorz/kunato"
 BASE_URL="${KUNATO_BASE_URL:-https://github.com/$REPO/releases/download}"
 DEFAULT_RULES_URL="https://raw.githubusercontent.com/$REPO/main/dist/rules.yaml"
+RELEASE_PUBLIC_KEY="RWS744VDWQt2ID29WdV+zUCBjEe7s64K6tCDCKK6cpRbmYL4k5E3RLwQ"
 CONFIG_PATH="/etc/kunato/kunato.yaml"
 CONFIG_DIR="/etc/kunato"
 TLS_DIR="/etc/kunato/tls"
@@ -284,9 +285,22 @@ install_release() {
     curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
         "$BASE_URL/$VERSION/$tarball" -o "$workdir/$tarball" ||
         die "failed to download $BASE_URL/$VERSION/$tarball"
-    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
-        "$BASE_URL/$VERSION/SHA256SUMS" -o "$workdir/SHA256SUMS" ||
-        die "failed to download SHA256SUMS"
+    if [ -n "${KUNATO_VERIFIED_SHA256SUMS:-}" ] && [ -f "$KUNATO_VERIFIED_SHA256SUMS" ]; then
+        cp "$KUNATO_VERIFIED_SHA256SUMS" "$workdir/SHA256SUMS"
+    else
+        curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+            "$BASE_URL/$VERSION/SHA256SUMS" -o "$workdir/SHA256SUMS" ||
+            die "failed to download SHA256SUMS"
+        if command -v minisign >/dev/null 2>&1; then
+            curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+                "$BASE_URL/$VERSION/SHA256SUMS.minisig" -o "$workdir/SHA256SUMS.minisig" ||
+                die "failed to download SHA256SUMS.minisig"
+            log "verifying SHA256SUMS signature"
+            minisign -Vm "$workdir/SHA256SUMS" -x "$workdir/SHA256SUMS.minisig" \
+                -P "$RELEASE_PUBLIC_KEY" >/dev/null ||
+                die "SHA256SUMS signature verification failed"
+        fi
+    fi
 
     log "verifying the checksum"
     (
@@ -365,12 +379,21 @@ initialize_configuration() {
         if [ "$ACME_STAGING" -eq 1 ]; then
             set -- "$@" --acme-staging
         fi
+        had_rules=0
+        if [ -f "$RULES_FILE" ]; then
+            had_rules=1
+        fi
         "$BIN_PATH" init "$@"
         chown root:kunato "$CONFIG_PATH"
         chmod 0640 "$CONFIG_PATH"
+    else
+        had_rules=0
+        if [ -f "$RULES_FILE" ]; then
+            had_rules=1
+        fi
     fi
 
-    if [ ! -f "$RULES_FILE" ]; then
+    if [ "$had_rules" -eq 0 ] || [ ! -f "$RULES_FILE.update-state" ]; then
         log "downloading the managed rule set"
         if "$BIN_PATH" update-rules --config "$CONFIG_PATH"; then
             :
@@ -380,10 +403,12 @@ initialize_configuration() {
         else
             die "the initial rules download failed; fix the network or --rules-url and re-run the installer (kunato update-rules --config $CONFIG_PATH retries it; --allow-empty-rules starts without rules anyway)"
         fi
-        # `update-rules` also writes the adjacent `.update-state` file; hand the
-        # whole state directory to the service user so later reloads can read it.
-        chown -R kunato:kunato "$STATE_DIR" 2>/dev/null || true
     fi
+    # `init` and `update-rules` run as root; hand the state directory and its
+    # rule and `.update-state` files to the service user so later reloads and
+    # updates can read and replace them.
+    chown -R kunato:kunato "$STATE_DIR" 2>/dev/null || true
+    chmod 0640 "$RULES_FILE" 2>/dev/null || true
 
     "$BIN_PATH" validate --config "$CONFIG_PATH"
 }
