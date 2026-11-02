@@ -2311,6 +2311,37 @@ async fn upload_inspection_accepts_benign_and_explicit_uploads() {
 }
 
 #[tokio::test]
+async fn upload_inspection_rejects_archive_expansion_bombs() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits:\n  upload_expansion:\n    max_bytes: 1024\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut encoder, &vec![b'a'; 64 * 1024]).expect("write gzip");
+    let compressed = encoder.finish().expect("finish gzip");
+    let body = multipart_upload("bomb.tar.gz", "application/gzip", &compressed);
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let rendered = running.metrics.render(0);
+    assert!(
+        rendered.contains("kunato_upload_rejected_total 1"),
+        "{rendered}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn upload_inspection_strict_blocks_generic_executables() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(

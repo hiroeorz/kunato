@@ -1097,13 +1097,13 @@ rejects executable and script content behind a generic or explicit executable
 claim, and markup unless the part declares an active web type; an active web
 part still passes its markup. `off` disables the check.
 
-The rejection is answered with `403` and counted in
-`kunato_upload_rejected_total`. The check is an engine limit: it runs before
-rule evaluation, so an `ALLOW` rule (including `trusted-sources`) does not
-bypass it, and it stays active with `protection.enabled: false`. It shares the
-multipart boundary and part limits with rule inspection, checks every declared
-boundary interpretation, never copies the body, and runs under the process-wide
-inspection budget.
+The rejection is answered with `403` (or `413` for the archive expansion
+budget) and counted in `kunato_upload_rejected_total`. The check is an engine
+limit: it runs before rule evaluation, so an `ALLOW` rule (including
+`trusted-sources`) does not bypass it, and it stays active with
+`protection.enabled: false`. It shares the multipart boundary and part limits
+with rule inspection, checks every declared boundary interpretation, never
+copies the body, and runs under the process-wide inspection budget.
 
 ```yaml
 limits: { upload_inspection: strict }
@@ -1113,6 +1113,27 @@ The engine default is `strict`. Use `mismatch` (safe claims only) when the
 application legitimately stores downloads, firmware, or source archives whose
 bytes start with a script marker or an executable header, and `off` only where
 another control covers the upload path.
+
+An uploaded gzip or ZIP archive is also decompressed up to
+`limits.upload_expansion.max_bytes` (default 64 MiB) and
+`limits.upload_expansion.max_entries` ZIP entries (default 4096). An archive
+that expands past either bound is rejected with `413`. A part whose bytes do not
+parse as the claimed archive is left to the existing content checks, so a
+malformed archive is not newly rejected by this guard. ZIP deflate entries are
+counted by their actual output, ZIP64 is read, and encrypted or
+unsupported-compression entries fall back to the declared uncompressed size.
+Nested archives are not expanded. The check covers the inspected part of the
+body only, so `body_inspection: stream` limits it to the buffered prefix, and
+`upload_inspection: off` disables it together with the rest of the upload
+checks.
+
+```yaml
+limits:
+  upload_expansion:
+    enabled: true
+    max_bytes: 67108864
+    max_entries: 4096
+```
 
 The check is content-based, so an explicitly named upload (`.php`, `.rb`,
 `.sh`, `.exe`) is the bundled `malicious-upload` category's job. Its
@@ -1129,9 +1150,10 @@ because the file bytes must be complete for inspection. With
 `body_inspection: stream`, only the buffered prefix is inspected and the
 remainder is forwarded; a warning is logged at load or reload. The check does
 not cover a file part outside the inspected prefix, a body with more than four
-boundary parameters, a malformed multipart body, archives or nested files, or
-active markup or executable headers embedded beyond the leading bytes. The
-script-marker scan is linear in the inspected part size and bounded by
+boundary parameters, a malformed multipart body, nested archives inside an
+inspected archive, or active markup or executable headers embedded beyond the
+leading bytes. The script-marker scan is linear in the inspected part size and
+bounded by
 `max_body_bytes`; a safe-claim file that legitimately contains `<?php` (for
 example a PDF code sample) is rejected, so a deployment that must accept such
 documents needs an explicit policy decision rather than a smaller scan window;

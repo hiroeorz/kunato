@@ -153,6 +153,10 @@ rule-set updates.
   `strict` also covers generic and explicitly executable claims; `mismatch`
   inspects safe claims only, and `off` disables both checks. It runs before rule
   evaluation, so `ALLOW` does not bypass it.
+- `limits.upload_expansion` defaults to enabled: uploaded gzip and ZIP archives
+  (`.tar.gz`, `.zip`, `.jar`, OOXML/ODF) are decompressed up to `max_bytes`
+  (64 MiB) and `max_entries` (4096) ZIP entries; an archive that expands past
+  either bound is rejected with `413`. Nested archives are not expanded.
 - `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
   must be complete and pass field/part/header/name/nesting/complexity limits
   before ALLOW or forwarding. This also applies in body `stream` mode; explicitly

@@ -34,6 +34,8 @@ const MAX_PATH_BYTES_LIMIT: usize = 64 * 1024;
 const MAX_HEADER_BYTES_LIMIT: usize = 1024 * 1024;
 const MAX_HEADERS_LIMIT: usize = 1000;
 const MAX_BODY_BYTES_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_UPLOAD_EXPANSION_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_UPLOAD_EXPANSION_ENTRIES: usize = 65_536;
 const MAX_GRAPHQL_DEPTH_LIMIT: usize = 1000;
 const MAX_GRAPHQL_FIELDS_LIMIT: usize = 10_000;
 const MAX_GRAPHQL_PATHS: usize = 16;
@@ -414,6 +416,8 @@ pub struct LimitsSpec {
     pub body_inspection: BodyInspection,
     #[serde(default)]
     pub upload_inspection: UploadInspection,
+    #[serde(default)]
+    pub upload_expansion: UploadExpansion,
     #[serde(default = "default_max_concurrent_streams")]
     pub max_concurrent_streams: u32,
     #[serde(default)]
@@ -437,11 +441,41 @@ impl Default for LimitsSpec {
             max_response_body_bytes: default_max_response_body_bytes(),
             body_inspection: BodyInspection::default(),
             upload_inspection: UploadInspection::default(),
+            upload_expansion: UploadExpansion::default(),
             max_concurrent_streams: default_max_concurrent_streams(),
             graphql: GraphqlSpec::default(),
             jwt: JwtSpec::default(),
             hardening: HardeningSpec::default(),
             form: FormLimits::default(),
+        }
+    }
+}
+
+/// Limits for decompressing uploaded gzip and ZIP archives during inspection.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UploadExpansion {
+    pub enabled: bool,
+    pub max_bytes: usize,
+    pub max_entries: usize,
+}
+
+impl Default for UploadExpansion {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_bytes: 64 * 1024 * 1024,
+            max_entries: 4096,
+        }
+    }
+}
+
+impl UploadExpansion {
+    #[cfg(test)]
+    pub(crate) fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
         }
     }
 }
@@ -1002,6 +1036,7 @@ pub struct Limits {
     pub max_response_body_bytes: usize,
     pub body_inspection: BodyInspection,
     pub upload_inspection: UploadInspection,
+    pub upload_expansion: UploadExpansion,
     pub max_concurrent_streams: u32,
     pub graphql: Graphql,
     pub jwt: Jwt,
@@ -1020,6 +1055,7 @@ impl From<&LimitsSpec> for Limits {
             max_response_body_bytes: spec.max_response_body_bytes,
             body_inspection: spec.body_inspection,
             upload_inspection: spec.upload_inspection,
+            upload_expansion: spec.upload_expansion,
             max_concurrent_streams: spec.max_concurrent_streams,
             graphql: Graphql::from(&spec.graphql),
             jwt: Jwt::from(&spec.jwt),
@@ -2323,6 +2359,21 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
     }
     if !(1..=1000).contains(&limits.max_concurrent_streams) {
         issues.push("limits.max_concurrent_streams must be between 1 and 1000".to_owned());
+    }
+    if limits.upload_expansion.max_bytes == 0
+        || limits.upload_expansion.max_bytes > MAX_UPLOAD_EXPANSION_BYTES
+    {
+        issues.push(format!(
+            "limits.upload_expansion.max_bytes must be between 1 and {MAX_UPLOAD_EXPANSION_BYTES}"
+        ));
+    }
+    if limits.upload_expansion.max_entries == 0
+        || limits.upload_expansion.max_entries > MAX_UPLOAD_EXPANSION_ENTRIES
+    {
+        issues.push(format!(
+            "limits.upload_expansion.max_entries must be between 1 and \
+             {MAX_UPLOAD_EXPANSION_ENTRIES}"
+        ));
     }
     validate_graphql(&limits.graphql, issues);
     validate_jwt(&limits.jwt, issues);
@@ -5212,6 +5263,30 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
         let error = parse_with(BASE, "limits: { upload_inspection: permissive }\n")
             .expect_err("unknown policy must fail");
         assert!(matches!(error, Error::ConfigParse(_)));
+    }
+
+    #[test]
+    fn parses_upload_expansion_limits() {
+        let config = parse_with(BASE, "").expect("valid config");
+        assert!(config.limits.upload_expansion.enabled);
+        assert_eq!(config.limits.upload_expansion.max_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.limits.upload_expansion.max_entries, 4096);
+
+        let config = parse_with(
+            BASE,
+            "limits:\n  upload_expansion:\n    max_bytes: 1024\n    max_entries: 8\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.limits.upload_expansion.max_bytes, 1024);
+        assert_eq!(config.limits.upload_expansion.max_entries, 8);
+
+        let error = parse_with(BASE, "limits: { upload_expansion: { max_bytes: 0 } }\n")
+            .expect_err("zero budget must fail");
+        assert!(error.to_string().contains("upload_expansion.max_bytes"));
+
+        let error = parse_with(BASE, "limits: { upload_expansion: { max_entries: 0 } }\n")
+            .expect_err("zero entries must fail");
+        assert!(error.to_string().contains("upload_expansion.max_entries"));
     }
 
     #[test]

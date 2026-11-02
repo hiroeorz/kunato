@@ -12,17 +12,22 @@
 //!
 //! The check shares the multipart boundary, part, and body limits with rule
 //! inspection and never copies the body. It runs before rule evaluation, so an
-//! `ALLOW` rule cannot bypass it. It is deliberately a heuristic: server-side
-//! script markers are scanned throughout the inspected part, but executable and
-//! markup detection beyond the leading bytes, a matching signature followed by
-//! script code, an unsupported boundary interpretation, archive contents, or an
-//! upload larger than `max_body_bytes` without `body_inspection: stream` is not
-//! fully inspected.
+//! `ALLOW` rule cannot bypass it. Uploaded gzip and ZIP archives are limited to
+//! `limits.upload_expansion`, but nested archives and encrypted entries are not
+//! expanded. It is deliberately a heuristic: server-side script markers are
+//! scanned throughout the inspected part, but executable and markup detection
+//! beyond the leading bytes, a matching signature followed by script code, an
+//! unsupported boundary interpretation, archive contents, or an upload larger
+//! than `max_body_bytes` without `body_inspection: stream` is not fully
+//! inspected.
 
+use std::io::Read;
+
+use flate2::read::{DeflateDecoder, MultiGzDecoder};
 use http::header::{CONTENT_TYPE, HeaderMap};
-use http::{Method, Uri};
+use http::{Method, StatusCode, Uri};
 
-use crate::config::UploadInspection;
+use crate::config::{UploadExpansion, UploadInspection};
 use crate::decoding::{MultipartPart, multipart_boundaries, multipart_parts, percent_decode_forms};
 
 const SAFE_EXTENSIONS: &[&str] = &[
@@ -52,6 +57,8 @@ pub(crate) enum DangerousKind {
     FormatMismatch,
     /// The declared type and the filename extension promise different things.
     ClaimMismatch,
+    /// The upload decompresses past `limits.upload_expansion`.
+    ArchiveExpansion,
 }
 
 impl DangerousKind {
@@ -62,6 +69,7 @@ impl DangerousKind {
             Self::ActiveWeb => "active-web",
             Self::FormatMismatch => "format-mismatch",
             Self::ClaimMismatch => "claim-mismatch",
+            Self::ArchiveExpansion => "archive-expansion",
         }
     }
 }
@@ -71,6 +79,22 @@ pub(crate) struct Rejection {
     pub(crate) filename: String,
     pub(crate) declared: Option<String>,
     pub(crate) kind: DangerousKind,
+}
+
+impl Rejection {
+    pub(crate) fn status(&self) -> StatusCode {
+        match self.kind {
+            DangerousKind::ArchiveExpansion => StatusCode::PAYLOAD_TOO_LARGE,
+            _ => StatusCode::FORBIDDEN,
+        }
+    }
+
+    pub(crate) fn message(&self) -> &'static str {
+        match self.kind {
+            DangerousKind::ArchiveExpansion => "upload expands beyond the configured limit",
+            _ => "upload content does not match its declared type",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +124,7 @@ pub(crate) fn inspect(
     headers: &HeaderMap,
     body: &[u8],
     mode: UploadInspection,
+    expansion: UploadExpansion,
 ) -> Option<Rejection> {
     if mode == UploadInspection::Off || body.is_empty() {
         return None;
@@ -120,7 +145,7 @@ pub(crate) fn inspect(
             continue;
         };
         for part in parts {
-            let Some(rejection) = inspect_part(part, mode) else {
+            let Some(rejection) = inspect_part(part, mode, expansion) else {
                 continue;
             };
             return Some(rejection);
@@ -217,7 +242,11 @@ fn raw_script_content(value: &[u8]) -> Option<DangerousKind> {
     None
 }
 
-fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejection> {
+fn inspect_part(
+    part: MultipartPart<'_>,
+    mode: UploadInspection,
+    expansion: UploadExpansion,
+) -> Option<Rejection> {
     let filename = part.filename()?;
     if part.value.is_empty() {
         return None;
@@ -228,6 +257,16 @@ fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejec
             filename,
             declared,
             kind: DangerousKind::ClaimMismatch,
+        });
+    }
+    if mode != UploadInspection::Off
+        && let Some(kind) =
+            archive_expansion_rejection(&part, declared.as_deref(), &filename, expansion)
+    {
+        return Some(Rejection {
+            filename,
+            declared,
+            kind,
         });
     }
     let claim = claim_for(declared.as_deref(), &filename);
@@ -261,6 +300,371 @@ fn inspect_part(part: MultipartPart<'_>, mode: UploadInspection) -> Option<Rejec
         declared,
         kind,
     })
+}
+
+const ZIP_LOCAL_HEADER: &[u8; 4] = b"PK\x03\x04";
+const ZIP_CENTRAL_HEADER: &[u8; 4] = b"PK\x01\x02";
+const ZIP_END_OF_CENTRAL_DIRECTORY: &[u8; 4] = b"PK\x05\x06";
+const ZIP64_END_OF_CENTRAL_DIRECTORY: &[u8; 4] = b"PK\x06\x06";
+const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR: &[u8; 4] = b"PK\x06\x07";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    Gzip,
+    Zip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpansionError {
+    TooLarge,
+    Malformed,
+}
+
+struct ZipEntry {
+    flags: u16,
+    method: u16,
+    compressed: u64,
+    uncompressed: u64,
+    local_offset: u64,
+    next: usize,
+}
+
+/// Rejects an uploaded gzip or ZIP archive whose contents expand past the
+/// configured budget. Returns `None` when the part is not an archive, the
+/// budget is disabled, or the expansion fits.
+fn archive_expansion_rejection(
+    part: &MultipartPart<'_>,
+    declared: Option<&str>,
+    filename: &str,
+    expansion: UploadExpansion,
+) -> Option<DangerousKind> {
+    if !expansion.enabled {
+        return None;
+    }
+    let value = archive_value(part.value);
+    let result = match archive_kind(declared, filename)? {
+        ArchiveKind::Gzip => {
+            if !value.starts_with(&[0x1f, 0x8b]) {
+                return None;
+            }
+            gzip_expansion(value, expansion.max_bytes)
+        }
+        ArchiveKind::Zip => {
+            if !value.starts_with(&ZIP_LOCAL_HEADER[..])
+                && !value.starts_with(&ZIP_END_OF_CENTRAL_DIRECTORY[..])
+            {
+                return None;
+            }
+            zip_expansion(value, expansion.max_bytes, expansion.max_entries)
+        }
+    };
+    match result {
+        Ok(()) => None,
+        Err(ExpansionError::TooLarge) => Some(DangerousKind::ArchiveExpansion),
+        Err(ExpansionError::Malformed) => None,
+    }
+}
+
+/// The multipart framing leaves the CRLF that precedes the boundary on the
+/// part value; an archive parser must not see it as trailing content.
+fn archive_value(value: &[u8]) -> &[u8] {
+    value
+        .strip_suffix(b"\r\n")
+        .or_else(|| value.strip_suffix(b"\n"))
+        .unwrap_or(value)
+}
+
+fn archive_kind(declared: Option<&str>, filename: &str) -> Option<ArchiveKind> {
+    let declared = declared.unwrap_or_default();
+    let filename = filename.to_ascii_lowercase();
+    let gzip_type = matches!(declared, "application/gzip" | "application/x-gzip");
+    let zip_type = matches!(
+        declared,
+        "application/zip" | "application/x-zip-compressed" | "application/java-archive"
+    ) || declared.starts_with("application/vnd.openxmlformats-officedocument.")
+        || declared.starts_with("application/vnd.oasis.opendocument.");
+    let gzip_extension =
+        filename.ends_with(".gz") || filename.ends_with(".tgz") || filename.ends_with(".tar.gz");
+    let zip_extension = [
+        ".zip", ".jar", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub", ".apk", ".whl",
+    ]
+    .iter()
+    .any(|extension| filename.ends_with(extension));
+    if gzip_type || gzip_extension {
+        Some(ArchiveKind::Gzip)
+    } else if zip_type || zip_extension {
+        Some(ArchiveKind::Zip)
+    } else {
+        None
+    }
+}
+
+fn gzip_expansion(value: &[u8], limit: usize) -> Result<(), ExpansionError> {
+    let mut decoder = MultiGzDecoder::new(value);
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0usize;
+    loop {
+        match decoder.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => {
+                total = total.saturating_add(read);
+                if total > limit {
+                    return Err(ExpansionError::TooLarge);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ExpansionError::Malformed),
+        }
+    }
+}
+
+fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<(), ExpansionError> {
+    let end = find_zip_end(value).ok_or(ExpansionError::Malformed)?;
+    let (entries, directory_offset, directory_size) = zip_directory(value, end)?;
+    if entries > max_entries as u64 {
+        return Err(ExpansionError::TooLarge);
+    }
+    let directory_end = directory_offset
+        .checked_add(directory_size)
+        .ok_or(ExpansionError::Malformed)?;
+    if directory_end > value.len() as u64 {
+        return Err(ExpansionError::Malformed);
+    }
+    let mut position = usize::try_from(directory_offset).map_err(|_| ExpansionError::Malformed)?;
+    let directory_end = usize::try_from(directory_end).map_err(|_| ExpansionError::Malformed)?;
+    let mut total = 0u64;
+    for _ in 0..entries {
+        let entry = parse_zip_entry(value, position, directory_end)?;
+        position = entry.next;
+        let remaining = limit.saturating_sub(total as usize);
+        let expanded = zip_entry_expansion(value, &entry, remaining)?;
+        total = total
+            .checked_add(expanded)
+            .ok_or(ExpansionError::Malformed)?;
+        if total > limit as u64 {
+            return Err(ExpansionError::TooLarge);
+        }
+    }
+    Ok(())
+}
+
+fn find_zip_end(value: &[u8]) -> Option<usize> {
+    let minimum = 22;
+    if value.len() < minimum {
+        return None;
+    }
+    let last = value.len() - minimum;
+    let first = last.saturating_sub(65_535);
+    for position in (first..=last).rev() {
+        if value.get(position..position + 4) != Some(&ZIP_END_OF_CENTRAL_DIRECTORY[..]) {
+            continue;
+        }
+        let comment = read_u16(value, position + 20).ok()? as usize;
+        if position + minimum + comment == value.len() {
+            return Some(position);
+        }
+    }
+    None
+}
+
+fn zip_directory(value: &[u8], end: usize) -> Result<(u64, u64, u64), ExpansionError> {
+    let disk = read_u16(value, end + 4)?;
+    let directory_disk = read_u16(value, end + 6)?;
+    if disk != 0 || directory_disk != 0 {
+        return Err(ExpansionError::Malformed);
+    }
+    let mut entries = read_u16(value, end + 10)? as u64;
+    let mut directory_size = read_u32(value, end + 12)? as u64;
+    let mut directory_offset = read_u32(value, end + 16)? as u64;
+    if entries == u16::MAX as u64
+        || directory_size == u32::MAX as u64
+        || directory_offset == u32::MAX as u64
+    {
+        let locator = end.checked_sub(20).ok_or(ExpansionError::Malformed)?;
+        if value.get(locator..locator + 4) != Some(&ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR[..]) {
+            return Err(ExpansionError::Malformed);
+        }
+        let record = read_u64(value, locator + 8)?;
+        let record = usize::try_from(record).map_err(|_| ExpansionError::Malformed)?;
+        if value.get(record..record + 4) != Some(&ZIP64_END_OF_CENTRAL_DIRECTORY[..]) {
+            return Err(ExpansionError::Malformed);
+        }
+        entries = read_u64(value, record + 32)?;
+        directory_size = read_u64(value, record + 40)?;
+        directory_offset = read_u64(value, record + 48)?;
+    }
+    Ok((entries, directory_offset, directory_size))
+}
+
+fn parse_zip_entry(value: &[u8], position: usize, end: usize) -> Result<ZipEntry, ExpansionError> {
+    let fixed_end = position.checked_add(46).ok_or(ExpansionError::Malformed)?;
+    if fixed_end > end || value.get(position..position + 4) != Some(&ZIP_CENTRAL_HEADER[..]) {
+        return Err(ExpansionError::Malformed);
+    }
+    let flags = read_u16(value, position + 8)?;
+    let method = read_u16(value, position + 10)?;
+    let mut compressed = read_u32(value, position + 20)? as u64;
+    let mut uncompressed = read_u32(value, position + 24)? as u64;
+    let name = read_u16(value, position + 28)? as usize;
+    let extra = read_u16(value, position + 30)? as usize;
+    let comment = read_u16(value, position + 32)? as usize;
+    let mut local_offset = read_u32(value, position + 42)? as u64;
+    let extra_start = fixed_end
+        .checked_add(name)
+        .ok_or(ExpansionError::Malformed)?;
+    let extra_end = extra_start
+        .checked_add(extra)
+        .ok_or(ExpansionError::Malformed)?;
+    if extra_end > end {
+        return Err(ExpansionError::Malformed);
+    }
+    if uncompressed == u32::MAX as u64
+        || compressed == u32::MAX as u64
+        || local_offset == u32::MAX as u64
+    {
+        let mut cursor = extra_start;
+        let mut found = false;
+        while cursor + 4 <= extra_end {
+            let id = read_u16(value, cursor)?;
+            let size = read_u16(value, cursor + 2)? as usize;
+            let data = cursor + 4;
+            let data_end = data.checked_add(size).ok_or(ExpansionError::Malformed)?;
+            if data_end > extra_end {
+                return Err(ExpansionError::Malformed);
+            }
+            if id == 0x0001 {
+                let mut field = data;
+                if uncompressed == u32::MAX as u64 {
+                    check_field(value, field, data_end)?;
+                    uncompressed = read_u64(value, field)?;
+                    field += 8;
+                }
+                if compressed == u32::MAX as u64 {
+                    check_field(value, field, data_end)?;
+                    compressed = read_u64(value, field)?;
+                    field += 8;
+                }
+                if local_offset == u32::MAX as u64 {
+                    check_field(value, field, data_end)?;
+                    local_offset = read_u64(value, field)?;
+                }
+                found = true;
+                break;
+            }
+            cursor = data_end;
+        }
+        if !found
+            || uncompressed == u32::MAX as u64
+            || compressed == u32::MAX as u64
+            || local_offset == u32::MAX as u64
+        {
+            return Err(ExpansionError::Malformed);
+        }
+    }
+    let next = fixed_end
+        .checked_add(name)
+        .and_then(|value| value.checked_add(extra))
+        .and_then(|value| value.checked_add(comment))
+        .ok_or(ExpansionError::Malformed)?;
+    if next > end {
+        return Err(ExpansionError::Malformed);
+    }
+    Ok(ZipEntry {
+        flags,
+        method,
+        compressed,
+        uncompressed,
+        local_offset,
+        next,
+    })
+}
+
+fn check_field(value: &[u8], field: usize, data_end: usize) -> Result<(), ExpansionError> {
+    let field_end = field.checked_add(8).ok_or(ExpansionError::Malformed)?;
+    if field_end > data_end || field_end > value.len() {
+        return Err(ExpansionError::Malformed);
+    }
+    Ok(())
+}
+
+fn zip_entry_expansion(
+    value: &[u8],
+    entry: &ZipEntry,
+    remaining: usize,
+) -> Result<u64, ExpansionError> {
+    if entry.flags & 1 != 0 {
+        return Ok(entry.uncompressed);
+    }
+    match entry.method {
+        0 => Ok(entry.compressed),
+        8 => zip_deflate_expansion(value, entry, remaining),
+        _ => Ok(entry.uncompressed),
+    }
+}
+
+fn zip_deflate_expansion(
+    value: &[u8],
+    entry: &ZipEntry,
+    remaining: usize,
+) -> Result<u64, ExpansionError> {
+    if entry.compressed == 0 {
+        return Ok(0);
+    }
+    let start = usize::try_from(entry.local_offset).map_err(|_| ExpansionError::Malformed)?;
+    let header_end = start.checked_add(30).ok_or(ExpansionError::Malformed)?;
+    if header_end > value.len() || value.get(start..start + 4) != Some(&ZIP_LOCAL_HEADER[..]) {
+        return Err(ExpansionError::Malformed);
+    }
+    let name = read_u16(value, start + 26)? as usize;
+    let extra = read_u16(value, start + 28)? as usize;
+    let data = header_end
+        .checked_add(name)
+        .and_then(|value| value.checked_add(extra))
+        .ok_or(ExpansionError::Malformed)?;
+    let compressed = usize::try_from(entry.compressed).map_err(|_| ExpansionError::Malformed)?;
+    let data_end = data
+        .checked_add(compressed)
+        .ok_or(ExpansionError::Malformed)?;
+    if data_end > value.len() {
+        return Err(ExpansionError::Malformed);
+    }
+    let mut decoder = DeflateDecoder::new(&value[data..data_end]);
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0usize;
+    loop {
+        match decoder.read(&mut buffer) {
+            Ok(0) => return Ok(total as u64),
+            Ok(read) => {
+                total = total.saturating_add(read);
+                if total > remaining {
+                    return Err(ExpansionError::TooLarge);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ExpansionError::Malformed),
+        }
+    }
+}
+
+fn read_u16(value: &[u8], offset: usize) -> Result<u16, ExpansionError> {
+    let end = offset.checked_add(2).ok_or(ExpansionError::Malformed)?;
+    let bytes = value.get(offset..end).ok_or(ExpansionError::Malformed)?;
+    let bytes: [u8; 2] = bytes.try_into().map_err(|_| ExpansionError::Malformed)?;
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn read_u32(value: &[u8], offset: usize) -> Result<u32, ExpansionError> {
+    let end = offset.checked_add(4).ok_or(ExpansionError::Malformed)?;
+    let bytes = value.get(offset..end).ok_or(ExpansionError::Malformed)?;
+    let bytes: [u8; 4] = bytes.try_into().map_err(|_| ExpansionError::Malformed)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64(value: &[u8], offset: usize) -> Result<u64, ExpansionError> {
+    let end = offset.checked_add(8).ok_or(ExpansionError::Malformed)?;
+    let bytes = value.get(offset..end).ok_or(ExpansionError::Malformed)?;
+    let bytes: [u8; 8] = bytes.try_into().map_err(|_| ExpansionError::Malformed)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 fn is_multipart_media_type(content_type: &str) -> bool {
@@ -400,7 +804,8 @@ fn blocks(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
             DangerousKind::Executable
             | DangerousKind::Script
             | DangerousKind::FormatMismatch
-            | DangerousKind::ClaimMismatch => true,
+            | DangerousKind::ClaimMismatch
+            | DangerousKind::ArchiveExpansion => true,
             DangerousKind::ActiveWeb => claim != Claim::ActiveWeb,
         },
     }
@@ -1024,6 +1429,10 @@ mod tests {
 
     use super::*;
 
+    fn inspect(headers: &HeaderMap, body: &[u8], mode: UploadInspection) -> Option<Rejection> {
+        super::inspect(headers, body, mode, UploadExpansion::disabled())
+    }
+
     fn headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1056,6 +1465,174 @@ mod tests {
 
     fn inspect_mismatch(body: &[u8]) -> Option<Rejection> {
         inspect(&headers(), body, UploadInspection::Mismatch)
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(data).expect("write gzip");
+        encoder.finish().expect("finish gzip")
+    }
+
+    fn zip(data: &[u8], method: u16) -> Vec<u8> {
+        use std::io::Write;
+
+        let name = b"entry.bin";
+        let payload = if method == 8 {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(data).expect("write deflate");
+            encoder.finish().expect("finish deflate")
+        } else {
+            data.to_vec()
+        };
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&ZIP_LOCAL_HEADER[..]);
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&method.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(name);
+        archive.extend_from_slice(&payload);
+        let directory_offset = archive.len();
+        archive.extend_from_slice(&ZIP_CENTRAL_HEADER[..]);
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&method.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(name);
+        let directory_size = archive.len() - directory_offset;
+        archive.extend_from_slice(&ZIP_END_OF_CENTRAL_DIRECTORY[..]);
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&1u16.to_le_bytes());
+        archive.extend_from_slice(&1u16.to_le_bytes());
+        archive.extend_from_slice(&(directory_size as u32).to_le_bytes());
+        archive.extend_from_slice(&(directory_offset as u32).to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive
+    }
+
+    fn expansion(max_bytes: usize) -> UploadExpansion {
+        UploadExpansion {
+            enabled: true,
+            max_bytes,
+            max_entries: 4096,
+        }
+    }
+
+    #[test]
+    fn uploaded_gzip_expansion_is_bounded() {
+        let archive = gzip(&vec![b'a'; 128 * 1024]);
+        let body = body(&[("data.tar.gz", Some("application/gzip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(32 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+        assert_eq!(rejection.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn small_gzip_and_stored_zip_pass_the_expansion_budget() {
+        let gzip_body = body(&[("data.tar.gz", Some("application/gzip"), &gzip(b"hello"))]);
+        assert!(
+            super::inspect(
+                &headers(),
+                &gzip_body,
+                UploadInspection::Strict,
+                expansion(1024),
+            )
+            .is_none()
+        );
+        let stored = zip(b"hello", 0);
+        let zip_body = body(&[("data.zip", Some("application/zip"), &stored)]);
+        assert!(
+            super::inspect(
+                &headers(),
+                &zip_body,
+                UploadInspection::Strict,
+                expansion(1024),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn uploaded_zip_deflate_expansion_is_bounded() {
+        let archive = zip(&vec![b'a'; 128 * 1024], 8);
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(32 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+    }
+
+    #[test]
+    fn zip_entry_count_is_bounded() {
+        let archive = zip(b"hello", 0);
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            UploadExpansion {
+                enabled: true,
+                max_bytes: 1024,
+                max_entries: 0,
+            },
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+    }
+
+    #[test]
+    fn archive_expansion_is_ignored_when_disabled() {
+        let archive = gzip(&vec![b'a'; 128 * 1024]);
+        let body = body(&[("data.tar.gz", Some("application/gzip"), &archive)]);
+        assert!(
+            super::inspect(
+                &headers(),
+                &body,
+                UploadInspection::Strict,
+                UploadExpansion::disabled(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn unparseable_archive_claims_are_left_to_the_existing_checks() {
+        let body = body(&[("data.zip", Some("application/zip"), b"not a zip")]);
+        assert!(
+            super::inspect(&headers(), &body, UploadInspection::Strict, expansion(1024)).is_none()
+        );
     }
 
     #[test]

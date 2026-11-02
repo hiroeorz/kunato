@@ -1891,6 +1891,7 @@ async fn process(
             &parts.headers,
             inspected_body.as_ref(),
             config.limits.upload_inspection,
+            config.limits.upload_expansion,
         )
     {
         context
@@ -1905,10 +1906,7 @@ async fn process(
             kind = rejection.kind.as_str(),
             "upload content rejected"
         );
-        return Err(HttpError::new(
-            StatusCode::FORBIDDEN,
-            "upload content does not match its declared type",
-        ));
+        return Err(HttpError::new(rejection.status(), rejection.message()));
     }
     if inspect_raw_body
         && let Some(rejection) = crate::upload::inspect_raw(
