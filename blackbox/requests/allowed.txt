@@ -370,6 +370,9 @@ GET /api/logs?from=2026-01-01&limit=100
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
 POST /api/upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-benign.txt
 POST /api/search header="Content-Type: application/json" chunked=1 body="{\"query\":\"rust\"}"
+# A file part whose compressed bytes contain a request signature: the payload is
+# content, inspected by the upload checks, not a body-matched parameter.
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-png-struts.bin
 
 # --- Upload content near-misses: matching bytes behind a safe type and an
 #     explicitly active type must keep passing ---

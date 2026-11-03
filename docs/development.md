@@ -604,7 +604,14 @@ from a rule. Bodies are matched raw
 and decoded by `Content-Type` (`application/x-www-form-urlencoded`, JSON string
 escapes such as `\u0075`, and `multipart/form-data` flattened to field values and
 `filename="..."` entries), then through the same percent-decode passes; bodies whose content
-type is unknown still get the percent passes. A `multipart/form-data` message
+type is unknown still get the percent passes. Verified binary multipart file
+payloads — a safe media claim whose bytes match that format's signature — are
+content, not parameters: their bytes are masked out of the raw form and omitted
+from the flattened form, so a signature such as `%{` inside compressed pixels
+cannot reject a benign upload while field values, filenames, and unverified file
+payloads stay in scope (the file content is inspected by
+`limits.upload_inspection` instead). A
+`multipart/form-data` message
 that declares several boundaries is flattened once per boundary (up to four),
 because parsers disagree on which one wins (Rack takes the last); messages that
 exceed that fall back to the percent passes on the raw body. Bodies are
@@ -1082,16 +1089,21 @@ executable claim over a safe extension (`photo.jpg` declared `text/html`) is
 rejected as well. Declaring both as active (`page.html` with `text/html`) keeps
 working.
 
-PHP short tags (`<?`) are detected as well when the tag body looks like code: a
-variable, a function call, a parenthesized callable (`(system)(...)`), or a
-language keyword (`echo`, `system`, `eval`, `include`, ...), a leading
-backslash (global namespace call), or a backtick, after skipping whitespace,
-`@`, and `/* ... */`, `// ...`, or `# ...` comments. Comments are scanned to
-their end, so a long comment cannot hide the tag, and an unterminated comment
-runs to the end of the part. This catches `<?/*x*/system(...)`,
-`<?=/*c*/system(...)`, `<? \system(...)`, and `` <? `id` `` behind an image
-signature without matching XML processing instructions (`<?xml`, `<?xpacket`,
-`<?mso-application`) or random bytes inside compressed media.
+PHP short tags (`<?`) are detected when the tag body looks like a statement: a
+variable with an assignment or member access (`$x=`, `$f(`), a function call, a
+parenthesized callable (`(system)(...)`), a namespaced call (`\system(`), a
+closed backtick command, or a language keyword (`echo`, `system`, `eval`,
+`include`, ...) followed by an expression, after skipping whitespace, `@`, and
+`/* ... */`, `// ...`, or `# ...` comments. Comments are scanned to their end,
+so a long comment cannot hide the tag, and an unterminated comment runs to the
+end of the part. Requiring a statement shape keeps `<?if`, `<?$x`, and `<?\`
+byte coincidences inside compressed pixels from rejecting legitimate images: a
+two-byte tag is common in high-entropy data and a bare name after it is not
+code. ASP and JSP blocks are detected only when they close with `%>` inside a
+short statement: an unclosed block is a parse error, and `<%#` or `<%=` openers
+appear in compressed data by chance. This catches `<?/*x*/system(...)`, `<?=/*c*/system(...)`,
+`<? \system(...)`, and `` <? `id` `` behind an image signature without matching
+XML processing instructions (`<?xml`, `<?xpacket`, `<?mso-application`).
 
 A non-multipart write request (`POST`, `PUT`, `PATCH`) whose `Content-Type` or
 path names an executable or server-side script — for example

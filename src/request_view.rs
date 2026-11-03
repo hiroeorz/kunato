@@ -5,7 +5,8 @@ use http::header::{COOKIE, HeaderMap};
 use http::{Method, StatusCode, Uri};
 
 use crate::decoding::{
-    decoded_body_forms, normalize_path, percent_decode_forms, query_decode_forms,
+    decoded_body_forms, mask_multipart_file_payloads, normalize_path, percent_decode_forms,
+    query_decode_forms,
 };
 use crate::protection::normalize_ip;
 
@@ -15,6 +16,10 @@ pub struct RequestView<'a> {
     pub query_forms: Vec<Cow<'a, str>>,
     pub headers: &'a HeaderMap,
     pub body: &'a [u8],
+    /// Bytes matched by body targets: the raw body with multipart file payloads
+    /// masked out. Form field values, part headers, and boundaries remain in
+    /// scope; uploaded file content is inspected by the upload checks instead.
+    pub match_body: Cow<'a, [u8]>,
     pub body_forms: Vec<Vec<u8>>,
     /// True when the inspected body is only a prefix of the message (either
     /// because the raw body exceeded the limit or because decoding could not
@@ -47,13 +52,22 @@ impl<'a> RequestView<'a> {
         source_ip: IpAddr,
         decode_body: bool,
     ) -> Self {
+        let inspect_body = decode_body && !body.is_empty();
         Self {
             method,
             path_forms: path_forms(uri.path()),
             query_forms: uri.query().map(query_decode_forms).unwrap_or_default(),
             headers,
             body,
-            body_forms: if decode_body && !body.is_empty() {
+            match_body: if inspect_body {
+                match mask_multipart_file_payloads(body, headers) {
+                    Some(masked) => Cow::Owned(masked),
+                    None => Cow::Borrowed(body),
+                }
+            } else {
+                Cow::Borrowed(body)
+            },
+            body_forms: if inspect_body {
                 decoded_body_forms(body, headers)
             } else {
                 Vec::new()

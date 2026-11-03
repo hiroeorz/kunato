@@ -369,20 +369,21 @@ impl PayloadMatcher {
         if self.targets & TARGET_BODY == 0 || view.body_rules_exempt {
             return false;
         }
+        let body = view.match_body.as_ref();
         if allow_mode {
             if view.body_truncated {
                 // The rest of the body has not been inspected, so an ALLOW
                 // rule must not treat the visible prefix as the whole message.
                 return false;
             }
-            !view.body.is_empty()
-                && self.hits(&String::from_utf8_lossy(view.body))
+            !body.is_empty()
+                && self.hits(&String::from_utf8_lossy(body))
                 && view
                     .body_forms
                     .iter()
                     .all(|form| self.hits(&String::from_utf8_lossy(form)))
         } else {
-            (!view.body.is_empty() && self.hits(&String::from_utf8_lossy(view.body)))
+            (!body.is_empty() && self.hits(&String::from_utf8_lossy(body)))
                 || view
                     .body_forms
                     .iter()
@@ -584,6 +585,31 @@ mod tests {
         assert!(
             block.matches(&view(&method, &uri, &headers, b"trusted").with_body_truncated(true))
         );
+    }
+
+    #[test]
+    fn multipart_file_payloads_are_not_matched_as_body_parameters() {
+        let method = Method::POST;
+        let uri: Uri = "/upload".parse().expect("valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("multipart/form-data; boundary=X"),
+        );
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"%\{")],
+                targets: TARGET_BODY,
+            }),
+            ..Matcher::default()
+        };
+
+        let file = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n%{payload}\r\n--X--\r\n";
+        assert!(!matcher.matches(&view(&method, &uri, &headers, file)));
+
+        let field =
+            b"--X\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n%{payload}\r\n--X--\r\n";
+        assert!(matcher.matches(&view(&method, &uri, &headers, field)));
     }
 
     #[test]

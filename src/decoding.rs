@@ -1069,6 +1069,9 @@ fn form_decode(body: &[u8]) -> Vec<u8> {
 pub(crate) struct MultipartPart<'a> {
     pub(crate) headers: &'a [u8],
     pub(crate) value: &'a [u8],
+    /// Offset of `value` inside the body the part was parsed from, so file
+    /// payloads can be masked without copying the part list.
+    pub(crate) value_offset: usize,
 }
 
 impl MultipartPart<'_> {
@@ -1090,6 +1093,17 @@ impl MultipartPart<'_> {
         let value = header_value(&headers, "content-type")?;
         let media_type = value.split(';').next()?.trim();
         (!media_type.is_empty()).then(|| media_type.to_ascii_lowercase())
+    }
+
+    /// True when the part declares a `filename`, including an empty one: the
+    /// part is a file upload, and its payload is content rather than a request
+    /// parameter.
+    pub(crate) fn has_filename(&self) -> bool {
+        let headers = String::from_utf8_lossy(self.headers);
+        header_value(&headers, "content-disposition").is_some_and(|disposition| {
+            disposition_param(disposition, "filename").is_some()
+                || disposition_param(disposition, "filename*").is_some()
+        })
     }
 }
 
@@ -1307,7 +1321,11 @@ pub(crate) fn multipart_parts_limited<'a>(
                     return Err(MultipartError::TooManyParts);
                 }
                 let (headers, value) = split_part(&body[start..offset]);
-                parts.push(MultipartPart { headers, value });
+                parts.push(MultipartPart {
+                    headers,
+                    value,
+                    value_offset: offset - value.len(),
+                });
             }
             if is_closing {
                 closed = true;
@@ -1326,9 +1344,10 @@ pub(crate) fn multipart_parts_limited<'a>(
 }
 
 /// Flattens the parts of a `multipart/form-data` body into one document for
-/// inspection: field values and file names joined by newlines. Binary part
-/// payloads are included verbatim; the result is bounded by the input size and
-/// the part/name limits. Malformed or oversized input yields `None`.
+/// inspection: field values and file names joined by newlines. File payloads
+/// are excluded because they are content, not parameters, and are inspected by
+/// the upload checks instead; the result is bounded by the input size and the
+/// part/name limits. Malformed or oversized input yields `None`.
 fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
     let parts = multipart_parts(body, boundary)?;
     let mut output = Vec::new();
@@ -1342,11 +1361,74 @@ fn multipart_flatten(body: &[u8], boundary: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Replaces the payload bytes of every verified binary file part with newlines
+/// and returns the copy, or `None` when the body is not a multipart upload with
+/// such a part. Body targets still see the part headers, the boundaries, form
+/// field values, and unverified file payloads, so an attack in a parameter or
+/// in a part that only claims a binary type still matches while a signature
+/// such as `%{` inside compressed pixels cannot reject a benign image.
+pub(crate) fn mask_multipart_file_payloads(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
+    if body.is_empty() {
+        return None;
+    }
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()))
+        .unwrap_or_default();
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if media_type != "multipart/form-data" {
+        return None;
+    }
+    let boundaries = multipart_boundaries(&content_type).ok()?;
+    let mut masked: Option<Vec<u8>> = None;
+    for boundary in &boundaries {
+        let Some(parts) = multipart_parts(body, boundary) else {
+            continue;
+        };
+        for part in parts {
+            if part.value.is_empty() || !verified_binary_file_part(&part) {
+                continue;
+            }
+            let start = part.value_offset;
+            let end = start + part.value.len();
+            if end > body.len() {
+                continue;
+            }
+            let buffer = masked.get_or_insert_with(|| body.to_vec());
+            buffer[start..end].fill(b'\n');
+        }
+    }
+    masked
+}
+
+/// True when a file part's bytes are a verified binary container: a safe media
+/// claim whose payload starts with that format's signature. Such a payload is
+/// content for the upload checks, not a request parameter. An unverified or
+/// text part stays in scope for body matching.
+fn verified_binary_file_part(part: &MultipartPart<'_>) -> bool {
+    part.has_filename()
+        && part.filename().is_some_and(|filename| {
+            crate::upload::is_verified_binary_part(
+                part.declared_content_type().as_deref(),
+                &filename,
+                part.value,
+            )
+        })
+}
+
 fn flatten_part(part: MultipartPart<'_>, output: &mut Vec<u8>) {
-    let value = trim_line_end(part.value);
-    if !value.is_empty() {
-        output.extend_from_slice(value);
-        output.push(b'\n');
+    // A verified binary file part's payload is content, not a parameter.
+    if !verified_binary_file_part(&part) {
+        let value = trim_line_end(part.value);
+        if !value.is_empty() {
+            output.extend_from_slice(value);
+            output.push(b'\n');
+        }
     }
     if let Some(filename) = part.filename() {
         // Emit the `filename=` spelling the signatures match, including the
@@ -2285,6 +2367,36 @@ mod tests {
         let text = String::from_utf8(decoded).expect("valid utf8");
         assert!(text.contains("admin"));
         assert!(text.contains("../../etc/passwd"));
+    }
+
+    #[test]
+    fn multipart_flatten_excludes_verified_binary_file_payloads() {
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\nunion select\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n%{blob}\r\n--X--\r\n";
+        let decoded = decode_body_format(body, &multipart_headers("X")).expect("decoded");
+        let text = String::from_utf8(decoded).expect("utf8");
+        assert!(text.contains("union select"), "{text}");
+        assert!(text.contains("a.png"), "{text}");
+        assert!(!text.contains("%{blob}"), "{text}");
+    }
+
+    #[test]
+    fn multipart_flatten_keeps_unverified_file_payloads() {
+        // A part that only names a file (no verified signature) stays in scope,
+        // so traversal payloads inside it are still matched.
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.tar\"\r\n\r\n../../opt/webapps/ROOT/x.txt\r\n--X--\r\n";
+        let decoded = decode_body_format(body, &multipart_headers("X")).expect("decoded");
+        let text = String::from_utf8(decoded).expect("utf8");
+        assert!(text.contains("../../opt/webapps/ROOT/x.txt"), "{text}");
+    }
+
+    #[test]
+    fn multipart_file_payloads_are_masked_for_body_matching() {
+        let body = b"--X\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nreport\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n\x1a\n%{hidden}\r\n--X--\r\n";
+        let masked = mask_multipart_file_payloads(body, &multipart_headers("X")).expect("masked");
+        let text = String::from_utf8_lossy(&masked);
+        assert!(text.contains("report"), "{text}");
+        assert!(text.contains("photo.png"), "{text}");
+        assert!(!text.contains("%{hidden}"), "{text}");
     }
 
     #[test]
