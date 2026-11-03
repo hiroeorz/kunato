@@ -1803,6 +1803,24 @@ categories:
       - name: prefab-ui-deno-file-access
         match: { regex: '(?i)Deno\s*\.\s*(readTextFileSync|writeTextFileSync|readFileSync|writeFileSync|removeSync|renameSync|chmodSync|mkdirSync|readDirSync)', in: [body] }
 
+  # Request-shape signatures for the 2026-11-01..03 delta.
+  - name: cve-2026-11-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-120322 (Termix): transferToHost trusts a caller-recorded
+      # loopback destination and writes an attacker-chosen absolute destPath
+      # onto the Termix host. The transfer endpoint is legitimate; the
+      # sensitive destinations are not.
+      - name: termix-file-manager-local-write
+        match:
+          path: '(?i)^/plugin-api/file-manager/transferToHost$'
+          regex: '(?i)"destPath"\s*:\s*"[^"]*(\.tmxplug|/\.env|/\.ssh/|/etc/)'
+          in: [body]
+      # CVE-2026-120426 (OpenCSG CSGHub): a percent-encoded current_user query
+      # is injected into the unauthenticated file resolve path.
+      - name: csghub-encoded-current-user
+        match: { regex: '(?i)%3fcurrent_user=', in: [path, query] }
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
   # br, and zstd bodies are decompressed for matching first. When the limit is

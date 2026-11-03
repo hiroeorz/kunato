@@ -752,3 +752,23 @@ POST /case-report-template/upload header="Content-Type: application/x-www-form-u
 GET /api/scoutsuite/report/default
 POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"generate_prefab_ui\",\"arguments\":{\"code\":\"from prefab_ui import Prefab; Prefab.text('hello')\"}}}"
 GET /api?mode=status&name=delete_orphan&value=downloads/complete
+
+# --- Near-misses for the 2026-11-02 GoFound/Termix/CWP/Joomla/FOSSBilling/
+#     fastify/Rancher/CSGHub signatures: the same endpoints and parameters with
+#     ordinary values must keep passing. ---
+GET /api/db/create?database=news
+GET /api/db/drop?database=news
+POST /plugin-api/file-manager/transferToHost header="Content-Type: application/json" body="{\"sourceSessionId\":\"S1\",\"destSessionId\":\"S2\",\"sourcePaths\":[\"/home/developer/site.tar.gz\"],\"destPath\":\"/home/developer/backup/site.tar.gz\"}"
+GET /user/index.php?module=dashboard
+GET /user/index.php?module=protected_directory&acc=list
+POST /user/index.php header="Content-Type: application/x-www-form-urlencoded" body="module=protected_directory&acc=deletedp&file=old-backup.tar.gz"
+POST /user/index.php header="Content-Type: application/x-www-form-urlencoded" body="module=phpini_editor&acc=addlabelphpiniadv&label=memory_limit"
+POST /user/index.php header="Content-Type: application/x-www-form-urlencoded" body="module=phpini_editor&acc=update&path=conf/php.ini&content=memory_limit%3D256M"
+GET /index.php?option=com_djclassifieds&view=items&search=accounting
+POST /index.php?option=com_djclassifieds&task=item.add header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /index.php?option=com_customtables&task=form.save header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+POST /admin/support/note_create header="Content-Type: application/x-www-form-urlencoded" body="ticket_id=1&note=Customer%20reported%20a%20billing%20issue"
+GET /proxy/reports/2026/10
+GET /proxy/tenant/reports
+GET /meta/proxy?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus
+GET /models/public/resolve/main/config.json
