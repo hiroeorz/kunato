@@ -773,6 +773,14 @@ GET /proxy/tenant/reports
 GET /meta/proxy?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus
 GET /models/public/resolve/main/config.json
 
+# --- Near-misses for the command-injection path signatures: article slugs and
+#     documentation paths that name a shell or tool are content, not execution,
+#     and must reach the upstream. ---
+GET /admin/posts/powershell-tpm/edit
+GET /admin/posts/pwsh-tips/edit
+GET /posts/powershell
+GET /blog/2026/11/bash-and-powershell-tips
+
 # --- Benign XML and HTML doctypes ---
 POST /xml header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><root/>"
 POST /xml header="Content-Type: text/html" body="<!DOCTYPE html><html><body>ok</body></html>"

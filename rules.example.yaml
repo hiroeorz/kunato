@@ -1024,7 +1024,12 @@ categories:
       - name: brace-expansion-command
         match: { regex: '(?i)(;|\||&&|\|\||&\s+|\$\(|`)\s*\{\s*(cat|ls|id|whoami|uname|sleep|ping|echo|touch|base64|bash|sh|nc|ncat|netcat|curl|wget)\s*,', in: [query, body] }
       - name: shell-and-binaries
-        match: { regex: '(?i)(/bin/(sh|bash|zsh|dash|busybox|cat|ls|id|whoami|uname|sleep|ping|env|pwd|nc)|/usr/bin/(sh|bash|dash|env|perl|python|php|base64|xxd|socat|openssl|curl|wget|nc|ncat|nslookup|dig|telnet|awk|sed|find)|cmd\.exe|powershell(\.exe)?|pwsh)', in: [query, body, path] }
+        match: { regex: '(?i)(/bin/(sh|bash|zsh|dash|busybox|cat|ls|id|whoami|uname|sleep|ping|env|pwd|nc)|/usr/bin/(sh|bash|dash|env|perl|python|php|base64|xxd|socat|openssl|curl|wget|nc|ncat|nslookup|dig|telnet|awk|sed|find)|cmd\.exe|powershell(\.exe)?|pwsh)', in: [query, body] }
+      # A bare tool name in a path is usually content, not execution: article
+      # slugs such as /admin/posts/powershell-tpm/edit and /posts/powershell
+      # must reach the upstream. The path target keeps only executable shapes.
+      - name: shell-binary-path
+        match: { regex: '(?i)(/bin/(sh|bash|zsh|dash|busybox|cat|ls|id|whoami|uname|sleep|ping|env|pwd|nc)|/usr/bin/(sh|bash|dash|env|perl|python|php|base64|xxd|socat|openssl|curl|wget|nc|ncat|nslookup|dig|telnet|awk|sed|find)|cmd\.exe|powershell\.exe|pwsh\.exe)', in: [path] }
       # Bash reverse shells use the /dev/tcp pseudo-device (HestiaCP
       # CVE-2026-111627 cron entries and countless others); the shape has no
       # legitimate request-side use.
