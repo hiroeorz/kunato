@@ -248,8 +248,26 @@ cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ./scripts/generate-signing-keys.sh  # Create the release and rules signing keys
 ./scripts/sign-artifact.sh KEY FILE # Detached minisign signature (FILE.minisig)
-./scripts/sign-release.sh vX.Y.Z # Sign and upload a release's install.sh and SHA256SUMS
+./scripts/sign-release.sh vX.Y.Z # Required after release.sh: sign and upload install.sh + SHA256SUMS
 ```
+
+### Release procedure
+
+`./scripts/release.sh X.Y.Z` only pushes the tag and lets the release workflow
+publish binaries and the rule set. It does **not** sign the release assets.
+After the Release workflow finishes, run the manual signing step on the machine
+that holds the release key:
+
+```sh
+./scripts/sign-release.sh vX.Y.Z
+```
+
+This uploads `install.sh.minisig` and `SHA256SUMS.minisig`. They are mandatory:
+`kunato upgrade` verifies both before running the installer as root, and a
+release without them fails with `release download request returned 404`.
+Confirm the release assets include both signatures before announcing the release
+as complete. The command needs the release key (`~/.config/kunato/keys/release.key`
+or `KUNATO_RELEASE_KEY`), `minisign`, an authenticated `gh`, and the pushed tag.
 
 Before finishing any task, always run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
 `./scripts/check-deny.sh`, and `cargo test`, in that order. The wrapper runs
