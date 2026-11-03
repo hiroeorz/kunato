@@ -923,6 +923,19 @@ fn claim_for(declared: Option<&str>, filename: &str) -> Claim {
     extension_claim(filename)
 }
 
+/// True when the part carries a verified binary container: a safe media claim
+/// whose bytes start with that format's signature. Body targets skip such a
+/// payload because the upload checks inspect the file content, while form
+/// fields, filenames, and unverified file claims stay in scope.
+pub(crate) fn is_verified_binary_part(
+    declared: Option<&str>,
+    filename: &str,
+    value: &[u8],
+) -> bool {
+    claim_for(declared, filename) == Claim::Safe
+        && expected_format(declared, filename).is_some_and(|format| format.matches(value))
+}
+
 fn extension_claim(filename: &str) -> Claim {
     let Some(extension) = extension(filename) else {
         return Claim::Generic;
@@ -1484,11 +1497,25 @@ fn contains_asp_scriptlet(bytes: &[u8]) -> bool {
         b"this",
         b"super",
     ];
+    // An ASP or JSP block is a short statement; a legitimate one closes well
+    // inside this window.
+    const MAX_SCRIPTLET_BYTES: usize = 64;
 
     let mut index = 0;
     while index + 2 < bytes.len() {
         if bytes[index] == b'<' && bytes[index + 1] == b'%' {
             let rest = &bytes[index + 2..];
+            // ASP and JSP require the block to close with `%>`; an unclosed
+            // block is a parse error, while random compressed bytes produce
+            // `<%#` and `<%=` openers often enough to reject photographs.
+            let closed = rest
+                .windows(2)
+                .take(MAX_SCRIPTLET_BYTES)
+                .any(|window| window == b"%>");
+            if !closed {
+                index += 1;
+                continue;
+            }
             let Some(&first) = rest.first() else {
                 break;
             };
@@ -1532,12 +1559,13 @@ fn is_code_start(byte: u8) -> bool {
         )
 }
 
-/// PHP short open tags (`<?`) are only detected when what follows looks like
-/// code: a variable, a call, a parenthesized callable, or a language keyword.
-/// Whitespace, `@`, and comments may sit between the tag and the first
-/// expression. A bare two-byte scan would match random bytes inside compressed
-/// images and media, and XML processing instructions (`<?xml`, `<?xpacket`,
-/// `<?mso-application`) must not match.
+/// PHP short open tags (`<?`) are only detected when what follows looks like a
+/// statement: a call, a variable with an assignment or member access, a
+/// namespaced function, a closed backtick command, or a language construct
+/// followed by an expression. Whitespace, `@`, and comments may sit between the
+/// tag and the first expression. A bare two-byte scan would match random bytes
+/// inside compressed images and media, and XML processing instructions
+/// (`<?xml`, `<?xpacket`, `<?mso-application`) must not match.
 fn contains_short_script_tag(bytes: &[u8]) -> bool {
     let mut index = 0;
     while index + 1 < bytes.len() {
@@ -1608,6 +1636,11 @@ fn strip_line_comment(value: &[u8]) -> Option<&[u8]> {
     Some(&[])
 }
 
+/// The body of a short tag must look like a statement: a call, a variable with
+/// an assignment or member access, a namespaced function, a closed backtick
+/// command, or a language construct followed by an expression. A bare name is
+/// not enough because compressed pixels contain `<?if`, `<?$x` and similar
+/// byte coincidences at a rate that rejects legitimate photographs.
 fn short_tag_body(rest: &[u8]) -> bool {
     const KEYWORDS: &[&[u8]] = &[
         b"echo",
@@ -1659,16 +1692,12 @@ fn short_tag_body(rest: &[u8]) -> bool {
     let Some(&first) = rest.first() else {
         return false;
     };
-    if first == b'$' {
-        return true;
-    }
-    if first == b'(' {
-        return parenthesized_callable(rest);
-    }
-    // A leading backslash calls into the global namespace and a backtick runs a
-    // shell command; both are code even though they are not names.
-    if matches!(first, b'\\' | b'`') {
-        return true;
+    match first {
+        b'$' => return variable_statement(rest),
+        b'(' => return parenthesized_callable(rest),
+        b'\\' => return namespaced_call(rest),
+        b'`' => return backtick_command(rest),
+        _ => {}
     }
     if !(first.is_ascii_alphabetic() || first == b'_') {
         return false;
@@ -1682,12 +1711,80 @@ fn short_tag_body(rest: &[u8]) -> bool {
     if name.eq_ignore_ascii_case(b"xml") {
         return false;
     }
-    if skip_ascii_spaces(&rest[name_len..]).first() == Some(&b'(') {
-        return true;
+    let after = skip_ascii_spaces(&rest[name_len..]);
+    // A call needs a name long enough that compressed bytes rarely form one.
+    // Two-letter language keywords such as `if(` still pass the keyword check.
+    if after.first() == Some(&b'(') {
+        return name.len() >= 3
+            || KEYWORDS
+                .iter()
+                .any(|keyword| name.eq_ignore_ascii_case(keyword));
     }
-    KEYWORDS
+    if !KEYWORDS
         .iter()
         .any(|keyword| name.eq_ignore_ascii_case(keyword))
+    {
+        return false;
+    }
+    // A language construct must be followed by an expression.
+    matches!(
+        after.first().copied(),
+        Some(b'$' | b'"' | b'\'' | b'\\' | b'`')
+    ) || after.first().is_some_and(u8::is_ascii_digit)
+}
+
+/// A variable needs an assignment, a call, an index, or a member access after
+/// the name (`<?$x=$_GET['cmd'];`, `<?$f();`); a bare `<?$x` is a coincidence.
+fn variable_statement(rest: &[u8]) -> bool {
+    const MAX_NAME_BYTES: usize = 64;
+
+    let after_dollar = &rest[1..];
+    let name_len = after_dollar
+        .iter()
+        .take(MAX_NAME_BYTES)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+        .count();
+    if name_len == 0 {
+        return false;
+    }
+    let after = skip_ascii_spaces(&after_dollar[name_len..]);
+    matches!(
+        after.first().copied(),
+        Some(b'=' | b';' | b'(' | b'[' | b'.' | b',' | b')' | b'?' | b':')
+    ) || after.starts_with(b"->")
+}
+
+/// A leading backslash calls into the global namespace: `\system(...)`.
+fn namespaced_call(rest: &[u8]) -> bool {
+    const MAX_NAME_BYTES: usize = 64;
+
+    let after_backslash = &rest[1..];
+    let name_len = after_backslash
+        .iter()
+        .take(MAX_NAME_BYTES)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+        .count();
+    name_len > 0 && skip_ascii_spaces(&after_backslash[name_len..]).first() == Some(&b'(')
+}
+
+/// A backtick runs a shell command, but the command must be closed before the
+/// tag ends and be followed by a statement terminator (`<? \`id\`;`).
+fn backtick_command(rest: &[u8]) -> bool {
+    const MAX_COMMAND_BYTES: usize = 128;
+
+    let body = &rest[1..];
+    let Some(close) = body
+        .iter()
+        .take(MAX_COMMAND_BYTES)
+        .position(|byte| *byte == b'`')
+    else {
+        return false;
+    };
+    if close == 0 {
+        return false;
+    }
+    let after = skip_ascii_spaces(&body[close + 1..]);
+    matches!(after.first().copied(), Some(b';' | b'?'))
 }
 
 /// A parenthesized callable (`(system)(...)`, `($f)(...)`) is only treated as
@@ -2625,6 +2722,11 @@ mod tests {
         ] {
             assert!(contains_script_marker(marker), "{marker:?}");
         }
+        // An unclosed block is a parse error in ASP and JSP, and compressed
+        // pixels produce these openers by chance.
+        for marker in [b"<%#i\xff".as_slice(), b"<%=x", b"<% out.print(1);"] {
+            assert!(!contains_script_marker(marker), "{marker:?}");
+        }
     }
 
     #[test]
@@ -2660,6 +2762,12 @@ mod tests {
             b"<?(1)",
             b"<?(system) nonsense",
             b"\x3c\x3f\x00\x01\x02",
+            b"<?if~",
+            b"<?$vp\xff\x00",
+            b"<?\\\x1b\x00",
+            b"<?Xe(",
+            b"<?`id",
+            b"<?$x",
         ] {
             assert!(!contains_short_script_tag(value), "{value:?}");
         }
