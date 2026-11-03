@@ -229,6 +229,9 @@ outside the inspected prefix (in `stream` mode), archive contents, or
 executable/markup content embedded beyond the leading bytes is not covered.
 In strict body mode an over-limit upload is rejected with `413` unless an
 `ALLOW` rule decides, because the file bytes must be complete for inspection.
+Archive inspection is CPU-bound and runs on Tokio's blocking pool, bounded by a
+semaphore sized to the available parallelism and by the per-request expansion
+budget, so decompression cannot stall the asynchronous request workers.
 
 ### Request normalization
 

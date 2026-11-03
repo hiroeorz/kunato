@@ -1149,6 +1149,14 @@ limits:
     max_entries: 4096
 ```
 
+Archive inspection is CPU-bound, so multipart upload inspection runs on Tokio's
+blocking pool rather than on an async worker. The inspected body is shared as
+`Bytes` (a reference-counted handle, not a copy), a semaphore sized to the
+available parallelism bounds concurrent jobs (1..=32), and the request task
+waits asynchronously for a permit. A blocking task that cannot be joined is
+answered with `500` instead of forwarding an uninspected body.
+`kunato_upload_inspection_active` reports the jobs in flight.
+
 The check is content-based, so an explicitly named upload (`.php`, `.rb`,
 `.sh`, `.exe`) is the bundled `malicious-upload` category's job. Its
 `executable-filenames`, `script-filenames`, `binary-filenames`, and
@@ -1362,8 +1370,8 @@ not be inspected: `kunato_request_decode_skipped_total`; and response bodies
 that could not be decoded: `kunato_response_decode_skipped_total`), GraphQL
 rejections (`kunato_graphql_rejected_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
-uptime, the time of the last successful rules update, and the time of the last
-deployed ACME certificate. Non-loopback addresses are rejected at validation
+upload inspections running on the blocking pool, uptime, the time of the last
+successful rules update, and the time of the last deployed ACME certificate. Non-loopback addresses are rejected at validation
 time, and if the port is already in use Kunato logs a warning and continues
 without the admin endpoint.
 

@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -18,7 +17,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
@@ -55,6 +54,16 @@ const RESPONSE_INSPECTION_FACTOR: usize = 3;
 /// before decoding and rule evaluation. A stalled body therefore holds its
 /// actual buffered bytes, not the whole decoding budget.
 const MIN_INSPECTION_RESERVATION: usize = 64 * 1024;
+
+/// CPU-bound upload inspection is moved to the blocking pool. Cap the number
+/// of concurrent jobs at the available parallelism so a burst of large
+/// archives cannot oversubscribe every CPU while the async workers wait.
+fn upload_inspection_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(1, 32)
+}
 
 pub(crate) struct InspectionBudget {
     reserved: AtomicUsize,
@@ -353,6 +362,7 @@ pub struct Context {
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
     inspection: Arc<InspectionBudget>,
+    upload_slots: Arc<Semaphore>,
     tls: TlsMode,
     scheme: &'static str,
     alt_svc: Option<HeaderValue>,
@@ -433,6 +443,18 @@ impl Context {
     }
 }
 
+/// Keeps `kunato_upload_inspection_active` accurate even if an inspection
+/// panics: the guard is dropped while the blocking task unwinds.
+struct UploadInspectionActive(Arc<Metrics>);
+
+impl Drop for UploadInspectionActive {
+    fn drop(&mut self) {
+        self.0
+            .upload_inspection_active
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub struct Server {
     listener: TcpListener,
     context: Context,
@@ -500,6 +522,7 @@ impl Server {
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
                 inspection: Arc::new(InspectionBudget::new()),
+                upload_slots: Arc::new(Semaphore::new(upload_inspection_concurrency())),
                 tls,
                 scheme,
                 alt_svc,
@@ -1771,7 +1794,8 @@ async fn process(
         }
     }
     let body_truncated;
-    let mut inspected_body: Cow<'_, [u8]> = match if decode_body {
+    let mut body_was_decoded = false;
+    let mut inspected_body: Bytes = match if decode_body {
         crate::decoding::decode_body_for_inspection(
             body,
             &parts.headers,
@@ -1782,7 +1806,7 @@ async fn process(
     } {
         crate::decoding::DecodeOutcome::NotEncoded => {
             body_truncated = payload.truncated;
-            Cow::Borrowed(body)
+            payload.prefix.clone()
         }
         crate::decoding::DecodeOutcome::Decoded {
             body: decoded,
@@ -1808,7 +1832,8 @@ async fn process(
                 ));
             }
             body_truncated = payload.truncated;
-            Cow::Owned(decoded)
+            body_was_decoded = true;
+            Bytes::from(decoded)
         }
         crate::decoding::DecodeOutcome::Unsupported => {
             context
@@ -1908,27 +1933,56 @@ async fn process(
             return Err(HttpError::new(status, violation.message()));
         }
     }
-    if inspect_multipart
-        && let Some(rejection) = crate::upload::inspect(
-            &parts.headers,
-            inspected_body.as_ref(),
-            config.limits.upload_inspection,
-            config.limits.upload_expansion,
-        )
-    {
-        context
-            .metrics
-            .upload_rejected
-            .fetch_add(1, Ordering::Relaxed);
-        debug!(
-            client = %source.client_ip, peer = %source.peer,
-            path = %parts.uri.path(),
-            filename = %rejection.filename,
-            declared = rejection.declared.as_deref().unwrap_or("-"),
-            kind = rejection.kind.as_str(),
-            "upload content rejected"
-        );
-        return Err(HttpError::new(rejection.status(), rejection.message()));
+    if inspect_multipart {
+        let permit = match Arc::clone(&context.upload_slots).acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                warn!("upload inspection semaphore is closed");
+                return Err(HttpError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "upload inspection unavailable",
+                ));
+            }
+        };
+        let upload_headers = parts.headers.clone();
+        let upload_body = inspected_body.clone();
+        let metrics = Arc::clone(&context.metrics);
+        let mode = config.limits.upload_inspection;
+        let expansion = config.limits.upload_expansion;
+        let rejection = match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            metrics
+                .upload_inspection_active
+                .fetch_add(1, Ordering::Relaxed);
+            let _active = UploadInspectionActive(metrics);
+            crate::upload::inspect(&upload_headers, upload_body.as_ref(), mode, expansion)
+        })
+        .await
+        {
+            Ok(rejection) => rejection,
+            Err(error) => {
+                warn!(error = %error, "upload inspection task failed");
+                return Err(HttpError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "upload inspection failed",
+                ));
+            }
+        };
+        if let Some(rejection) = rejection {
+            context
+                .metrics
+                .upload_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            debug!(
+                client = %source.client_ip, peer = %source.peer,
+                path = %parts.uri.path(),
+                filename = %rejection.filename,
+                declared = rejection.declared.as_deref().unwrap_or("-"),
+                kind = rejection.kind.as_str(),
+                "upload content rejected"
+            );
+            return Err(HttpError::new(rejection.status(), rejection.message()));
+        }
     }
     if inspect_raw_body
         && let Some(rejection) = crate::upload::inspect_raw(
@@ -2080,11 +2134,12 @@ async fn process(
     let keep_inspected_body =
         config.has_response_rules() && config.response_targets_request_body() && !body_rules_exempt;
     if !keep_inspected_body {
-        inspected_body = Cow::Borrowed(&[]);
+        inspected_body = Bytes::new();
     }
-    let owned_decoded = match &inspected_body {
-        Cow::Borrowed(_) => 0,
-        Cow::Owned(bytes) => bytes.len(),
+    let decoded_body_bytes = if keep_inspected_body && body_was_decoded {
+        inspected_body.len()
+    } else {
+        0
     };
     let pending_bytes: usize = payload
         .pending
@@ -2097,7 +2152,7 @@ async fn process(
             .prefix
             .len()
             .saturating_add(pending_bytes)
-            .saturating_add(owned_decoded),
+            .saturating_add(decoded_body_bytes),
     );
     // The request context retains its prefix across the upstream exchange.
     // Share the reservation with the outbound body, which can also outlive an
@@ -2236,6 +2291,11 @@ async fn process(
 mod tests {
     use super::*;
     use crate::proxy::Full;
+
+    #[test]
+    fn upload_inspection_concurrency_is_bounded() {
+        assert!((1..=32).contains(&upload_inspection_concurrency()));
+    }
 
     struct PendingBody;
 

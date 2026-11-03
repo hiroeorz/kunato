@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use http::header::{HeaderName, HeaderValue};
@@ -977,6 +977,65 @@ fn zip_with_stored_file(name: &str, data: &[u8]) -> Vec<u8> {
     archive.extend_from_slice(&1u16.to_le_bytes());
     archive.extend_from_slice(&(directory_size as u32).to_le_bytes());
     archive.extend_from_slice(&(directory_offset as u32).to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive
+}
+
+fn zip_bomb(entries: usize, entry_size: usize) -> Vec<u8> {
+    use std::io::Write;
+
+    let payload = vec![0u8; entry_size];
+    let mut archive = Vec::new();
+    let mut central = Vec::new();
+    for index in 0..entries {
+        let name = format!("entry{index}.bin");
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&payload).expect("write deflate");
+        let compressed = encoder.finish().expect("finish deflate");
+        let offset = archive.len() as u32;
+        archive.extend_from_slice(b"PK\x03\x04");
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&8u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(name.as_bytes());
+        archive.extend_from_slice(&compressed);
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&8u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let directory_offset = archive.len() as u32;
+    let directory_size = central.len() as u32;
+    archive.extend_from_slice(&central);
+    archive.extend_from_slice(b"PK\x05\x06");
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&(entries as u16).to_le_bytes());
+    archive.extend_from_slice(&(entries as u16).to_le_bytes());
+    archive.extend_from_slice(&directory_size.to_le_bytes());
+    archive.extend_from_slice(&directory_offset.to_le_bytes());
     archive.extend_from_slice(&0u16.to_le_bytes());
     archive
 }
@@ -6144,6 +6203,63 @@ async fn upload_expansion_budget_is_shared_across_parts() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_expansion_does_not_block_the_async_runtime() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits:\n  upload_expansion:\n    max_bytes: 1073741824\n    max_total_bytes: 1073741824\n    max_entries: 4096\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+    let archive = zip_bomb(4096, 256 * 1024);
+    let body = multipart_upload("bomb.zip", "application/zip", &archive);
+    let address = running.addr;
+    let upload = tokio::spawn(async move {
+        send_bytes(
+            address,
+            Method::POST,
+            "/upload",
+            body,
+            &[("content-type", "multipart/form-data; boundary=X")],
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while running
+            .metrics
+            .upload_inspection_active
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("upload inspection must reach the blocking pool");
+
+    let started = Instant::now();
+    let (status, _) = tokio::time::timeout(
+        Duration::from_millis(250),
+        send(address, Method::GET, "/", ""),
+    )
+    .await
+    .expect("the async runtime must stay responsive during expansion");
+    assert_eq!(status, StatusCode::OK);
+    assert!(started.elapsed() < Duration::from_millis(250));
+
+    let (status, _) = upload.await.expect("upload task");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        running
+            .metrics
+            .upload_inspection_active
+            .load(Ordering::Relaxed),
+        0
+    );
 
     running.stop().await;
 }

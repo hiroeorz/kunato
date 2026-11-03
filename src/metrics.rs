@@ -14,6 +14,7 @@ pub struct Metrics {
     pub request_truncated: AtomicU64,
     pub request_body_rejected: AtomicU64,
     pub upload_rejected: AtomicU64,
+    pub upload_inspection_active: AtomicU64,
     pub form_rejected: AtomicU64,
     pub php_request_rejected: AtomicU64,
     pub php_response_rejected: AtomicU64,
@@ -63,6 +64,7 @@ impl Metrics {
             request_truncated: AtomicU64::new(0),
             request_body_rejected: AtomicU64::new(0),
             upload_rejected: AtomicU64::new(0),
+            upload_inspection_active: AtomicU64::new(0),
             form_rejected: AtomicU64::new(0),
             php_request_rejected: AtomicU64::new(0),
             php_response_rejected: AtomicU64::new(0),
@@ -364,6 +366,12 @@ impl Metrics {
         );
         gauge(
             &mut out,
+            "kunato_upload_inspection_active",
+            "Upload inspections running on the blocking pool.",
+            self.upload_inspection_active.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
             "kunato_active_connections",
             "Active client connections.",
             active_connections,
@@ -406,6 +414,9 @@ mod tests {
         let metrics = Metrics::new();
         metrics.requests.fetch_add(2, Ordering::Relaxed);
         metrics.blocked.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .upload_inspection_active
+            .fetch_add(1, Ordering::Relaxed);
         metrics.acme_issued.fetch_add(1, Ordering::Relaxed);
         metrics
             .rules_update_incompatible
@@ -416,6 +427,7 @@ mod tests {
         assert!(text.contains("# TYPE kunato_requests_total counter"));
         assert!(text.contains("kunato_requests_total 2"));
         assert!(text.contains("kunato_blocked_total 1"));
+        assert!(text.contains("kunato_upload_inspection_active 1"));
         assert!(text.contains("kunato_acme_issued_total 1"));
         assert!(text.contains("kunato_acme_last_success_timestamp_seconds 0"));
         assert!(text.contains("kunato_rules_update_incompatible_total 1"));
