@@ -10,39 +10,51 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::HeaderMap;
-use http::header::AUTHORIZATION;
 
 use crate::config::Jwt;
-use crate::request_view::cookie_pairs;
 
 const MAX_TOKEN_BYTES: usize = 8192;
 const MAX_HEADER_BYTES: usize = 1024;
 
-/// Returns a human-readable policy violation for the first matching JWT.
+/// Returns a human-readable policy violation for the first matching JWT in the
+/// request headers or cookies.
 pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
+    violation_in_request(headers, None, &[], policy)
+}
+
+/// Inspect headers, the query string, and the request body for compact JWT or
+/// JWE tokens. A policy that only sees `Authorization` misses custom token
+/// headers and tokens carried in JSON or form parameters.
+pub fn violation_in_request(
+    headers: &HeaderMap,
+    query: Option<&str>,
+    body: &[u8],
+    policy: &Jwt,
+) -> Option<String> {
     if !policy.enabled || policy.allowed_algorithms.is_empty() {
         return None;
     }
-    for value in headers.get_all(AUTHORIZATION) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        // RFC 9110 allows any amount of optional whitespace between the
-        // scheme and the credentials, including a tab.
-        let mut parts = value.splitn(2, char::is_whitespace);
-        let (Some(scheme), Some(token)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        if !scheme.eq_ignore_ascii_case("bearer") {
-            continue;
-        }
-        if let Some(reason) = check_token(token, policy) {
+    for value in headers.values() {
+        let text = String::from_utf8_lossy(value.as_bytes());
+        if let Some(reason) = check_text(&text, policy) {
             return Some(reason);
         }
     }
-    for (_, value) in cookie_pairs(headers) {
-        for form in crate::decoding::percent_decode_forms(value.as_ref()) {
-            if let Some(reason) = check_token(form.as_ref(), policy) {
+    if let Some(query) = query
+        && let Some(reason) = check_text(query, policy)
+    {
+        return Some(reason);
+    }
+    if !body.is_empty() && body.contains(&b'.') {
+        let text = String::from_utf8_lossy(body);
+        if let Some(reason) = check_text(&text, policy) {
+            return Some(reason);
+        }
+        if body.contains(&b'%') {
+            let decoded = crate::decoding::percent_decode(&text);
+            if decoded.as_ref() != text
+                && let Some(reason) = check_text(decoded.as_ref(), policy)
+            {
                 return Some(reason);
             }
         }
@@ -50,16 +62,77 @@ pub fn violation(headers: &HeaderMap, policy: &Jwt) -> Option<String> {
     None
 }
 
-/// Whether a token has the three base64url segments of a JWT and a header
-/// segment that decodes to a JSON object.
+fn check_text(text: &str, policy: &Jwt) -> Option<String> {
+    let forms = crate::decoding::percent_decode_forms(text);
+    for form in forms {
+        for token in token_candidates(form.as_ref()) {
+            if let Some(reason) = check_token(token, policy) {
+                return Some(reason);
+            }
+        }
+        // A lenient base64 decoder on the origin may skip punctuation that
+        // splits our token scanner. Scan compact runs anchored at the JWT
+        // header prefix too, so `eyJ...!.payload.signature` still reaches the
+        // header check.
+        for (index, _) in form.match_indices("eyJ") {
+            let candidate = &form[index..];
+            let end = candidate
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(
+                            character,
+                            '"' | '\'' | ',' | ';' | '&' | '(' | ')' | '[' | ']' | '{' | '}'
+                        )
+                })
+                .unwrap_or(candidate.len());
+            let candidate = &candidate[..end];
+            if candidate.matches('.').count() >= 2
+                && let Some(reason) = check_token(candidate, policy)
+            {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+/// Split text into compact-token candidates. JWT and JWE segments use the
+/// base64url alphabet plus `.` and optional `=` padding.
+fn token_candidates(text: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        let token_byte =
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'+' | b'/' | b'.');
+        match (token_byte, start) {
+            (true, None) => start = Some(index),
+            (false, Some(begin)) => {
+                if index > begin && text[begin..index].contains('.') {
+                    candidates.push(&text[begin..index]);
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start
+        && bytes.len() > begin
+        && text[begin..].contains('.')
+    {
+        candidates.push(&text[begin..]);
+    }
+    candidates
+}
+
+/// Whether a token has the compact segment shape of a JWT (three parts) or a
+/// JWE (five parts) and a header segment that decodes to a JSON object.
 fn looks_like_jwt(token: &str) -> bool {
-    let mut parts = token.split('.');
-    let (Some(header), Some(_), Some(_), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    let parts: Vec<&str> = token.split('.').collect();
+    if !matches!(parts.len(), 3 | 5) {
         return false;
-    };
-    decode_base64url(header).is_some_and(|decoded| decoded.trim_ascii_start().starts_with(b"{"))
+    }
+    decode_base64url(parts[0]).is_some_and(|decoded| decoded.trim_ascii_start().starts_with(b"{"))
 }
 
 fn check_token(token: &str, policy: &Jwt) -> Option<String> {
@@ -67,22 +140,32 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
     if token.is_empty() {
         return None;
     }
+    let parts: Vec<&str> = token.split('.').collect();
+    if !matches!(parts.len(), 3 | 5) {
+        return None;
+    }
+    let header = parts[0];
+    // An invalid header segment is not an opaque token: lenient origin-side
+    // base64 decoders skip or reinterpret characters that this decoder
+    // rejects, which is exactly how `alg: none` payloads slip through.
+    if !header.starts_with("eyJ") && !looks_like_jwt(token) {
+        return None;
+    }
     // An opaque token is out of scope, but a token shaped like a JWT that is
     // too large to inspect must fail closed: the algorithm check cannot see
     // its header.
     if token.len() > MAX_TOKEN_BYTES {
-        return looks_like_jwt(token).then(|| "jwt is too large to inspect".to_owned());
+        return Some("jwt is too large to inspect".to_owned());
     }
-    let mut parts = token.split('.');
-    let (Some(header), Some(payload), Some(_signature), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return None;
-    };
     if header.len() > MAX_HEADER_BYTES {
         return Some("jwt header is too large to inspect".to_owned());
     }
-    let decoded = decode_base64url(header)?;
+    let Some(decoded) = decode_base64url(header) else {
+        return Some("jwt header is not valid base64url".to_owned());
+    };
+    if !decoded.trim_ascii_start().starts_with(b"{") {
+        return None;
+    }
     if crate::hardening::has_duplicate_json_key(&decoded) {
         // The WAF and the application may read different duplicate keys
         // (`{"alg":"none","alg":"RS256"}`), so any duplicate is rejected.
@@ -97,13 +180,25 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
     {
         return Some(format!("jwt algorithm `{algorithm}` is not allowed"));
     }
+    if parts.len() == 5 {
+        // Encrypted JWTs hide their claims from the WAF. A claim policy cannot
+        // be enforced, so fail closed instead of forwarding an uninspected
+        // token.
+        if policy.require_exp
+            || !policy.allowed_issuers.is_empty()
+            || !policy.allowed_audiences.is_empty()
+        {
+            return Some("encrypted jwt claims cannot be inspected".to_owned());
+        }
+        return None;
+    }
     if !policy.require_exp
         && policy.allowed_issuers.is_empty()
         && policy.allowed_audiences.is_empty()
     {
         return None;
     }
-    let Some(payload) = decode_base64url(payload) else {
+    let Some(payload) = decode_base64url(parts[1]) else {
         return Some("jwt payload is not valid base64url".to_owned());
     };
     if crate::hardening::has_duplicate_json_key(&payload) {
@@ -197,6 +292,7 @@ fn decode_base64url(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use http::HeaderValue;
+    use http::header::AUTHORIZATION;
 
     fn policy() -> Jwt {
         Jwt {
@@ -384,5 +480,62 @@ mod tests {
             HeaderValue::from_str(&format!("access={}", hs.replace('.', "%2E"))).unwrap(),
         );
         assert!(violation(&headers, &policy()).is_some());
+    }
+
+    #[test]
+    fn custom_headers_query_and_body_tokens_are_inspected() {
+        let hs = token("eyJhbGciOiJIUzI1NiJ9", "e30");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-access-token",
+            HeaderValue::from_str(&hs).expect("header"),
+        );
+        assert!(violation(&headers, &policy()).is_some());
+
+        assert!(
+            violation_in_request(
+                &HeaderMap::new(),
+                Some(&format!("access_token={hs}")),
+                b"",
+                &policy()
+            )
+            .is_some()
+        );
+        assert!(
+            violation_in_request(
+                &HeaderMap::new(),
+                None,
+                format!("{{\"access_token\":\"{hs}\"}}").as_bytes(),
+                &policy()
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn encrypted_tokens_and_invalid_headers_fail_closed() {
+        let jwe = format!(
+            "{}.e30.aXY.aXY.c2lnLnRhZw",
+            encode(r#"{"alg":"HS256","enc":"A256GCM"}"#)
+        );
+        assert_eq!(
+            violation(&bearer(&jwe), &policy()),
+            Some("jwt algorithm `HS256` is not allowed".to_owned())
+        );
+
+        let mut claim_policy = policy();
+        claim_policy.allowed_algorithms = vec!["HS256".to_owned()];
+        claim_policy.require_exp = true;
+        assert_eq!(
+            violation(&bearer(&jwe), &claim_policy),
+            Some("encrypted jwt claims cannot be inspected".to_owned())
+        );
+
+        let malformed = "eyJhbGciOiJIUzI1NiJ9!..c2ln".to_owned();
+        assert_eq!(
+            violation(&bearer(&malformed), &policy()),
+            Some("jwt header is not valid base64url".to_owned())
+        );
     }
 }

@@ -29,9 +29,15 @@ upstream: http://127.0.0.1:3000
 categories:
   # Trusted clients skip the remaining request rules and the strict body-size
   # rejection. Engine limits (header/path size, GraphQL, undecodable bodies) and
-  # response-phase rules still apply. Add your own ranges (VPN, office network,
-  # monitoring) here.
+  # response-phase rules still apply.
+  #
+  # Disabled by default: a reverse proxy, container network, or cloud load
+  # balancer often makes every internet client appear to come from one of
+  # these ranges. Enable only when the source addresses are genuinely trusted
+  # and client_ip is configured so forwarded requests do not inherit a private
+  # peer address.
   - name: trusted-sources
+    enabled: false
     action: ALLOW
     rules:
       - name: internal-networks
@@ -78,6 +84,10 @@ categories:
         match: { regex: '(?i)(?:^|[?&\s])admin=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*admin=', in: [query, body] }
       - name: duplicate-permission-parameter
         match: { regex: '(?i)(?:^|[?&\s])permissions?=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*permissions?=', in: [query, body] }
+      - name: duplicate-php-normalized-admin-parameter
+        match: { regex: '(?i)(?:^|[?&\s])is[._\s]?admin=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*is[._\s]?admin=', in: [query, body] }
+      - name: duplicate-php-normalized-role-parameter
+        match: { regex: '(?i)(?:^|[?&\s])role[._\[]id[\]\s]*=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*role[._\[]id[\]\s]*=', in: [query, body] }
       - name: duplicate-account-type-parameter
         match: { regex: '(?i)(?:^|[?&\s])account_type=[^&\s]{0,128}&(?:[^&\s]{1,128}&)*account_type=', in: [query, body] }
       - name: duplicate-redirect-uri-parameter
@@ -101,7 +111,7 @@ categories:
     action: BLOCK
     rules:
       - name: privileged-field-assignment
-        match: { regex: '(?i)(^|[?&"\s])(is_admin|isadmin|permission|permissions|account_type|user_type|scope|authorities)["\x27]?\s*[:=]\s*["\x27]?(admin|true|1|root|superuser|owner)["\x27]?', in: [query, body] }
+        match: { regex: '(?i)(^|[?&"\s])(is[._\s]?admin|isadmin|role[._\[]id|user[._\s]?type|account[._\s]?type|permission|permissions|scope|authorities)[\]"\x27]?\s*[:=]\s*["\x27]?(admin|true|1|root|superuser|owner)["\x27]?', in: [query, body] }
 
   # Common prompt-injection and chat-template control strings. This is a
   # coarse signature for obvious payloads, not a semantic guard for an LLM.
@@ -1151,7 +1161,7 @@ categories:
       - name: javascript-uri
         match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers, cookies] }
       - name: data-html-uri
-        match: { regex: '(?i)data\s*:\s*(text/html|text/javascript|application/javascript|application/xhtml)', in: [query, body, headers, cookies] }
+        match: { regex: '(?i)data\s*:\s*(text/html|text/javascript|application/javascript|application/xhtml\+xml|image/svg\+xml|image/svg)', in: [query, body, headers, cookies] }
       - name: dom-sinks
         match: { regex: '(?i)(document\.(cookie|domain|write)|window\.location|eval\s*\(|expression\s*\()', in: [query, body, cookies] }
 
@@ -1191,7 +1201,7 @@ categories:
     action: BLOCK
     rules:
       - name: redirect-parameter-url
-        match: { regex: '(?i)(^|[?&"\x27\s])(redirect(_to|_url|_path)?|redir|return_to|reset_url|next|continue|goto|dest(ination)?|target_url|out_url)["\x27]?\s*[:=]\s*"?((https?|ftps?)://|//)', in: [query, body, cookies] }
+        match: { regex: '(?i)(^|[?&"\x27\s])(redirect(_to|_url|_path)?|redir|return_to|reset_url|next|continue|goto|dest(ination)?|target_url|out_url)["\x27]?\s*[:=]\s*"?((https?|ftps?):[\\/]{1,2}|[\\/]{2})', in: [query, body, cookies] }
 
   # Directory traversal and local file inclusion.
   - name: path-traversal
@@ -1248,7 +1258,7 @@ categories:
     action: BLOCK
     rules:
       - name: doctype-and-entity
-        match: { regex: '(?i)<!DOCTYPE\s+[^\s>]+\s*(?:\[|(?:SYSTEM|PUBLIC)\s)|<!ENTITY\b', in: [body] }
+        match: { regex: '(?i)<!DOCTYPE\s+[^\s>]+\s*(?:\[|(?:SYSTEM|PUBLIC)\s)|<!ENTITY\b|<(?:xi:)?include\b', in: [body] }
 
   # Server-side request forgery: cloud metadata endpoints, private,
   # link-local, and CGNAT targets, encoded and shorthand loopback addresses,
@@ -1257,17 +1267,21 @@ categories:
     action: BLOCK
     rules:
       - name: metadata-endpoints
-        match: { regex: '(?i)(169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)', in: [query, body] }
+        match: { regex: '(?i)(169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200)', in: [query, body, headers, cookies] }
       - name: internal-addresses
-        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?(127\.[0-9]|localhost([/:?#&"\x27\s]|$)|0\.0\.0\.0|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|\[::1\]|\[::\]|\[(f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?):|\[::ffff:(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|7f00:1\]))', in: [query, body] }
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?(127\.[0-9]|localhost([/:?#&"\x27\s]|$)|0\.0\.0\.0|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|\[::1\]|\[::\]|\[(f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?):)', in: [query, body, headers, cookies] }
       - name: encoded-addresses
-        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(2130706433|017700000001|0x7f0{5}1|0x7f\.0\.0\.1|0x7f\.1|0177\.0\.0\.1)([/:?#&"\x27\s]|$)', in: [query, body] }
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(2130706433|017700000001|0x7f0{5}1|0x7f\.0\.0\.1|0x7f\.1|0177\.0\.0\.1)([/:?#&"\x27\s]|$)', in: [query, body, headers, cookies] }
+      - name: encoded-private-or-metadata-addresses
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(0x[0-9a-f]{1,8}|0[0-7]{6,}|[0-9]{8,10})([/:?#&"\x27\s]|$)', in: [query, body, headers, cookies] }
+      - name: ipv6-mapped-private-or-metadata-addresses
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://\[::ffff:(127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+|169\.254\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|7f00:1|a9fe:a9fe|a00:1|c0a8:1)\]', in: [query, body, headers, cookies] }
       - name: single-label-host
-        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?[a-z0-9_-]+\.?([:/?#&"\x27\s]|$)', in: [query, body] }
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?[a-z0-9_-]+\.?([:/?#&"\x27\s]|$)', in: [query, body, headers, cookies] }
       - name: protocol-relative-internal
-        match: { regex: '(?i)//(127\.[0-9]|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|localhost([/:?#&"\x27\s]|$)|\[::1\])', in: [query, body] }
+        match: { regex: '(?i)//(127\.[0-9]|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]|192\.168\.[0-9]|169\.254\.[0-9]|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]|localhost([/:?#&"\x27\s]|$)|\[::1\])', in: [query, body, headers, cookies] }
       - name: file-scheme
-        match: { regex: '(?i)file://', in: [query, body] }
+        match: { regex: '(?i)file://', in: [query, body, headers, cookies] }
 
   # Ruby deserialization payloads: base64 Marshal blobs (BAh7 is the base64 of
   # the "\x04\x08" Marshal header), percent-encoded raw Marshal bytes, and the

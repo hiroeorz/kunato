@@ -131,7 +131,8 @@ fn write_text(
         write!(writer, "{} {level_text} {target}:", timestamp.to_rfc3339())?;
     }
     if let Some(message) = &fields.message {
-        write!(writer, " {message}")?;
+        write!(writer, " ")?;
+        write_text_message(writer, message)?;
     }
     for (key, value) in &fields.values {
         write!(writer, " {key}=")?;
@@ -141,6 +142,23 @@ fn write_text(
         }
     }
     writeln!(writer)
+}
+
+/// Event messages are static literals in Kunato, but a `log` record forwarded
+/// by the bridge may carry peer-derived text. Escape control characters and
+/// line terminators without quoting ordinary spaces so the message stays
+/// readable and can never inject a fake log line or terminal escape.
+fn write_text_message(writer: &mut dyn io::Write, value: &str) -> io::Result<()> {
+    for ch in value.chars() {
+        match ch {
+            '\n' => write!(writer, "\\n")?,
+            '\r' => write!(writer, "\\r")?,
+            '\t' => write!(writer, "\\t")?,
+            ch if ch.is_control() => write!(writer, "\\x{:02x}", ch as u32)?,
+            ch => write!(writer, "{ch}")?,
+        }
+    }
+    Ok(())
 }
 
 /// Write a text field value so `kunato log` can split it back out: values that
@@ -354,6 +372,30 @@ mod tests {
         assert_eq!(value["fields"]["answer"], 42);
         assert_eq!(value["fields"]["action"], "\"BLOCK\"");
         assert_eq!(value["fields"]["rate_limited"], false);
+    }
+
+    #[test]
+    fn text_escapes_control_characters_in_messages() {
+        let fields = Fields {
+            message: Some("peer said\n\x1b[31mfake\x1b[0m".to_owned()),
+            values: Vec::new(),
+        };
+        let mut output = Vec::new();
+        write(
+            &mut output,
+            LogFormat::Text,
+            timestamp(0, 0),
+            Level::INFO,
+            "kunato",
+            &fields,
+            false,
+        )
+        .expect("write text");
+        let text = String::from_utf8(output).expect("utf-8");
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+        assert!(text.contains("\\n"), "{text:?}");
+        assert!(text.contains("\\x1b"), "{text:?}");
+        assert!(!text.contains('\x1b'), "{text:?}");
     }
 
     #[test]

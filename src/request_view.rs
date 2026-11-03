@@ -133,8 +133,16 @@ pub fn cookie_pairs(headers: &HeaderMap) -> Vec<(Cow<'_, str>, Cow<'_, str>)> {
             Ok(value) => {
                 for part in value.split(';') {
                     let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
                     if let Some((name, value)) = part.split_once('=') {
                         pairs.push((Cow::Borrowed(name.trim()), Cow::Borrowed(value.trim())));
+                    } else {
+                        // PHP and several frameworks expose a valueless token
+                        // as a cookie name with an empty value. Dropping it
+                        // would hide that name from cookie-name rules.
+                        pairs.push((Cow::Borrowed(part), Cow::Borrowed("")));
                     }
                 }
             }
@@ -142,11 +150,16 @@ pub fn cookie_pairs(headers: &HeaderMap) -> Vec<(Cow<'_, str>, Cow<'_, str>)> {
                 let lossy = String::from_utf8_lossy(value.as_bytes());
                 for part in lossy.split(';') {
                     let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
                     if let Some((name, value)) = part.split_once('=') {
                         pairs.push((
                             Cow::Owned(name.trim().to_owned()),
                             Cow::Owned(value.trim().to_owned()),
                         ));
+                    } else {
+                        pairs.push((Cow::Owned(part.to_owned()), Cow::Owned(String::new())));
                     }
                 }
             }

@@ -26,6 +26,9 @@ const MAX_SIGNATURE_BYTES: usize = 8 * 1024;
 
 pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
     let tag = args.version.as_deref().map(normalize_tag).transpose()?;
+    if let Some(tag) = &tag {
+        ensure_not_downgrade(tag, args.allow_downgrade)?;
+    }
     let url = installer_url(tag.as_deref())?;
 
     if args.dry_run {
@@ -33,7 +36,13 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
         println!(
             "would run: sh -s --{} --yes",
             tag.as_deref()
-                .map(|tag| format!(" --version {tag}"))
+                .map(|tag| {
+                    let mut options = format!(" --version {tag}");
+                    if args.allow_downgrade {
+                        options.push_str(" --allow-downgrade");
+                    }
+                    options
+                })
                 .unwrap_or_default()
         );
         return Ok(());
@@ -61,8 +70,9 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
     let _cleanup = TempFileGuard(&verified_checksums);
     println!("running the installer from {url}");
 
-    let mut command = installer_command(tag.as_deref());
+    let mut command = installer_command(tag.as_deref(), args.allow_downgrade);
     command.env("KUNATO_VERIFIED_SHA256SUMS", &verified_checksums);
+    command.env("KUNATO_CURRENT_VERSION", env!("CARGO_PKG_VERSION"));
     command.stdin(Stdio::piped());
     let mut child = command
         .spawn()
@@ -145,18 +155,58 @@ fn write_verified_checksums(bytes: &[u8]) -> Result<std::path::PathBuf, Error> {
     Ok(path)
 }
 
+/// Reject an explicit release tag older than the running binary unless the
+/// operator asked for a downgrade. A replayed release asset is otherwise a
+/// silent rollback to a version with known vulnerabilities.
+fn ensure_not_downgrade(tag: &str, allow_downgrade: bool) -> Result<(), Error> {
+    if allow_downgrade {
+        return Ok(());
+    }
+    let current = env!("CARGO_PKG_VERSION");
+    if version_less(parse_version(tag), parse_version(current)) {
+        return Err(Error::Message(format!(
+            "refusing to downgrade from {current} to {tag}; pass --allow-downgrade to override"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_version(tag: &str) -> (Vec<u64>, bool) {
+    let tag = tag.trim().trim_start_matches('v');
+    let (core, prerelease) = match tag.split_once(['-', '+']) {
+        Some((core, rest)) => (core, !rest.is_empty() && tag.contains('-')),
+        None => (tag, false),
+    };
+    let mut parts: Vec<u64> = core
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect();
+    parts.resize(3, 0);
+    (parts, prerelease)
+}
+
+fn version_less(a: (Vec<u64>, bool), b: (Vec<u64>, bool)) -> bool {
+    if a.0 != b.0 {
+        return a.0 < b.0;
+    }
+    a.1 && !b.1
+}
+
 /// Build the shell invocation for the downloaded installer. The environment is
 /// cleared: `kunato upgrade` runs as root, so a variable inherited from the
 /// caller (`KUNATO_BASE_URL`, `PATH` with a planted `curl`) must not steer the
 /// install. `PATH` is pinned to the standard system directories so the script
 /// finds `curl`, `tar`, and `sha256sum` without trusting the caller's `PATH`.
-fn installer_command(tag: Option<&str>) -> Command {
+fn installer_command(tag: Option<&str>, allow_downgrade: bool) -> Command {
     const FALLBACK_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
     let mut command = Command::new("/bin/sh");
     command.arg("-s").arg("--");
     if let Some(tag) = tag {
         command.arg("--version").arg(tag);
+    }
+    if allow_downgrade {
+        command.arg("--allow-downgrade");
     }
     command.arg("--yes");
     command.env_clear();
@@ -264,7 +314,7 @@ mod tests {
 
     #[test]
     fn the_installer_runs_with_a_cleared_environment() {
-        let command = installer_command(Some("v0.4.0"));
+        let command = installer_command(Some("v0.4.0"), false);
         let environment: Vec<_> = command.get_envs().collect();
         assert_eq!(
             environment.len(),
@@ -277,6 +327,30 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect();
         assert_eq!(arguments, ["-s", "--", "--version", "v0.4.0", "--yes"]);
+    }
+
+    #[test]
+    fn an_explicit_older_release_is_refused_without_opt_in() {
+        let error = ensure_not_downgrade("v0.0.1", false).expect_err("must refuse");
+        assert!(error.to_string().contains("downgrade"), "{error}");
+        assert!(ensure_not_downgrade("v0.0.1", true).is_ok());
+        assert!(ensure_not_downgrade(env!("CARGO_PKG_VERSION"), false).is_ok());
+    }
+
+    #[test]
+    fn version_comparison_orders_prereleases_before_releases() {
+        assert!(version_less(
+            parse_version("v0.16.2-rc.1"),
+            parse_version("v0.16.2")
+        ));
+        assert!(!version_less(
+            parse_version("v0.16.2"),
+            parse_version("v0.16.2-rc.1")
+        ));
+        assert!(version_less(
+            parse_version("v0.9.9"),
+            parse_version("v0.10.0")
+        ));
     }
 
     #[test]

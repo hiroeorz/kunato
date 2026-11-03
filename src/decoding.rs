@@ -505,6 +505,133 @@ pub fn decode_body_format(body: &[u8], headers: &HeaderMap) -> Option<Vec<u8>> {
     decode_body_formats(body, headers).into_iter().next()
 }
 
+/// Largest JSON/XML nesting the rule engine and the origin are expected to
+/// handle. A deeper body is rejected instead of being forwarded uninspected
+/// because the analyzer cannot bound recursive parser behavior.
+const MAX_STRUCTURED_DEPTH: usize = 128;
+
+/// Return a description when a JSON or XML body nests past
+/// [`MAX_STRUCTURED_DEPTH`]. The scan is linear and only counts structure
+/// outside strings, comments, CDATA, and processing instructions.
+pub(crate) fn structured_body_depth_error(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<&'static str> {
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    let body = body.trim_ascii_start();
+    if body.is_empty() {
+        return None;
+    }
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).to_ascii_lowercase())
+        .unwrap_or_default();
+    let json = content_type.contains("json") || matches!(body.first(), Some(b'{' | b'['));
+    let xml = content_type.contains("xml")
+        || content_type.contains("xhtml")
+        || matches!(body.first(), Some(b'<'));
+    if json && json_depth_exceeds(body, MAX_STRUCTURED_DEPTH) {
+        return Some("json");
+    }
+    if xml && xml_depth_exceeds(body, MAX_STRUCTURED_DEPTH) {
+        return Some("xml");
+    }
+    None
+}
+
+fn json_depth_exceeds(body: &[u8], limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in body {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn xml_depth_exceeds(body: &[u8], limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < body.len() {
+        if body[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        if body[index..].starts_with(b"<!--") {
+            index = body[index + 4..]
+                .windows(3)
+                .position(|window| window == b"-->")
+                .map_or(body.len(), |offset| index + 4 + offset + 3);
+            continue;
+        }
+        if body[index..].starts_with(b"<![CDATA[") {
+            index = body[index + 9..]
+                .windows(3)
+                .position(|window| window == b"]]>")
+                .map_or(body.len(), |offset| index + 9 + offset + 3);
+            continue;
+        }
+        if body[index..].starts_with(b"<?") {
+            index = body[index + 2..]
+                .windows(2)
+                .position(|window| window == b"?>")
+                .map_or(body.len(), |offset| index + 2 + offset + 2);
+            continue;
+        }
+        let closing = body.get(index + 1) == Some(&b'/');
+        let declaration = matches!(body.get(index + 1), Some(b'!' | b'?'));
+        let mut cursor = index + 1;
+        let mut quote: Option<u8> = None;
+        while cursor < body.len() {
+            let byte = body[cursor];
+            if let Some(current_quote) = quote {
+                if byte == current_quote {
+                    quote = None;
+                }
+            } else if matches!(byte, b'"' | b'\'') {
+                quote = Some(byte);
+            } else if byte == b'>' {
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor >= body.len() {
+            break;
+        }
+        let self_closing = cursor > index && body[cursor - 1] == b'/';
+        if closing {
+            depth = depth.saturating_sub(1);
+        } else if !declaration && !self_closing {
+            depth += 1;
+            if depth > limit {
+                return true;
+            }
+        }
+        index = cursor + 1;
+    }
+    false
+}
+
 /// Decoded forms derived from the declared content type. Multipart bodies
 /// yield one flattened form per declared boundary: a message may name several
 /// (Rack parses the last, most servers the first), so every interpretation has
@@ -566,10 +693,8 @@ pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
     let mut forms = Vec::new();
     let decoded = decode_body_formats(body, headers);
     if decoded.is_empty() {
-        if !body.contains(&b'%') {
-            return forms;
-        }
-        push_percent_passes(&String::from_utf8_lossy(body), &mut forms);
+        let text = String::from_utf8_lossy(body);
+        push_text_decode_passes(&text, &mut forms);
         return forms;
     }
     for formatted in decoded {
@@ -580,7 +705,7 @@ pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
         if formatted.as_bytes() != body {
             push_unique(&mut forms, formatted.as_bytes());
         }
-        push_percent_passes(&formatted, &mut forms);
+        push_text_decode_passes(&formatted, &mut forms);
     }
     forms
 }
@@ -595,6 +720,115 @@ fn push_percent_passes(current: &str, forms: &mut Vec<Vec<u8>>) {
         push_unique(forms, next.as_bytes());
         current = next;
     }
+}
+
+/// Add percent- and HTML/XML-entity-decoded variants. Applications routinely
+/// decode numeric character references before evaluating XML, SOAP, or HTML
+/// attributes, so a rule that only sees the raw body can miss the payload the
+/// origin executes.
+fn push_text_decode_passes(current: &str, forms: &mut Vec<Vec<u8>>) {
+    push_percent_passes(current, forms);
+    let mut current = current.to_owned();
+    for _ in 0..MAX_PERCENT_DECODE_PASSES {
+        let next = decode_entities(&current).into_owned();
+        if next == current {
+            break;
+        }
+        push_unique(forms, next.as_bytes());
+        push_percent_passes(&next, forms);
+        current = next;
+    }
+}
+
+/// Decode HTML/XML character references (`&#x3c;`, `&#60;`, and the common
+/// named entities) in one pass. Unknown entities are left untouched.
+pub(crate) fn decode_entities(input: &str) -> Cow<'_, str> {
+    if !input.contains('&') {
+        return Cow::Borrowed(input);
+    }
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut last = 0usize;
+    let mut index = 0usize;
+    let mut changed = false;
+    while index < bytes.len() {
+        if bytes[index] != b'&' {
+            index += 1;
+            continue;
+        }
+        let Some(end_offset) = bytes[index + 1..]
+            .iter()
+            .take(32)
+            .position(|byte| *byte == b';')
+        else {
+            index += 1;
+            continue;
+        };
+        let end = index + 1 + end_offset;
+        let entity = &input[index + 1..end];
+        let decoded = if let Some(hex) = entity
+            .strip_prefix("#x")
+            .or_else(|| entity.strip_prefix("#X"))
+        {
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        } else if let Some(decimal) = entity.strip_prefix('#') {
+            decimal.parse::<u32>().ok().and_then(char::from_u32)
+        } else {
+            named_entity(entity)
+        };
+        if let Some(decoded) = decoded {
+            output.push_str(&input[last..index]);
+            output.push(decoded);
+            changed = true;
+            last = end + 1;
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+    if changed {
+        output.push_str(&input[last..]);
+        Cow::Owned(output)
+    } else {
+        Cow::Borrowed(input)
+    }
+}
+
+fn named_entity(entity: &str) -> Option<char> {
+    Some(match entity {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "colon" => ':',
+        "sol" => '/',
+        "bsol" => '\\',
+        "lpar" => '(',
+        "rpar" => ')',
+        "num" => '#',
+        "percnt" => '%',
+        "plus" => '+',
+        "equals" => '=',
+        "excl" => '!',
+        "quest" => '?',
+        "tab" => '\t',
+        "newline" => '\n',
+        "commat" => '@',
+        "period" => '.',
+        "comma" => ',',
+        "semi" => ';',
+        "lowbar" => '_',
+        "dollar" => '$',
+        "ast" => '*',
+        "vert" => '|',
+        "grave" => '`',
+        "lbrace" => '{',
+        "rbrace" => '}',
+        "lbrack" => '[',
+        "rbrack" => ']',
+        _ => return None,
+    })
 }
 
 fn push_unique(forms: &mut Vec<Vec<u8>>, bytes: &[u8]) {
@@ -631,7 +865,7 @@ pub fn percent_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
 pub fn query_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
     let mut forms = Vec::with_capacity(MAX_PERCENT_DECODE_PASSES + 1);
     forms.push(Cow::Borrowed(input));
-    if !input.contains('%') && !input.contains('+') {
+    if !input.contains('%') && !input.contains('+') && !input.contains('&') {
         return forms;
     }
     let mut current = input.to_owned();
@@ -642,6 +876,21 @@ pub fn query_decode_forms(input: &str) -> Vec<Cow<'_, str>> {
         }
         forms.push(Cow::Owned(next.clone()));
         current = next;
+    }
+    for _ in 0..MAX_PERCENT_DECODE_PASSES {
+        let next = decode_entities(&current).into_owned();
+        if next == current {
+            break;
+        }
+        current = next;
+        let decoded = String::from_utf8_lossy(&form_decode(current.as_bytes())).into_owned();
+        if decoded != current {
+            forms.push(Cow::Owned(decoded.clone()));
+            current = decoded;
+        }
+        if !forms.iter().any(|form| form.as_ref() == current) {
+            forms.push(Cow::Owned(current.clone()));
+        }
     }
     forms
 }
@@ -1435,6 +1684,45 @@ mod tests {
         let mut map = HeaderMap::new();
         map.insert(name, HeaderValue::from_str(value).expect("valid header"));
         map
+    }
+
+    #[test]
+    fn decodes_numeric_and_named_entities() {
+        assert_eq!(
+            decode_entities("&#x3C;script&#62; &amp; &#x1F600;").as_ref(),
+            "<script> & 😀"
+        );
+        assert_eq!(decode_entities("plain").as_ref(), "plain");
+    }
+
+    #[test]
+    fn body_forms_include_entity_decoding() {
+        let headers = headers(CONTENT_TYPE, "text/xml");
+        let forms = decoded_body_forms(b"<x>&#x3C;script&#x3E;</x>", &headers);
+        assert!(
+            forms
+                .iter()
+                .any(|form| form.windows(7).any(|window| window == b"<script")),
+            "{forms:?}"
+        );
+    }
+
+    #[test]
+    fn structured_depth_limits_are_enforced() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let deep = format!("{}{}", "[".repeat(129), "]".repeat(129));
+        assert_eq!(
+            structured_body_depth_error(&headers, deep.as_bytes()),
+            Some("json")
+        );
+
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
+        let xml = format!("{}x{}", "<a>".repeat(129), "</a>".repeat(129));
+        assert_eq!(
+            structured_body_depth_error(&headers, xml.as_bytes()),
+            Some("xml")
+        );
     }
 
     #[test]

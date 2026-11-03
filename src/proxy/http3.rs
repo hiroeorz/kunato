@@ -281,8 +281,8 @@ async fn handle_request(
         server::rejected(source, &err)
     } else if let Some(err) = server::request_head_error(&config, &parts) {
         server::rejected(source, &err)
-    } else if let Some(inspection) = context.reserve_request_inspection() {
-        match read_prefix(recv, &config, inspection, &context).await {
+    } else if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
+        match read_prefix(recv, &config, source, inspection, &context).await {
             Ok((payload, inspection)) => {
                 server::process_payload(parts, payload, source, &config, &context, inspection).await
             }
@@ -357,6 +357,7 @@ impl Body for RequestBody {
 async fn read_prefix(
     mut recv: RequestStream<h3_quinn::RecvStream, Bytes>,
     config: &CompiledConfig,
+    source: crate::client_ip::ClientSource,
     mut inspection: InspectionGuard,
     context: &Context,
 ) -> Result<(RequestPayload, InspectionGuard), HttpError> {
@@ -385,6 +386,9 @@ async fn read_prefix(
         };
 
         let chunk = chunk.copy_to_bytes(chunk.remaining());
+        if let Some(err) = server::charge_body_bytes(context, source, config, chunk.len()) {
+            return Err(err);
+        }
         let observed = prefix.len().saturating_add(chunk.len());
         if !server::grow_request_inspection_raw(&mut inspection, config, observed) {
             context.record_overloaded();

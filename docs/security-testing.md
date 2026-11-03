@@ -179,7 +179,7 @@ fallback does not count as an H2/H3 test.
 
 | Profile | Configuration and claim |
 | --- | --- |
-| Signature discovery | Remove the entire `trusted-sources` category: Docker private addresses match it too. Disable automatic protection; isolate or explicitly disable YAML rule-level throttles in an archived lab profile when they interfere. Keep other guards unless the case explicitly varies them. |
+| Signature discovery | `trusted-sources` is disabled by default; if you enabled it, remove the entire category because Docker private addresses match it too. Disable automatic protection; isolate or explicitly disable YAML rule-level throttles in an archived lab profile when they interfere. Keep other guards unless the case explicitly varies them. |
 | Scanner identification | Preserve default tool fingerprints and attribute blocks to their actual rules. This measures scanner recognition separately. |
 | Payload efficacy | Use a fixed ordinary User-Agent and verify that templates did not override it. Every relevant attack runs here even if default fingerprints already trigger a block. |
 | Protection/behavior | Enable intended rate/connection/ban settings and remove matching `protection.allowlist` entries. Check thresholds, windows, recovery, and normal traffic from a separate source. The ffuf behavior phase uses an explicit enumeration `BLOCK` profile and a long-lived normal client whose address cannot reuse the banned runner. |

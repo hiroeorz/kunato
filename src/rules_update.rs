@@ -197,6 +197,7 @@ async fn update_candidate(
     };
 
     let state = UpdateState::read(state_file);
+    let installed_signature_timestamp = state.signature_timestamp;
     let client = build_client()?;
     let fetched = fetch(&client, url, settings.max_bytes, &state, "rules update").await?;
     let Fetched::Body {
@@ -245,7 +246,15 @@ async fn update_candidate(
             "rules checksum mismatch: expected {expected}, got {actual}"
         )));
     }
-    verify_rules_signature(&client, url, &bytes).await?;
+    let signature_timestamp = verify_rules_signature(&client, url, &bytes).await?;
+    if let Some(installed) = installed_signature_timestamp
+        && let Some(candidate) = signature_timestamp
+        && candidate < installed
+    {
+        return Err(Error::Message(format!(
+            "rules signature is older than the installed rule set ({candidate} < {installed}); refusing a rollback"
+        )));
+    }
 
     let main_config = main_config.to_path_buf();
     let rules_file = rules_file.to_path_buf();
@@ -299,6 +308,7 @@ async fn update_candidate(
             ),
             etag,
             last_modified,
+            signature_timestamp,
         };
         write_state(&next, &state_file);
 
@@ -513,17 +523,17 @@ async fn verify_rules_signature(
     client: &RulesClient,
     rules_url: &Uri,
     bytes: &[u8],
-) -> Result<(), Error> {
+) -> Result<Option<u64>, Error> {
     if crate::trust::RULES_KEYS.is_empty() {
         warn_once_no_rules_key();
-        return Ok(());
+        return Ok(None);
     }
     // Loopback HTTP is the documented development/local-mirror path (plain
     // HTTP is rejected for any other host). Requiring a signature there would
     // make the local test setup impossible, so it is skipped with a warning.
     if rules_url.scheme_str() == Some("http") {
         warn_once_http_rules_url();
-        return Ok(());
+        return Ok(None);
     }
     let signature_url = signature_url(rules_url)?;
     let fetched = fetch(
@@ -545,14 +555,31 @@ async fn verify_rules_signature(
     check_rules_signature(crate::trust::RULES_KEYS, bytes, &signature)
 }
 
-/// Verify the downloaded signature against the embedded rules keys.
-fn check_rules_signature(keys: &[&str], bytes: &[u8], signature: &[u8]) -> Result<(), Error> {
+/// Verify the downloaded signature against the embedded rules keys. A trusted
+/// key requires a signed timestamp so a replay of an older, validly signed
+/// rule set can be rejected.
+fn check_rules_signature(
+    keys: &[&str],
+    bytes: &[u8],
+    signature: &[u8],
+) -> Result<Option<u64>, Error> {
+    if keys.is_empty() {
+        return Ok(None);
+    }
     let signature = std::str::from_utf8(signature)
         .map_err(|_| Error::Message("rules signature is not valid UTF-8".to_owned()))?;
+    let parsed = crate::signing::parse_signature(signature)
+        .map_err(|err| Error::Signature(err.to_string()))?;
+    let timestamp = parsed.timestamp().ok_or_else(|| {
+        Error::Message(
+            "rules signature has no signed timestamp; refusing a rollback-unsafe update".to_owned(),
+        )
+    })?;
     match crate::trust::verify(keys, bytes, signature)
         .map_err(|err| Error::Signature(err.to_string()))?
     {
-        crate::trust::Verification::Verified | crate::trust::Verification::NoTrustedKeys => Ok(()),
+        crate::trust::Verification::Verified => Ok(Some(timestamp)),
+        crate::trust::Verification::NoTrustedKeys => Ok(None),
     }
 }
 
@@ -804,6 +831,7 @@ struct UpdateState {
     next_due: Option<u64>,
     etag: Option<String>,
     last_modified: Option<String>,
+    signature_timestamp: Option<u64>,
 }
 
 impl UpdateState {
@@ -830,6 +858,9 @@ impl UpdateState {
                 "last_modified" if !value.trim().is_empty() => {
                     state.last_modified = Some(value.trim().to_owned());
                 }
+                "signature_timestamp" => {
+                    state.signature_timestamp = value.trim().parse().ok();
+                }
                 _ => {}
             }
         }
@@ -849,6 +880,9 @@ impl UpdateState {
         }
         if let Some(last_modified) = &self.last_modified {
             let _ = writeln!(text, "last_modified={last_modified}");
+        }
+        if let Some(signature_timestamp) = self.signature_timestamp {
+            let _ = writeln!(text, "signature_timestamp={signature_timestamp}");
         }
         write_atomic(path, text.as_bytes())
     }
@@ -1117,6 +1151,7 @@ mod tests {
             next_due: Some(3600),
             etag: Some("\"abc\"".to_owned()),
             last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_owned()),
+            signature_timestamp: Some(1_700_000_000),
         };
         state.write(&path).expect("write state");
         let read = UpdateState::read(&path);

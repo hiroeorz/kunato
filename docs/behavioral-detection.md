@@ -197,7 +197,10 @@ per source and also added to the global window.
 **Global authentication failures (`global_auth_failures`).** The sum of
 authentication failures across all sources in `global_auth.window`. With
 `global_auth.action: BLOCK`, crossing the threshold rejects subsequent requests
-on the authentication paths for `global_auth.ban`, regardless of source.
+on the authentication paths for `global_auth.ban` only from sources that
+contributed a recent authentication failure themselves. A source with no recent
+failure is not locked out, so one attacker cannot deny authentication to every
+user.
 
 ### 4.3 Trigger conditions
 

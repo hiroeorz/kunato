@@ -17,9 +17,9 @@ cargo run -- --config rules.example.yaml
 
 Open `http://127.0.0.1:8080/` in a browser or use `curl -v`. The response reports
 the method, target, headers, and body as seen by the upstream, including the
-`X-Forwarded-*` headers Kunato adds. The bundled example configuration trusts
-`127.0.0.1`, so remove `127.0.0.1/32` from `trusted-sources` to exercise the block
-rules locally.
+`X-Forwarded-*` headers Kunato adds. The bundled `trusted-sources` category is
+disabled by default, so block rules apply to local requests; enable it and narrow
+its ranges only when you deliberately want a trusted bypass.
 
 ## Black-Box Testing
 
@@ -56,8 +56,8 @@ including HPACK compression bombs (`hpack_bomb=N`) and oversized header blocks
 `--parallelism` defaults to 5. The two lists are split by expectation; correctness
 is judged from the logs: the upstream access log should contain only the allowed
 requests, and the Kunato log should show the blocked requests as blocked. Run it
-against a configuration that does not trust the test client, otherwise
-`trusted-sources` forwards everything. If the configuration has strict protection
+against a configuration that does not trust the test client. If you enable
+`trusted-sources`, exclude the driver's source address first. If the configuration has strict protection
 limits, start Kunato with `--disable-protection` so rate limits and bans do not
 interfere with the driver.
 
@@ -244,6 +244,7 @@ categories:
   # Trusted clients: matching rules forward the request immediately and skip
   # all remaining categories.
   - name: trusted-sources
+    enabled: false          # enable only for genuinely trusted source ranges
     action: ALLOW
     rules:
       - name: internal-networks
@@ -417,8 +418,11 @@ fetched over the same TLS connection as the rules file, so it does not add
 authenticity by itself. A detached minisign signature
 (`<rules url>.minisig`) is verified against keys embedded in the binary when one
 is configured (HTTPS rule URLs only; the loopback HTTP development path skips it
-with a warning), and `kunato upgrade` verifies `install.sh.minisig` before
-running the installer as root. See [release-signing.md](release-signing.md) for key
+with a warning). The signed minisign trusted comment is verified together with
+the file signature, and its timestamp must not move backwards, so replaying an
+older rule set does not roll the install back. `kunato upgrade` verifies
+`install.sh.minisig` before running the installer as root and refuses a release
+tag older than the running binary unless `--allow-downgrade` is given. See [release-signing.md](release-signing.md) for key
 generation, signing, rotation, and the remaining trust limits.
 
 ### Content routes
@@ -957,8 +961,9 @@ more subdomain labels and never the apex; an exact entry matches only that name.
 IPv4 and bracketed IPv6 literals are accepted (for example `127.0.0.1` and
 `[::1]`).
 
-A request with no Host and no `:authority`, a malformed Host or `:authority`, or
-a duplicate `Host` header is rejected with `400`. A well-formed Host or
+A request with no Host and no `:authority`, a malformed Host or `:authority`, a
+duplicate `Host` header, or an absolute-form authority that disagrees with the
+`Host` header is rejected with `400`. A well-formed Host or
 `:authority` that is not listed is rejected with `421`. The check is an engine
 policy: an `ALLOW` rule (including `trusted-sources`) does not bypass it, it
 stays active with `protection.enabled: false`, and a reload swaps the list
@@ -1015,7 +1020,9 @@ IPv6 request state is still aggregated by `protection.aggregate_ipv6_prefix`
 (default `/64`). TCP/QUIC connection caps and connection-time allowlist checks
 use the transport peer, because a client identity is not available at accept
 time. Trusting a proxy does not exempt its clients from request protection.
-Connection and client entries share the existing bounded source table.
+Connection and client entries share the existing bounded source table. Eviction
+prefers entries without a ban history, behavioral flag, or recent authentication
+failure, so a flood of new addresses does not reset an attacker's escalation.
 
 HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes use the same policy, resolved
 anew for each request. Request decision logs distinguish `client` (resolved IP)
@@ -1104,6 +1111,13 @@ rejects executable and script content behind a generic or explicit executable
 claim, and markup unless the part declares an active web type; an active web
 part still passes its markup. `off` disables the check.
 
+Encrypted ZIP entries, compression methods other than stored/deflate, and
+BZIP2/XZ/Zstandard/7z/RAR archives are refused with `400` because the inspector
+cannot bound their expansion. ZIP archives must list every local header in the
+central directory, so a hybrid archive that hides a streaming-only entry is
+rejected. Raw non-multipart writes that claim a safe or binary type are checked
+for a matching signature and for script, executable, or archive content.
+
 The rejection is answered with `403` (or `413` for the archive expansion
 budget, or `400` for an archive claim that cannot be parsed) and counted in
 `kunato_upload_rejected_total`. The check is an engine
@@ -1111,7 +1125,10 @@ limit: it runs before rule evaluation, so an `ALLOW` rule (including
 `trusted-sources`) does not bypass it, and it stays active with
 `protection.enabled: false`. It shares the multipart boundary and part limits
 with rule inspection, checks every declared boundary interpretation, never
-copies the body, and runs under the process-wide inspection budget.
+copies the body, and runs under the process-wide inspection budget. Body bytes
+are charged to the source's rate budget as they arrive, and one source can hold
+at most a quarter of the process-wide inspection memory, so a stalled upload
+cannot exhaust the budget for every client.
 
 ```yaml
 limits: { upload_inspection: strict }
@@ -1666,9 +1683,12 @@ rules as any other request, and is blocked like one; when the upstream answers
 `101 Switching Protocols`, Kunato opens a bidirectional tunnel between client
 and upstream.
 
-Handshake headers use the same hop-by-hop filtering as ordinary HTTP in both
-directions: fields named by `Connection` are removed, then `Connection: upgrade`
-and `Upgrade: websocket` are rebuilt for the forwarded handshake.
+Handshake headers use the same filtering as ordinary HTTP. A `Connection` token
+that names an end-to-end field (including `Origin`, `Cookie`, or a custom
+header present on the request) is rejected with `400` before the handshake, so
+the inspected header set cannot differ from the forwarded one. Standard
+hop-by-hop fields are removed, then `Connection: upgrade` and
+`Upgrade: websocket` are rebuilt for the forwarded handshake.
 
 Application payloads are inspected in both directions. Client-to-server
 messages are reassembled (up to `limits.websocket_message_bytes`) and matched
@@ -1759,13 +1779,16 @@ opt-in because API clients and legitimate crawlers can look similar.
 
 `global_auth` aggregates authentication failures across sources. With the
 default `action: LOG` it only records the threshold; with `action: BLOCK` it
-blocks subsequent requests on the configured `auth.paths` for `ban`, even when
-the new request comes from another source. The block is not a per-source ban and
-does not identify individual stolen credentials.
+blocks subsequent requests on the configured `auth.paths` for `ban` from the
+sources that contributed a recent failure themselves. A clean source is not
+locked out, so one attacker cannot deny authentication to every user. The block
+is not a per-source ban and does not identify individual stolen credentials.
 
-Admission consumes one token. After the body has been read and decoded, Kunato
-charges additional tokens for the inspection work: one token per 256 KiB of
-inspected body, capped at 64 tokens per request. A 1 MiB body therefore costs
+Admission consumes one token. Body bytes are charged as they arrive, one token
+per 256 KiB, capped at 64 tokens per request; decompression above the wire size
+is charged when the decoded body is inspected. Each source also holds at most a
+quarter of the process-wide inspection-memory budget, so a stalled body cannot
+reserve it all. A 1 MiB body therefore costs
 about five tokens, and the global limit is charged the same way. This ties the
 CPU cost of body rules to the rate budget instead of counting a 1 MiB request
 the same as a small one.

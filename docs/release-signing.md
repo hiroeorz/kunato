@@ -31,7 +31,9 @@ being produced (see "Limits" below).
 Both variants minisign produces are accepted: plain Ed25519 over the file
 (`Ed`) and the prehashed form (`ED`). `minisign -S` uses the prehashed form by
 default, hashing the artifact with BLAKE2b-512 first; the digest is implemented
-in-tree because `ring` does not expose it.
+in-tree because `ring` does not expose it. When a signature carries a trusted
+comment, its global signature is verified too and the signed timestamp is used
+to reject a replay of an older release or rule set.
 
 ## Generate the keys
 

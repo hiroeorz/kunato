@@ -129,17 +129,24 @@ pub async fn forward_request(
     Ok(convert_response(response))
 }
 
-/// Legacy identity headers that attestation proxies up the chain may have
-/// added. Clients can forge all of them, so applications behind Kunato must
-/// rely on the canonical `X-Forwarded-*` trio (rewritten below) instead; the
-/// forged copies are removed from every forwarded request.
-const LEGACY_IDENTITY_HEADERS: [&str; 6] = [
+/// Headers that attest a client identity or rewrite the request target. A
+/// client can forge all of them, so applications behind Kunato must rely on
+/// the canonical `X-Forwarded-*` trio (rewritten below) instead; the forged
+/// copies are removed from every forwarded request. Routing overrides
+/// (`X-Original-URL` and friends) are removed too: letting them reach the
+/// origin would let a request that passed path rules be routed somewhere else.
+const LEGACY_IDENTITY_HEADERS: [&str; 11] = [
     "forwarded",
     "x-real-ip",
     "x-client-ip",
     "x-forwarded-port",
     "cf-connecting-ip",
     "true-client-ip",
+    "x-original-url",
+    "x-rewrite-url",
+    "x-forwarded-prefix",
+    "x-http-method-override",
+    "x-method-override",
 ];
 
 pub(crate) fn set_forwarded_headers(
@@ -352,6 +359,11 @@ mod tests {
         target.insert("x-forwarded-port", HeaderValue::from_static("1234"));
         target.insert("cf-connecting-ip", HeaderValue::from_static("10.10.10.10"));
         target.insert("true-client-ip", HeaderValue::from_static("11.11.11.11"));
+        target.insert("x-original-url", HeaderValue::from_static("/admin"));
+        target.insert("x-rewrite-url", HeaderValue::from_static("/admin"));
+        target.insert("x-forwarded-prefix", HeaderValue::from_static("/admin"));
+        target.insert("x-http-method-override", HeaderValue::from_static("DELETE"));
+        target.insert("x-method-override", HeaderValue::from_static("DELETE"));
         let mut source = HeaderMap::new();
         source.insert("x-real-ip", HeaderValue::from_static("10.10.10.10"));
         let uri: http::Uri = "/".parse().expect("valid URI");

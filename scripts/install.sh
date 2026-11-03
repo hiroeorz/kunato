@@ -33,6 +33,8 @@ NO_START=0
 NO_BANNER=0
 ALLOW_EMPTY_RULES=0
 ASSUME_YES=0
+ALLOW_UNVERIFIED=0
+ALLOW_DOWNGRADE=0
 UNINSTALL=0
 PURGE=0
 
@@ -67,6 +69,9 @@ Options:
   --no-banner          Do not print the banner after a successful install.
   --allow-empty-rules  Start kunato even when the initial rules download fails
                        (an empty rule set blocks nothing).
+  --allow-unverified   Continue without minisign when SHA256SUMS cannot be
+                       signature-verified. Not recommended for production.
+  --allow-downgrade    Install a release older than the running binary.
   --yes                Never prompt; fail instead of asking.
   --uninstall          Stop the service and remove the binary and unit file.
   --purge              With --uninstall, also remove /etc/kunato and /var/lib/kunato.
@@ -144,6 +149,14 @@ while [ $# -gt 0 ]; do
             ;;
         --allow-empty-rules)
             ALLOW_EMPTY_RULES=1
+            shift
+            ;;
+        --allow-unverified)
+            ALLOW_UNVERIFIED=1
+            shift
+            ;;
+        --allow-downgrade)
+            ALLOW_DOWNGRADE=1
             shift
             ;;
         --yes)
@@ -231,6 +244,12 @@ fetch_latest_version() {
     printf '%s' "$tag"
 }
 
+version_lt() {
+    [ "$1" != "$2" ] || return 1
+    first=$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)
+    [ "$first" = "$1" ]
+}
+
 stop_service_if_present() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop kunato 2>/dev/null || true
@@ -277,6 +296,17 @@ install_release() {
         "" | *[!A-Za-z0-9._-]*) die "invalid version tag: $VERSION" ;;
     esac
 
+    current_version="${KUNATO_CURRENT_VERSION:-}"
+    if [ -z "$current_version" ] && [ -x "$BIN_PATH" ]; then
+        current_version=$("$BIN_PATH" --version 2>/dev/null | awk '{print $2}' | head -n 1)
+    fi
+    if [ -n "$current_version" ] && [ "$ALLOW_DOWNGRADE" -ne 1 ]; then
+        current_tag="v${current_version#v}"
+        if version_lt "$VERSION" "$current_tag"; then
+            die "refusing to downgrade from $current_tag to $VERSION; pass --allow-downgrade to override"
+        fi
+    fi
+
     tarball="kunato-$VERSION-$TARGET.tar.gz"
     workdir=$(mktemp -d)
     trap 'rm -rf "$workdir"' EXIT INT TERM
@@ -299,6 +329,10 @@ install_release() {
             minisign -Vm "$workdir/SHA256SUMS" -x "$workdir/SHA256SUMS.minisig" \
                 -P "$RELEASE_PUBLIC_KEY" >/dev/null ||
                 die "SHA256SUMS signature verification failed"
+        elif [ "$ALLOW_UNVERIFIED" -eq 1 ]; then
+            log "warning: minisign is not installed and --allow-unverified was given; SHA256SUMS was only checksum-verified over HTTPS"
+        else
+            die "minisign is required to verify the release signature; install minisign or re-run with --allow-unverified"
         fi
     fi
 
@@ -327,6 +361,7 @@ install_release() {
 initialize_configuration() {
     ensure_user
     copy_tls_material
+    [ ! -L "$STATE_DIR" ] || die "$STATE_DIR must not be a symbolic link"
     install -d -m 0750 -o kunato -g kunato "$STATE_DIR"
 
     had_rules=0
@@ -402,9 +437,13 @@ initialize_configuration() {
     fi
     # `init` and `update-rules` run as root; hand the state directory and its
     # rule and `.update-state` files to the service user so later reloads and
-    # updates can read and replace them.
-    chown -R kunato:kunato "$STATE_DIR" 2>/dev/null || true
-    chmod 0640 "$RULES_FILE" 2>/dev/null || true
+    # updates can read and replace them. `find` never follows symlinks, so a
+    # compromised service cannot point a link at a root-owned file and gain it
+    # through the next `sudo kunato upgrade`.
+    [ ! -L "$STATE_DIR" ] || die "$STATE_DIR must not be a symbolic link"
+    find "$STATE_DIR" -xdev -exec chown -h kunato:kunato {} + 2>/dev/null || true
+    find "$STATE_DIR" -xdev -type d -exec chmod 0750 {} + 2>/dev/null || true
+    find "$STATE_DIR" -xdev -type f -exec chmod 0640 {} + 2>/dev/null || true
 
     "$BIN_PATH" validate --config "$CONFIG_PATH"
 }

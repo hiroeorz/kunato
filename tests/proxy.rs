@@ -1464,12 +1464,12 @@ async fn allowed_hosts_checks_both_http2_host_sources() {
     ))
     .await;
 
-    // Both sources are allowed even though they differ; the Host header is what
-    // the upstream receives.
-    let (status, body) =
+    // A different :authority and Host header are a routing ambiguity even
+    // when both names are allowlisted: the path rules saw one host and the
+    // upstream would receive another.
+    let (status, _) =
         send_h2c_request(running.addr, "other.example", Some("example.com"), "/").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "hello");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let (status, _) =
         send_h2c_request(running.addr, "evil.example", Some("example.com"), "/").await;
@@ -5609,13 +5609,13 @@ categories:
 }
 
 #[tokio::test]
-async fn websocket_strips_connection_options_in_both_directions() {
+async fn websocket_rejects_a_connection_named_end_to_end_header() {
     let upstream = spawn_upgrade_upstream().await;
     let running = start_kunato(&format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
     ))
     .await;
-    let (headers, mut stream) = websocket_handshake_with_headers(
+    let (headers, _stream) = websocket_handshake_with_headers(
         running.addr,
         "/ws",
         &[
@@ -5624,23 +5624,7 @@ async fn websocket_strips_connection_options_in_both_directions() {
         ],
     )
     .await;
-    assert!(headers.starts_with("HTTP/1.1 101"), "{headers}");
-    let lower = headers.to_ascii_lowercase();
-    assert!(lower.contains("connection: upgrade\r\n"), "{headers}");
-    assert!(lower.contains("upgrade: websocket\r\n"), "{headers}");
-    assert!(!lower.contains("x-upstream-hop"), "{headers}");
-    assert!(!lower.contains("connection-local-value"), "{headers}");
-
-    let frame = client_ws_frame(0x1, b"hello", true);
-    let expected = server_ws_frame(0x1, b"hello", true);
-    stream.write_all(&frame).await.expect("write tunnel");
-    let mut echoed = vec![0u8; expected.len()];
-    tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut echoed))
-        .await
-        .expect("echo timeout")
-        .expect("read echo");
-    assert_eq!(echoed, server_ws_frame(0x1, b"hello", true));
-    drop(stream);
+    assert!(headers.starts_with("HTTP/1.1 400"), "{headers}");
     running.stop().await;
 }
 

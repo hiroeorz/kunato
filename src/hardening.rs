@@ -16,6 +16,7 @@ use crate::request_view::{RequestView, cookie_pairs};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
     Incomplete,
+    Uninspectable,
     InternalHost(String),
     DuplicateParameter(String),
     CacheDeception,
@@ -26,7 +27,7 @@ impl Violation {
     pub fn status(&self) -> http::StatusCode {
         match self {
             Self::Incomplete => http::StatusCode::PAYLOAD_TOO_LARGE,
-            Self::DuplicateParameter(_) => http::StatusCode::BAD_REQUEST,
+            Self::Uninspectable | Self::DuplicateParameter(_) => http::StatusCode::BAD_REQUEST,
             Self::InternalHost(_) | Self::CacheDeception | Self::Redirect(_) => {
                 http::StatusCode::FORBIDDEN
             }
@@ -36,6 +37,7 @@ impl Violation {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::Incomplete => "request body is too large to inspect",
+            Self::Uninspectable => "structured request body could not be inspected",
             Self::InternalHost(_) => "request targets an internal host",
             Self::DuplicateParameter(_) => "conflicting duplicate request parameter",
             Self::CacheDeception => "authenticated request addressed as a static asset",
@@ -49,6 +51,9 @@ pub fn inspect(view: &RequestView<'_>, policy: &Hardening) -> Option<Violation> 
         && (policy.ssrf.enabled || policy.duplicates.enabled || policy.redirects.enabled)
     {
         return Some(Violation::Incomplete);
+    }
+    if (policy.duplicates.enabled || policy.redirects.enabled) && json_body_is_uninspectable(view) {
+        return Some(Violation::Uninspectable);
     }
     if policy.ssrf.enabled
         && let Some(host) = internal_host(view, policy)
@@ -206,6 +211,31 @@ fn authority_host(rest: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
+/// A JSON-looking body that serde_json cannot read (including its recursion
+/// limit) must fail closed when duplicate-key or redirect inspection depends
+/// on parsing it. The origin's parser may have no such limit.
+fn json_body_is_uninspectable(view: &RequestView<'_>) -> bool {
+    let json_body = view
+        .body
+        .strip_prefix(&[0xEF, 0xBB, 0xBF])
+        .unwrap_or(view.body)
+        .trim_ascii_start();
+    if json_body.is_empty() {
+        return false;
+    }
+    let content_type = view
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let looks_like_json =
+        content_type.contains("json") || json_body.starts_with(b"{") || json_body.starts_with(b"[");
+    looks_like_json
+        && (crate::decoding::structured_body_depth_error(view.headers, view.body).is_some()
+            || serde_json::from_slice::<serde::de::IgnoredAny>(json_body).is_err())
+}
+
 fn duplicate_parameter(view: &RequestView<'_>, policy: &Hardening) -> Option<String> {
     if let Some(raw) = view.query_forms.first()
         && let Some(name) = duplicate_in_pairs(raw, &policy.duplicates.allow_parameters)
@@ -296,7 +326,7 @@ fn multipart_fields<'a>(body: &'a [u8], content_type: &str) -> Vec<(String, &'a 
             };
             let is_file = disposition_param(disposition, "filename")
                 .is_some_and(|filename| !filename.is_empty());
-            fields.push((name.to_ascii_lowercase(), part.value, is_file));
+            fields.push((php_parameter_name(&name), part.value, is_file));
         }
     }
     fields
@@ -306,7 +336,8 @@ fn duplicate_in_pairs(pairs: &str, allow: &[String]) -> Option<String> {
     let mut values: HashMap<String, String> = HashMap::new();
     for pair in pairs.split('&') {
         let (raw_name, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-        let name = form_value(raw_name).to_ascii_lowercase();
+        let name = form_value(raw_name);
+        let name = php_parameter_name(&name);
         if name.is_empty() || name.ends_with("[]") || allow.iter().any(|entry| entry == &name) {
             continue;
         }
@@ -326,6 +357,19 @@ fn duplicate_in_pairs(pairs: &str, allow: &[String]) -> Option<String> {
 /// resolved, matching what servlet and PHP parsers hand to the application.
 fn form_value(value: &str) -> String {
     percent_decode(&value.replace('+', " ")).into_owned()
+}
+
+/// PHP normalizes dots, spaces, and `[` in request parameter names to `_`.
+/// Comparing raw names lets `is.admin` and `is_admin` reach the same PHP key
+/// while the duplicate check sees two different names.
+fn php_parameter_name(name: &str) -> String {
+    name.chars()
+        .map(|character| match character {
+            '.' | ' ' | '[' => '_',
+            character => character,
+        })
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 fn redirect_host(value: &str, policy: &Hardening) -> Option<String> {
@@ -436,9 +480,17 @@ fn absolute_redirect(value: &str) -> Option<String> {
     let trimmed =
         normalized.trim_start_matches(|ch: char| ch.is_whitespace() || ch.is_ascii_control());
     let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        Some(trimmed.to_owned())
-    } else if trimmed.starts_with("//") {
+    for scheme in ["https", "http", "ftps", "ftp"] {
+        let prefix = format!("{scheme}:");
+        if let Some(rest) = lower.strip_prefix(&prefix) {
+            let rest = rest.trim_start_matches(['/', '\\']);
+            if rest.is_empty() {
+                return None;
+            }
+            return Some(format!("{scheme}://{rest}"));
+        }
+    }
+    if trimmed.starts_with("//") {
         Some(format!("http:{trimmed}"))
     } else {
         None
@@ -622,6 +674,39 @@ mod tests {
                 Some(Violation::InternalHost(_))
             ));
         }
+    }
+
+    #[test]
+    fn recognizes_single_slash_absolute_redirects() {
+        let headers = HeaderMap::new();
+        for target in [
+            "/login?redirect_uri=https:/evil.example/",
+            "/login?redirect_uri=https:evil.example",
+            "/login?redirect_uri=http:%5Cevil.example",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy()),
+                    Some(Violation::Redirect(_))
+                ),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn php_normalizes_dots_and_brackets_in_parameter_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        let uri: Uri = "/profile".parse().unwrap();
+        assert_eq!(
+            inspect(&view(&uri, &headers, b"is.admin=1&is_admin=2"), &policy()),
+            Some(Violation::DuplicateParameter("is_admin".to_owned()))
+        );
     }
 
     #[test]

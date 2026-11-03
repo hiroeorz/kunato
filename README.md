@@ -102,6 +102,12 @@ reachable from the internet, so wildcards and setups behind a TLS-terminating
 CDN or proxy must manage certificates manually (see
 [Deployment](docs/development.md#deployment) for the full option list).
 
+The installer verifies the release `SHA256SUMS` with its embedded minisign
+public key. Install `minisign` on servers that use the `curl | sudo sh` path, or
+pass `--allow-unverified` explicitly to accept checksum-only verification over
+HTTPS (not recommended). `kunato upgrade` verifies the installer in-process and
+does not need the CLI.
+
 The `--acme-domain` names are also written to `allowed_hosts`, so requests with
 any other Host header are rejected with `421`. If clients reach Kunato through
 another name or an IP address (for example a health check), add it with
@@ -201,6 +207,10 @@ sudo kunato upgrade --version v0.4.0   # pin a specific release
 sudo kunato upgrade --dry-run          # print what would run
 ```
 
+A pinned release older than the running binary is refused unless
+`--allow-downgrade` is also given, so a replayed release asset cannot silently
+roll the server back.
+
 Existing configurations are kept as-is, including an absent `allowed_hosts`;
 add the field to the existing file to enable host checking. Rerunning the
 installer also upgrades the binary and unit, keeps the configuration, and
@@ -220,13 +230,13 @@ cargo run --example upstream -- --listen 127.0.0.1:3000
 cargo run -- --config rules.example.yaml
 ```
 
-Then send requests to `http://127.0.0.1:8080/` (remove `127.0.0.1/32` from
-`trusted-sources` in `rules.example.yaml` to test block rules locally).
+Then send requests to `http://127.0.0.1:8080/` (`trusted-sources` is disabled
+by default in `rules.example.yaml`, so block rules apply locally).
 
 ### 6. Sign Releases and Rules (Maintainers)
 
 Signing is only needed when publishing artifacts: the installed binary verifies
-signatures with its embedded keys, so end users do not install `minisign`.
+signatures with its embedded keys, so upgrades do not need the `minisign` CLI.
 
 ```sh
 sudo apt-get update

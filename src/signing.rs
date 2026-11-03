@@ -18,9 +18,9 @@
 //! <base64(global signature)>
 //! ```
 //!
-//! The trusted comment's global signature is not checked: it authenticates a
-//! comment this module never consumes, while the file signature above is what
-//! the caller relies on.
+//! The trusted comment and its global signature are verified when the
+//! signature carries them. The comment is also where the signed timestamp
+//! lives; callers that need rollback protection read [`Signature::timestamp`].
 
 use ring::signature::{ED25519, UnparsedPublicKey};
 
@@ -79,18 +79,41 @@ impl PublicKey {
             .prehashed
             .then(|| crate::blake2b::blake2b_512(message));
         let signed = digest.as_ref().map_or(message, |digest| &digest[..]);
-        UnparsedPublicKey::new(&ED25519, &self.key[..])
+        if UnparsedPublicKey::new(&ED25519, &self.key[..])
             .verify(signed, &signature.signature[..])
-            .is_ok()
+            .is_err()
+        {
+            return false;
+        }
+        // minisign's global signature covers the 64-byte file signature and
+        // the trusted comment. Verifying it makes the signed timestamp
+        // trustworthy enough for rollback checks.
+        if let Some(comment) = &signature.trusted_comment {
+            let Some(global) = &signature.global_signature else {
+                return false;
+            };
+            let mut payload = Vec::with_capacity(64 + comment.len());
+            payload.extend_from_slice(&signature.signature);
+            payload.extend_from_slice(comment.as_bytes());
+            if UnparsedPublicKey::new(&ED25519, &self.key[..])
+                .verify(&payload, &global[..])
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     key_id: [u8; 8],
     signature: [u8; 64],
     /// The signature covers the BLAKE2b-512 digest instead of the bytes.
     prehashed: bool,
+    trusted_comment: Option<String>,
+    global_signature: Option<[u8; 64]>,
 }
 
 impl Signature {
@@ -105,11 +128,114 @@ impl Signature {
         }
         id
     }
+
+    /// Signed timestamp from the trusted comment, in Unix seconds.
+    pub fn timestamp(&self) -> Option<u64> {
+        self.trusted_comment.as_deref().and_then(trusted_timestamp)
+    }
+}
+
+/// Parse a signed timestamp from a minisign trusted comment. Both the standard
+/// `timestamp:<seconds>` field and the ISO-8601 form written by
+/// `scripts/sign-artifact.sh` are accepted.
+pub(crate) fn trusted_timestamp(comment: &str) -> Option<u64> {
+    if let Some(index) = comment
+        .to_ascii_lowercase()
+        .find("timestamp:")
+        .map(|index| index + "timestamp:".len())
+    {
+        let digits: String = comment[index..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        if let Ok(timestamp) = digits.parse() {
+            return Some(timestamp);
+        }
+    }
+    let token = comment.split_whitespace().last()?;
+    parse_iso8601_utc(token)
+}
+
+fn parse_iso8601_utc(value: &str) -> Option<u64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let year: i64 = value.get(0..4)?.parse().ok()?;
+    let month: i64 = value.get(5..7)?.parse().ok()?;
+    let day: i64 = value.get(8..10)?.parse().ok()?;
+    let hour: i64 = value.get(11..13)?.parse().ok()?;
+    let minute: i64 = value.get(14..16)?.parse().ok()?;
+    let second: i64 = value.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?;
+    u64::try_from(seconds).ok()
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month_prime + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Parse a detached minisign signature file.
 pub fn parse_signature(text: &str) -> Result<Signature, Error> {
-    let payload = decode_payload(text, SIGNATURE_BYTES)
+    let mut payload = None;
+    let mut trusted_comment = None;
+    let mut global_signature = None;
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("untrusted comment:") {
+            continue;
+        }
+        if let Some(comment) = line.strip_prefix("trusted comment:") {
+            trusted_comment = Some(comment.trim().to_owned());
+            for candidate in lines.by_ref() {
+                let candidate = candidate.trim();
+                if candidate.is_empty() || candidate.starts_with("trusted comment:") {
+                    continue;
+                }
+                if let Some(decoded) = decode_base64(candidate)
+                    && decoded.len() == 64
+                {
+                    let mut signature = [0u8; 64];
+                    signature.copy_from_slice(&decoded);
+                    global_signature = Some(signature);
+                }
+                break;
+            }
+            continue;
+        }
+        if payload.is_none()
+            && let Some(decoded) = decode_base64(line)
+            && decoded.len() == SIGNATURE_BYTES
+        {
+            payload = Some(decoded);
+        }
+    }
+    let payload = payload
         .ok_or_else(|| Error::Message("signature is not a minisign signature".to_owned()))?;
     let prehashed = if payload[..2] == *ED25519_ALGORITHM {
         false
@@ -124,10 +250,17 @@ pub fn parse_signature(text: &str) -> Result<Signature, Error> {
     key_id.copy_from_slice(&payload[2..10]);
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&payload[10..]);
+    if trusted_comment.is_some() && global_signature.is_none() {
+        return Err(Error::Message(
+            "signature has a trusted comment but no global signature".to_owned(),
+        ));
+    }
     Ok(Signature {
         key_id,
         signature,
         prehashed,
+        trusted_comment,
+        global_signature,
     })
 }
 
@@ -232,14 +365,20 @@ mod tests {
     }
 
     fn signature_text(key: &TestKey, message: &[u8]) -> String {
+        let signature = key.pair.sign(message);
         let mut payload = Vec::with_capacity(SIGNATURE_BYTES);
         payload.extend_from_slice(ED25519_ALGORITHM);
         payload.extend_from_slice(&key.key_id);
-        payload.extend_from_slice(key.pair.sign(message).as_ref());
+        payload.extend_from_slice(signature.as_ref());
+        let trusted_comment = "timestamp:0\tfile:test";
+        let mut global_message = Vec::new();
+        global_message.extend_from_slice(signature.as_ref());
+        global_message.extend_from_slice(trusted_comment.as_bytes());
+        let global = key.pair.sign(&global_message);
         format!(
-            "untrusted comment: signature from minisign secret key\n{}\ntrusted comment: timestamp:0\n{}\n",
+            "untrusted comment: signature from minisign secret key\n{}\ntrusted comment: {trusted_comment}\n{}\n",
             base64(&payload),
-            base64(&[0u8; 64])
+            base64(global.as_ref())
         )
     }
 
@@ -264,6 +403,36 @@ mod tests {
         let other = test_key();
         let other_key = PublicKey::parse(&public_key_text(&other)).expect("public key");
         assert!(!other_key.verify(b"rules", &signature));
+    }
+
+    #[test]
+    fn verifies_the_trusted_comment_and_reads_its_timestamp() {
+        let key = test_key();
+        let public_key = PublicKey::parse(&public_key_text(&key)).expect("public key");
+        let signature = parse_signature(&signature_text(&key, b"rules")).expect("signature");
+        assert_eq!(signature.timestamp(), Some(0));
+        assert!(public_key.verify(b"rules", &signature));
+
+        let text = signature_text(&key, b"rules");
+        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        if let Some(last) = lines.last_mut() {
+            *last = base64(&[1u8; 64]);
+        }
+        let tampered = lines.join("\n");
+        assert!(!public_key.verify(b"rules", &parse_signature(&tampered).expect("signature")));
+    }
+
+    #[test]
+    fn parses_timestamp_forms() {
+        assert_eq!(
+            trusted_timestamp("timestamp:1700000000\tfile:rules.yaml"),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            trusted_timestamp("rules.yaml 2026-11-03T02:05:25Z"),
+            Some(1_793_671_525)
+        );
+        assert_eq!(trusted_timestamp("no timestamp"), None);
     }
 
     #[test]

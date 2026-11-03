@@ -61,6 +61,9 @@ pub(crate) enum DangerousKind {
     ArchiveExpansion,
     /// The upload claims to be an archive that cannot be parsed.
     ArchiveMalformed,
+    /// The archive uses encryption or a compression method the inspector
+    /// cannot expand.
+    ArchiveUnsupported,
 }
 
 impl DangerousKind {
@@ -73,6 +76,7 @@ impl DangerousKind {
             Self::ClaimMismatch => "claim-mismatch",
             Self::ArchiveExpansion => "archive-expansion",
             Self::ArchiveMalformed => "archive-malformed",
+            Self::ArchiveUnsupported => "archive-unsupported",
         }
     }
 }
@@ -88,7 +92,9 @@ impl Rejection {
     pub(crate) fn status(&self) -> StatusCode {
         match self.kind {
             DangerousKind::ArchiveExpansion => StatusCode::PAYLOAD_TOO_LARGE,
-            DangerousKind::ArchiveMalformed => StatusCode::BAD_REQUEST,
+            DangerousKind::ArchiveMalformed | DangerousKind::ArchiveUnsupported => {
+                StatusCode::BAD_REQUEST
+            }
             _ => StatusCode::FORBIDDEN,
         }
     }
@@ -97,6 +103,9 @@ impl Rejection {
         match self.kind {
             DangerousKind::ArchiveExpansion => "upload expands beyond the configured limit",
             DangerousKind::ArchiveMalformed => "upload archive could not be parsed",
+            DangerousKind::ArchiveUnsupported => {
+                "upload archive uses compression or encryption that cannot be inspected"
+            }
             _ => "upload content does not match its declared type",
         }
     }
@@ -161,29 +170,51 @@ pub(crate) fn inspect(
 }
 
 /// True when a non-multipart write request names an executable or server-side
-/// script in its `Content-Type` or path, so its raw body must be scanned too.
-/// Applications that store generated or authored script files through an API
-/// disable this by setting `upload_inspection: off`.
+/// script, claims a binary/safe media type, or names an archive, so its raw
+/// body must be scanned too. Applications that store generated or authored
+/// files through an API disable this by setting `upload_inspection: off`.
 pub(crate) fn wants_raw_inspection(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
     matches!(*method, Method::POST | Method::PUT | Method::PATCH)
-        && raw_claim_is_dangerous(uri, headers)
+        && raw_claim_needs_inspection(uri, headers)
 }
 
-fn raw_claim_is_dangerous(uri: &Uri, headers: &HeaderMap) -> bool {
-    let script_type = headers
+fn raw_claim_needs_inspection(uri: &Uri, headers: &HeaderMap) -> bool {
+    let media_type = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            let media_type = value
+        .map(|value| {
+            value
                 .split(';')
                 .next()
                 .unwrap_or_default()
                 .trim()
-                .to_ascii_lowercase();
-            is_explicit_dangerous_media_type(&media_type) || is_script_media_type(&media_type)
+                .to_ascii_lowercase()
         });
-    if script_type {
-        return true;
+    if let Some(media_type) = &media_type {
+        if is_explicit_dangerous_media_type(media_type) || is_script_media_type(media_type) {
+            return true;
+        }
+        // `application/octet-stream` and safe media types are how raw uploads
+        // arrive; a script, executable, or archive hidden behind them was
+        // previously not inspected at all.
+        if media_type == "application/octet-stream"
+            || is_safe_media_type(media_type)
+            || matches!(
+                media_type.as_str(),
+                "application/zip"
+                    | "application/x-zip-compressed"
+                    | "application/gzip"
+                    | "application/x-gzip"
+                    | "application/x-tar"
+                    | "application/x-bzip2"
+                    | "application/x-xz"
+                    | "application/zstd"
+                    | "application/x-7z-compressed"
+                    | "application/vnd.rar"
+            )
+        {
+            return true;
+        }
     }
     let path = uri.path();
     if !path.contains('.') && !path.contains('%') {
@@ -200,15 +231,16 @@ fn path_claims_dangerous_extension(path: &str) -> bool {
 }
 
 /// Checks the raw body of a non-multipart request whose declared type or path
-/// names executable or server-side script content. Returns the first
-/// rejection, or `None` when the request is not in scope or the body carries
-/// no executable header, shebang, or script marker.
+/// can carry executable content or an archive. Returns the first rejection, or
+/// `None` when the request is not in scope or the body is ordinary application
+/// data.
 pub(crate) fn inspect_raw(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
     body: &[u8],
     mode: UploadInspection,
+    expansion: UploadExpansion,
 ) -> Option<Rejection> {
     if mode == UploadInspection::Off || body.is_empty() || is_multipart(headers) {
         return None;
@@ -216,36 +248,80 @@ pub(crate) fn inspect_raw(
     if !wants_raw_inspection(method, uri, headers) {
         return None;
     }
-    let kind = raw_script_content(body)?;
-    Some(Rejection {
-        filename: uri
-            .path()
-            .rsplit('/')
-            .next()
-            .unwrap_or_else(|| uri.path())
-            .to_owned(),
-        declared: declared_media_type(headers),
+    let filename = uri
+        .path()
+        .rsplit('/')
+        .next()
+        .unwrap_or_else(|| uri.path())
+        .to_owned();
+    let declared = declared_media_type(headers);
+    let mut budget = expansion.max_total_bytes;
+    if expansion.enabled
+        && let Some(kind) = archive_expansion_rejection_value(body, expansion, &mut budget)
+    {
+        return Some(Rejection {
+            filename,
+            declared,
+            kind,
+        });
+    }
+    let base_claim = claim_for(declared.as_deref(), &filename);
+    let claim = if base_claim == Claim::Generic
+        && percent_decode_forms(&filename)
+            .iter()
+            .any(|form| extension_claim(form) == Claim::ExplicitDangerous)
+    {
+        Claim::ExplicitDangerous
+    } else {
+        base_claim
+    };
+    let kind = match dangerous_content(body) {
+        Some(kind) => kind,
+        None if claim == Claim::Safe => {
+            let format = expected_format(declared.as_deref(), &filename)?;
+            if format.matches(body) {
+                return None;
+            }
+            DangerousKind::FormatMismatch
+        }
+        None => return None,
+    };
+    blocks_raw(mode, claim, kind).then_some(Rejection {
+        filename,
+        declared,
         kind,
     })
+}
+
+/// Raw-upload mode is narrower than multipart `mismatch` mode: an explicitly
+/// dangerous type or filename is always scanned, while an ordinary JSON or
+/// text API body is not. A safe media claim is still checked for a script
+/// payload or a missing format signature because that is exactly how a
+/// webshell is smuggled through an image endpoint.
+fn blocks_raw(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
+    match mode {
+        UploadInspection::Off => false,
+        UploadInspection::Mismatch => match claim {
+            Claim::Safe => true,
+            Claim::ActiveWeb => kind == DangerousKind::Executable,
+            Claim::ExplicitDangerous => {
+                matches!(kind, DangerousKind::Executable | DangerousKind::Script)
+            }
+            Claim::Generic => false,
+        },
+        UploadInspection::Strict => match claim {
+            Claim::ExplicitDangerous => {
+                matches!(kind, DangerousKind::Executable | DangerousKind::Script)
+            }
+            _ => blocks(mode, claim, kind),
+        },
+    }
 }
 
 fn declared_media_type(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(CONTENT_TYPE)?.to_str().ok()?;
     let media_type = value.split(';').next()?.trim();
     (!media_type.is_empty()).then(|| media_type.to_ascii_lowercase())
-}
-
-fn raw_script_content(value: &[u8]) -> Option<DangerousKind> {
-    if is_executable(value) {
-        return Some(DangerousKind::Executable);
-    }
-    if value[leading_content_start(value)..].starts_with(b"#!") {
-        return Some(DangerousKind::Script);
-    }
-    if contains_script_marker(value) || contains_short_script_tag(value) {
-        return Some(DangerousKind::Script);
-    }
-    None
 }
 
 fn inspect_part(
@@ -324,6 +400,7 @@ enum ArchiveKind {
 enum ExpansionError {
     TooLarge,
     Malformed,
+    Unsupported,
 }
 
 struct ZipEntry {
@@ -346,14 +423,25 @@ fn archive_expansion_rejection(
     expansion: UploadExpansion,
     budget: &mut usize,
 ) -> Option<DangerousKind> {
+    archive_expansion_rejection_value(archive_value(part.value), expansion, budget)
+}
+
+fn archive_expansion_rejection_value(
+    value: &[u8],
+    expansion: UploadExpansion,
+    budget: &mut usize,
+) -> Option<DangerousKind> {
     if !expansion.enabled {
         return None;
     }
-    let value = archive_value(part.value);
     let kind = if value.starts_with(&[0x1f, 0x8b]) {
         ArchiveKind::Gzip
     } else if find_zip_end(value).is_some() {
         ArchiveKind::Zip
+    } else if unsupported_archive_magic(value) {
+        // Do not claim to inspect a format this build cannot expand. Reject it
+        // so a BZIP2/XZ/Zstandard/7z/RAR bomb cannot pass as an ordinary file.
+        return Some(DangerousKind::ArchiveUnsupported);
     } else {
         return None;
     };
@@ -373,7 +461,16 @@ fn archive_expansion_rejection(
         }
         Err(ExpansionError::TooLarge) => Some(DangerousKind::ArchiveExpansion),
         Err(ExpansionError::Malformed) => Some(DangerousKind::ArchiveMalformed),
+        Err(ExpansionError::Unsupported) => Some(DangerousKind::ArchiveUnsupported),
     }
+}
+
+fn unsupported_archive_magic(value: &[u8]) -> bool {
+    value.starts_with(b"BZh")
+        || value.starts_with(b"\xfd7zXZ\x00")
+        || value.starts_with(b"\x28\xb5\x2f\xfd")
+        || value.starts_with(b"7z\xbc\xaf\x27\x1c")
+        || value.starts_with(b"Rar!\x1a\x07")
 }
 
 /// The multipart framing leaves the CRLF that precedes the boundary on the
@@ -430,9 +527,11 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, 
         return Err(ExpansionError::Malformed);
     }
     let concat = usize::try_from(concat).map_err(|_| ExpansionError::Malformed)?;
-    let mut position = usize::try_from(directory_offset).map_err(|_| ExpansionError::Malformed)?;
+    let directory_offset =
+        usize::try_from(directory_offset).map_err(|_| ExpansionError::Malformed)?;
     let directory_end = usize::try_from(directory_end).map_err(|_| ExpansionError::Malformed)?;
-    let mut total = 0u64;
+    let mut position = directory_offset;
+    let mut parsed = Vec::with_capacity(usize::try_from(entries).unwrap_or(0));
     for _ in 0..entries {
         let mut entry = parse_zip_entry(value, position, directory_end)?;
         entry.local_offset = entry
@@ -440,8 +539,16 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, 
             .checked_add(concat as u64)
             .ok_or(ExpansionError::Malformed)?;
         position = entry.next;
+        parsed.push(entry);
+    }
+    // A hybrid archive can list one harmless entry in the central directory
+    // while hiding additional local headers that streaming unzip clients still
+    // expand. Walk the local headers and require every one to be listed.
+    validate_local_entries(value, &parsed, concat, directory_offset)?;
+    let mut total = 0u64;
+    for entry in &parsed {
         let remaining = limit.saturating_sub(total as usize);
-        let expanded = zip_entry_expansion(value, &entry, remaining)?;
+        let expanded = zip_entry_expansion(value, entry, remaining)?;
         total = total
             .checked_add(expanded)
             .ok_or(ExpansionError::Malformed)?;
@@ -450,6 +557,83 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, 
         }
     }
     Ok(total)
+}
+
+fn validate_local_entries(
+    value: &[u8],
+    entries: &[ZipEntry],
+    start: usize,
+    directory_offset: usize,
+) -> Result<(), ExpansionError> {
+    let mut by_offset = std::collections::HashMap::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        if by_offset.insert(entry.local_offset, index).is_some() {
+            return Err(ExpansionError::Malformed);
+        }
+    }
+    let mut position = start;
+    let mut seen = 0usize;
+    while position < directory_offset {
+        if value.get(position..position + 4) != Some(&ZIP_LOCAL_HEADER[..]) {
+            return Err(ExpansionError::Malformed);
+        }
+        let flags = read_u16(value, position + 6)?;
+        let method = read_u16(value, position + 8)?;
+        let local_compressed = read_u32(value, position + 18)? as u64;
+        let local_uncompressed = read_u32(value, position + 22)? as u64;
+        let name = read_u16(value, position + 26)? as usize;
+        let extra = read_u16(value, position + 28)? as usize;
+        let header_end = position
+            .checked_add(30)
+            .and_then(|end| end.checked_add(name))
+            .and_then(|end| end.checked_add(extra))
+            .ok_or(ExpansionError::Malformed)?;
+        let Some(&index) = by_offset.get(&(position as u64)) else {
+            return Err(ExpansionError::Malformed);
+        };
+        let entry = &entries[index];
+        if flags != entry.flags || method != entry.method {
+            return Err(ExpansionError::Malformed);
+        }
+        let compressed = if flags & 0x08 != 0 && local_compressed == 0 {
+            entry.compressed
+        } else {
+            local_compressed
+        };
+        if flags & 0x08 == 0
+            && local_uncompressed != 0
+            && entry.uncompressed != 0
+            && local_uncompressed != entry.uncompressed
+        {
+            return Err(ExpansionError::Malformed);
+        }
+        let data_end = header_end
+            .checked_add(usize::try_from(compressed).map_err(|_| ExpansionError::Malformed)?)
+            .ok_or(ExpansionError::Malformed)?;
+        if data_end > directory_offset {
+            return Err(ExpansionError::Malformed);
+        }
+        let mut next = data_end;
+        if flags & 0x08 != 0 && next < directory_offset {
+            let listed = value.get(next..next + 4) == Some(&ZIP_LOCAL_HEADER[..]);
+            if !listed {
+                next = if value.get(next..next + 4) == Some(b"PK\x07\x08") {
+                    next.checked_add(16).ok_or(ExpansionError::Malformed)?
+                } else {
+                    next.checked_add(12).ok_or(ExpansionError::Malformed)?
+                };
+            }
+        }
+        if next > directory_offset {
+            return Err(ExpansionError::Malformed);
+        }
+        position = next;
+        seen += 1;
+    }
+    if position != directory_offset || seen != entries.len() {
+        return Err(ExpansionError::Malformed);
+    }
+    Ok(())
 }
 
 fn find_zip_end(value: &[u8]) -> Option<usize> {
@@ -637,12 +821,17 @@ fn zip_entry_expansion(
     remaining: usize,
 ) -> Result<u64, ExpansionError> {
     if entry.flags & 1 != 0 {
-        return Ok(entry.uncompressed);
+        return Err(ExpansionError::Unsupported);
     }
     match entry.method {
-        0 => Ok(entry.compressed),
+        0 => {
+            if entry.compressed != entry.uncompressed {
+                return Err(ExpansionError::Malformed);
+            }
+            Ok(entry.compressed)
+        }
         8 => zip_deflate_expansion(value, entry, remaining),
-        _ => Ok(entry.uncompressed),
+        _ => Err(ExpansionError::Unsupported),
     }
 }
 
@@ -850,7 +1039,8 @@ fn blocks(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
             | DangerousKind::FormatMismatch
             | DangerousKind::ClaimMismatch
             | DangerousKind::ArchiveExpansion
-            | DangerousKind::ArchiveMalformed => true,
+            | DangerousKind::ArchiveMalformed
+            | DangerousKind::ArchiveUnsupported => true,
             DangerousKind::ActiveWeb => claim != Claim::ActiveWeb,
         },
     }
@@ -1121,6 +1311,71 @@ fn contains_script_marker(bytes: &[u8]) -> bool {
         || contains_asp_scriptlet(bytes)
         || contains_jsp_tag(bytes)
         || contains_server_script_tag(bytes)
+        || contains_source_or_config_marker(bytes)
+}
+
+/// Script and web-server configuration files do not need a shebang or a tag.
+/// Match line-oriented markers for Python, Ruby, Node.js, Apache `.htaccess`,
+/// and PHP `.user.ini`, which otherwise pass as extensionless octet-stream
+/// uploads.
+fn contains_source_or_config_marker(bytes: &[u8]) -> bool {
+    const CONFIG_PREFIXES: &[&[u8]] = &[
+        b"addtype",
+        b"addhandler",
+        b"sethandler",
+        b"options",
+        b"rewriterule",
+        b"rewriteengine",
+        b"php_value",
+        b"php_flag",
+        b"php_admin_value",
+        b"php_admin_flag",
+        b"auto_prepend_file",
+        b"auto_append_file",
+        b"include_path",
+        b"open_basedir",
+        b"disable_functions",
+        b"errordocument",
+        b"satisfy",
+    ];
+    for line in bytes.split(|byte| *byte == b'\n' || *byte == b'\r') {
+        let line = trim_ascii_start(line);
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(b"import ")
+            || line.starts_with(b"from ") && line.windows(8).any(|window| window == b" import ")
+            || line.starts_with(b"def ")
+            || line.starts_with(b"class ")
+            || line.starts_with(b"package ")
+            || line.starts_with(b"use strict")
+        {
+            return true;
+        }
+        if line.windows(8).any(|window| window == b"require(")
+            || line.windows(9).any(|window| window == b"require (")
+            || line.starts_with(b"require ")
+            || line.starts_with(b"require'")
+            || line.starts_with(b"require\"")
+            || line.windows(7).any(|window| window == b"require")
+                && line.windows(9).any(|window| window == b"require '")
+        {
+            return true;
+        }
+        if CONFIG_PREFIXES.iter().any(|prefix| {
+            line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix)
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn trim_ascii_start(mut value: &[u8]) -> &[u8] {
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    value
 }
 
 /// JSP documents use XML element syntax (`<jsp:scriptlet>`,
@@ -1735,6 +1990,73 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_zip_compression_and_encryption_are_rejected() {
+        let archive = zip(b"hello", 12);
+        let archive_body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        assert_eq!(
+            super::inspect(
+                &headers(),
+                &archive_body,
+                UploadInspection::Strict,
+                expansion(1024),
+            )
+            .expect("unsupported method")
+            .kind,
+            DangerousKind::ArchiveUnsupported
+        );
+
+        let mut encrypted = zip(b"hello", 0);
+        encrypted[6..8].copy_from_slice(&1u16.to_le_bytes());
+        let central = encrypted
+            .windows(4)
+            .position(|window| window == ZIP_CENTRAL_HEADER)
+            .expect("central header");
+        encrypted[central + 8..central + 10].copy_from_slice(&1u16.to_le_bytes());
+        let encrypted_body = body(&[("data.zip", Some("application/zip"), &encrypted)]);
+        assert_eq!(
+            super::inspect(
+                &headers(),
+                &encrypted_body,
+                UploadInspection::Strict,
+                expansion(1024),
+            )
+            .expect("encrypted entry")
+            .kind,
+            DangerousKind::ArchiveUnsupported
+        );
+    }
+
+    #[test]
+    fn local_entries_missing_from_the_central_directory_are_rejected() {
+        let mut archive = zip(b"hello", 0);
+        let central = archive
+            .windows(4)
+            .position(|window| window == ZIP_CENTRAL_HEADER)
+            .expect("central header");
+        let hidden = zip(b"hidden", 0);
+        let hidden_end = hidden
+            .windows(4)
+            .position(|window| window == ZIP_CENTRAL_HEADER)
+            .expect("hidden central header");
+        let inserted = hidden[..hidden_end].to_vec();
+        archive.splice(central..central, inserted.iter().copied());
+        let eocd = archive
+            .windows(4)
+            .position(|window| window == ZIP_END_OF_CENTRAL_DIRECTORY)
+            .expect("eocd");
+        let offset = u32::from_le_bytes(archive[eocd + 16..eocd + 20].try_into().expect("offset"));
+        archive[eocd + 16..eocd + 20]
+            .copy_from_slice(&(offset + inserted.len() as u32).to_le_bytes());
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        assert_eq!(
+            super::inspect(&headers(), &body, UploadInspection::Strict, expansion(1024),)
+                .expect("hybrid archive")
+                .kind,
+            DangerousKind::ArchiveMalformed
+        );
+    }
+
+    #[test]
     fn archive_expansion_is_ignored_when_disabled() {
         let archive = gzip(&vec![b'a'; 128 * 1024]);
         let body = body(&[("data.tar.gz", Some("application/gzip"), &archive)]);
@@ -2231,7 +2553,24 @@ mod tests {
             &headers,
             value,
             UploadInspection::Mismatch,
+            UploadExpansion::default(),
         )
+    }
+
+    #[test]
+    fn source_and_web_server_config_markers_are_detected() {
+        for value in [
+            b"import os\nos.system('id')".as_slice(),
+            b"from pathlib import Path\nPath('/tmp').write_text('x')",
+            b"const fs = require('fs')\nfs.readFileSync('/etc/passwd')",
+            b"AddType application/x-httpd-php .jpg",
+            b"auto_prepend_file=/tmp/shell.php",
+        ] {
+            assert!(contains_script_marker(value), "{value:?}");
+        }
+        assert!(!contains_script_marker(
+            b"ordinary notes about imports and classes"
+        ));
     }
 
     #[test]
@@ -2402,16 +2741,27 @@ mod tests {
     }
 
     #[test]
-    fn raw_bodies_without_a_dangerous_claim_are_not_inspected() {
+    fn raw_bodies_without_a_binary_claim_are_not_inspected() {
         for (path, content_type) in [
             ("/api/notes", "application/json"),
-            ("/upload/photo.jpg", "image/jpeg"),
-            ("/upload/report.pdf", "application/pdf"),
             ("/index.html", "text/html"),
         ] {
             assert!(
                 raw(Method::POST, path, content_type, b"<?php echo 1;").is_none(),
                 "inspected {path} ({content_type})"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_raw_claims_still_reject_script_payloads_and_format_mismatches() {
+        for (path, content_type) in [
+            ("/upload/photo.jpg", "image/jpeg"),
+            ("/upload/report.pdf", "application/pdf"),
+        ] {
+            assert!(
+                raw(Method::POST, path, content_type, b"<?php echo 1;").is_some(),
+                "accepted script behind {path} ({content_type})"
             );
         }
     }
@@ -2427,7 +2777,8 @@ mod tests {
                 "image/jpeg",
                 b"JPEGDATA"
             )
-            .is_none()
+            .is_some(),
+            "a body that does not start with the claimed image signature must be rejected"
         );
     }
 
@@ -2449,6 +2800,7 @@ mod tests {
                 &headers,
                 b"<?php echo 1;",
                 UploadInspection::Mismatch,
+                UploadExpansion::default(),
             )
             .is_none()
         );
@@ -2459,6 +2811,7 @@ mod tests {
                 &HeaderMap::new(),
                 b"<?php echo 1;",
                 UploadInspection::Off,
+                UploadExpansion::disabled(),
             )
             .is_none()
         );

@@ -19,5 +19,7 @@ a cell breaks the table.
 
 | CVE | Product | Engine change | Why a rule cannot cover it | Reported | Status |
 | --- | --- | --- | --- | --- | --- |
-| CVE-2026-116011 | Crow | Bound JSON nesting depth in inspected request bodies | Deeply nested JSON below the body-size limit exhausts the worker stack; the rule schema has no depth target and the engine has no generic JSON depth cap (only GraphQL and form nesting limits) | 2026-11-02 | open |
-| CVE-2026-119762 | Axigen Mail Server | Bound XML/SOAP nesting depth (verify) | The coverage note says body and form limits stop it, but form limits apply to multipart and URL-encoded bodies; XML nesting is not depth-checked | 2026-11-02 | verify |
+
+No open engine gaps as of 2026-11-03: generic JSON/XML nesting depth and the
+GraphQL batch/depth differentials are handled by the request-body checks added
+in this release.

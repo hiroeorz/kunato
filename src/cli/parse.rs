@@ -122,6 +122,7 @@ struct InitState {
 struct UpgradeState {
     version: Option<String>,
     dry_run: bool,
+    allow_downgrade: bool,
 }
 
 #[derive(Default)]
@@ -351,6 +352,10 @@ impl Parser {
                 self.no_value(inline, "--dry-run")?;
                 self.upgrade.dry_run = true;
             }
+            "allow-downgrade" => {
+                self.no_value(inline, "--allow-downgrade")?;
+                self.upgrade.allow_downgrade = true;
+            }
             _ => return Err(self.unexpected(format!("--{name}"))),
         }
         Ok(())
@@ -540,6 +545,7 @@ impl Parser {
             Some(Kind::Upgrade) => Some(Command::Upgrade(UpgradeArgs {
                 version: self.upgrade.version,
                 dry_run: self.upgrade.dry_run,
+                allow_downgrade: self.upgrade.allow_downgrade,
             })),
             Some(Kind::Metrics) => Some(Command::Metrics(MetricsArgs {
                 listen: self.metrics.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
@@ -867,8 +873,9 @@ keeping the configuration, by rerunning the official installer.
 Usage: kunato upgrade [OPTIONS]
 
 Options:
-      --version <TAG>  Release tag to install (default: the latest release)
-      --dry-run        Print what would be downloaded and run without changing anything
+      --version <TAG>   Release tag to install (default: the latest release)
+      --dry-run         Print what would be downloaded and run without changing anything
+      --allow-downgrade Install a release older than the running binary
 
 {}"#,
         GLOBAL_OPTIONS
@@ -1122,6 +1129,23 @@ mod tests {
         };
         assert_eq!(args.version.as_deref(), Some("v0.9.0"));
         assert!(args.dry_run);
+        assert!(!args.allow_downgrade);
+    }
+
+    #[test]
+    fn upgrade_accepts_allow_downgrade() {
+        let cli = parse(&[
+            "kunato",
+            "upgrade",
+            "--version",
+            "v0.9.0",
+            "--allow-downgrade",
+        ])
+        .expect("parse");
+        let Some(Command::Upgrade(args)) = cli.command else {
+            panic!("expected the upgrade command");
+        };
+        assert!(args.allow_downgrade);
     }
 
     #[test]

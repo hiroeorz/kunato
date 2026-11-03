@@ -21,6 +21,9 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 /// Upper bound for parsed selection nodes. This bounds analyzer memory
 /// independently of the configured field limit.
 const MAX_NODES: usize = 20_000;
+/// Upper bound across every document in one request (a batch or repeated
+/// `query` fields). A batch must not multiply the parser budget.
+const MAX_TOTAL_NODES: usize = MAX_NODES * 8;
 /// Inline fragments do not add a selection level, but they do add parser
 /// recursion. Cap them relative to the configured depth so a body full of
 /// `...{` cannot overflow the worker stack.
@@ -65,8 +68,19 @@ pub fn inspect(
     if body_truncated {
         return Some(Violation::Incomplete);
     }
-    let Some(candidates) = candidates(uri_query, headers, body) else {
-        return Some(Violation::TooComplex);
+    // serde_json and the origin's JSON parser can disagree about recursion
+    // (serde_json caps nesting at 128). Reject a JSON-shaped body that exceeds
+    // the engine's structured depth before any parser-specific behavior can
+    // turn into a fail-open fallback.
+    if !body.is_empty()
+        && json_request_expected(headers, body)
+        && crate::decoding::structured_body_depth_error(headers, body).is_some()
+    {
+        return Some(Violation::Uninspectable);
+    }
+    let candidates = match candidates(uri_query, headers, body) {
+        Ok(candidates) => candidates,
+        Err(violation) => return Some(violation),
     };
     if limits.block_introspection
         && candidates
@@ -88,11 +102,17 @@ pub fn inspect(
     }
 
     let mut analysed = false;
+    let mut total_fields = 0usize;
+    let mut total_nodes = 0usize;
     for candidate in &candidates {
         match Document::parse(candidate, limits.max_depth) {
             Ok(document) => {
+                total_nodes = total_nodes.saturating_add(document.nodes);
+                if total_nodes > MAX_TOTAL_NODES {
+                    return Some(Violation::TooComplex);
+                }
                 analysed = true;
-                if let Some(violation) = document.analyse(limits) {
+                if let Some(violation) = document.analyse(limits, &mut total_fields) {
                     return Some(violation);
                 }
             }
@@ -120,6 +140,7 @@ enum Selection {
 struct Document {
     operations: Vec<Vec<Selection>>,
     fragments: HashMap<String, Vec<Selection>>,
+    nodes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -156,6 +177,14 @@ impl Document {
             if parser.at_end() {
                 break;
             }
+            // Executable definitions may carry a description string before the
+            // `query`/`mutation`/`subscription`/`fragment` keyword. Skipping it
+            // keeps the parser aligned with the GraphQL Oct 2021 grammar
+            // instead of treating the document as unparseable and passing it.
+            if parser.peek_byte() == Some(b'"') {
+                parser.skip_string()?;
+                continue;
+            }
             if parser.peek_byte() == Some(b'{') {
                 document.operations.push(parser.parse_operation()?);
                 continue;
@@ -176,10 +205,11 @@ impl Document {
         if document.operations.is_empty() {
             return Err(ParseError::Syntax);
         }
+        document.nodes = parser.nodes;
         Ok(document)
     }
 
-    fn analyse(&self, limits: Limits) -> Option<Violation> {
+    fn analyse(&self, limits: Limits, total_fields: &mut usize) -> Option<Violation> {
         if self
             .operations
             .iter()
@@ -240,9 +270,10 @@ impl Document {
                     depth: metric.depth,
                 });
             }
-            if metric.fields > limits.max_fields {
+            *total_fields = total_fields.saturating_add(metric.fields);
+            if *total_fields > limits.max_fields {
                 return Some(Violation::TooManyFields {
-                    fields: metric.fields,
+                    fields: *total_fields,
                 });
             }
         }
@@ -699,14 +730,18 @@ fn media_type(headers: &HeaderMap) -> Option<String> {
     (!media.is_empty()).then_some(media)
 }
 
-fn candidates(uri_query: Option<&str>, headers: &HeaderMap, body: &[u8]) -> Option<Vec<String>> {
+fn candidates(
+    uri_query: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Vec<String>, Violation> {
     let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
     let mut candidates = Vec::new();
     if let Some(query) = uri_query {
         collect_form_queries(query, &mut candidates);
     }
     if body.is_empty() {
-        return Some(deduplicate(candidates));
+        return Ok(deduplicate(candidates));
     }
 
     let media = media_type(headers);
@@ -715,7 +750,9 @@ fn candidates(uri_query: Option<&str>, headers: &HeaderMap, body: &[u8]) -> Opti
     {
         push_candidate(&mut candidates, text);
     }
-    collect_json_body_queries(body, &mut candidates);
+    if json_request_expected(headers, body) {
+        collect_json_body_queries(body, &mut candidates)?;
+    }
     if let Ok(text) = std::str::from_utf8(body) {
         collect_form_queries(text, &mut candidates);
     }
@@ -733,9 +770,33 @@ fn candidates(uri_query: Option<&str>, headers: &HeaderMap, body: &[u8]) -> Opti
     }
     let candidates = deduplicate(candidates);
     if candidates.len() > MAX_CANDIDATES {
-        return None;
+        return Err(Violation::TooComplex);
     }
-    Some(candidates)
+    Ok(candidates)
+}
+
+/// A JSON request object or batch is expected when the declared type is JSON
+/// or the body starts like one. A raw GraphQL shorthand query also starts with
+/// `{`, but its first token is a field name rather than a quoted key.
+fn json_request_expected(headers: &HeaderMap, body: &[u8]) -> bool {
+    let media = media_type(headers);
+    if media.as_deref().is_some_and(|media| {
+        media == "application/json"
+            || media.ends_with("+json")
+            || media.contains("/json")
+            || media.contains("-json")
+    }) {
+        return true;
+    }
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    let body = body.trim_ascii_start();
+    let mut rest = match body.first() {
+        Some(b'{') => &body[1..],
+        Some(b'[') => &body[1..],
+        _ => return false,
+    };
+    rest = rest.trim_ascii_start();
+    matches!(rest.first(), Some(b'"' | b'{' | b'['))
 }
 
 /// Collect GraphQL documents from the parts of a multipart body. Each part is
@@ -940,11 +1001,19 @@ impl<'de> Deserialize<'de> for QueryDocuments {
     }
 }
 
-fn collect_json_body_queries(body: &[u8], candidates: &mut Vec<String>) {
-    if let Ok(documents) = serde_json::from_slice::<QueryDocuments>(body) {
-        for query in documents.queries {
-            push_candidate(candidates, &query);
+fn collect_json_body_queries(body: &[u8], candidates: &mut Vec<String>) -> Result<(), Violation> {
+    match serde_json::from_slice::<QueryDocuments>(body) {
+        Ok(documents) => {
+            for query in documents.queries {
+                push_candidate(candidates, &query);
+            }
+            Ok(())
         }
+        // A JSON-shaped GraphQL request that serde_json cannot read (including
+        // its 128-level recursion limit) must not fall back to treating the raw
+        // JSON as a GraphQL document: the origin's JSON parser has no such
+        // limit, so it may execute a query this analyzer never saw.
+        Err(_) => Err(Violation::Uninspectable),
     }
 }
 
@@ -1038,6 +1107,61 @@ mod tests {
             serde_json::to_string(query).expect("encode")
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn rejects_json_that_exceeds_the_parser_depth_limit() {
+        let mut body = String::from("{\"query\":\"{ a }\",\"variables\":");
+        body.push_str(&"[".repeat(129));
+        body.push_str(&"]".repeat(129));
+        body.push('}');
+        assert_eq!(
+            inspect_with(None, Some("application/json"), body.as_bytes(), false),
+            Some(Violation::Uninspectable)
+        );
+    }
+
+    #[test]
+    fn accepts_executable_descriptions() {
+        assert_eq!(
+            inspect_with(
+                None,
+                Some("application/json"),
+                &json_body("\"description\" query { a }"),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            inspect_with(
+                None,
+                Some("application/json"),
+                &json_body("\"\"\"block description\"\"\" mutation { a }"),
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn counts_fields_across_a_batch() {
+        let body = br#"[{"query":"{ a b }"},{"query":"{ c d }"}]"#;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        assert_eq!(
+            inspect(
+                None,
+                &headers,
+                body,
+                false,
+                Limits {
+                    max_depth: 20,
+                    max_fields: 3,
+                    block_introspection: false,
+                }
+            ),
+            Some(Violation::TooManyFields { fields: 4 })
+        );
     }
 
     #[test]
@@ -1472,7 +1596,7 @@ mod tests {
         );
         assert_eq!(
             inspect_with(None, Some("application/json"), body, false),
-            None
+            Some(Violation::Uninspectable)
         );
 
         // A complete shallow document in the prefix does not make a truncated

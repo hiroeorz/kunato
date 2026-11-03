@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -47,6 +48,11 @@ const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// response reserves a worst-case share before it starts buffering, so a burst
 /// of concurrent bodies cannot grow the process without bound.
 const INSPECTION_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+/// A single source may hold at most this much of the process-wide budget. One
+/// maximum-size (8 MiB) body needs 64 MiB for its decoded worst case, so this
+/// still admits a single large upload while preventing one client from
+/// reserving every slot.
+pub(crate) const SOURCE_INSPECTION_BUDGET_BYTES: usize = INSPECTION_BUDGET_BYTES / 3;
 const REQUEST_INSPECTION_FACTOR: usize = 8;
 const RESPONSE_INSPECTION_FACTOR: usize = 3;
 /// Requests start with this small baseline; the raw prefix grows it as body
@@ -67,46 +73,111 @@ fn upload_inspection_concurrency() -> usize {
 
 pub(crate) struct InspectionBudget {
     reserved: AtomicUsize,
+    /// Outstanding reservations per source. The map only contains sources with
+    /// a live guard, so it stays proportional to in-flight inspections.
+    per_source: std::sync::Mutex<HashMap<IpAddr, usize>>,
 }
 
 impl InspectionBudget {
     pub(crate) fn new() -> Self {
         Self {
             reserved: AtomicUsize::new(0),
+            per_source: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InspectionGuard> {
-        self.add(bytes).then(|| InspectionGuard {
+        self.reserve_inner(None, bytes)
+    }
+
+    pub(crate) fn reserve_for(
+        self: &Arc<Self>,
+        source: IpAddr,
+        bytes: usize,
+    ) -> Option<InspectionGuard> {
+        self.reserve_inner(Some(normalize_ip(source)), bytes)
+    }
+
+    fn reserve_inner(
+        self: &Arc<Self>,
+        source: Option<IpAddr>,
+        bytes: usize,
+    ) -> Option<InspectionGuard> {
+        if !self.add(bytes) {
+            return None;
+        }
+        if let Some(source) = source
+            && !self.add_source(source, bytes)
+        {
+            self.subtract(bytes);
+            return None;
+        }
+        Some(InspectionGuard {
             budget: Arc::clone(self),
+            source,
             bytes: AtomicUsize::new(bytes),
         })
     }
 
     fn add(&self, bytes: usize) -> bool {
-        let mut current = self.reserved.load(Ordering::Relaxed);
-        loop {
-            let Some(next) = current.checked_add(bytes) else {
-                return false;
-            };
-            if next > INSPECTION_BUDGET_BYTES {
-                return false;
+        add_bounded(&self.reserved, bytes, INSPECTION_BUDGET_BYTES)
+    }
+
+    fn subtract(&self, bytes: usize) {
+        self.reserved.fetch_sub(bytes, Ordering::AcqRel);
+    }
+
+    fn add_source(&self, source: IpAddr, bytes: usize) -> bool {
+        let mut sources = self
+            .per_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = sources.get(&source).copied().unwrap_or(0);
+        let Some(next) = current.checked_add(bytes) else {
+            return false;
+        };
+        if next > SOURCE_INSPECTION_BUDGET_BYTES {
+            return false;
+        }
+        sources.insert(source, next);
+        true
+    }
+
+    fn subtract_source(&self, source: IpAddr, bytes: usize) {
+        let mut sources = self
+            .per_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = sources.get_mut(&source) {
+            *current = current.saturating_sub(bytes);
+            if *current == 0 {
+                sources.remove(&source);
             }
-            match self.reserved.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(actual) => current = actual,
-            }
+        }
+    }
+}
+
+fn add_bounded(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = current.checked_add(bytes) else {
+            return false;
+        };
+        if next > limit {
+            return false;
+        }
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
         }
     }
 }
 
 pub(crate) struct InspectionGuard {
     budget: Arc<InspectionBudget>,
+    /// Source that owns this reservation, when the caller supplied one.
+    source: Option<IpAddr>,
     /// Shared so a guard attached to a body stream can still release the
     /// reservation once the decoded buffers are gone, without waiting for the
     /// stream to finish.
@@ -123,6 +194,12 @@ impl InspectionGuard {
             return true;
         }
         if !self.budget.add(additional) {
+            return false;
+        }
+        if let Some(source) = self.source
+            && !self.budget.add_source(source, additional)
+        {
+            self.budget.subtract(additional);
             return false;
         }
         self.bytes.fetch_add(additional, Ordering::AcqRel);
@@ -143,9 +220,11 @@ impl InspectionGuard {
                 .compare_exchange(current, target, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
-                    self.budget
-                        .reserved
-                        .fetch_sub(current - target, Ordering::AcqRel);
+                    let released = current - target;
+                    if let Some(source) = self.source {
+                        self.budget.subtract_source(source, released);
+                    }
+                    self.budget.reserved.fetch_sub(released, Ordering::AcqRel);
                     return;
                 }
                 Err(actual) => current = actual,
@@ -156,9 +235,11 @@ impl InspectionGuard {
 
 impl Drop for InspectionGuard {
     fn drop(&mut self) {
-        self.budget
-            .reserved
-            .fetch_sub(self.bytes.load(Ordering::Relaxed), Ordering::AcqRel);
+        let bytes = self.bytes.load(Ordering::Relaxed);
+        if let Some(source) = self.source {
+            self.budget.subtract_source(source, bytes);
+        }
+        self.budget.reserved.fetch_sub(bytes, Ordering::AcqRel);
     }
 }
 
@@ -408,15 +489,18 @@ impl Context {
     }
 
     /// Reserve the small baseline share of memory for inspecting one request
-    /// body. The raw prefix and decoded forms grow it as needed.
-    pub(crate) fn reserve_request_inspection(&self) -> Option<InspectionGuard> {
-        self.inspection.reserve(MIN_INSPECTION_RESERVATION)
+    /// body. The raw prefix and decoded forms grow it as needed, and the
+    /// reservation is charged to the resolved client source.
+    pub(crate) fn reserve_request_inspection(&self, source: IpAddr) -> Option<InspectionGuard> {
+        self.inspection
+            .reserve_for(source, MIN_INSPECTION_RESERVATION)
     }
 
     /// Reserve the worst-case memory for inspecting one upstream response.
     pub(crate) fn reserve_response_inspection(
         &self,
         config: &CompiledConfig,
+        source: IpAddr,
     ) -> Option<InspectionGuard> {
         let bytes = if config.has_response_body_rules() {
             config
@@ -427,7 +511,7 @@ impl Context {
         } else {
             0
         };
-        self.inspection.reserve(bytes)
+        self.inspection.reserve_for(source, bytes)
     }
 
     pub(crate) fn record_overloaded(&self) {
@@ -1016,7 +1100,7 @@ async fn handle_request(
         && !parts.headers.contains_key(CONTENT_LENGTH)
         && !parts.headers.contains_key(TRANSFER_ENCODING)
     {
-        if let Some(inspection) = context.reserve_request_inspection() {
+        if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
             let payload = RequestPayload {
                 prefix: Bytes::new(),
                 pending: Vec::new(),
@@ -1031,8 +1115,8 @@ async fn handle_request(
             context.record_overloaded();
             Err(inspection_capacity_error())
         }
-    } else if let Some(inspection) = context.reserve_request_inspection() {
-        match read_body(body, &config, inspection, &context).await {
+    } else if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
+        match read_body(body, &config, source, inspection, &context).await {
             Ok((body, inspection)) => {
                 process(parts, body, source, &config, &context, upgrade, inspection).await
             }
@@ -1140,6 +1224,112 @@ pub(crate) fn host_policy_error(
     Some(HttpError::new(violation.status(), violation.message()))
 }
 
+/// Reject a request whose absolute-form authority and `Host` header disagree.
+/// Forwarding would use the URI path with the Host header, so an inspection
+/// that saw one host could hand the origin a different virtual host.
+fn authority_mismatch_error(parts: &http::request::Parts) -> Option<HttpError> {
+    let authority = parts.uri.authority()?;
+    let host = parts.headers.get(HOST)?;
+    let Ok(host) = host.to_str() else {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "malformed Host header",
+        ));
+    };
+    if authority_agrees(authority, host) {
+        return None;
+    }
+    Some(HttpError::new(
+        StatusCode::BAD_REQUEST,
+        "Host header does not match request authority",
+    ))
+}
+
+fn authority_agrees(authority: &http::uri::Authority, host: &str) -> bool {
+    let host = host.trim();
+    let (host_name, host_port) = split_host_port(host);
+    if !host_name.eq_ignore_ascii_case(authority.host()) {
+        return false;
+    }
+    match (authority.port_u16(), host_port) {
+        (Some(authority_port), Some(host_port)) => authority_port == host_port,
+        (Some(_), None) => false,
+        (None, Some(host_port)) => host_port == 80 || host_port == 443,
+        (None, None) => true,
+    }
+}
+
+fn split_host_port(host: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some((name, suffix)) = rest.split_once(']') {
+            let port = suffix
+                .strip_prefix(':')
+                .and_then(|port| port.parse::<u16>().ok());
+            return (name, port);
+        }
+        return (host, None);
+    }
+    if let Some((name, port)) = host.rsplit_once(':')
+        && !name.contains(':')
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return (name, Some(port));
+    }
+    (host, None)
+}
+
+/// `Connection` names hop-by-hop fields that a proxy removes before
+/// forwarding. Removing a field after rule evaluation would let the origin see
+/// a different request than the one Kunato inspected, so a client may only
+/// name standard hop-by-hop fields here. Naming any end-to-end field that is
+/// present (or a security-sensitive field) is rejected.
+fn connection_header_error(headers: &HeaderMap) -> Option<HttpError> {
+    const SENSITIVE: &[&str] = &[
+        "authorization",
+        "content-encoding",
+        "content-length",
+        "content-type",
+        "cookie",
+        "host",
+        "origin",
+        "referer",
+        "user-agent",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+    ];
+    for value in headers.get_all(CONNECTION) {
+        let Ok(value) = value.to_str() else {
+            return Some(HttpError::new(
+                StatusCode::BAD_REQUEST,
+                "malformed Connection header",
+            ));
+        };
+        for token in value.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let Ok(name) = http::header::HeaderName::from_bytes(token.as_bytes()) else {
+                return Some(HttpError::new(
+                    StatusCode::BAD_REQUEST,
+                    "malformed Connection header",
+                ));
+            };
+            if name.as_str() == "close" || forward::is_hop_by_hop(&name) {
+                continue;
+            }
+            if SENSITIVE.contains(&name.as_str()) || headers.contains_key(&name) {
+                return Some(HttpError::new(
+                    StatusCode::BAD_REQUEST,
+                    "Connection header names an end-to-end field",
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// Reject invalid request heads before allocating or reading a body.
 pub(crate) fn request_head_error(
     config: &CompiledConfig,
@@ -1150,6 +1340,13 @@ pub(crate) fn request_head_error(
             StatusCode::BAD_REQUEST,
             "non-canonical HTTP method",
         ));
+    }
+
+    if let Some(err) = authority_mismatch_error(parts) {
+        return Some(err);
+    }
+    if let Some(err) = connection_header_error(&parts.headers) {
+        return Some(err);
     }
 
     if parts.headers.get_all(HOST).iter().count() > 1 {
@@ -1337,6 +1534,25 @@ fn protection_http_error(context: &Context, decision: Decision) -> Option<HttpEr
     }
 }
 
+/// Charge a source for body bytes as they arrive. This is the same budget the
+/// completed-body inspection used to consume, moved to the read loop so a slow
+/// or stalled body cannot reserve memory for free.
+pub(crate) fn charge_body_bytes(
+    context: &Context,
+    source: ClientSource,
+    config: &CompiledConfig,
+    bytes: usize,
+) -> Option<HttpError> {
+    if bytes == 0 {
+        return None;
+    }
+    let decision =
+        context
+            .protection
+            .charge_inspection(source.client_ip, &config.protection, bytes);
+    protection_error(context, source, config, None, decision)
+}
+
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -1353,6 +1569,7 @@ pub(crate) struct RequestPayload {
 async fn read_body(
     mut body: Incoming,
     config: &CompiledConfig,
+    source: ClientSource,
     mut inspection: InspectionGuard,
     context: &Context,
 ) -> Result<(RequestPayload, InspectionGuard), HttpError> {
@@ -1385,6 +1602,12 @@ async fn read_body(
         // otherwise reach the origin over HTTP/2 or HTTP/3 without header
         // limits or rule evaluation.
         if let Ok(data) = frame.into_data() {
+            // Charge body bytes as they arrive. Waiting until the body is
+            // complete lets a source hold a large inspection buffer while
+            // staying under the request rate limit.
+            if let Some(err) = charge_body_bytes(context, source, config, data.len()) {
+                return Err(err);
+            }
             let observed = prefix.len().saturating_add(data.len());
             if !grow_request_inspection_raw(&mut inspection, config, observed) {
                 context.record_overloaded();
@@ -1779,16 +2002,16 @@ async fn process(
         ));
     }
     if (decode_body || inspect_uploads) && !body.is_empty() {
-        // The read path reserved only the raw prefix. Reserve the decoded-form
-        // worst case (or the bounded multipart-parse worst case) now,
-        // immediately before decoding and rule evaluation: a stalled body must
-        // not be able to hold this share of the budget.
-        let raw_bytes = if encoded {
-            config.limits.max_body_bytes
+        // The read path reserved only the raw prefix. For an encoded body,
+        // reserve the bounded decompression output first; the decoded-form
+        // worst case is reserved after decompression, when the actual size is
+        // known. An uncompressed body already has its worst-case form share.
+        let raw_reservation = if encoded {
+            body.len().saturating_add(config.limits.max_body_bytes)
         } else {
-            body.len()
+            request_inspection_bytes(config, body.len())
         };
-        if !grow_inspection_to(&mut inspection, request_inspection_bytes(config, raw_bytes)) {
+        if !grow_inspection_to(&mut inspection, raw_reservation) {
             context.record_overloaded();
             return Err(inspection_capacity_error());
         }
@@ -1884,20 +2107,53 @@ async fn process(
             "unsupported request body charset",
         ));
     }
-    if decode_body {
-        let decision = context.protection.charge_inspection(
-            source.client_ip,
-            &config.protection,
-            inspected_body.len(),
+    if (inspect_body || inspect_uploads || inspect_form)
+        && let Some(kind) =
+            crate::decoding::structured_body_depth_error(&parts.headers, inspected_body.as_ref())
+    {
+        warn!(
+            client = %source.client_ip, peer = %source.peer,
+            kind,
+            path = %parts.uri.path(),
+            "structured request body is nested too deeply; rejecting"
         );
-        if let Some(err) = protection_error(
-            context,
-            source,
-            config,
-            Some((parts.method.as_str(), parts.uri.path())),
-            decision,
-        ) {
-            return Err(err);
+        return Err(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "structured request body nesting too deep",
+        ));
+    }
+    if body_was_decoded {
+        // The decoded size is known now. Reserve the form-decoding worst case
+        // on top of the raw prefix instead of reserving the full maximum for
+        // every small compressed request.
+        let target = body.len().saturating_add(
+            inspected_body
+                .len()
+                .saturating_mul(REQUEST_INSPECTION_FACTOR),
+        );
+        if !grow_inspection_to(&mut inspection, target) {
+            context.record_overloaded();
+            return Err(inspection_capacity_error());
+        }
+        // The read loop charged the compressed bytes. Charge the additional
+        // bytes produced by decompression so a compression bomb costs more
+        // than its wire size.
+        let expansion = inspected_body.len().saturating_sub(body.len());
+        if expansion > 0 {
+            let decision = context.protection.charge_inspection(
+                source.client_ip,
+                &config.protection,
+                expansion,
+            );
+            if let Some(err) = protection_error(
+                context,
+                source,
+                config,
+                Some((parts.method.as_str(), parts.uri.path())),
+                decision,
+            ) {
+                return Err(err);
+            }
         }
     }
     if inspect_form {
@@ -1991,6 +2247,7 @@ async fn process(
             &parts.headers,
             inspected_body.as_ref(),
             config.limits.upload_inspection,
+            config.limits.upload_expansion,
         )
     {
         context
@@ -2035,7 +2292,12 @@ async fn process(
         );
         return Err(graphql_error(violation));
     }
-    if let Some(reason) = crate::jwt::violation(&parts.headers, &config.limits.jwt) {
+    if let Some(reason) = crate::jwt::violation_in_request(
+        &parts.headers,
+        parts.uri.query(),
+        inspected_body.as_ref(),
+        &config.limits.jwt,
+    ) {
         debug!(
             client = %source.client_ip, peer = %source.peer,
             reason = %reason,
@@ -2196,7 +2458,9 @@ async fn process(
                         PrefixBody::new(Bytes::new(), Vec::new(), body).boxed(),
                     ));
                 }
-                let Some(response_inspection) = context.reserve_response_inspection(config) else {
+                let Some(response_inspection) =
+                    context.reserve_response_inspection(config, source.client_ip)
+                else {
                     context.record_overloaded();
                     return Err(inspection_capacity_error());
                 };
@@ -2268,7 +2532,8 @@ async fn process(
         ));
     }
 
-    let Some(response_inspection) = context.reserve_response_inspection(config) else {
+    let Some(response_inspection) = context.reserve_response_inspection(config, source.client_ip)
+    else {
         context.record_overloaded();
         return Err(inspection_capacity_error());
     };
@@ -2427,6 +2692,81 @@ mod tests {
         let error = request_head_error(&config, &parts).expect("duplicate content-type");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.message, "duplicate Content-Type header");
+    }
+
+    #[test]
+    fn connection_named_end_to_end_headers_are_rejected() {
+        let config =
+            crate::config::parse("listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n")
+                .expect("valid config");
+        for name in [
+            "content-encoding",
+            "content-type",
+            "cookie",
+            "authorization",
+        ] {
+            let request = Request::builder()
+                .uri("/")
+                .header("connection", name)
+                .header(name, "value")
+                .body(())
+                .expect("request");
+            let (parts, ()) = request.into_parts();
+            let error = request_head_error(&config, &parts)
+                .unwrap_or_else(|| panic!("{name} must be rejected"));
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.message, "Connection header names an end-to-end field");
+        }
+
+        let request = Request::builder()
+            .uri("/")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "websocket")
+            .body(())
+            .expect("request");
+        let (parts, ()) = request.into_parts();
+        assert!(request_head_error(&config, &parts).is_none());
+    }
+
+    #[test]
+    fn absolute_form_authority_must_match_host_header() {
+        let config =
+            crate::config::parse("listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n")
+                .expect("valid config");
+        let request = Request::builder()
+            .uri("http://safe.example/admin")
+            .header(HOST, "evil.example")
+            .body(())
+            .expect("request");
+        let (parts, ()) = request.into_parts();
+        let error = request_head_error(&config, &parts).expect("mismatch");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "Host header does not match request authority"
+        );
+
+        let request = Request::builder()
+            .uri("http://safe.example/admin")
+            .header(HOST, "safe.example:80")
+            .body(())
+            .expect("request");
+        let (parts, ()) = request.into_parts();
+        assert!(request_head_error(&config, &parts).is_none());
+    }
+
+    #[test]
+    fn inspection_budget_caps_a_single_source() {
+        let budget = Arc::new(InspectionBudget::new());
+        let source = "203.0.113.1".parse().expect("source");
+        let other = "203.0.113.2".parse().expect("source");
+        let first = budget
+            .reserve_for(source, SOURCE_INSPECTION_BUDGET_BYTES)
+            .expect("source limit fits");
+        assert!(budget.reserve_for(source, 1).is_none());
+        assert!(budget.reserve_for(other, 1).is_some());
+        drop(first);
+        assert!(budget.reserve_for(source, 1).is_some());
     }
 
     #[test]
@@ -2622,7 +2962,7 @@ categories:
             .expect("leave response slot");
         let inspection = server
             .context
-            .reserve_response_inspection(&config)
+            .reserve_response_inspection(&config, "203.0.113.1".parse().expect("source"))
             .expect("response reservation");
         let (parts, _) = Request::new(()).into_parts();
         let response = crate::proxy::response::inspect(

@@ -18,6 +18,9 @@ const STALE_AFTER: Duration = Duration::from_secs(600);
 /// new sources must not trigger one per request.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const GLOBAL_WINDOW: Duration = Duration::from_secs(1);
+/// Bound the work one admission attempt may spend looking for an eviction
+/// candidate. A full-table sweep still happens at most once per sweep interval.
+const EVICT_SCAN_LIMIT: usize = 256;
 /// Minimum interval between per-source rate-limit/ban log lines. Rejections
 /// inside the interval are counted and reported as `suppressed` on the next
 /// line, so a flood cannot turn the journal into a disk-I/O amplifier.
@@ -101,6 +104,7 @@ pub struct ProtectionState {
     last_sweep: Mutex<Option<Instant>>,
     last_rule_sweep: Mutex<Option<Instant>>,
     last_failed_evict: Mutex<Option<Instant>>,
+    last_rule_failed_evict: Mutex<Option<Instant>>,
     global_requests: Mutex<GlobalWindow>,
     global_auth: Mutex<GlobalAuthWindow>,
 }
@@ -123,6 +127,7 @@ impl ProtectionState {
             last_sweep: Mutex::new(None),
             last_rule_sweep: Mutex::new(None),
             last_failed_evict: Mutex::new(None),
+            last_rule_failed_evict: Mutex::new(None),
             global_requests: Mutex::new(GlobalWindow {
                 started: Instant::now(),
                 count: 0.0,
@@ -327,6 +332,10 @@ impl ProtectionState {
                 entry.behavior.auth_failures = entry.behavior.auth_failures.saturating_add(1);
                 outcome.observed_auth_failure = true;
             }
+            if global_enabled && auth_failure {
+                entry.behavior.global_auth_failures =
+                    entry.behavior.global_auth_failures.saturating_add(1);
+            }
 
             if enumeration_enabled
                 && entry.behavior.flags & BehaviorEntry::ENUMERATION_FLAG == 0
@@ -453,14 +462,25 @@ impl ProtectionState {
             return None;
         }
         let now = Instant::now();
-        let mut window = lock(&self.global_auth);
-        let until = window.blocked_until?;
-        if until > now {
-            Some(until.saturating_duration_since(now))
-        } else {
-            window.blocked_until = None;
-            None
-        }
+        let remaining = {
+            let mut window = lock(&self.global_auth);
+            let until = window.blocked_until?;
+            if until > now {
+                until.saturating_duration_since(now)
+            } else {
+                window.blocked_until = None;
+                return None;
+            }
+        };
+        // A distributed authentication attack must not lock every user out. A
+        // source is only covered by the global block after it has contributed
+        // a recent authentication failure itself; a clean client keeps using
+        // the login endpoint.
+        let key = tracking_key(ip, config);
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        let entry = shard.entries.get_mut(&key)?;
+        entry.behavior.roll(now, config.behavior.window);
+        (entry.behavior.global_auth_failures > 0).then_some(remaining)
     }
 
     pub fn try_acquire_connection(
@@ -595,7 +615,7 @@ impl ProtectionState {
                 return false;
             }
         }
-        let mut oldest: Option<(Instant, usize, IpAddr)> = None;
+        let mut oldest: Option<(u8, Instant, usize, IpAddr)> = None;
         for (index, shard) in self.shards.iter().enumerate() {
             let shard = lock(shard);
             let Some((&key, entry)) = shard
@@ -604,15 +624,18 @@ impl ProtectionState {
                 .filter(|(_, entry)| {
                     entry.connections == 0 && !entry.banned_until.is_some_and(|until| until > now)
                 })
-                .min_by_key(|(_, entry)| entry.last_seen)
+                .take(EVICT_SCAN_LIMIT)
+                .min_by_key(|(_, entry)| (entry_security_rank(entry), entry.last_seen))
             else {
                 continue;
             };
-            if oldest.is_none_or(|(seen, _, _)| entry.last_seen < seen) {
-                oldest = Some((entry.last_seen, index, key));
+            if oldest.is_none_or(|(rank, seen, _, _)| {
+                (entry_security_rank(entry), entry.last_seen) < (rank, seen)
+            }) {
+                oldest = Some((entry_security_rank(entry), entry.last_seen, index, key));
             }
         }
-        let Some((_, index, candidate)) = oldest else {
+        let Some((_, _, index, candidate)) = oldest else {
             *lock(&self.last_failed_evict) = Some(now);
             return false;
         };
@@ -648,6 +671,45 @@ impl ProtectionState {
             self.tracked_rules
                 .fetch_sub(before - shard.entries.len(), Ordering::AcqRel);
         }
+    }
+
+    /// Remove the least recently seen rule bucket from any shard. The scan is
+    /// expensive, so a table that is full of recently active sources only pays
+    /// for it once per [`GLOBAL_WINDOW`].
+    fn evict_rule_oldest_any_shard(&self, now: Instant) -> bool {
+        {
+            let failed = lock(&self.last_rule_failed_evict);
+            if failed.is_some_and(|last| now.saturating_duration_since(last) < GLOBAL_WINDOW) {
+                return false;
+            }
+        }
+        let mut oldest: Option<(Instant, usize, (RuleLimitKey, IpAddr))> = None;
+        for (index, shard) in self.rule_shards.iter().enumerate() {
+            let shard = lock(shard);
+            let Some((key, bucket)) = shard
+                .entries
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.last_seen)
+            else {
+                continue;
+            };
+            if oldest
+                .as_ref()
+                .is_none_or(|(seen, _, _)| bucket.last_seen < *seen)
+            {
+                oldest = Some((bucket.last_seen, index, key.clone()));
+            }
+        }
+        let Some((_, index, candidate)) = oldest else {
+            *lock(&self.last_rule_failed_evict) = Some(now);
+            return false;
+        };
+        let mut shard = lock(&self.rule_shards[index]);
+        if shard.entries.remove(&candidate).is_none() {
+            return false;
+        }
+        self.tracked_rules.fetch_sub(1, Ordering::AcqRel);
+        true
     }
 
     fn check_client(&self, key: IpAddr, config: &Protection, cost: f64) -> Option<Decision> {
@@ -758,7 +820,18 @@ impl ProtectionState {
                 shard = lock(&self.rule_shards[shard_index(tracking)]);
                 if !shard.entries.contains_key(&map_key) {
                     if !reserve_slot(&self.tracked_rules, config.max_tracked_ips) {
-                        return false;
+                        // A full table must not lock every new source out of
+                        // rule-level limits. Reclaim the least recently seen
+                        // bucket before failing closed.
+                        drop(shard);
+                        let evicted = self.evict_rule_oldest_any_shard(now);
+                        shard = lock(&self.rule_shards[shard_index(tracking)]);
+                        if !evicted && evict_rule_oldest(&mut shard.entries) {
+                            self.tracked_rules.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        if !reserve_slot(&self.tracked_rules, config.max_tracked_ips) {
+                            return false;
+                        }
                     }
                     let burst = f64::from(limit.requests);
                     shard
@@ -929,6 +1002,7 @@ struct BehaviorEntry {
     requests: u32,
     not_found: u32,
     auth_failures: u32,
+    global_auth_failures: u32,
     not_found_paths: [u64; 4],
     content: u32,
     content_paths: [u64; 4],
@@ -946,6 +1020,7 @@ impl BehaviorEntry {
             requests: 0,
             not_found: 0,
             auth_failures: 0,
+            global_auth_failures: 0,
             not_found_paths: [0; 4],
             content: 0,
             content_paths: [0; 4],
@@ -1196,8 +1271,34 @@ fn evict_oldest(entries: &mut HashMap<IpAddr, Entry>, now: Instant) -> bool {
         .filter(|(_, entry)| {
             entry.connections == 0 && !entry.banned_until.is_some_and(|until| until > now)
         })
-        .min_by_key(|(_, entry)| entry.last_seen)
+        .take(EVICT_SCAN_LIMIT)
+        .min_by_key(|(_, entry)| (entry_security_rank(entry), entry.last_seen))
         .map(|(key, _)| *key);
+    candidate.is_some_and(|key| entries.remove(&key).is_some())
+}
+
+/// Evict entries without security history first. A source behind a trusted
+/// proxy can create many tracked client entries; losing a ban count or an
+/// active behavioral window to table pressure would reset an attacker's
+/// escalation.
+fn entry_security_rank(entry: &Entry) -> u8 {
+    if entry.ban_count > 0
+        || entry.behavior.flags != 0
+        || entry.behavior.auth_failures > 0
+        || entry.behavior.global_auth_failures > 0
+        || entry.violations > 0
+    {
+        1
+    } else {
+        0
+    }
+}
+
+fn evict_rule_oldest(entries: &mut HashMap<(RuleLimitKey, IpAddr), RuleBucket>) -> bool {
+    let candidate = entries
+        .iter()
+        .min_by_key(|(_, bucket)| bucket.last_seen)
+        .map(|(key, _)| key.clone());
     candidate.is_some_and(|key| entries.remove(&key).is_some())
 }
 
@@ -1794,12 +1895,13 @@ mod tests {
 
         let limit = rule_limit(1, 3600);
         assert!(state.check_rule_limit(&rule_key(1), ip("10.0.0.1"), &limit, &config));
-        assert!(!state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
-        tokio::time::advance(STALE_AFTER).await;
-        assert!(!state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
+        assert!(
+            state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config),
+            "a full rule table must evict an old bucket instead of locking out a new source"
+        );
+        assert_eq!(state.tracked_rules.load(Ordering::Relaxed), 1);
         tokio::time::advance(Duration::from_secs(3600)).await;
         assert!(state.check_rule_limit(&rule_key(2), ip("10.0.0.2"), &limit, &config));
-        assert_eq!(state.tracked_rules.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2111,23 +2213,38 @@ mod tests {
         config.behavior = behavior;
         let state = ProtectionState::new();
 
+        assert_eq!(
+            state.check_request(ip("10.0.0.1"), &config),
+            Decision::Allow
+        );
+        assert_eq!(
+            state.check_request(ip("10.0.0.2"), &config),
+            Decision::Allow
+        );
         state.observe_response(ip("10.0.0.1"), "/login", StatusCode::UNAUTHORIZED, &config);
         state.observe_response(ip("10.0.0.2"), "/login", StatusCode::UNAUTHORIZED, &config);
         assert!(
             state
-                .global_auth_block(ip("10.0.0.3"), "/login", &config)
-                .is_some()
+                .global_auth_block(ip("10.0.0.1"), "/login", &config)
+                .is_some(),
+            "a source that contributed failures is covered by the global block"
         );
         assert!(
             state
-                .global_auth_block(ip("10.0.0.3"), "/health", &config)
+                .global_auth_block(ip("10.0.0.3"), "/login", &config)
+                .is_none(),
+            "a clean source must not be locked out by a distributed attack"
+        );
+        assert!(
+            state
+                .global_auth_block(ip("10.0.0.1"), "/health", &config)
                 .is_none()
         );
 
         tokio::time::advance(Duration::from_secs(6)).await;
         assert!(
             state
-                .global_auth_block(ip("10.0.0.3"), "/login", &config)
+                .global_auth_block(ip("10.0.0.1"), "/login", &config)
                 .is_none()
         );
     }

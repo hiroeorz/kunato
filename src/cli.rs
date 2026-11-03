@@ -84,6 +84,9 @@ pub struct UpgradeArgs {
 
     /// Print what would be downloaded and run without changing anything.
     pub dry_run: bool,
+
+    /// Allow installing a release older than the running binary.
+    pub allow_downgrade: bool,
 }
 
 #[derive(Debug)]

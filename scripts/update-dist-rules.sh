@@ -31,3 +31,4 @@ mkdir -p "$root/dist"
     sha256sum rules.yaml > rules.yaml.sha256
 )
 echo "updated $dist"
+echo "re-sign $dist with the rules key before publishing: ./scripts/sign-artifact.sh KEY $dist"

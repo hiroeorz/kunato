@@ -125,6 +125,11 @@ async fn handle(
     metrics: Arc<Metrics>,
     protection: Arc<ProtectionState>,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    if !admin_host_allowed(request.headers().get(http::header::HOST)) {
+        let mut response = Response::new(full_body("misdirected request"));
+        *response.status_mut() = StatusCode::MISDIRECTED_REQUEST;
+        return Ok(response);
+    }
     if request.method() == Method::GET && request.uri().path() == "/metrics" {
         let body = metrics.render(protection.active_connections());
         let mut response = Response::new(full_body(body));
@@ -138,4 +143,66 @@ async fn handle(
     let mut response = Response::new(full_body("not found"));
     *response.status_mut() = StatusCode::NOT_FOUND;
     Ok(response)
+}
+
+/// Reject DNS-rebinding requests: the admin listener only accepts loopback
+/// names, so a browser resolving an attacker-controlled name to 127.0.0.1
+/// still sends that name in `Host`.
+fn admin_host_allowed(host: Option<&HeaderValue>) -> bool {
+    let Some(host) = host else {
+        // HTTP/1.0 clients may omit Host; they cannot be driven by a browser
+        // rebinding attack.
+        return true;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let host = host.trim();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split_once(']').map(|(name, _)| name).unwrap_or(host)
+    } else {
+        host.rsplit_once(':')
+            .filter(|(name, port)| {
+                !name.contains(':') && port.chars().all(|ch| ch.is_ascii_digit())
+            })
+            .map(|(name, _)| name)
+            .unwrap_or(host)
+    };
+    name.eq_ignore_ascii_case("localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_loopback_admin_hosts() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:9090",
+            "localhost",
+            "LOCALHOST:9090",
+            "[::1]",
+            "[::1]:9090",
+        ] {
+            assert!(
+                admin_host_allowed(Some(&HeaderValue::from_str(host).expect("host"))),
+                "{host}"
+            );
+        }
+        assert!(admin_host_allowed(None));
+    }
+
+    #[test]
+    fn rejects_dns_rebinding_hosts() {
+        for host in ["evil.example", "evil.example:9090", "10.0.0.1", "0.0.0.0"] {
+            assert!(
+                !admin_host_allowed(Some(&HeaderValue::from_str(host).expect("host"))),
+                "{host}"
+            );
+        }
+    }
 }

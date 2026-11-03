@@ -316,14 +316,17 @@ async fn pump_upstream_to_client<R, W>(
     W: AsyncWrite + Unpin,
 {
     let mut message = Message::default();
-    let mut budget = MessageBudget::new(inspection);
+    let mut budget = MessageBudget::new(inspection, source_ip);
+    let mut message_deadline: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
-            frame = read_frame(
+            frame = read_message_frame(
                 &mut reader,
                 message_limit.saturating_sub(message.payload_len()),
                 false,
-                Some(&mut budget),
+                &mut budget,
+                message_deadline,
+                live_config.load().timeouts.body_read,
             ) => {
                 let frame = match frame {
                     Ok(frame) => frame,
@@ -333,6 +336,10 @@ async fn pump_upstream_to_client<R, W>(
                     }
                     Err(WsError::Budget) => {
                         close_and_flush(&mut writer, 1013, "inspection budget exhausted").await;
+                        return;
+                    }
+                    Err(WsError::Timeout) => {
+                        close_and_flush(&mut writer, 1008, "message assembly timed out").await;
                         return;
                     }
                     Err(WsError::Protocol(reason)) => {
@@ -366,8 +373,15 @@ async fn pump_upstream_to_client<R, W>(
                     }
                 }
                 if !fin {
+                    if message_deadline.is_none() {
+                        message_deadline = Some(
+                            tokio::time::Instant::now()
+                                + live_config.load().timeouts.body_read,
+                        );
+                    }
                     continue;
                 }
+                message_deadline = None;
                 let (_, payload, raw) = message.finish();
                 let view = RequestView::with_body_decoding(
                     &request.method,
@@ -455,13 +469,23 @@ async fn pump_client_to_upstream<R, W>(
     W: AsyncWrite + Unpin,
 {
     let mut message = Message::default();
-    let mut budget = MessageBudget::new(inspection);
+    let mut budget = MessageBudget::new(inspection, source_ip);
+    let mut message_deadline: Option<tokio::time::Instant> = None;
     loop {
         // A frame header may declare the whole message limit again even when
         // earlier fragments already filled it; clamp the read, and therefore
         // the budget it may reserve, to what is actually left.
         let remaining = message_limit.saturating_sub(message.payload_len());
-        let frame = match read_frame(&mut reader, remaining, true, Some(&mut budget)).await {
+        let frame = match read_message_frame(
+            &mut reader,
+            remaining,
+            true,
+            &mut budget,
+            message_deadline,
+            live_config.load().timeouts.body_read,
+        )
+        .await
+        {
             Ok(frame) => frame,
             Err(WsError::TooLarge) => {
                 send_close(&close, 1009, "message too large").await;
@@ -469,6 +493,10 @@ async fn pump_client_to_upstream<R, W>(
             }
             Err(WsError::Budget) => {
                 send_close(&close, 1013, "inspection budget exhausted").await;
+                return;
+            }
+            Err(WsError::Timeout) => {
+                send_close(&close, 1008, "message assembly timed out").await;
                 return;
             }
             Err(WsError::Protocol(reason)) => {
@@ -489,6 +517,23 @@ async fn pump_client_to_upstream<R, W>(
             }
             _ => {}
         }
+        // Charge fragmented messages as each frame arrives. Waiting for the
+        // final fragment lets a source hold a message assembly reservation
+        // indefinitely while staying under the request rate limit.
+        let frame_bytes = frame.payload.len();
+        let decision =
+            protection.charge_inspection(source_ip, &live_config.load().protection, frame_bytes);
+        match decision {
+            ProtectionDecision::Allow => {}
+            ProtectionDecision::RateLimited { .. } | ProtectionDecision::Banned { .. } => {
+                send_close(&close, 1008, "rate limited").await;
+                return;
+            }
+            ProtectionDecision::Overloaded { .. } => {
+                send_close(&close, 1013, "service overloaded").await;
+                return;
+            }
+        }
         let fin = frame.fin;
         match message.push(frame, message_limit) {
             Ok(()) => {}
@@ -502,8 +547,13 @@ async fn pump_client_to_upstream<R, W>(
             }
         }
         if !fin {
+            if message_deadline.is_none() {
+                message_deadline =
+                    Some(tokio::time::Instant::now() + live_config.load().timeouts.body_read);
+            }
             continue;
         }
+        message_deadline = None;
         let (opcode, payload, raw) = message.finish();
         if opcode == OP_TEXT && std::str::from_utf8(&payload).is_err() {
             send_close(&close, 1007, "invalid UTF-8").await;
@@ -527,24 +577,45 @@ async fn pump_client_to_upstream<R, W>(
         // Application messages are user traffic: charge the same per-source
         // budget as an HTTP request so a tunnel cannot bypass rate limits and
         // bans by staying open.
-        for decision in [
-            protection.check_request(source_ip, &config.protection),
-            protection.charge_inspection(source_ip, &config.protection, payload.len()),
-        ] {
-            match decision {
-                ProtectionDecision::Allow => {}
-                ProtectionDecision::RateLimited { .. } | ProtectionDecision::Banned { .. } => {
-                    send_close(&close, 1008, "rate limited").await;
-                    return;
-                }
-                ProtectionDecision::Overloaded { .. } => {
-                    send_close(&close, 1013, "service overloaded").await;
-                    return;
-                }
+        match protection.check_request(source_ip, &config.protection) {
+            ProtectionDecision::Allow => {}
+            ProtectionDecision::RateLimited { .. } | ProtectionDecision::Banned { .. } => {
+                send_close(&close, 1008, "rate limited").await;
+                return;
+            }
+            ProtectionDecision::Overloaded { .. } => {
+                send_close(&close, 1013, "service overloaded").await;
+                return;
             }
         }
         if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
             send_close(&close, 1008, violation.reason()).await;
+            return;
+        }
+        let graphql_path = config.limits.graphql.enabled
+            && crate::request_view::path_forms(request.uri.path())
+                .iter()
+                .any(|form| config.limits.graphql.matches_path(form));
+        if graphql_path
+            && let Some(violation) = crate::graphql::inspect(
+                None,
+                &request.headers,
+                &payload,
+                false,
+                crate::graphql::Limits {
+                    max_depth: config.limits.graphql.max_depth,
+                    max_fields: config.limits.graphql.max_fields,
+                    block_introspection: config.limits.graphql.block_introspection,
+                },
+            )
+        {
+            warn!(
+                client = %source_ip,
+                path = %request.uri.path(),
+                ?violation,
+                "WebSocket GraphQL payload rejected"
+            );
+            send_close(&close, 1008, "graphql policy violation").await;
             return;
         }
         let outcome = evaluate_websocket(&config, &view, Some(protection.as_ref()));
@@ -670,17 +741,20 @@ enum WsError {
     Protocol(&'static str),
     TooLarge,
     Budget,
+    Timeout,
 }
 
 struct MessageBudget {
     budget: Arc<InspectionBudget>,
+    source: IpAddr,
     guard: Option<InspectionGuard>,
 }
 
 impl MessageBudget {
-    fn new(budget: Arc<InspectionBudget>) -> Self {
+    fn new(budget: Arc<InspectionBudget>, source: IpAddr) -> Self {
         Self {
             budget,
+            source,
             guard: None,
         }
     }
@@ -693,7 +767,7 @@ impl MessageBudget {
         if let Some(guard) = &mut self.guard {
             return guard.grow(requested);
         }
-        match self.budget.reserve(requested) {
+        match self.budget.reserve_for(self.source, requested) {
             Some(guard) => {
                 self.guard = Some(guard);
                 true
@@ -707,11 +781,32 @@ impl MessageBudget {
     }
 }
 
+async fn read_message_frame<R>(
+    reader: &mut R,
+    max: usize,
+    require_mask: bool,
+    budget: &mut MessageBudget,
+    deadline: Option<tokio::time::Instant>,
+    payload_timeout: std::time::Duration,
+) -> Result<Frame, WsError>
+where
+    R: AsyncRead + Unpin,
+{
+    let read = read_frame(reader, max, require_mask, Some(budget), payload_timeout);
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, read)
+            .await
+            .map_err(|_| WsError::Timeout)?,
+        None => read.await,
+    }
+}
+
 async fn read_frame<R>(
     reader: &mut R,
     max: usize,
     require_mask: bool,
     budget: Option<&mut MessageBudget>,
+    payload_timeout: std::time::Duration,
 ) -> Result<Frame, WsError>
 where
     R: AsyncRead + Unpin,
@@ -775,6 +870,7 @@ where
     const READ_CHUNK_BYTES: usize = 16 * 1024;
     let total = len as usize;
     let mut payload = Vec::with_capacity(total.min(READ_CHUNK_BYTES));
+    let payload_deadline = tokio::time::Instant::now() + payload_timeout;
     let mut budget = budget;
     let mut remaining = total;
     while remaining > 0 {
@@ -787,9 +883,9 @@ where
         }
         let start = payload.len();
         payload.resize(start + step, 0);
-        reader
-            .read_exact(&mut payload[start..])
+        tokio::time::timeout_at(payload_deadline, reader.read_exact(&mut payload[start..]))
             .await
+            .map_err(|_| WsError::Timeout)?
             .map_err(|_| WsError::Io)?;
         remaining -= step;
     }
@@ -882,8 +978,11 @@ mod tests {
 
     #[test]
     fn message_budget_is_bounded_and_released() {
-        let mut budget = MessageBudget::new(Arc::new(InspectionBudget::new()));
-        assert!(budget.ensure(128 * 1024 * 1024));
+        let mut budget = MessageBudget::new(
+            Arc::new(InspectionBudget::new()),
+            "203.0.113.1".parse().expect("source"),
+        );
+        assert!(budget.ensure(crate::proxy::server::SOURCE_INSPECTION_BUDGET_BYTES / 2));
         assert!(!budget.ensure(1));
         budget.finish();
         assert!(budget.ensure(1));

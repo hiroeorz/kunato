@@ -50,6 +50,61 @@ fn cookie_regex_hits(value: &str, regexes: &[Regex], allow_mode: bool) -> bool {
     }
 }
 
+/// Header values reach applications through framework-specific decoders too.
+/// Match the raw value and its percent-decoded forms; an ALLOW must match every
+/// form, while a BLOCK matches any.
+fn header_regex_hits(value: &str, regexes: &[Regex], allow_mode: bool) -> bool {
+    let forms = percent_decode_forms(value);
+    if allow_mode {
+        forms
+            .iter()
+            .all(|form| regexes.iter().any(|regex| regex.is_match(form)))
+    } else {
+        forms
+            .iter()
+            .any(|form| regexes.iter().any(|regex| regex.is_match(form)))
+    }
+}
+
+fn header_payload_hits(value: &str, matcher: &PayloadMatcher, allow_mode: bool) -> bool {
+    let forms = percent_decode_forms(value);
+    if allow_mode {
+        forms.iter().all(|form| matcher.hits(form))
+    } else {
+        forms.iter().any(|form| matcher.hits(form))
+    }
+}
+
+/// A cookie name that an application may legitimately expose as a parameter.
+/// RFC 6265 token characters cannot carry the quotes, angle brackets, spaces,
+/// slashes, or control bytes used by injection payloads. Percent-encoded forms
+/// are checked too, so `%3Cscript%3E` cannot pass as a name.
+fn safe_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && percent_decode_forms(name).iter().all(|form| {
+            !form.is_empty()
+                && form.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b'!' | b'#'
+                                | b'$'
+                                | b'&'
+                                | b'\''
+                                | b'*'
+                                | b'+'
+                                | b'-'
+                                | b'.'
+                                | b'^'
+                                | b'_'
+                                | b'`'
+                                | b'|'
+                                | b'~'
+                        )
+                })
+        })
+}
+
 #[derive(Debug, Default)]
 pub struct Matcher {
     pub paths: Vec<Regex>,
@@ -185,12 +240,12 @@ impl Matcher {
                 !values.is_empty()
                     && values
                         .iter()
-                        .all(|value| regexes.iter().any(|re| re.is_match(&header_text(value))))
+                        .all(|value| header_regex_hits(&header_text(value), regexes, true))
             } else {
                 view.headers
                     .get_all(name)
                     .iter()
-                    .any(|value| regexes.iter().any(|re| re.is_match(&header_text(value))))
+                    .any(|value| header_regex_hits(&header_text(value), regexes, false))
             };
             if !matched {
                 return false;
@@ -265,13 +320,14 @@ impl PayloadMatcher {
             let pairs = cookie_pairs(view.headers);
             let hit = if allow_mode {
                 !pairs.is_empty()
-                    && pairs
-                        .iter()
-                        .all(|(_, value)| self.hits_cookie(value.as_ref(), true))
+                    && pairs.iter().all(|(name, value)| {
+                        safe_cookie_name(name.as_ref()) && self.hits_cookie(value.as_ref(), true)
+                    })
             } else {
-                pairs
-                    .iter()
-                    .any(|(_, value)| self.hits_cookie(value.as_ref(), false))
+                pairs.iter().any(|(name, value)| {
+                    self.hits_cookie(name.as_ref(), false)
+                        || self.hits_cookie(value.as_ref(), false)
+                })
             };
             if hit {
                 return true;
@@ -284,11 +340,11 @@ impl PayloadMatcher {
                     && view
                         .headers
                         .values()
-                        .all(|value| self.hits(&header_text(value)))
+                        .all(|value| header_payload_hits(&header_text(value), self, true))
             } else {
                 view.headers
                     .values()
-                    .any(|value| self.hits(&header_text(value)))
+                    .any(|value| header_payload_hits(&header_text(value), self, false))
             };
             if hit {
                 return true;
@@ -655,6 +711,25 @@ mod tests {
     }
 
     #[test]
+    fn cookie_names_are_scanned_by_payload_targets() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex("<script")],
+                targets: TARGET_COOKIES,
+            }),
+            ..Matcher::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("%3Cscript%3E=1; session=ok"),
+        );
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
     fn allow_mode_cookie_payload_requires_every_decoded_form() {
         let method = Method::GET;
         let uri: Uri = "/".parse().expect("valid URI");
@@ -677,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn header_payloads_stay_as_received() {
+    fn header_payloads_match_percent_decoded_forms() {
         let method = Method::GET;
         let uri: Uri = "/".parse().expect("valid URI");
         let matcher = Matcher {
@@ -690,7 +765,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert("x-test", HeaderValue::from_static("%3Cscript%3E"));
-        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
         headers.insert("x-test", HeaderValue::from_static("<script>"));
         assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
     }
