@@ -787,3 +787,17 @@ GET /blog/2026/11/bash-and-powershell-tips
 # --- Benign XML and HTML doctypes ---
 POST /xml header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><root/>"
 POST /xml header="Content-Type: text/html" body="<!DOCTYPE html><html><body>ok</body></html>"
+
+# --- Near-miss guards for the 2026-11-03 delta intake ---
+GET /api/stacks/my-stack/env/raw
+PUT /api/stacks/my-stack/env/raw header="Content-Type: application/json" body="{\"content\":\"APP_ENV=production\"}"
+GET /api/fs/stream?mount=root&path=media/photo.jpg
+GET /api/fs/thumb?mount=root&path=media/photo.jpg
+POST /nagiosxi/admin/mibs.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f6164223b2066696c656e616d653d227374616e646172642e6d6962220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a4d494220444546494e4954494f4e53203a3a3d20424547494e20454e440d0a2d2d582d2d0d0a
+POST /main/inc/ajax/model.ajax.php header="Content-Type: application/x-www-form-urlencoded" body="action=get_sessions&_search=true&filters={\"groupOp\":\"AND\"}"
+POST /upload/send/ header="Content-Type: application/json" body="{\"fileName\":\"holiday.jpg\",\"fileContent\":\"/9j/4AAQSkZJRgABAQ==\"}"
+GET /geonetwork/srv/eng/catalog.search?any=water
+POST /api/v1/files header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d226c6f676f2e737667220d0a436f6e74656e742d547970653a20696d6167652f7376672b786d6c0d0a0d0a3c73766720786d6c6e733d22687474703a2f2f7777772e77332e6f72672f323030302f737667223e3c726563742077696474683d22313022206865696768743d223130222f3e3c2f7376673e0d0a2d2d582d2d0d0a
+PUT /api/station/1/profile/edit header="Content-Type: application/json" body="{\"timezone\":\"UTC\",\"stereo_tool_configuration_path\":\"/usr/share/stereo_tool\",\"frontend_config\":{\"custom_config\":\"{}\"}}"
+POST /api/v2/dfiq/from_yaml header="Content-Type: application/x-yaml" body="uuid: 12345678-1234-1234-1234-123456789012"
+POST /api/v2/tasks/export/new header="Content-Type: application/json" body="{\"name\":\"monthly-report\",\"format\":\"json\"}"

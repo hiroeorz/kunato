@@ -1839,6 +1839,31 @@ categories:
       # is injected into the unauthenticated file resolve path.
       - name: csghub-encoded-current-user
         match: { regex: '(?i)%3fcurrent_user=', in: [path, query] }
+      # CVE-2026-73328 (Volmarg Personal Management System): /upload/send/
+      # writes a caller-chosen fileName from base64 fileContent. A legitimate
+      # upload keeps a non-executable extension.
+      - name: volmarg-upload-executable-filename
+        match:
+          path: '(?i)^/upload/send/?$'
+          regex: '(?i)"(?:fileName|filename)"\s*:\s*"[^"]*\.(php[0-9]?|phtml|phar|jspx?|asp|aspx|ashx|asmx|cgi|pl|py|sh|exe|dll|war)\b'
+          in: [body]
+      # CVE-2026-39379 (GeoNetwork): an error page reflects request content into
+      # an AngularJS template. The sandbox-escape gadgets have no search use.
+      - name: geonetwork-angularjs-template
+        match:
+          path: '(?i)/srv/(?:eng|api)/'
+          regex: '(?i)\{\{[^}]{0,120}(constructor\s*\.\s*constructor|\$eval\s*\(|__proto__)'
+          in: [query, body]
+      # CVE-2026-121427 / CVE-2026-121428 / CVE-2026-121429 (AzuraCast): the
+      # station profile edit writes newline-bearing timezone and custom_config
+      # values into Supervisor and Shoutcast configuration, and passes the
+      # StereoTool settings to a shell. A normal profile value has no newline,
+      # command separator, or substitution.
+      - name: azuracast-profile-config-injection
+        match:
+          path: '(?i)^/api/station/[0-9]+/profile/edit$'
+          regex: '(?i)("timezone"|"custom_config"|"stereo_tool_(?:configuration_path|license_key)")[^}]{0,160}(\\n|\\r|[\r\n]|%0a|;|\||&&|\$\()'
+          in: [body]
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
