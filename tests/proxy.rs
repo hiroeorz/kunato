@@ -935,6 +935,52 @@ fn multipart_upload(filename: &str, content_type: &str, value: &[u8]) -> Vec<u8>
     body
 }
 
+fn zip_with_stored_file(name: &str, data: &[u8]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    archive.extend_from_slice(b"PK\x03\x04");
+    archive.extend_from_slice(&20u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u32.to_le_bytes());
+    archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(name.as_bytes());
+    archive.extend_from_slice(data);
+    let directory_offset = archive.len();
+    archive.extend_from_slice(b"PK\x01\x02");
+    archive.extend_from_slice(&20u16.to_le_bytes());
+    archive.extend_from_slice(&20u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u32.to_le_bytes());
+    archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u32.to_le_bytes());
+    archive.extend_from_slice(&0u32.to_le_bytes());
+    archive.extend_from_slice(name.as_bytes());
+    let directory_size = archive.len() - directory_offset;
+    archive.extend_from_slice(b"PK\x05\x06");
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&1u16.to_le_bytes());
+    archive.extend_from_slice(&1u16.to_le_bytes());
+    archive.extend_from_slice(&(directory_size as u32).to_le_bytes());
+    archive.extend_from_slice(&(directory_offset as u32).to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive
+}
+
 fn json_query_body(query: &str) -> Vec<u8> {
     format!(
         "{{\"query\":{}}}",
@@ -2252,7 +2298,7 @@ async fn upload_inspection_rejects_short_tag_polyglots() {
     let body = multipart_upload(
         "report.docx",
         "application/octet-stream",
-        b"PK\x03\x04<?xml version=\"1.0\"?><Types/>",
+        &zip_with_stored_file("word/document.xml", b"<?xml version=\"1.0\"?><Types/>"),
     );
     let (status, _) = send_bytes(
         running.addr,
@@ -5957,6 +6003,147 @@ categories:
         send_raw_request(running.addr, &request).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn rejects_encoded_bodies_in_a_charset_it_cannot_inspect() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: body-marker
+    action: BLOCK
+    rules:
+      - name: marker
+        match: {{ regex: secret, in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut utf16 = vec![0xFF, 0xFE];
+    for unit in "{\"q\":\"secret\"}".encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/search",
+        gzip(&utf16),
+        &[
+            ("content-type", "application/json"),
+            ("content-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let mut bomless = Vec::new();
+    for unit in "<?xml".encode_utf16() {
+        bomless.extend_from_slice(&unit.to_le_bytes());
+    }
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/search",
+        gzip(&bomless),
+        &[
+            ("content-type", "application/xml"),
+            ("content-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/search",
+        gzip(&utf16),
+        &[
+            ("content-type", "application/json; charset=utf-8"),
+            ("content-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/search",
+        b"<?xml version=\"1.0\" encoding=\"UTF-7\"?><root/>".to_vec(),
+        &[("content-type", "application/xml")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let multipart = b"--X\r\nContent-Disposition: form-data; name=\"_charset_\"\r\n\r\nutf-7\r\n--X\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n+ADw-root+AD4-\r\n--X--\r\n";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/search",
+        gzip(multipart),
+        &[
+            ("content-type", "multipart/form-data; boundary=X"),
+            ("content-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn rejects_utf16_response_bodies_before_response_rules() {
+    let mut body = vec![0xFF, 0xFE];
+    for unit in "SECRET".encode_utf16() {
+        body.extend_from_slice(&unit.to_le_bytes());
+    }
+    let upstream = spawn_encoded_response_upstream(
+        StatusCode::OK,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("text/plain"),
+        )],
+        body,
+    )
+    .await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: leaks\n    phase: response\n    action: BLOCK\n    rules:\n      - name: secret\n        match: {{ regex: SECRET, in: [response_body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn upload_expansion_budget_is_shared_across_parts() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits:\n  upload_expansion:\n    max_bytes: 1024\n    max_total_bytes: 1536\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let first = multipart_upload("first.gz", "application/gzip", &gzip(&vec![b'a'; 1024]));
+    let second = multipart_upload("second.gz", "application/gzip", &gzip(&vec![b'b'; 1024]));
+    let mut body = first.strip_suffix(b"--X--\r\n").expect("closing").to_vec();
+    body.extend_from_slice(&second);
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/upload",
+        body,
+        &[("content-type", "multipart/form-data; boundary=X")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 
     running.stop().await;
 }

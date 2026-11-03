@@ -59,6 +59,8 @@ pub(crate) enum DangerousKind {
     ClaimMismatch,
     /// The upload decompresses past `limits.upload_expansion`.
     ArchiveExpansion,
+    /// The upload claims to be an archive that cannot be parsed.
+    ArchiveMalformed,
 }
 
 impl DangerousKind {
@@ -70,6 +72,7 @@ impl DangerousKind {
             Self::FormatMismatch => "format-mismatch",
             Self::ClaimMismatch => "claim-mismatch",
             Self::ArchiveExpansion => "archive-expansion",
+            Self::ArchiveMalformed => "archive-malformed",
         }
     }
 }
@@ -85,6 +88,7 @@ impl Rejection {
     pub(crate) fn status(&self) -> StatusCode {
         match self.kind {
             DangerousKind::ArchiveExpansion => StatusCode::PAYLOAD_TOO_LARGE,
+            DangerousKind::ArchiveMalformed => StatusCode::BAD_REQUEST,
             _ => StatusCode::FORBIDDEN,
         }
     }
@@ -92,6 +96,7 @@ impl Rejection {
     pub(crate) fn message(&self) -> &'static str {
         match self.kind {
             DangerousKind::ArchiveExpansion => "upload expands beyond the configured limit",
+            DangerousKind::ArchiveMalformed => "upload archive could not be parsed",
             _ => "upload content does not match its declared type",
         }
     }
@@ -140,12 +145,13 @@ pub(crate) fn inspect(
         return None;
     }
 
+    let mut budget = expansion.max_total_bytes;
     for boundary in &boundaries {
         let Some(parts) = multipart_parts(body, boundary) else {
             continue;
         };
         for part in parts {
-            let Some(rejection) = inspect_part(part, mode, expansion) else {
+            let Some(rejection) = inspect_part(part, mode, expansion, &mut budget) else {
                 continue;
             };
             return Some(rejection);
@@ -246,6 +252,7 @@ fn inspect_part(
     part: MultipartPart<'_>,
     mode: UploadInspection,
     expansion: UploadExpansion,
+    budget: &mut usize,
 ) -> Option<Rejection> {
     let filename = part.filename()?;
     if part.value.is_empty() {
@@ -260,8 +267,7 @@ fn inspect_part(
         });
     }
     if mode != UploadInspection::Off
-        && let Some(kind) =
-            archive_expansion_rejection(&part, declared.as_deref(), &filename, expansion)
+        && let Some(kind) = archive_expansion_rejection(&part, expansion, budget)
     {
         return Some(Rejection {
             filename,
@@ -330,38 +336,43 @@ struct ZipEntry {
 }
 
 /// Rejects an uploaded gzip or ZIP archive whose contents expand past the
-/// configured budget. Returns `None` when the part is not an archive, the
-/// budget is disabled, or the expansion fits.
+/// configured budget. Detection uses the leading gzip magic or a valid ZIP
+/// end-of-central-directory record, so a renamed part or a self-extracting
+/// prefix does not hide the archive. The budget is shared by every archive in
+/// the request. Returns `None` when the part is not an archive, the budget is
+/// disabled, or the expansion fits.
 fn archive_expansion_rejection(
     part: &MultipartPart<'_>,
-    declared: Option<&str>,
-    filename: &str,
     expansion: UploadExpansion,
+    budget: &mut usize,
 ) -> Option<DangerousKind> {
     if !expansion.enabled {
         return None;
     }
     let value = archive_value(part.value);
-    let result = match archive_kind(declared, filename)? {
-        ArchiveKind::Gzip => {
-            if !value.starts_with(&[0x1f, 0x8b]) {
-                return None;
-            }
-            gzip_expansion(value, expansion.max_bytes)
-        }
-        ArchiveKind::Zip => {
-            if !value.starts_with(&ZIP_LOCAL_HEADER[..])
-                && !value.starts_with(&ZIP_END_OF_CENTRAL_DIRECTORY[..])
-            {
-                return None;
-            }
-            zip_expansion(value, expansion.max_bytes, expansion.max_entries)
-        }
+    let kind = if value.starts_with(&[0x1f, 0x8b]) {
+        ArchiveKind::Gzip
+    } else if find_zip_end(value).is_some() {
+        ArchiveKind::Zip
+    } else {
+        return None;
+    };
+    let limit = expansion.max_bytes.min(*budget);
+    if limit == 0 {
+        return Some(DangerousKind::ArchiveExpansion);
+    }
+    let result = match kind {
+        ArchiveKind::Gzip => gzip_expansion(value, limit),
+        ArchiveKind::Zip => zip_expansion(value, limit, expansion.max_entries),
     };
     match result {
-        Ok(()) => None,
+        Ok(expanded) => {
+            let expanded = usize::try_from(expanded).unwrap_or(usize::MAX);
+            *budget = budget.saturating_sub(expanded);
+            None
+        }
         Err(ExpansionError::TooLarge) => Some(DangerousKind::ArchiveExpansion),
-        Err(ExpansionError::Malformed) => None,
+        Err(ExpansionError::Malformed) => Some(DangerousKind::ArchiveMalformed),
     }
 }
 
@@ -374,38 +385,13 @@ fn archive_value(value: &[u8]) -> &[u8] {
         .unwrap_or(value)
 }
 
-fn archive_kind(declared: Option<&str>, filename: &str) -> Option<ArchiveKind> {
-    let declared = declared.unwrap_or_default();
-    let filename = filename.to_ascii_lowercase();
-    let gzip_type = matches!(declared, "application/gzip" | "application/x-gzip");
-    let zip_type = matches!(
-        declared,
-        "application/zip" | "application/x-zip-compressed" | "application/java-archive"
-    ) || declared.starts_with("application/vnd.openxmlformats-officedocument.")
-        || declared.starts_with("application/vnd.oasis.opendocument.");
-    let gzip_extension =
-        filename.ends_with(".gz") || filename.ends_with(".tgz") || filename.ends_with(".tar.gz");
-    let zip_extension = [
-        ".zip", ".jar", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub", ".apk", ".whl",
-    ]
-    .iter()
-    .any(|extension| filename.ends_with(extension));
-    if gzip_type || gzip_extension {
-        Some(ArchiveKind::Gzip)
-    } else if zip_type || zip_extension {
-        Some(ArchiveKind::Zip)
-    } else {
-        None
-    }
-}
-
-fn gzip_expansion(value: &[u8], limit: usize) -> Result<(), ExpansionError> {
+fn gzip_expansion(value: &[u8], limit: usize) -> Result<u64, ExpansionError> {
     let mut decoder = MultiGzDecoder::new(value);
     let mut buffer = [0u8; 64 * 1024];
     let mut total = 0usize;
     loop {
         match decoder.read(&mut buffer) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(total as u64),
             Ok(read) => {
                 total = total.saturating_add(read);
                 if total > limit {
@@ -418,23 +404,41 @@ fn gzip_expansion(value: &[u8], limit: usize) -> Result<(), ExpansionError> {
     }
 }
 
-fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<(), ExpansionError> {
+fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, ExpansionError> {
     let end = find_zip_end(value).ok_or(ExpansionError::Malformed)?;
-    let (entries, directory_offset, directory_size) = zip_directory(value, end)?;
+    let (entries, directory_offset, directory_size, central_end) = zip_directory(value, end)?;
     if entries > max_entries as u64 {
         return Err(ExpansionError::TooLarge);
     }
+    // A self-extracting archive may carry an arbitrary prefix before the
+    // first local header. The central directory records offsets relative to
+    // the original archive start, so derive the prefix length from the EOCD
+    // position and apply it to every offset.
+    let claimed_end = directory_offset
+        .checked_add(directory_size)
+        .ok_or(ExpansionError::Malformed)?;
+    let concat = (central_end as u64)
+        .checked_sub(claimed_end)
+        .ok_or(ExpansionError::Malformed)?;
+    let directory_offset = directory_offset
+        .checked_add(concat)
+        .ok_or(ExpansionError::Malformed)?;
     let directory_end = directory_offset
         .checked_add(directory_size)
         .ok_or(ExpansionError::Malformed)?;
     if directory_end > value.len() as u64 {
         return Err(ExpansionError::Malformed);
     }
+    let concat = usize::try_from(concat).map_err(|_| ExpansionError::Malformed)?;
     let mut position = usize::try_from(directory_offset).map_err(|_| ExpansionError::Malformed)?;
     let directory_end = usize::try_from(directory_end).map_err(|_| ExpansionError::Malformed)?;
     let mut total = 0u64;
     for _ in 0..entries {
-        let entry = parse_zip_entry(value, position, directory_end)?;
+        let mut entry = parse_zip_entry(value, position, directory_end)?;
+        entry.local_offset = entry
+            .local_offset
+            .checked_add(concat as u64)
+            .ok_or(ExpansionError::Malformed)?;
         position = entry.next;
         let remaining = limit.saturating_sub(total as usize);
         let expanded = zip_entry_expansion(value, &entry, remaining)?;
@@ -445,7 +449,7 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<(), E
             return Err(ExpansionError::TooLarge);
         }
     }
-    Ok(())
+    Ok(total)
 }
 
 fn find_zip_end(value: &[u8]) -> Option<usize> {
@@ -460,14 +464,51 @@ fn find_zip_end(value: &[u8]) -> Option<usize> {
             continue;
         }
         let comment = read_u16(value, position + 20).ok()? as usize;
-        if position + minimum + comment == value.len() {
+        // Trailing bytes after the EOCD are not part of the archive but common
+        // in uploads (and a one-byte suffix must not hide a bomb). The central
+        // directory check below still rejects a chance EOCD signature.
+        if position
+            .checked_add(minimum)
+            .and_then(|end| end.checked_add(comment))
+            .is_none_or(|end| end > value.len())
+        {
+            continue;
+        }
+        if zip_eocd_has_central_directory(value, position) {
             return Some(position);
         }
     }
     None
 }
 
-fn zip_directory(value: &[u8], end: usize) -> Result<(u64, u64, u64), ExpansionError> {
+fn zip_eocd_has_central_directory(value: &[u8], position: usize) -> bool {
+    let entries = read_u16(value, position + 10).unwrap_or(0);
+    let size = read_u32(value, position + 12).unwrap_or(0) as u64;
+    let offset = read_u32(value, position + 16).unwrap_or(0) as u64;
+    if entries == 0 && size == 0 {
+        return true;
+    }
+    if entries == u16::MAX || size == u32::MAX as u64 || offset == u32::MAX as u64 {
+        return position >= 20
+            && value.get(position - 20..position - 16)
+                == Some(&ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR[..]);
+    }
+    let Some(claimed_end) = offset.checked_add(size) else {
+        return false;
+    };
+    let Some(prefix) = (position as u64).checked_sub(claimed_end) else {
+        return false;
+    };
+    let Some(central_start) = prefix.checked_add(offset) else {
+        return false;
+    };
+    let Ok(central_start) = usize::try_from(central_start) else {
+        return false;
+    };
+    value.get(central_start..central_start.saturating_add(4)) == Some(&ZIP_CENTRAL_HEADER[..])
+}
+
+fn zip_directory(value: &[u8], end: usize) -> Result<(u64, u64, u64, usize), ExpansionError> {
     let disk = read_u16(value, end + 4)?;
     let directory_disk = read_u16(value, end + 6)?;
     if disk != 0 || directory_disk != 0 {
@@ -476,6 +517,7 @@ fn zip_directory(value: &[u8], end: usize) -> Result<(u64, u64, u64), ExpansionE
     let mut entries = read_u16(value, end + 10)? as u64;
     let mut directory_size = read_u32(value, end + 12)? as u64;
     let mut directory_offset = read_u32(value, end + 16)? as u64;
+    let mut central_end = end;
     if entries == u16::MAX as u64
         || directory_size == u32::MAX as u64
         || directory_offset == u32::MAX as u64
@@ -486,14 +528,16 @@ fn zip_directory(value: &[u8], end: usize) -> Result<(u64, u64, u64), ExpansionE
         }
         let record = read_u64(value, locator + 8)?;
         let record = usize::try_from(record).map_err(|_| ExpansionError::Malformed)?;
-        if value.get(record..record + 4) != Some(&ZIP64_END_OF_CENTRAL_DIRECTORY[..]) {
+        let record_end = record.checked_add(4).ok_or(ExpansionError::Malformed)?;
+        if value.get(record..record_end) != Some(&ZIP64_END_OF_CENTRAL_DIRECTORY[..]) {
             return Err(ExpansionError::Malformed);
         }
         entries = read_u64(value, record + 32)?;
         directory_size = read_u64(value, record + 40)?;
         directory_offset = read_u64(value, record + 48)?;
+        central_end = record;
     }
-    Ok((entries, directory_offset, directory_size))
+    Ok((entries, directory_offset, directory_size, central_end))
 }
 
 fn parse_zip_entry(value: &[u8], position: usize, end: usize) -> Result<ZipEntry, ExpansionError> {
@@ -805,7 +849,8 @@ fn blocks(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
             | DangerousKind::Script
             | DangerousKind::FormatMismatch
             | DangerousKind::ClaimMismatch
-            | DangerousKind::ArchiveExpansion => true,
+            | DangerousKind::ArchiveExpansion
+            | DangerousKind::ArchiveMalformed => true,
             DangerousKind::ActiveWeb => claim != Claim::ActiveWeb,
         },
     }
@@ -1532,10 +1577,77 @@ mod tests {
         archive
     }
 
+    fn zip64_stored(name: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&ZIP_LOCAL_HEADER[..]);
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(name);
+        archive.extend_from_slice(data);
+        let directory_offset = archive.len();
+        archive.extend_from_slice(&ZIP_CENTRAL_HEADER[..]);
+        archive.extend_from_slice(&45u16.to_le_bytes());
+        archive.extend_from_slice(&45u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&u32::MAX.to_le_bytes());
+        archive.extend_from_slice(&u32::MAX.to_le_bytes());
+        archive.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        archive.extend_from_slice(&28u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&u32::MAX.to_le_bytes());
+        archive.extend_from_slice(name);
+        archive.extend_from_slice(&0x0001u16.to_le_bytes());
+        archive.extend_from_slice(&24u16.to_le_bytes());
+        archive.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        archive.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        archive.extend_from_slice(&0u64.to_le_bytes());
+        let directory_size = archive.len() - directory_offset;
+        let zip64_record = archive.len();
+        archive.extend_from_slice(&ZIP64_END_OF_CENTRAL_DIRECTORY[..]);
+        archive.extend_from_slice(&44u64.to_le_bytes());
+        archive.extend_from_slice(&45u16.to_le_bytes());
+        archive.extend_from_slice(&45u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&1u64.to_le_bytes());
+        archive.extend_from_slice(&1u64.to_le_bytes());
+        archive.extend_from_slice(&(directory_size as u64).to_le_bytes());
+        archive.extend_from_slice(&(directory_offset as u64).to_le_bytes());
+        archive.extend_from_slice(&ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR[..]);
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&(zip64_record as u64).to_le_bytes());
+        archive.extend_from_slice(&1u32.to_le_bytes());
+        archive.extend_from_slice(&ZIP_END_OF_CENTRAL_DIRECTORY[..]);
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&u16::MAX.to_le_bytes());
+        archive.extend_from_slice(&u16::MAX.to_le_bytes());
+        archive.extend_from_slice(&u32::MAX.to_le_bytes());
+        archive.extend_from_slice(&u32::MAX.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive
+    }
+
     fn expansion(max_bytes: usize) -> UploadExpansion {
         UploadExpansion {
             enabled: true,
             max_bytes,
+            max_total_bytes: max_bytes,
             max_entries: 4096,
         }
     }
@@ -1581,6 +1693,15 @@ mod tests {
     }
 
     #[test]
+    fn zip64_archives_are_parsed() {
+        let archive = zip64_stored(b"entry.bin", b"hello");
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        assert!(
+            super::inspect(&headers(), &body, UploadInspection::Strict, expansion(1024),).is_none()
+        );
+    }
+
+    #[test]
     fn uploaded_zip_deflate_expansion_is_bounded() {
         let archive = zip(&vec![b'a'; 128 * 1024], 8);
         let body = body(&[("data.zip", Some("application/zip"), &archive)]);
@@ -1605,6 +1726,7 @@ mod tests {
             UploadExpansion {
                 enabled: true,
                 max_bytes: 1024,
+                max_total_bytes: 1024,
                 max_entries: 0,
             },
         )
@@ -1633,6 +1755,115 @@ mod tests {
         assert!(
             super::inspect(&headers(), &body, UploadInspection::Strict, expansion(1024)).is_none()
         );
+    }
+
+    #[test]
+    fn malformed_archives_with_a_valid_header_or_eocd_are_rejected() {
+        let gzip_body = body(&[("data.gz", Some("application/gzip"), b"\x1f\x8bnot gzip")]);
+        let rejection = super::inspect(
+            &headers(),
+            &gzip_body,
+            UploadInspection::Strict,
+            expansion(1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveMalformed);
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+
+        let mut zip = vec![0u8; 22];
+        zip[18..22].copy_from_slice(&ZIP_CENTRAL_HEADER[..]);
+        zip.extend_from_slice(&ZIP_END_OF_CENTRAL_DIRECTORY[..]);
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&4u32.to_le_bytes());
+        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        let zip_body = body(&[("data.zip", Some("application/zip"), &zip)]);
+        let rejection = super::inspect(
+            &headers(),
+            &zip_body,
+            UploadInspection::Strict,
+            expansion(1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveMalformed);
+    }
+
+    #[test]
+    fn zip_with_prepended_bytes_is_still_bounded() {
+        let archive = zip(&vec![b'a'; 128 * 1024], 8);
+        let mut prefixed = b"JUNK".to_vec();
+        prefixed.extend_from_slice(&archive);
+        let body = body(&[("data.zip", Some("application/zip"), &prefixed)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(32 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+    }
+
+    #[test]
+    fn zip_with_trailing_bytes_is_still_bounded() {
+        let mut archive = zip(&vec![b'a'; 128 * 1024], 8);
+        archive.extend_from_slice(b"JUNK");
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(32 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+    }
+
+    #[test]
+    fn zip_name_normalization_and_content_detection_are_bounded() {
+        let archive = zip(&vec![b'a'; 128 * 1024], 8);
+        for (filename, content_type) in [
+            ("data.zip ", Some("application/octet-stream")),
+            ("data.zip.", Some("application/octet-stream")),
+            ("data.bin", Some("application/octet-stream")),
+            ("data.zip", None),
+        ] {
+            let body = body(&[(filename, content_type, &archive)]);
+            let rejection = super::inspect(
+                &headers(),
+                &body,
+                UploadInspection::Strict,
+                expansion(32 * 1024),
+            )
+            .expect("rejected");
+            assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+        }
+    }
+
+    #[test]
+    fn expansion_budget_is_shared_across_parts() {
+        let first = gzip(&vec![b'a'; 64 * 1024]);
+        let second = gzip(&vec![b'b'; 64 * 1024]);
+        let body = body(&[
+            ("first.gz", Some("application/gzip"), &first),
+            ("second.gz", Some("application/gzip"), &second),
+        ]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            UploadExpansion {
+                enabled: true,
+                max_bytes: 128 * 1024,
+                max_total_bytes: 96 * 1024,
+                max_entries: 4096,
+            },
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
     }
 
     #[test]

@@ -456,7 +456,11 @@ impl Default for LimitsSpec {
 #[serde(default, deny_unknown_fields)]
 pub struct UploadExpansion {
     pub enabled: bool,
+    /// Expanded bytes allowed for one archive.
     pub max_bytes: usize,
+    /// Expanded bytes allowed across every archive in one request.
+    pub max_total_bytes: usize,
+    /// ZIP entries inspected in one archive.
     pub max_entries: usize,
 }
 
@@ -465,6 +469,7 @@ impl Default for UploadExpansion {
         Self {
             enabled: true,
             max_bytes: 64 * 1024 * 1024,
+            max_total_bytes: 64 * 1024 * 1024,
             max_entries: 4096,
         }
     }
@@ -2365,6 +2370,14 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
     {
         issues.push(format!(
             "limits.upload_expansion.max_bytes must be between 1 and {MAX_UPLOAD_EXPANSION_BYTES}"
+        ));
+    }
+    if limits.upload_expansion.max_total_bytes == 0
+        || limits.upload_expansion.max_total_bytes > MAX_UPLOAD_EXPANSION_BYTES
+    {
+        issues.push(format!(
+            "limits.upload_expansion.max_total_bytes must be between 1 and \
+             {MAX_UPLOAD_EXPANSION_BYTES}"
         ));
     }
     if limits.upload_expansion.max_entries == 0
@@ -5270,14 +5283,19 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
         let config = parse_with(BASE, "").expect("valid config");
         assert!(config.limits.upload_expansion.enabled);
         assert_eq!(config.limits.upload_expansion.max_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            config.limits.upload_expansion.max_total_bytes,
+            64 * 1024 * 1024
+        );
         assert_eq!(config.limits.upload_expansion.max_entries, 4096);
 
         let config = parse_with(
             BASE,
-            "limits:\n  upload_expansion:\n    max_bytes: 1024\n    max_entries: 8\n",
+            "limits:\n  upload_expansion:\n    max_bytes: 1024\n    max_total_bytes: 2048\n    max_entries: 8\n",
         )
         .expect("valid config");
         assert_eq!(config.limits.upload_expansion.max_bytes, 1024);
+        assert_eq!(config.limits.upload_expansion.max_total_bytes, 2048);
         assert_eq!(config.limits.upload_expansion.max_entries, 8);
 
         let error = parse_with(BASE, "limits: { upload_expansion: { max_bytes: 0 } }\n")
@@ -5287,6 +5305,28 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
         let error = parse_with(BASE, "limits: { upload_expansion: { max_entries: 0 } }\n")
             .expect_err("zero entries must fail");
         assert!(error.to_string().contains("upload_expansion.max_entries"));
+
+        let error = parse_with(
+            BASE,
+            "limits: { upload_expansion: { max_total_bytes: 0 } }\n",
+        )
+        .expect_err("zero total budget must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("upload_expansion.max_total_bytes")
+        );
+
+        let error = parse_with(
+            BASE,
+            "limits: { upload_expansion: { max_total_bytes: 1099511627777 } }\n",
+        )
+        .expect_err("oversized total budget must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("upload_expansion.max_total_bytes")
+        );
     }
 
     #[test]

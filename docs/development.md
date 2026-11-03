@@ -622,11 +622,17 @@ from the inspection. A quoted boundary that contains spaces is legal and is
 inspected in every interpretation.
 
 A body that declares a charset the inspection cannot read (`utf-16`, `utf-32`,
-`utf-7`, or an EBCDIC code page, or a UTF-16/UTF-32 byte-order mark on a textual
-type) is rejected with `415` when body inspection is active: decoding it as
-UTF-8 would show bytes, not the text the origin executes. ASCII-compatible
-encodings such as `shift_jis` stay accepted. No other normalization (Unicode
-folding, HTML entity decoding) is performed. Body targets are skipped entirely on configured
+`utf-7`, or an EBCDIC code page) is rejected with `415` when body inspection is
+active: decoding it as UTF-8 would show bytes, not the text the origin executes.
+The check runs on the decoded body as well, so `Content-Encoding` cannot hide a
+wide charset, and it recognizes a UTF-16/UTF-32 byte-order mark, the BOM-less
+UTF-16/UTF-32 XML signatures, a NUL byte in a textual body, and an XML
+declaration whose `encoding` names an uninspectable charset. Multipart part
+charsets and `_charset_` fields are checked after decompression. Response bodies
+with response-body rules are checked the same way and replaced with `502` when
+they cannot be inspected. ASCII-compatible encodings such as `shift_jis` stay
+accepted. No other normalization (Unicode folding, HTML entity decoding) is
+performed. Body targets are skipped entirely on configured
 [content routes](#content-routes).
 
 | Field              | Description                                                                                                             |
@@ -658,8 +664,9 @@ for matching (all gzip members, stacked encodings in reverse order up to three
 layers), and only the first `limits.max_response_body_bytes` are inspected (the
 decoded output is bounded by the same limit). Unknown or deeper encodings are
 inspected as received and counted in `kunato_response_decode_skipped_total`; a
-truncated response body is still inspected best-effort but never satisfies a
-body-targeting `ALLOW` rule. Decoding is inspection-only: the bytes forwarded to
+response body whose charset cannot be inspected is rejected with `502` and
+counted in the same counter. A truncated response body is still inspected
+best-effort but never satisfies a body-targeting `ALLOW` rule. Decoding is inspection-only: the bytes forwarded to
 the upstream and to the client are never modified.
 
 After a `101` WebSocket handshake, reassembled server-to-client messages are the
@@ -1098,7 +1105,8 @@ claim, and markup unless the part declares an active web type; an active web
 part still passes its markup. `off` disables the check.
 
 The rejection is answered with `403` (or `413` for the archive expansion
-budget) and counted in `kunato_upload_rejected_total`. The check is an engine
+budget, or `400` for an archive claim that cannot be parsed) and counted in
+`kunato_upload_rejected_total`. The check is an engine
 limit: it runs before rule evaluation, so an `ALLOW` rule (including
 `trusted-sources`) does not bypass it, and it stays active with
 `protection.enabled: false`. It shares the multipart boundary and part limits
@@ -1115,23 +1123,29 @@ bytes start with a script marker or an executable header, and `off` only where
 another control covers the upload path.
 
 An uploaded gzip or ZIP archive is also decompressed up to
-`limits.upload_expansion.max_bytes` (default 64 MiB) and
-`limits.upload_expansion.max_entries` ZIP entries (default 4096). An archive
-that expands past either bound is rejected with `413`. A part whose bytes do not
-parse as the claimed archive is left to the existing content checks, so a
-malformed archive is not newly rejected by this guard. ZIP deflate entries are
-counted by their actual output, ZIP64 is read, and encrypted or
-unsupported-compression entries fall back to the declared uncompressed size.
-Nested archives are not expanded. The check covers the inspected part of the
-body only, so `body_inspection: stream` limits it to the buffered prefix, and
-`upload_inspection: off` disables it together with the rest of the upload
+`limits.upload_expansion.max_bytes` (default 64 MiB) per archive,
+`limits.upload_expansion.max_total_bytes` (default 64 MiB) across the request,
+and `limits.upload_expansion.max_entries` ZIP entries (default 4096) per
+archive. An archive that expands past either byte bound is rejected with `413`.
+A detected archive (leading gzip magic or a valid ZIP end-of-central-directory
+record) that cannot be parsed is rejected with `400` rather than forwarded
+uninspected. Detection is content-based, so a renamed part and a self-extracting
+prefix are still inspected; a part that merely claims an archive in its type or
+name but has no recognizable archive structure keeps the previous content
 checks.
+ZIP deflate entries are counted by their actual output, ZIP64 is read, and
+encrypted or unsupported-compression entries fall back to the declared
+uncompressed size. Nested archives are not expanded. The check covers the
+inspected part of the body only, so `body_inspection: stream` limits it to the
+buffered prefix, and `upload_inspection: off` disables it together with the
+rest of the upload checks.
 
 ```yaml
 limits:
   upload_expansion:
     enabled: true
     max_bytes: 67108864
+    max_total_bytes: 67108864
     max_entries: 4096
 ```
 

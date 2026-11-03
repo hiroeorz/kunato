@@ -1736,7 +1736,11 @@ async fn process(
     let decode_body = inspect_body || ((inspect_uploads || inspect_form) && encoded);
     if (decode_body || inspect_uploads || inspect_form)
         && !body.is_empty()
-        && let Some(charset) = crate::decoding::uninspectable_charset(&parts.headers, body)
+        && let Some(charset) = if encoded {
+            crate::decoding::declared_charset(&parts.headers)
+        } else {
+            crate::decoding::uninspectable_charset(&parts.headers, body)
+        }
     {
         // Inspecting the bytes as UTF-8 while the origin reads another
         // encoding would let the body carry any payload past the rules.
@@ -1837,6 +1841,24 @@ async fn process(
             ));
         }
     };
+    // The pre-decode check above cannot see an encoding hidden behind
+    // Content-Encoding, a BOM-less wide encoding, or an in-band XML
+    // declaration. Run it again on the bytes the rules are about to inspect.
+    if (decode_body || inspect_uploads || inspect_form)
+        && let Some(charset) =
+            crate::decoding::uninspectable_charset(&parts.headers, inspected_body.as_ref())
+    {
+        warn!(
+            client = %source.client_ip, peer = %source.peer,
+            charset = %charset,
+            path = %parts.uri.path(),
+            "decoded request body charset cannot be inspected; rejecting"
+        );
+        return Err(HttpError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported request body charset",
+        ));
+    }
     if decode_body {
         let decision = context.protection.charge_inspection(
             source.client_ip,

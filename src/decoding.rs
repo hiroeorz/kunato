@@ -49,10 +49,23 @@ const NON_INSPECTABLE_CHARSETS: &[&str] = &[
 /// UTF-32 byte-order mark counts too: the declared type may be missing or
 /// generic, while the XML or JSON parser on the origin still reads the BOM.
 pub(crate) fn uninspectable_charset(headers: &HeaderMap, body: &[u8]) -> Option<String> {
-    let content_type = headers
-        .get(CONTENT_TYPE)
-        .map(|value| String::from_utf8_lossy(value.as_bytes()))
-        .unwrap_or_default();
+    uninspectable_charset_inner(headers, body, true)
+}
+
+/// Response bodies are allowed to contain raw binary even under a textual
+/// content type because an origin may echo an uploaded file. A BOM, an XML
+/// declaration, or a wide XML signature is still uninspectable, but a bare NUL
+/// does not reject the response.
+pub(crate) fn uninspectable_response_charset(headers: &HeaderMap, body: &[u8]) -> Option<String> {
+    uninspectable_charset_inner(headers, body, false)
+}
+
+fn uninspectable_charset_inner(
+    headers: &HeaderMap,
+    body: &[u8],
+    check_nul: bool,
+) -> Option<String> {
+    let content_type = content_type_header(headers);
     let media_type = content_type
         .split(';')
         .next()
@@ -62,11 +75,122 @@ pub(crate) fn uninspectable_charset(headers: &HeaderMap, body: &[u8]) -> Option<
     if let Some(charset) = uninspectable_charset_in_header(&content_type) {
         return Some(charset);
     }
-    if media_type == "multipart/form-data" {
-        return uninspectable_multipart_charset(&content_type, body);
+    if let Some(encoding) = uninspectable_xml_declaration(body) {
+        return Some(encoding);
     }
-    if is_textual_media_type(&media_type) && has_wide_bom(body) {
+    if media_type == "multipart/form-data" {
+        return uninspectable_multipart_charset(&content_type, body, check_nul);
+    }
+    uninspectable_text_body(&media_type, body, check_nul)
+}
+
+/// The top-level `Content-Type` charset alone. This is the only part that can
+/// be trusted before a `Content-Encoding` layer has been removed: compressed
+/// bytes are not text, so BOM, XML-declaration, and NUL checks must wait for
+/// [`uninspectable_charset`] to run on the decoded body.
+pub(crate) fn declared_charset(headers: &HeaderMap) -> Option<String> {
+    uninspectable_charset_in_header(&content_type_header(headers))
+}
+
+fn content_type_header(headers: &HeaderMap) -> String {
+    headers
+        .get(CONTENT_TYPE)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .unwrap_or_default()
+}
+
+/// Wide encodings that make ASCII matching blind. The XML parser discovers
+/// these from the first bytes even without a BOM (XML 1.0, appendix F), so a
+/// body that starts with one of these signatures must not be inspected as
+/// UTF-8. The last entry is the EBCDIC XML signature (`<?xm`).
+const WIDE_ENCODING_SIGNATURES: &[&[u8]] = &[
+    &[0x00, 0x00, 0x00, 0x3C],
+    &[0x3C, 0x00, 0x00, 0x00],
+    &[0x00, 0x3C, 0x00, 0x3F],
+    &[0x3C, 0x00, 0x3F, 0x00],
+    &[0x4C, 0x6F, 0xA7, 0x94],
+];
+
+fn uninspectable_text_body(media_type: &str, body: &[u8], check_nul: bool) -> Option<String> {
+    if !is_textual_media_type(media_type) {
+        return None;
+    }
+    if has_wide_bom(body) {
         return Some("utf-16/utf-32 byte-order mark".to_owned());
+    }
+    if WIDE_ENCODING_SIGNATURES
+        .iter()
+        .any(|signature| body.starts_with(signature))
+    {
+        return Some("utf-16/utf-32 byte order".to_owned());
+    }
+    if check_nul && body.contains(&0) {
+        return Some("NUL byte in a textual body".to_owned());
+    }
+    None
+}
+
+/// The `encoding` pseudo-attribute of an XML declaration. It is ASCII even
+/// when the rest of the document is UTF-7, so a declaration that names an
+/// encoding the inspection cannot read lets the origin see markup that the
+/// regex rules do not.
+fn uninspectable_xml_declaration(body: &[u8]) -> Option<String> {
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    let body = body.trim_ascii_start();
+    if body.len() < 5 || !body[..5].eq_ignore_ascii_case(b"<?xml") {
+        return None;
+    }
+    let end = body.windows(2).position(|window| window == b"?>")?;
+    let declaration = &body[..end];
+    let mut index = 5;
+    while index < declaration.len() {
+        while index < declaration.len() && declaration[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= declaration.len() {
+            break;
+        }
+        let name_start = index;
+        while index < declaration.len()
+            && !declaration[index].is_ascii_whitespace()
+            && declaration[index] != b'='
+            && declaration[index] != b'?'
+        {
+            index += 1;
+        }
+        if index == name_start {
+            index += 1;
+            continue;
+        }
+        let name = &declaration[name_start..index];
+        while index < declaration.len() && declaration[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= declaration.len() || declaration[index] != b'=' {
+            continue;
+        }
+        index += 1;
+        while index < declaration.len() && declaration[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= declaration.len() || !matches!(declaration[index], b'"' | b'\'') {
+            continue;
+        }
+        let quote = declaration[index];
+        index += 1;
+        let value_start = index;
+        while index < declaration.len() && declaration[index] != quote {
+            index += 1;
+        }
+        let value = String::from_utf8_lossy(&declaration[value_start..index])
+            .trim()
+            .to_ascii_lowercase();
+        if name.eq_ignore_ascii_case(b"encoding") && is_uninspectable_charset_name(&value) {
+            return Some(value);
+        }
+        if index < declaration.len() {
+            index += 1;
+        }
     }
     None
 }
@@ -187,7 +311,11 @@ fn uninspectable_charset_in_header(content_type: &str) -> Option<String> {
     None
 }
 
-fn uninspectable_multipart_charset(content_type: &str, body: &[u8]) -> Option<String> {
+fn uninspectable_multipart_charset(
+    content_type: &str,
+    body: &[u8],
+    check_nul: bool,
+) -> Option<String> {
     let Ok(boundaries) = multipart_boundaries(content_type) else {
         return None;
     };
@@ -207,11 +335,22 @@ fn uninspectable_multipart_charset(content_type: &str, body: &[u8]) -> Option<St
                     .unwrap_or("")
                     .trim()
                     .to_ascii_lowercase();
-                if is_textual_media_type(&part_media) && has_wide_bom(part.value) {
-                    return Some("utf-16/utf-32 byte-order mark".to_owned());
+                if let Some(encoding) = uninspectable_xml_declaration(part.value) {
+                    return Some(encoding);
                 }
-            } else if part.filename().is_none() && has_wide_bom(part.value) {
-                return Some("utf-16/utf-32 byte-order mark".to_owned());
+                if let Some(encoding) = uninspectable_text_body(&part_media, part.value, check_nul)
+                {
+                    return Some(encoding);
+                }
+            } else {
+                if let Some(encoding) = uninspectable_xml_declaration(part.value) {
+                    return Some(encoding);
+                }
+                if part.filename().is_none()
+                    && let Some(encoding) = uninspectable_text_body("", part.value, check_nul)
+                {
+                    return Some(encoding);
+                }
             }
             if let Some(disposition) = header_value(&headers, "content-disposition")
                 && disposition_param(disposition, "name")
@@ -1772,6 +1911,59 @@ mod tests {
             HeaderValue::from_static("application/json; charset=utf-8; charset=utf-16le"),
         );
         assert!(uninspectable_charset(&headers, br#"{"a":1}"#).is_some());
+
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/xml"));
+        for body in [
+            "<\0?\0x\0m\0l\0".as_bytes(),
+            "\0<\0?\0x\0m\0l".as_bytes(),
+            "<\0\0\0?\0\0\0x\0\0\0m".as_bytes(),
+            "\0\0\0<\0\0\0?".as_bytes(),
+        ] {
+            assert!(
+                uninspectable_charset(&headers, body).is_some(),
+                "wide signature must be rejected"
+            );
+        }
+        assert_eq!(
+            uninspectable_charset(
+                &headers,
+                br#"<?xml version="1.0" encoding="UTF-7"?><root/>"#,
+            )
+            .as_deref(),
+            Some("utf-7")
+        );
+        assert_eq!(
+            uninspectable_charset(
+                &headers,
+                br#"<?xml version='1.0' standalone='yes' encoding='utf-16'?><root/>"#,
+            )
+            .as_deref(),
+            Some("utf-16")
+        );
+        assert_eq!(
+            uninspectable_charset(
+                &headers,
+                br#"<?xml version="1.0" encoding="UTF-8"?><root/>"#,
+            ),
+            None
+        );
+        assert_eq!(
+            uninspectable_charset(&headers, b"<root>plain\0text</root>"),
+            Some("NUL byte in a textual body".to_owned())
+        );
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("multipart/form-data; boundary=X"),
+        );
+        assert_eq!(
+            uninspectable_charset(
+                &headers,
+                b"--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.xml\"\r\nContent-Type: application/xml\r\n\r\n<?xml version=\"1.0\" encoding=\"UTF-7\"?><a/>\r\n--X--\r\n"
+            )
+            .as_deref(),
+            Some("utf-7")
+        );
     }
 
     #[test]

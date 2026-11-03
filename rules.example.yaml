@@ -1248,7 +1248,7 @@ categories:
     action: BLOCK
     rules:
       - name: doctype-and-entity
-        match: { regex: '(?i)<!DOCTYPE[^>]{0,200}\[|<!ENTITY\b', in: [body] }
+        match: { regex: '(?i)<!DOCTYPE\s+[^\s>]+\s*(?:\[|(?:SYSTEM|PUBLIC)\s)|<!ENTITY\b', in: [body] }
 
   # Server-side request forgery: cloud metadata endpoints, private,
   # link-local, and CGNAT targets, encoded and shorthand loopback addresses,

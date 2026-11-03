@@ -772,3 +772,7 @@ GET /proxy/reports/2026/10
 GET /proxy/tenant/reports
 GET /meta/proxy?url=https%3A%2F%2Fapi.example.com%2Fv1%2Fstatus
 GET /models/public/resolve/main/config.json
+
+# --- Benign XML and HTML doctypes ---
+POST /xml header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><root/>"
+POST /xml header="Content-Type: text/html" body="<!DOCTYPE html><html><body>ok</body></html>"

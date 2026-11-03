@@ -155,8 +155,12 @@ rule-set updates.
   evaluation, so `ALLOW` does not bypass it.
 - `limits.upload_expansion` defaults to enabled: uploaded gzip and ZIP archives
   (`.tar.gz`, `.zip`, `.jar`, OOXML/ODF) are decompressed up to `max_bytes`
-  (64 MiB) and `max_entries` (4096) ZIP entries; an archive that expands past
-  either bound is rejected with `413`. Nested archives are not expanded.
+  (64 MiB) per archive and `max_total_bytes` (64 MiB) across the request, with
+  `max_entries` (4096) ZIP entries per archive. An archive that expands past
+  either bound is rejected with `413`; a detected archive that cannot be parsed
+  is rejected with `400`. Detection uses the leading gzip magic or a valid ZIP
+  end-of-central-directory record, so a renamed part or a self-extracting prefix
+  is still checked. Nested archives are not expanded.
 - `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
   must be complete and pass field/part/header/name/nesting/complexity limits
   before ALLOW or forwarding. This also applies in body `stream` mode; explicitly

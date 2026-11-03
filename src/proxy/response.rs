@@ -149,6 +149,7 @@ pub(crate) async fn inspect(
         crate::decoding::DecodeOutcome::NotEncoded
     };
     let mut body_truncated = buffered.truncated;
+    let mut charset_checkable = true;
     let inspected_prefix: Cow<'_, [u8]> = match decoded_prefix {
         crate::decoding::DecodeOutcome::NotEncoded => Cow::Borrowed(&buffered.prefix),
         crate::decoding::DecodeOutcome::Decoded { body, complete } => {
@@ -166,6 +167,7 @@ pub(crate) async fn inspect(
             Cow::Owned(body)
         }
         crate::decoding::DecodeOutcome::Unsupported | crate::decoding::DecodeOutcome::Malformed => {
+            charset_checkable = false;
             metrics
                 .response_decode_skipped
                 .fetch_add(1, Ordering::Relaxed);
@@ -177,6 +179,27 @@ pub(crate) async fn inspect(
             Cow::Borrowed(&buffered.prefix)
         }
     };
+    if config.has_response_body_rules()
+        && charset_checkable
+        && !inspected_prefix.is_empty()
+        && let Some(charset) = crate::decoding::uninspectable_response_charset(
+            &buffered.parts.headers,
+            inspected_prefix.as_ref(),
+        )
+    {
+        metrics
+            .response_decode_skipped
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            status = buffered.parts.status.as_u16(),
+            charset = %charset,
+            "response body charset cannot be inspected; rejecting"
+        );
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream response charset cannot be inspected",
+        ));
+    }
 
     let body_rules_exempt = config.is_content_route(&request.method, &request.uri);
     let request_body_targets = config.response_targets_request_body() && !body_rules_exempt;
