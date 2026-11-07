@@ -801,3 +801,31 @@ POST /api/v1/files header="Content-Type: multipart/form-data; boundary=X" bodyhe
 PUT /api/station/1/profile/edit header="Content-Type: application/json" body="{\"timezone\":\"UTC\",\"stereo_tool_configuration_path\":\"/usr/share/stereo_tool\",\"frontend_config\":{\"custom_config\":\"{}\"}}"
 POST /api/v2/dfiq/from_yaml header="Content-Type: application/x-yaml" body="uuid: 12345678-1234-1234-1234-123456789012"
 POST /api/v2/tasks/export/new header="Content-Type: application/json" body="{\"name\":\"monthly-report\",\"format\":\"json\"}"
+
+# --- Near-miss guards for the 2026-11-04 delta intake: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+POST /upload header="Content-Type: application/zip" bodyhex=504b03046c6567616c2f726561646d652e747874
+GET /Modules/students/StudentSummary.php?period_id=1
+POST /ecrire/?exec=article&id_article=1 header="Content-Type: application/x-www-form-urlencoded" body="where=period_id%3D1&id_article=1"
+GET /wizard/apply.cgi?ping_ip=8.8.8.8
+GET /wizard/apply.cgi?traceroute_ip=example.com
+GET /apply.cgi?ping_ip=192.0.2.10
+GET /apply.cgi?traceroute_ip=example.com
+GET /fs2/bin/iscm?host=speedtest.example.com
+POST /wp-json/wc-ast/v3/orders/1/shipment-trackings header="Content-Type: application/json" body="{\"tracking_provider\":\"UPS\",\"tracking_number\":\"1Z999\"}"
+POST /rest/docapi/template header="Content-Type: application/json" body="{\"template_data\":\"{{ incident.title }}\",\"name\":\"report\"}"
+GET /get-artifacts?path=models%3A%2F1%2Fartifacts%2Fmodel.pkl
+POST /wp-admin/admin-ajax.php header="Content-Type: application/x-www-form-urlencoded" body="action=fm_submit&form_id=1&field=Quarterly%20report"
+
+# --- Near-miss guards for the 2026-11-05..06 delta intake: the same endpoints
+#     and parameters with ordinary values must keep passing. ---
+POST /open-url header="Content-Type: application/json" body="{\"url\":\"https://reactnative.dev/docs/debugging\"}"
+GET /h/rest?app=mail&id=1
+GET /artifacts/get?source=http&bucket=mlpipeline&key=model
+GET /artifacts/get?source=s3&providerInfo.Params.endpoint=https%3A%2F%2Fs3.example.com&bucket=mlpipeline&key=model
+GET /linkinfo?source_se=https%3A%2F%2Fsource.example&dest_se=https%3A%2F%2Fdest.example
+GET /knowledge/render/1?content=Riemann%20zeta%20function
+POST /api/v1/trail/download header="Content-Type: application/json" body="{\"url\":\"https://www.openstreetmap.org/api/0.6/track/123/gpx\"}"
+POST /lua/rest/v2/add/host/to_scan.lua?scan_ports=22,80,443
+POST /tikz/svg header="Content-Type: text/plain" body="\\draw (0,0) -- (1,1);"
+POST /goform/mp header="Content-Type: application/x-www-form-urlencoded" body="command=status"

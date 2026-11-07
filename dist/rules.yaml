@@ -1841,6 +1841,32 @@ categories:
           regex: '(?i)("timezone"|"custom_config"|"stereo_tool_(?:configuration_path|license_key)")[^}]{0,160}(\\n|\\r|[\r\n]|%0a|;|\||&&|\$\()'
           in: [body]
 
+  # Request-shape signatures for the 2026-11-05..06 delta.
+  - name: cve-2026-11-05-signatures
+    action: BLOCK
+    rules:
+      # CVE-2025-11953 (React Native Community CLI / Metro, KEV): the
+      # unauthenticated /open-url handler passes the url field to open(), so a
+      # command-shaped value runs on Windows and a local executable on Unix.
+      - name: react-native-metro-open-url-command
+        match:
+          method: POST
+          path: '(?i)^/open-url/?$'
+          regex: '(?i)"url"\s*:\s*"[^"]{0,512}(cmd(\.exe)?\s*/c|powershell|pwsh|/bin/(ba)?sh|;|&&|\|\||\$\(|`)'
+          in: [body]
+      # CVE-2025-68645 (Zimbra Collaboration, KEV): the Classic UI RestFilter
+      # copies request parameters into servlet attributes, so an include path
+      # parameter makes the JSP servlet read a file under WebRoot.
+      - name: zimbra-restfilter-include
+        match: { regex: '(?i)javax\.servlet\.include\.(servlet_path|path_info|request_uri)=', in: [query, body] }
+      # CVE-2026-88980 (Kubeflow Pipelines): /artifacts/get accepts an all-digit
+      # bucket that the Node URL parser converts to an internal IPv4 address.
+      - name: kubeflow-decimal-bucket-ssrf
+        match:
+          path: '(?i)^/artifacts/get/?$'
+          regex: '(?i)(^|[?&])bucket=\d{8,10}(&|$)'
+          in: [query]
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
   # br, and zstd bodies are decompressed for matching first. When the limit is

@@ -5360,7 +5360,14 @@ categories: []
         "unexpected handshake: {handshake}"
     );
 
-    let (status, _) = send(running.addr, Method::GET, "/", "").await;
+    // The rejection is written before the request is parsed, so the probe must
+    // read the status line itself instead of relying on a client that expects
+    // its request to be dispatched before any response bytes arrive.
+    let status = send_raw_request(
+        running.addr,
+        "GET / HTTP/1.1\r\nhost: kunato.test\r\nconnection: close\r\n\r\n",
+    )
+    .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
     running.stop().await;
