@@ -658,6 +658,13 @@ invariant.
   decisions, upstream failures, truncated response inspection, and reloads;
   gauges cover active connections and uptime. The listener refuses non-loopback
   addresses at validation time, and a bind failure is logged and non-fatal.
+- `kunato maintenance on|off` toggles an in-memory maintenance switch through
+  `PUT /maintenance/on|off` on the same loopback listener. While on, requests
+  that passed admission, client identity, host, and request-head checks receive
+  a `503` page built around the embedded `maintenance_in_progress.png`
+  (`GET /maintenance_in_progress.png`) instead of being forwarded; bodies are
+  not read. `GET /maintenance` reports the current state. The switch survives
+  configuration reloads and resets when the process restarts.
 
 ## 10. CLI and Deployment
 
@@ -669,10 +676,12 @@ invariant.
   full configuration and exit), `update-rules` (one rules check and exit),
   `upgrade` (`sudo kunato upgrade` reruns the installer published with the
   target release, keeping the configuration; `--version TAG` pins a release,
-  `--dry-run` prints what would run), and `log` (read and filter the systemd
-  journal; see [Log viewer](development.md#log-viewer)). The installer remains
-  the only component that writes `/usr/local/bin` and the systemd unit, so
-  upgrades behave exactly like a manual installer rerun.
+  `--dry-run` prints what would run), `metrics` (print the admin listener's
+  Prometheus exposition as a table), `maintenance on|off` (serve the maintenance
+  page without forwarding, or restore normal proxying), and `log` (read and
+  filter the systemd journal; see [Log viewer](development.md#log-viewer)). The
+  installer remains the only component that writes `/usr/local/bin` and the
+  systemd unit, so upgrades behave exactly like a manual installer rerun.
 - Exit codes: `0` success, `1` configuration error, `2` usage error.
 - Signals: `SIGINT` / `SIGTERM` trigger graceful shutdown; `SIGHUP` triggers a
   reload.
@@ -692,9 +701,10 @@ src/
   cli.rs           # Argument parsing
   error.rs         # Error types
   telemetry.rs     # Logging setup
-  admin.rs         # Loopback admin listener exposing /metrics
+  admin.rs         # Loopback admin listener exposing /metrics and /maintenance
   client_ip.rs     # Bounded identity assertions from explicitly trusted proxies
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching
+  maintenance.rs   # In-memory maintenance switch, page, and embedded artwork
   metrics.rs       # Prometheus counters and gauges
   acme.rs          # ACME certificate management (Let's Encrypt) and cache
   graphql.rs       # Bounded GraphQL document extraction and depth/field analysis
@@ -723,7 +733,7 @@ blackbox/          # External black-box test driver (separate crate)
 examples/
   upstream.rs      # Manual test upstream with access logs
 tests/
-  proxy.rs         # Pass-through, rules, limits, protection, metrics
+  proxy.rs         # Pass-through, rules, limits, protection, metrics, maintenance
 docs/
   DESIGN.md
 packaging/
@@ -857,10 +867,10 @@ exposed by the configuration.
 | M11       | Response inspection: response-phase categories, status/header/body matching, bounded buffering. | Response rules block/log; oversized bodies stream through after prefix inspection. |
 | M12       | Behavioral detection: per-source probing/auth-abuse signals, global auth log, opt-in bans. | Unit and integration tests pass; black-box suite unaffected. |
 
-M0 through M12 are implemented: metrics and the admin listener, the example
-configuration, the systemd unit, musl static builds, CI, a tag-triggered release
-workflow, optional TLS termination, HTTP/2, HTTP/3, WebSocket upgrades,
-response-phase rules, and behavioral detection.
+M0 through M12 are implemented: metrics and the admin listener, maintenance
+mode, the example configuration, the systemd unit, musl static builds, CI, a
+tag-triggered release workflow, optional TLS termination, HTTP/2, HTTP/3,
+WebSocket upgrades, response-phase rules, and behavioral detection.
 
 ## 16. Open Questions and Future Work
 
@@ -873,6 +883,7 @@ response-phase rules, and behavioral detection.
   challenge, `200`-only scraping signals, configurable static exclusions); see
   [the design](behavioral-detection.md).
 - Multiple upstreams and load balancing.
-- Admin API beyond the `/metrics` endpoint.
+- A broader admin API (status queries, rule reload) beyond the metrics and
+  maintenance endpoints.
 - Config includes/anchors for large rule sets.
 - Container image recipe (the systemd unit and musl builds are shipped).

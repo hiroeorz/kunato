@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use super::{
     BannerArgs, Cli, Command, DEFAULT_CONFIG_PATH, DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE,
-    DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat, LogOutputFormat, MetricsArgs, UpgradeArgs,
+    DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat, LogOutputFormat, MaintenanceAction,
+    MaintenanceArgs, MetricsArgs, UpgradeArgs,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -85,6 +86,7 @@ enum Kind {
     Upgrade,
     Log,
     Metrics,
+    Maintenance,
     Banner,
 }
 
@@ -96,6 +98,7 @@ fn kind_from_name(name: &str) -> Option<Kind> {
         "upgrade" => Some(Kind::Upgrade),
         "log" => Some(Kind::Log),
         "metrics" => Some(Kind::Metrics),
+        "maintenance" => Some(Kind::Maintenance),
         "banner" => Some(Kind::Banner),
         _ => None,
     }
@@ -153,6 +156,12 @@ struct MetricsState {
 }
 
 #[derive(Default)]
+struct MaintenanceState {
+    action: Option<MaintenanceAction>,
+    listen: Option<SocketAddr>,
+}
+
+#[derive(Default)]
 struct BannerState {
     no_color: bool,
 }
@@ -170,6 +179,7 @@ struct Parser {
     upgrade: UpgradeState,
     log: LogState,
     metrics: MetricsState,
+    maintenance: MaintenanceState,
     banner: BannerState,
 }
 
@@ -188,6 +198,7 @@ impl Parser {
             upgrade: UpgradeState::default(),
             log: LogState::default(),
             metrics: MetricsState::default(),
+            maintenance: MaintenanceState::default(),
             banner: BannerState::default(),
         }
     }
@@ -269,6 +280,7 @@ impl Parser {
             Some(Kind::Log) => self.parse_log_long(name, inline),
             Some(Kind::Upgrade) => self.parse_upgrade_long(name, inline),
             Some(Kind::Metrics) => self.parse_metrics_long(name, inline),
+            Some(Kind::Maintenance) => self.parse_maintenance_long(name, inline),
             Some(Kind::Banner) => self.parse_banner_long(name, inline),
             Some(Kind::Validate | Kind::UpdateRules) | None => {
                 Err(self.unexpected(format!("--{name}")))
@@ -378,6 +390,22 @@ impl Parser {
                 let value = self.value_string(inline, "--listen <ADDR>")?;
                 let address = parse_loopback_address(&value)?;
                 set_once(&mut self.metrics.listen, address, "--listen <ADDR>")?;
+            }
+            _ => return Err(self.unexpected(format!("--{name}"))),
+        }
+        Ok(())
+    }
+
+    fn parse_maintenance_long(
+        &mut self,
+        name: &str,
+        inline: Option<&str>,
+    ) -> Result<(), ParseError> {
+        match name {
+            "listen" => {
+                let value = self.value_string(inline, "--listen <ADDR>")?;
+                let address = parse_loopback_address(&value)?;
+                set_once(&mut self.maintenance.listen, address, "--listen <ADDR>")?;
             }
             _ => return Err(self.unexpected(format!("--{name}"))),
         }
@@ -501,6 +529,17 @@ impl Parser {
     }
 
     fn parse_positional(&mut self, value: &str) -> Result<(), ParseError> {
+        if self.kind == Some(Kind::Maintenance) {
+            if self.maintenance.action.is_some() {
+                return Err(self.unexpected(value));
+            }
+            self.maintenance.action = Some(match value {
+                "on" => MaintenanceAction::On,
+                "off" => MaintenanceAction::Off,
+                _ => return Err(invalid_value(value, "<on|off>", "on or off")),
+            });
+            return Ok(());
+        }
         if self.kind.is_some() {
             return Err(self.unexpected(value));
         }
@@ -550,6 +589,18 @@ impl Parser {
             Some(Kind::Metrics) => Some(Command::Metrics(MetricsArgs {
                 listen: self.metrics.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
             })),
+            Some(Kind::Maintenance) => {
+                let Some(action) = self.maintenance.action else {
+                    return Err(ParseError::Message(
+                        "the following required arguments were not provided:\n  <on|off>"
+                            .to_owned(),
+                    ));
+                };
+                Some(Command::Maintenance(MaintenanceArgs {
+                    action,
+                    listen: self.maintenance.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
+                }))
+            }
             Some(Kind::Banner) => Some(Command::Banner(BannerArgs {
                 no_color: self.banner.no_color,
             })),
@@ -806,6 +857,7 @@ fn help_for(kind: Option<Kind>) -> String {
         Some(Kind::Upgrade) => upgrade_help(),
         Some(Kind::Log) => log_help(),
         Some(Kind::Metrics) => metrics_help(),
+        Some(Kind::Maintenance) => maintenance_help(),
         Some(Kind::Banner) => banner_help(),
     }
 }
@@ -823,6 +875,7 @@ Commands:
   upgrade       Upgrade the installed binary and systemd unit from a release
   log           Read the systemd journal for the Kunato service
   metrics       Print the Prometheus metrics served by the admin listener
+  maintenance   Enter or leave maintenance mode through the admin listener
   banner        Print the Kunato banner
   help          Print this message or the help of the given subcommand(s)
 
@@ -925,6 +978,25 @@ Usage: kunato metrics [OPTIONS]
 
 Options:
       --listen <ADDR>  Admin listener address serving /metrics [default: {}]
+
+{}"#,
+        DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
+    )
+}
+
+fn maintenance_help() -> String {
+    format!(
+        r#"Enter or leave maintenance mode through the admin listener.
+
+While maintenance mode is on, every request receives a `503 Service Unavailable`
+maintenance page and the embedded artwork it references, and the upstream is
+never contacted. Turning it off restores normal proxy behavior. The switch is
+kept in memory and resets when Kunato restarts.
+
+Usage: kunato maintenance <on|off> [OPTIONS]
+
+Options:
+      --listen <ADDR>  Admin listener address accepting the control request [default: {}]
 
 {}"#,
         DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
@@ -1243,6 +1315,54 @@ mod tests {
         match error {
             ParseError::Help(text) => {
                 assert!(text.contains("Usage: kunato metrics"));
+                assert!(text.contains("127.0.0.1:9090"));
+            }
+            other => panic!("expected help, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_maintenance_actions_and_listen() {
+        let cli = parse(&["kunato", "maintenance", "on"]).expect("parse");
+        let Some(Command::Maintenance(args)) = cli.command else {
+            panic!("expected the maintenance command");
+        };
+        assert_eq!(args.action, MaintenanceAction::On);
+        assert_eq!(args.listen, DEFAULT_METRICS_LISTEN);
+        assert!(args.action.enabled());
+
+        let cli =
+            parse(&["kunato", "maintenance", "off", "--listen", "127.0.0.1:9100"]).expect("parse");
+        let Some(Command::Maintenance(args)) = cli.command else {
+            panic!("expected the maintenance command");
+        };
+        assert_eq!(args.action, MaintenanceAction::Off);
+        assert!(!args.action.enabled());
+        assert_eq!(args.listen, SocketAddr::from(([127, 0, 0, 1], 9100)));
+    }
+
+    #[test]
+    fn maintenance_requires_a_loopback_listener_and_an_action() {
+        let error = parse(&["kunato", "maintenance", "on", "--listen", "0.0.0.0:9090"])
+            .expect_err("public address");
+        assert!(error.to_string().contains("loopback"));
+
+        let error = parse(&["kunato", "maintenance"]).expect_err("action required");
+        assert!(error.to_string().contains("<on|off>"), "{error}");
+
+        let error = parse(&["kunato", "maintenance", "maybe"]).expect_err("invalid action");
+        assert!(error.to_string().contains("on or off"), "{error}");
+
+        let error = parse(&["kunato", "maintenance", "on", "off"]).expect_err("one action");
+        assert!(error.to_string().contains("unexpected"), "{error}");
+    }
+
+    #[test]
+    fn maintenance_help_mentions_the_default_listener() {
+        let error = parse(&["kunato", "help", "maintenance"]).expect_err("help exits");
+        match error {
+            ParseError::Help(text) => {
+                assert!(text.contains("Usage: kunato maintenance <on|off>"));
                 assert!(text.contains("127.0.0.1:9090"));
             }
             other => panic!("expected help, got {other:?}"),

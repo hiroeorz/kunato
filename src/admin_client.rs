@@ -1,8 +1,8 @@
-//! `kunato metrics`: print the metrics served by the admin listener as a table.
+//! Client for the loopback admin listener.
 //!
-//! The `GET /metrics` body is fetched unchanged and rendered by
-//! [`crate::metrics_table`] as two aligned columns: the metric name and its
-//! value, without the Prometheus comment lines.
+//! `kunato metrics` fetches `GET /metrics` and renders the exposition as a
+//! table. `kunato maintenance on|off` sends `PUT /maintenance/on|off` to switch
+//! the running proxy between maintenance mode and normal forwarding.
 
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -15,14 +15,15 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use tokio::time::timeout;
 
-use crate::cli::MetricsArgs;
+use crate::cli::{MaintenanceAction, MaintenanceArgs, MetricsArgs};
 use crate::error::Error;
 use crate::proxy::{BodyExt, Full};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_METRICS_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MAINTENANCE_BYTES: usize = 4 * 1024;
 
-type MetricsClient = Client<HttpConnector, Full<Bytes>>;
+type AdminClient = Client<HttpConnector, Full<Bytes>>;
 
 /// Query the admin listener and write the rendered metrics table to stdout.
 pub async fn run(args: MetricsArgs) -> Result<(), Error> {
@@ -31,24 +32,52 @@ pub async fn run(args: MetricsArgs) -> Result<(), Error> {
     write_stdout(table.as_bytes())
 }
 
+/// Switch maintenance mode and write the admin confirmation to stdout.
+pub async fn run_maintenance(args: MaintenanceArgs) -> Result<(), Error> {
+    let body = request(
+        args.listen,
+        Method::PUT,
+        maintenance_path(args.action),
+        MAX_MAINTENANCE_BYTES,
+    )
+    .await?;
+    write_stdout(&body)
+}
+
+fn maintenance_path(action: MaintenanceAction) -> &'static str {
+    match action {
+        MaintenanceAction::On => "/maintenance/on",
+        MaintenanceAction::Off => "/maintenance/off",
+    }
+}
+
 async fn fetch(listen: SocketAddr) -> Result<Vec<u8>, Error> {
     fetch_with_limit(listen, MAX_METRICS_BYTES).await
 }
 
 async fn fetch_with_limit(listen: SocketAddr, max_bytes: usize) -> Result<Vec<u8>, Error> {
+    request(listen, Method::GET, "/metrics", max_bytes).await
+}
+
+async fn request(
+    listen: SocketAddr,
+    method: Method,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Error> {
     if !listen.ip().is_loopback() {
         return Err(Error::Message(format!(
             "the admin listener must be a loopback address, got `{listen}`"
         )));
     }
 
-    let url = format!("http://{listen}/metrics");
-    let client: MetricsClient = Client::builder(TokioExecutor::new()).build_http();
+    let url = format!("http://{listen}{path}");
+    let client: AdminClient = Client::builder(TokioExecutor::new()).build_http();
     let request = Request::builder()
-        .method(Method::GET)
+        .method(method)
         .uri(&url)
         .body(Full::new(Bytes::new()))
-        .map_err(|err| Error::Message(format!("invalid metrics request: {err}")))?;
+        .map_err(|err| Error::Message(format!("invalid admin request: {err}")))?;
 
     let response = timeout(REQUEST_TIMEOUT, client.request(request))
         .await
@@ -107,7 +136,7 @@ fn write_stdout(body: &[u8]) -> Result<(), Error> {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Err(err) => Err(Error::Message(format!(
-            "failed to write metrics to stdout: {err}"
+            "failed to write admin response to stdout: {err}"
         ))),
     }
 }
@@ -135,11 +164,55 @@ mod tests {
         addr
     }
 
+    async fn serve_once_capturing(
+        response: String,
+    ) -> (SocketAddr, tokio::sync::oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local address");
+        let (captured, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = [0u8; 2048];
+            let read = stream.read(&mut request).await.expect("read request");
+            let _ = captured.send(String::from_utf8_lossy(&request[..read]).into_owned());
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            let _ = stream.shutdown().await;
+        });
+        (addr, receiver)
+    }
+
     fn response(status: &str, body: &str) -> String {
         format!(
             "HTTP/1.1 {status}\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    #[test]
+    fn maintenance_paths_select_the_admin_route() {
+        assert_eq!(maintenance_path(MaintenanceAction::On), "/maintenance/on");
+        assert_eq!(maintenance_path(MaintenanceAction::Off), "/maintenance/off");
+    }
+
+    #[tokio::test]
+    async fn maintenance_is_a_put_request() {
+        let (addr, captured) = serve_once_capturing(response("200 OK", "maintenance on\n")).await;
+
+        run_maintenance(MaintenanceArgs {
+            action: MaintenanceAction::On,
+            listen: addr,
+        })
+        .await
+        .expect("toggle maintenance");
+
+        let request = captured.await.expect("captured request");
+        assert!(
+            request.starts_with("PUT /maintenance/on HTTP/1.1\r\n"),
+            "{request}"
+        );
     }
 
     #[tokio::test]

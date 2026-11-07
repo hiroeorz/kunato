@@ -4853,9 +4853,10 @@ categories:
     .await
     .expect("bind kunato");
     let protection = server.protection();
+    let maintenance = server.maintenance();
     let addr = server.local_addr().expect("local address");
 
-    let admin = AdminServer::bind(&admin_config, metrics.clone(), protection)
+    let admin = AdminServer::bind(&admin_config, metrics.clone(), protection, maintenance)
         .await
         .expect("bind admin");
     let admin_addr = admin.local_addr().expect("admin address");
@@ -4878,6 +4879,143 @@ categories:
     let _ = shutdown.send(true);
     let _ = server_task.await;
     let _ = admin_task.await;
+}
+
+#[tokio::test]
+async fn maintenance_mode_serves_the_page_until_turned_off() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream = upstream_listener.local_addr().expect("upstream address");
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream_hits = Arc::clone(&hits);
+    let upstream_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = upstream_listener.accept().await else {
+                break;
+            };
+            let hits = Arc::clone(&upstream_hits);
+            tokio::spawn(async move {
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    hits.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"origin"))))
+                    }
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+"
+    );
+    let compiled = config::parse(&yaml).expect("valid config");
+    let admin_config = compiled.admin.clone();
+    let config = Arc::new(Snapshot::new(compiled));
+    let metrics = Arc::new(Metrics::new());
+    let server = Server::bind(
+        "127.0.0.1:0".parse().expect("address"),
+        config,
+        metrics.clone(),
+        None,
+    )
+    .await
+    .expect("bind kunato");
+    let maintenance = server.maintenance();
+    let addr = server.local_addr().expect("local address");
+    let admin = AdminServer::bind(
+        &admin_config,
+        metrics.clone(),
+        server.protection(),
+        maintenance,
+    )
+    .await
+    .expect("bind admin");
+    let admin_addr = admin.local_addr().expect("admin address");
+
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
+    let admin_task = tokio::spawn(admin.run(shutdown_rx.clone()));
+
+    let (status, body) = send(addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "origin");
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+    kunato::admin_client::run_maintenance(kunato::cli::MaintenanceArgs {
+        action: kunato::cli::MaintenanceAction::On,
+        listen: admin_addr,
+    })
+    .await
+    .expect("turn maintenance on");
+
+    let (status, body) = send(addr, Method::GET, "/some/page?x=1", "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("/maintenance_in_progress.png"), "{body}");
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        1,
+        "maintenance must not reach the origin"
+    );
+
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("http://{addr}/maintenance_in_progress.png"))
+        .header("host", addr.to_string())
+        .body(Full::new(Bytes::new()))
+        .expect("image request");
+    let response = client.request(request).await.expect("image response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .expect("content type")
+            .to_str()
+            .expect("content type text"),
+        "image/png"
+    );
+    let image = response
+        .into_body()
+        .collect()
+        .await
+        .expect("image body")
+        .to_bytes();
+    assert_eq!(&image[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+    let (status, _) = send(addr, Method::POST, "/submit", "payload").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+    kunato::admin_client::run_maintenance(kunato::cli::MaintenanceArgs {
+        action: kunato::cli::MaintenanceAction::Off,
+        listen: admin_addr,
+    })
+    .await
+    .expect("turn maintenance off");
+
+    let (status, body) = send(addr, Method::GET, "/after", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "origin");
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+
+    let (status, body) = send(admin_addr, Method::GET, "/maintenance", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "off\n");
+
+    let _ = shutdown.send(true);
+    let _ = server_task.await;
+    let _ = admin_task.await;
+    upstream_task.abort();
 }
 
 #[tokio::test]

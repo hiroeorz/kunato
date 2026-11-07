@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Admin;
 use crate::error::Error;
+use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
 use crate::protection::ProtectionState;
 use crate::proxy::server::drain_connections;
@@ -29,6 +30,7 @@ pub struct AdminServer {
     listener: TcpListener,
     metrics: Arc<Metrics>,
     protection: Arc<ProtectionState>,
+    maintenance: Arc<MaintenanceState>,
 }
 
 impl AdminServer {
@@ -36,6 +38,7 @@ impl AdminServer {
         spec: &Admin,
         metrics: Arc<Metrics>,
         protection: Arc<ProtectionState>,
+        maintenance: Arc<MaintenanceState>,
     ) -> Result<Self, Error> {
         let listener = TcpListener::bind(spec.listen)
             .await
@@ -47,6 +50,7 @@ impl AdminServer {
             listener,
             metrics,
             protection,
+            maintenance,
         })
     }
 
@@ -69,9 +73,10 @@ impl AdminServer {
                         Ok((stream, peer)) => {
                             let metrics = self.metrics.clone();
                             let protection = self.protection.clone();
+                            let maintenance = self.maintenance.clone();
                             match Arc::clone(&limit).try_acquire_owned() {
                                 Ok(permit) => {
-                                    connections.spawn(serve_connection(stream, peer, metrics, protection, permit));
+                                    connections.spawn(serve_connection(stream, peer, metrics, protection, maintenance, permit));
                                 }
                                 Err(_) => {
                                     warn!(client = %peer, "admin connection limit exceeded");
@@ -101,13 +106,15 @@ async fn serve_connection(
     peer: SocketAddr,
     metrics: Arc<Metrics>,
     protection: Arc<ProtectionState>,
+    maintenance: Arc<MaintenanceState>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let io = TokioIo::new(stream);
     let service = service_fn(move |request: Request<Incoming>| {
         let metrics = metrics.clone();
         let protection = protection.clone();
-        async move { handle(request, metrics, protection).await }
+        let maintenance = maintenance.clone();
+        async move { handle(request, metrics, protection, maintenance).await }
     });
     let result = http1::Builder::new()
         .keep_alive(true)
@@ -124,6 +131,7 @@ async fn handle(
     request: Request<Incoming>,
     metrics: Arc<Metrics>,
     protection: Arc<ProtectionState>,
+    maintenance: Arc<MaintenanceState>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     if !admin_host_allowed(request.headers().get(http::header::HOST)) {
         let mut response = Response::new(full_body("misdirected request"));
@@ -139,10 +147,49 @@ async fn handle(
         );
         return Ok(response);
     }
+    if request.method() == Method::GET && request.uri().path() == "/maintenance" {
+        let body = if maintenance.enabled() {
+            "on\n"
+        } else {
+            "off\n"
+        };
+        return Ok(text_response(StatusCode::OK, body));
+    }
+    if request.method() == Method::PUT {
+        // `PUT` is not a simple cross-origin request, so a browser must pass a
+        // CORS preflight that this listener never grants. That keeps a page on
+        // another origin from toggling maintenance through the loopback
+        // listener.
+        match request.uri().path() {
+            "/maintenance/on" => {
+                if !maintenance.set(true) {
+                    info!("maintenance mode enabled");
+                }
+                return Ok(text_response(StatusCode::OK, "maintenance on\n"));
+            }
+            "/maintenance/off" => {
+                if maintenance.set(false) {
+                    info!("maintenance mode disabled");
+                }
+                return Ok(text_response(StatusCode::OK, "maintenance off\n"));
+            }
+            _ => {}
+        }
+    }
 
     let mut response = Response::new(full_body("not found"));
     *response.status_mut() = StatusCode::NOT_FOUND;
     Ok(response)
+}
+
+fn text_response(status: StatusCode, body: &'static str) -> Response<ProxyBody> {
+    let mut response = Response::new(full_body(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
 }
 
 /// Reject DNS-rebinding requests: the admin listener only accepts loopback

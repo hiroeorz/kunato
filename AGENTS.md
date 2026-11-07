@@ -35,13 +35,14 @@ src/
   cli.rs           # Command-line argument parsing
   error.rs         # Error types
   telemetry.rs     # Logging setup
-  admin.rs         # Loopback admin listener exposing /metrics
-  admin_client.rs  # `kunato metrics`: fetch the admin /metrics exposition
+  admin.rs         # Loopback admin listener exposing /metrics and /maintenance
+  admin_client.rs  # `kunato metrics` and `kunato maintenance`: admin client
   banner.rs        # `kunato banner`: colored mascot and wordmark for install success
   banner_art.rs    # Generated mascot payload embedded by banner.rs
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching
+  maintenance.rs   # In-memory maintenance switch, page, and embedded artwork
   metrics.rs       # Prometheus counters and gauges
   metrics_table.rs # `kunato metrics`: name/value table rendering
   acme/            # RFC 8555 client, TLS-ALPN-01 resolver, and certificate cache

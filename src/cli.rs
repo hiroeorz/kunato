@@ -14,7 +14,8 @@ pub const DEFAULT_RULES_URL: &str =
 pub const DEFAULT_RULES_FILE: &str = "/var/lib/kunato/rules.yaml";
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
 
-/// Admin listener queried by `kunato metrics`.
+/// Loopback admin listener queried by `kunato metrics` and
+/// `kunato maintenance`.
 pub const DEFAULT_METRICS_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9090));
 
@@ -65,6 +66,9 @@ pub enum Command {
     /// Print the Prometheus metrics served by the admin listener.
     Metrics(MetricsArgs),
 
+    /// Enter or leave maintenance mode through the admin listener.
+    Maintenance(MaintenanceArgs),
+
     /// Print the Kunato banner.
     Banner(BannerArgs),
 }
@@ -96,6 +100,30 @@ pub struct MetricsArgs {
     /// Only loopback addresses are accepted; the admin listener never binds a
     /// public interface.
     pub listen: SocketAddr,
+}
+
+#[derive(Debug)]
+pub struct MaintenanceArgs {
+    /// Turn maintenance mode on or off.
+    pub action: MaintenanceAction,
+
+    /// Admin listener address accepting the maintenance control request.
+    ///
+    /// Only loopback addresses are accepted; the admin listener never binds a
+    /// public interface.
+    pub listen: SocketAddr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceAction {
+    On,
+    Off,
+}
+
+impl MaintenanceAction {
+    pub fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
 
 #[derive(Debug)]

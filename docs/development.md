@@ -1379,7 +1379,8 @@ must be non-empty; use `remove` to drop a header.
 
 ### Admin and metrics
 
-An optional admin listener exposes Prometheus metrics on a loopback address:
+An optional admin listener exposes Prometheus metrics and the maintenance
+controls on a loopback address:
 
 ```yaml
 admin:
@@ -1419,6 +1420,36 @@ kunato metrics --listen 127.0.0.1:9100 | grep kunato_blocked_total
 
 The command does not read the configuration file, so pass `--listen` when the
 `admin.listen` value differs from the default.
+
+### Maintenance mode
+
+`kunato maintenance on` answers every client with the maintenance page and
+stops forwarding to the upstream; `kunato maintenance off` restores normal
+proxy behavior. Both commands control the running process through the
+loopback admin listener, so the listener must be enabled. They use
+`admin.listen` (`127.0.0.1:9090` by default) and accept `--listen <ADDR>` when
+that address differs:
+
+```sh
+kunato maintenance on
+kunato maintenance off
+```
+
+While maintenance mode is on, requests that pass the existing admission,
+client-identity, Host allowlist, and request-head checks receive `503 Service
+Unavailable` with `Retry-After: 3600` and a self-contained HTML page; request
+bodies are neither read nor forwarded. The page loads the embedded
+`maintenance_in_progress.png` artwork from `/maintenance_in_progress.png`,
+which is the only path served the image instead of the page. A request for that
+path is handled by Kunato in maintenance mode even if the origin also has it.
+The switch is kept in memory, survives configuration reloads, and resets to off
+when the process restarts; re-enable it after a restart while maintenance is
+still in progress.
+
+The admin listener exposes the same control as `PUT /maintenance/on` and
+`PUT /maintenance/off`; `GET /maintenance` reports `on` or `off`. The
+state-changing methods are not simple cross-origin requests, so a browser must
+pass a CORS preflight that the admin listener never grants.
 
 ### Log viewer
 

@@ -16,6 +16,7 @@ pub mod graphql;
 pub mod hardening;
 pub mod jwt;
 pub mod logs;
+pub mod maintenance;
 pub mod metrics;
 mod metrics_table;
 mod php;

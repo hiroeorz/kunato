@@ -26,6 +26,7 @@ use crate::acme::{ACME_TLS_ALPN, AcmeService};
 use crate::client_ip::ClientSource;
 use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
+use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
 use crate::protection::{BehaviorSignal, ConnectionGuard, Decision, ProtectionState, normalize_ip};
 use crate::proxy::client::UpstreamClient;
@@ -452,6 +453,7 @@ pub struct Context {
     client: Arc<Snapshot<UpstreamClient>>,
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
+    maintenance: Arc<MaintenanceState>,
     inspection: Arc<InspectionBudget>,
     upload_slots: Arc<Semaphore>,
     tls: TlsMode,
@@ -615,6 +617,7 @@ impl Server {
                 client: Arc::new(Snapshot::new(UpstreamClient::new(connect_timeout))),
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
+                maintenance: Arc::new(MaintenanceState::new()),
                 inspection: Arc::new(InspectionBudget::new()),
                 upload_slots: Arc::new(Semaphore::new(upload_inspection_concurrency())),
                 tls,
@@ -631,6 +634,10 @@ impl Server {
 
     pub fn protection(&self) -> Arc<ProtectionState> {
         Arc::clone(&self.context.protection)
+    }
+
+    pub fn maintenance(&self) -> Arc<MaintenanceState> {
+        Arc::clone(&self.context.maintenance)
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -1113,6 +1120,8 @@ async fn handle_request(
         Err(err)
     } else if let Some(err) = request_head_error(&config, &parts) {
         Err(err)
+    } else if let Some(response) = maintenance_response(&context, &parts) {
+        Ok(response)
     } else if upgrade.is_some()
         && !parts.headers.contains_key(CONTENT_LENGTH)
         && !parts.headers.contains_key(TRANSFER_ENCODING)
@@ -1239,6 +1248,19 @@ pub(crate) fn host_policy_error(
         );
     }
     Some(HttpError::new(violation.status(), violation.message()))
+}
+
+/// Serve the maintenance page instead of the origin while maintenance mode is
+/// on. Request bodies are never read in this mode; the artwork path is the
+/// only request that receives something other than the page.
+pub(crate) fn maintenance_response(
+    context: &Context,
+    parts: &http::request::Parts,
+) -> Option<Response<ProxyBody>> {
+    context
+        .maintenance
+        .enabled()
+        .then(|| crate::maintenance::response(parts.uri.path()))
 }
 
 /// Reject a request whose absolute-form authority and `Host` header disagree.

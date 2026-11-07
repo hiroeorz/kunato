@@ -50,6 +50,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             Command::Upgrade(args) => kunato::upgrade::run(args).await,
             Command::Log(args) => kunato::logs::run(*args).await,
             Command::Metrics(args) => kunato::admin_client::run(args).await,
+            Command::Maintenance(args) => kunato::admin_client::run_maintenance(args).await,
             Command::Banner(args) => kunato::banner::run(args),
         };
     }
@@ -83,6 +84,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
 
     let server = Server::bind(listen, config.clone(), metrics.clone(), acme.as_ref()).await?;
     let protection = server.protection();
+    let maintenance = server.maintenance();
     info!(addr = %server.local_addr()?, config = %cli.config.display(), "kunato started");
 
     let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
@@ -102,13 +104,16 @@ async fn run(cli: Cli) -> Result<(), Error> {
     ));
 
     let admin_task = if admin_config.enabled {
-        match AdminServer::bind(&admin_config, metrics.clone(), protection).await {
+        match AdminServer::bind(&admin_config, metrics.clone(), protection, maintenance).await {
             Ok(admin) => {
                 info!(addr = %admin.local_addr()?, "admin listening");
                 Some(tokio::spawn(admin.run(shutdown_rx.clone())))
             }
             Err(err) => {
-                warn!(error = %err, "failed to start admin listener; metrics unavailable");
+                warn!(
+                    error = %err,
+                    "failed to start admin listener; metrics and maintenance controls unavailable"
+                );
                 None
             }
         }

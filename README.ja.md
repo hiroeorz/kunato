@@ -123,6 +123,13 @@ sudo kunato log --attack cve-2025 --format json | jq .
 
 `kunato metrics` は Prometheus の `# HELP` や `# TYPE` 行を省き、メトリクス名と値を右揃えにした罫線付きの表形式で出力します（タイムスタンプのゲージにはローカル日時も付記されます）。管理リスナーが別のループバックアドレスを使用している場合は `--listen <ADDR>` を渡してください。
 
+`kunato maintenance on` は上流への転送を止め、すべてのリクエストに `503` のメンテナンス画面を返します。`kunato maintenance off` で通常のプロキシ動作に戻ります。画面には同梱の `maintenance_in_progress.png` を使用し、リクエストボディは上流へ転送しません。どちらのコマンドもループバック管理リスナー（デフォルト `127.0.0.1:9090`。変更する場合は `--listen <ADDR>`）に接続し、メンテナンス状態は Kunato の再起動で off に戻ります。
+
+```sh
+kunato maintenance on
+kunato maintenance off
+```
+
 ### 3. 設定とルールのカスタマイズ
 
 プロキシ設定の調整や独自ルールの追加は `/etc/kunato/kunato.yaml` を編集します。変更は自動検知され、再起動なしでホットリロードされます：
@@ -208,6 +215,7 @@ sudo apt-get install -y minisign
 | `kunato validate` | 設定ファイル、マネージド `rules_file`、および `overrides_file` を検証します。 |
 | `kunato log [OPTIONS]` | systemd ジャーナルから Kunato のセキュリティイベントを検索・フィルタリングします。 |
 | `kunato metrics` | ループバック管理リスナー (`127.0.0.1:9090`) から Prometheus メトリクスを表形式で表示します。 |
+| `kunato maintenance on\|off` | 転送を行わずメンテナンス画面を返すか、通常のプロキシ動作に戻します。 |
 | `kunato update-rules` | 最新のマネージドルールセットのチェック・検証・適用を1回実行します。 |
 | `kunato upgrade` | 設定を保持したまま、インストール済みバイナリと systemd ユニットをアップグレードします。 |
 | `kunato banner` | カラーのマスコットバナーをターミナルに表示します。 |

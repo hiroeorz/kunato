@@ -154,6 +154,18 @@ value columns, leaving out the Prometheus `# HELP` and `# TYPE` lines, aligning
 values to the right, and adding the local date and time to timestamp gauges;
 pass `--listen <ADDR>` when the admin listener uses another loopback address.
 
+`kunato maintenance on` stops forwarding to the upstream and answers every
+request with a `503` maintenance page; `kunato maintenance off` restores normal
+proxying. The page uses the bundled `maintenance_in_progress.png`, and request
+bodies are not forwarded. Both commands talk to the loopback admin listener
+(`127.0.0.1:9090` by default; pass `--listen <ADDR>` to change it), and the
+switch resets to off when Kunato restarts.
+
+```sh
+kunato maintenance on
+kunato maintenance off
+```
+
 ### 3. Configure and Customize Rules
 
 Edit `/etc/kunato/kunato.yaml` to adjust proxy settings or add your own rules;
@@ -258,6 +270,7 @@ and the remaining trust limits.
 | `kunato validate` | Validate the configuration, managed `rules_file`, and `overrides_file`. |
 | `kunato log [OPTIONS]` | Query and filter Kunato security events from the systemd journal. |
 | `kunato metrics` | Display Prometheus metrics from the loopback admin listener (`127.0.0.1:9090`). |
+| `kunato maintenance on\|off` | Serve the maintenance page without forwarding, or restore normal proxying. |
 | `kunato update-rules` | Check for, verify, validate, and apply the latest managed rule set once. |
 | `kunato upgrade` | Upgrade the installed binary and systemd unit while preserving configuration. |
 | `kunato banner` | Print the colored mascot banner to the terminal. |
