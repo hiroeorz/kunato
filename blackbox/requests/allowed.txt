@@ -829,3 +829,16 @@ POST /api/v1/trail/download header="Content-Type: application/json" body="{\"url
 POST /lua/rest/v2/add/host/to_scan.lua?scan_ports=22,80,443
 POST /tikz/svg header="Content-Type: text/plain" body="\\draw (0,0) -- (1,1);"
 POST /goform/mp header="Content-Type: application/x-www-form-urlencoded" body="command=status"
+
+# --- Near-miss guards for the 2026-11-07 delta intake: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+GET /esm.sh/react@19.2.0
+GET /static/app.4f2c.js
+POST /api/users header="Content-Type: application/json" body="{\"image\":\"data:text/plain,hello\"}"
+POST /api/users header="Content-Type: application/json" body="{\"image\":{\"path\":\"uploads/a.png\",\"originalName\":\"a.png\",\"test\":true}}"
+GET /console/api/remote-files?url=https%3A%2F%2Fexample.com%2Fdoc.pdf
+POST /console/api/remote-files/upload header="Content-Type: application/json" body="{\"url\":\"https://example.com/doc.pdf\"}"
+POST /layers/upload header="Content-Type: application/x-www-form-urlencoded" body="layer_name=roads&layer_title=Roads"
+POST /api/sessions header="Content-Type: application/json" body="{\"path\":\"/home/user/site/index.html\"}"
+GET /apps/queue-settings
+GET /artifact/604800/index.html?path=site/index.html
