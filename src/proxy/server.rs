@@ -436,6 +436,16 @@ enum TlsMode {
     Static(tokio_rustls::TlsAcceptor),
 }
 
+impl TlsMode {
+    /// The response a connection-level rejection can write before any
+    /// protocol work. A TLS socket cannot carry HTTP before its handshake, and
+    /// completing that handshake for a connection the budget rejected would
+    /// defeat the check, so TLS rejections close without writing.
+    fn rejection_response(&self) -> Option<&'static [u8]> {
+        matches!(self, Self::Plain).then_some(RAW_503)
+    }
+}
+
 #[derive(Clone)]
 pub struct Context {
     config: Arc<Snapshot<CompiledConfig>>,
@@ -664,7 +674,10 @@ impl Server {
                                 }
                                 None => {
                                     warn!(client = %peer.ip(), "connection limit exceeded");
-                                    connections.spawn(reject_connection(stream));
+                                    connections.spawn(reject_connection(
+                                        stream,
+                                        context.tls.rejection_response(),
+                                    ));
                                 }
                             }
                         }
@@ -712,11 +725,15 @@ pub(crate) async fn drain_connections(connections: &mut JoinSet<()>, grace: Dura
     }
 }
 
-/// A connection-level rejection before any request was parsed. Deliberately
-/// not counted in `kunato_requests_total`, which tracks requests Kunato kept
-/// and evaluated (or answered) as requests.
-async fn reject_connection(mut stream: tokio::net::TcpStream) {
-    let _ = stream.write_all(RAW_503).await;
+/// A connection-level rejection before any request was parsed. Plaintext
+/// listeners get a best-effort `503`; TLS listeners close without writing
+/// because they cannot carry HTTP before the handshake. Deliberately not
+/// counted in `kunato_requests_total`, which tracks requests Kunato kept and
+/// evaluated (or answered) as requests.
+async fn reject_connection(mut stream: tokio::net::TcpStream, response: Option<&'static [u8]>) {
+    if let Some(response) = response {
+        let _ = stream.write_all(response).await;
+    }
     let _ = stream.shutdown().await;
 }
 

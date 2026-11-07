@@ -1782,8 +1782,12 @@ protection:
 The per-IP limiter uses a token bucket (`requests_per_second` refill rate, `burst`
 capacity). Exceeding it returns `429 Too Many Requests` with a `Retry-After`
 header; exceeding the global rate or connection budget returns `503 Service
-Unavailable`. Repeated violations trigger a ban that doubles on each recurrence up
-to `max_duration`. Addresses in `allowlist` bypass all protection limits.
+Unavailable`. Connection-budget rejections are written as `503` on plaintext
+listeners; a TLS listener closes the connection before the handshake instead,
+because completing it is the work the budget is meant to avoid. HTTP/3 refuses
+the QUIC connection. Repeated violations trigger a ban that doubles on each
+recurrence up to `max_duration`. Addresses in `allowlist` bypass all protection
+limits.
 
 `scraping` counts distinct `200` responses on non-static paths per source and
 flags a source that crosses both `min_requests` and `distinct_paths`. It is

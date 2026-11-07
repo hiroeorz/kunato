@@ -5373,6 +5373,66 @@ categories: []
     running.stop().await;
 }
 
+#[tokio::test]
+async fn tls_connection_limit_closes_without_a_plaintext_response() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("generate cert");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&cert_path, certified.cert.pem()).expect("write cert");
+    std::fs::write(&key_path, certified.signing_key.serialize_pem()).expect("write key");
+
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+tls:
+  cert_file: {}
+  key_file: {}
+protection: {{ max_connections_per_ip: 1, max_connections: 8 }}
+categories: []
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(certified.cert.der().clone())
+        .expect("trust test certificate");
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect(running.addr)
+        .await
+        .expect("connect held connection");
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let _held = connector
+        .connect(server_name, stream)
+        .await
+        .expect("hold the only connection slot");
+
+    // The rejection happens before the TLS handshake, so only a raw connection
+    // can observe whether the listener wrote anything at all.
+    let mut rejected = TcpStream::connect(running.addr)
+        .await
+        .expect("connect rejected connection");
+    let mut response = Vec::new();
+    let read =
+        tokio::time::timeout(Duration::from_secs(5), rejected.read_to_end(&mut response)).await;
+    assert!(read.is_ok(), "a rejected TLS connection must be closed");
+    assert!(
+        response.is_empty(),
+        "a TLS listener must not answer a connection-limit rejection with plaintext: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    running.stop().await;
+}
+
 async fn spawn_prefix_stalling_upstream(body: &'static [u8], content_length: usize) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

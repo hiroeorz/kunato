@@ -477,8 +477,10 @@ contract; response rules follow the same contract with the response view.
 Protection is automatic and independent of the rule set. It consists of:
 
 1. **Connection budgets** — per-IP concurrent connections (default 32) and global
-   concurrent connections (default 1024). Excess connections receive `503` or are
-   closed.
+   concurrent connections (default 1024). Excess plaintext connections receive a
+   best-effort `503`; TLS connections are closed before the handshake so a
+   rejected connection never consumes TLS work, and HTTP/3 refuses the QUIC
+   connection.
 2. **Per-IP request rate** — token bucket with `requests_per_second` (default 20)
    and `burst` (default 60). Admission is checked before the body is buffered and
    consumes one token. After the body is decoded, inspection is charged one extra
