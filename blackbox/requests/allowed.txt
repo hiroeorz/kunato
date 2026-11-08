@@ -842,3 +842,14 @@ POST /layers/upload header="Content-Type: application/x-www-form-urlencoded" bod
 POST /api/sessions header="Content-Type: application/json" body="{\"path\":\"/home/user/site/index.html\"}"
 GET /apps/queue-settings
 GET /artifact/604800/index.html?path=site/index.html
+
+# --- Near-miss guards for the 2026-11-08 delta intake: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+POST /interface/forms/fee_sheet/new.php header="Content-Type: application/x-www-form-urlencoded" body="prod[0][drug_id]=4&prod[0][warehouse]=1&bn_save=Save"
+GET /apis/default/api/patient/abc123/insurance?insurance_type=primary
+GET /apis/default/api/patient/abc123/employer?employer_name=Acme%20Clinic
+GET /interface/esign/index.php?module=Form
+GET /interface/billing/sl_eob_process.php?csrf_token_form=x&paydate=2026-01-01&eraname=20260101_1_1
+GET /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument&action=download&file_path=/tmp/oe-module-faxsms/fax/inbox-2026.pdf&csrf_token_form=x
+POST /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument header="Content-Type: application/x-www-form-urlencoded" body="action=setup&file_path=/tmp/oe-module-faxsms/fax/outbox-2026.pdf&content=JVBERi0xLjQK&csrf_token_form=x"
+POST /plugin/AI/receiveAsync.json.php header="Content-Type: application/x-www-form-urlencoded" body="type=translation&token=probe&response%5Bvtt%5D=POC-CONTROL-15&response%5Blang%5D=en&response%5Btext%5D=c&response%5Btotal_price%5D=0"

@@ -1881,6 +1881,19 @@ categories:
       - name: symfony-datauri-uppercase-local-path
         match: { regex: '(?i)data:,[/\\]', in: [body, query, cookies] }
 
+  # Request signatures for the 2026-11-08 delta intake.
+  - name: cve-2026-11-08-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-124450 / CVE-2026-124446 / CVE-2026-124490 (OpenEMR fax/SMS):
+      # disposeDocument reads and writes the caller-supplied file_path without
+      # containment. A normal fax download stays under the module temp dir.
+      - name: openemr-faxsms-dispose-document-sensitive-path
+        match:
+          path: '(?i)/oe-module-faxsms/index\.php$'
+          regex: '(?i)file_path=(%2f|/)?[^&]*(sqlconf\.php|/etc/(passwd|shadow)|\.\.(%2f|/|%5c))'
+          in: [query, body]
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
   # br, and zstd bodies are decompressed for matching first. When the limit is
