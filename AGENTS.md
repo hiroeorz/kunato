@@ -82,6 +82,7 @@ docs/
   behavioral-readiness.md # Deployment and authentication observation checklist
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   engine-gaps.md      # Engine changes the daily CVE intake could not cover with a rule
+  next-version-ai-defense.md # Next-version concept for defending home servers against AI-assisted attacks
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
   release-signing.md  # Detached minisign signing: keys, signing, rotation, limits
