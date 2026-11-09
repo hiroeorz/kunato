@@ -19,6 +19,8 @@ pub struct Metrics {
     pub php_request_rejected: AtomicU64,
     pub php_response_rejected: AtomicU64,
     pub host_rejected: AtomicU64,
+    pub admin_access_denied: AtomicU64,
+    pub admin_access_allowed: AtomicU64,
     pub response_decode_truncated: AtomicU64,
     pub request_decode_truncated: AtomicU64,
     pub response_decode_skipped: AtomicU64,
@@ -69,6 +71,8 @@ impl Metrics {
             php_request_rejected: AtomicU64::new(0),
             php_response_rejected: AtomicU64::new(0),
             host_rejected: AtomicU64::new(0),
+            admin_access_denied: AtomicU64::new(0),
+            admin_access_allowed: AtomicU64::new(0),
             response_decode_truncated: AtomicU64::new(0),
             request_decode_truncated: AtomicU64::new(0),
             response_decode_skipped: AtomicU64::new(0),
@@ -183,6 +187,18 @@ impl Metrics {
             "kunato_host_rejected_total",
             "Requests rejected by the Host/authority allowlist (missing, malformed, duplicate, or unlisted).",
             self.host_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_admin_access_denied_total",
+            "Requests to administrative functions rejected by the effective closed state.",
+            self.admin_access_denied.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_admin_access_allowed_total",
+            "Requests to administrative functions allowed by the effective open state.",
+            self.admin_access_allowed.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -435,6 +451,8 @@ mod tests {
         assert!(text.contains("kunato_request_body_rejected_total 0"));
         assert!(text.contains("kunato_upload_rejected_total 0"));
         assert!(text.contains("kunato_host_rejected_total 0"));
+        assert!(text.contains("kunato_admin_access_denied_total 0"));
+        assert!(text.contains("kunato_admin_access_allowed_total 0"));
         assert!(text.contains("kunato_behavior_not_found_total 0"));
         assert!(text.contains("kunato_behavior_auth_failures_total 0"));
         assert!(text.contains("kunato_behavior_enumeration_flags_total 0"));

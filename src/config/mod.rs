@@ -16,6 +16,7 @@ use serde::{Deserialize, Deserializer};
 
 pub mod watcher;
 
+use crate::admin_access::{AccessState, AdminAccess, AdminFunction};
 use crate::allowed_hosts::AllowedHosts;
 use crate::cidr::IpNet;
 use crate::client_ip::ClientIp;
@@ -30,6 +31,11 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const MAX_PATTERN_BYTES: usize = 4096;
 const MAX_PATTERNS_PER_RULE: usize = 64;
 const MAX_CONTENT_ROUTES: usize = 64;
+const MAX_ADMIN_ACCESS_FUNCTIONS: usize = 64;
+const MAX_ADMIN_ACCESS_PATHS: usize = 32;
+const MAX_ADMIN_ACCESS_NAME_BYTES: usize = 64;
+const MAX_ADMIN_ACCESS_OVERRIDES: usize = 1024;
+const MAX_ADMIN_ACCESS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_PATH_BYTES_LIMIT: usize = 64 * 1024;
 const MAX_HEADER_BYTES_LIMIT: usize = 1024 * 1024;
 const MAX_HEADERS_LIMIT: usize = 1000;
@@ -302,6 +308,8 @@ pub struct ConfigSpec {
     pub protection: ProtectionSpec,
     #[serde(default)]
     pub admin: AdminSpec,
+    #[serde(default)]
+    pub admin_access: AdminAccessSpec,
     #[serde(default)]
     pub tls: Option<TlsSpec>,
     #[serde(default)]
@@ -623,6 +631,57 @@ impl Default for AdminSpec {
 
 fn default_admin_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9090))
+}
+
+/// Time-limited open and close overrides for administrative application
+/// functions.
+///
+/// Each function is a named set of path patterns. A request that matches a
+/// function is allowed or denied from the configured default state and the most
+/// recent matching override. Overrides are set through the loopback admin
+/// listener and expire automatically; the table resets on restart.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdminAccessSpec {
+    pub enabled: bool,
+    /// State applied when no active override matches.
+    pub default: AccessState,
+    /// Include the built-in functions for common administrative interfaces.
+    /// A `functions` entry with the same name replaces a preset, and
+    /// `presets: false` starts from only the declared functions.
+    #[serde(default = "default_true")]
+    pub presets: bool,
+    #[serde(deserialize_with = "de_duration")]
+    pub default_ttl: Duration,
+    #[serde(deserialize_with = "de_duration")]
+    pub max_ttl: Duration,
+    pub max_overrides: usize,
+    pub functions: Vec<AdminAccessFunctionSpec>,
+}
+
+impl Default for AdminAccessSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default: AccessState::Open,
+            presets: true,
+            default_ttl: crate::admin_access::DEFAULT_TTL,
+            max_ttl: crate::admin_access::MAX_TTL,
+            max_overrides: crate::admin_access::DEFAULT_MAX_OVERRIDES,
+            functions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminAccessFunctionSpec {
+    pub name: String,
+    pub paths: Vec<String>,
+    /// Path patterns that stay outside the gate even when they match `paths`
+    /// (for example a public AJAX handler below an administrative prefix).
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1696,6 +1755,7 @@ pub struct CompiledConfig {
     pub limits: Limits,
     pub protection: Protection,
     pub admin: Admin,
+    pub admin_access: AdminAccess,
     pub tls: Option<Tls>,
     pub http3: Http3,
     pub response_headers: ResponseHeaders,
@@ -1777,6 +1837,20 @@ impl CompiledConfig {
              rejected with 421. Add them to allowed_hosts.",
             missing.join(", ")
         ))
+    }
+
+    /// Warning to log when `admin_access` is enabled but the loopback admin
+    /// listener is disabled, which leaves no way to open or close access.
+    pub fn admin_access_warning(&self) -> Option<String> {
+        if !self.admin_access.enabled || self.admin.enabled {
+            return None;
+        }
+        Some(
+            "admin_access is enabled but the admin listener is disabled; no open or close command can \
+             be applied and every configured administrative function uses its configured default. \
+             Enable `admin` (listener changes require a restart) or disable `admin_access`."
+                .to_owned(),
+        )
     }
 
     pub fn has_response_body_rules(&self) -> bool {
@@ -2018,6 +2092,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
     let client_ip = compile_client_ip(spec.client_ip.as_ref(), &mut issues);
     let content_routes = compile_content_routes(&spec.content_routes, &mut issues);
+    let admin_access = compile_admin_access(&spec.admin_access, &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
     let php = compile_php(&spec.php, &mut issues);
     let upstream = compile_upstream(&spec.upstream, &mut issues);
@@ -2063,6 +2138,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         limits: Limits::from(&spec.limits),
         protection,
         admin: Admin::from(&spec.admin),
+        admin_access,
         tls: spec.tls.as_ref().map(Tls::from),
         http3: Http3::from(&spec.http3),
         response_headers,
@@ -2113,6 +2189,147 @@ fn compile_content_routes(
         compiled.push(ContentRoute { path, methods });
     }
     compiled
+}
+
+fn compile_admin_access(spec: &AdminAccessSpec, issues: &mut Vec<String>) -> AdminAccess {
+    if spec.max_overrides == 0 || spec.max_overrides > MAX_ADMIN_ACCESS_OVERRIDES {
+        issues.push(format!(
+            "admin_access.max_overrides must be between 1 and {MAX_ADMIN_ACCESS_OVERRIDES}"
+        ));
+    }
+    if spec.max_ttl < Duration::from_secs(1) || spec.max_ttl > MAX_ADMIN_ACCESS_TTL {
+        issues.push(format!(
+            "admin_access.max_ttl must be between 1s and {}s",
+            MAX_ADMIN_ACCESS_TTL.as_secs()
+        ));
+    }
+    if spec.default_ttl < Duration::from_secs(1) || spec.default_ttl > spec.max_ttl {
+        issues.push(
+            "admin_access.default_ttl must be at least 1s and must not exceed max_ttl".to_owned(),
+        );
+    }
+
+    let mut functions = Vec::new();
+    if spec.presets {
+        for preset in crate::admin_access::DEFAULT_FUNCTIONS {
+            let context = format!("admin_access.presets.{}", preset.name);
+            let paths = compile_regexes(preset.paths, &context, issues);
+            let exclude = compile_regexes(preset.exclude, &context, issues);
+            if paths.is_empty() {
+                issues.push(format!("{context}: preset has no valid paths"));
+                continue;
+            }
+            functions.push(AdminFunction::new(preset.name.to_owned(), paths, exclude));
+        }
+    }
+
+    if spec.functions.len() > MAX_ADMIN_ACCESS_FUNCTIONS {
+        issues.push(format!(
+            "admin_access: too many functions (max {MAX_ADMIN_ACCESS_FUNCTIONS})"
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    for (index, function) in spec
+        .functions
+        .iter()
+        .take(MAX_ADMIN_ACCESS_FUNCTIONS)
+        .enumerate()
+    {
+        let context = format!("admin_access.functions[{index}]");
+        if function.name.trim().is_empty() {
+            issues.push(format!("{context}: `name` is required"));
+            continue;
+        }
+        if !valid_admin_function_name(&function.name) {
+            issues.push(format!(
+                "{context}: `{}` is not a valid function name; use 1-{MAX_ADMIN_ACCESS_NAME_BYTES} \
+                 ASCII letters, digits, `.`, `_`, or `-`",
+                function.name
+            ));
+            continue;
+        }
+        if !seen.insert(function.name.as_str()) {
+            issues.push(format!(
+                "{context}: duplicate function name `{}`",
+                function.name
+            ));
+            continue;
+        }
+        if function.paths.is_empty() {
+            issues.push(format!("{context}: `paths` must not be empty"));
+            continue;
+        }
+        if function.paths.len() > MAX_ADMIN_ACCESS_PATHS {
+            issues.push(format!(
+                "{context}: too many paths (max {MAX_ADMIN_ACCESS_PATHS})"
+            ));
+        }
+        let paths = &function.paths[..function.paths.len().min(MAX_ADMIN_ACCESS_PATHS)];
+        if paths.iter().any(|path| path.trim().is_empty()) {
+            issues.push(format!("{context}: path patterns must not be empty"));
+            continue;
+        }
+        let patterns = compile_regexes(paths, &context, issues);
+        if patterns.is_empty() {
+            continue;
+        }
+        if function.exclude.len() > MAX_ADMIN_ACCESS_PATHS {
+            issues.push(format!(
+                "{context}: too many exclusions (max {MAX_ADMIN_ACCESS_PATHS})"
+            ));
+        }
+        let exclude_patterns =
+            &function.exclude[..function.exclude.len().min(MAX_ADMIN_ACCESS_PATHS)];
+        if exclude_patterns
+            .iter()
+            .any(|pattern| pattern.trim().is_empty())
+        {
+            issues.push(format!("{context}: exclusion patterns must not be empty"));
+            continue;
+        }
+        let exclude = compile_regexes(exclude_patterns, &context, issues);
+        let compiled = AdminFunction::new(function.name.clone(), patterns, exclude);
+        if let Some(existing) = functions
+            .iter_mut()
+            .find(|existing| existing.name == compiled.name)
+        {
+            *existing = compiled;
+        } else {
+            functions.push(compiled);
+        }
+    }
+
+    if functions.len() > MAX_ADMIN_ACCESS_FUNCTIONS {
+        issues.push(format!(
+            "admin_access: too many functions after presets (max {MAX_ADMIN_ACCESS_FUNCTIONS})"
+        ));
+        functions.truncate(MAX_ADMIN_ACCESS_FUNCTIONS);
+    }
+    if spec.enabled && functions.is_empty() {
+        issues.push(
+            "admin_access: `enabled` requires at least one function; set `presets: true` or \
+             declare `functions`"
+                .to_owned(),
+        );
+    }
+
+    AdminAccess {
+        enabled: spec.enabled,
+        default: spec.default,
+        default_ttl: spec.default_ttl,
+        max_ttl: spec.max_ttl,
+        max_overrides: spec.max_overrides,
+        functions,
+    }
+}
+
+pub(crate) fn valid_admin_function_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ADMIN_ACCESS_NAME_BYTES
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn compile_client_ip(spec: Option<&ClientIpSpec>, issues: &mut Vec<String>) -> ClientIp {
@@ -3507,7 +3724,11 @@ fn anchored_end(hir: &Hir) -> bool {
     }
 }
 
-fn compile_regexes(patterns: &[String], context: &str, issues: &mut Vec<String>) -> Vec<Regex> {
+fn compile_regexes<S: AsRef<str>>(
+    patterns: &[S],
+    context: &str,
+    issues: &mut Vec<String>,
+) -> Vec<Regex> {
     let mut regexes = Vec::new();
 
     if patterns.len() > MAX_PATTERNS_PER_RULE {
@@ -3517,6 +3738,7 @@ fn compile_regexes(patterns: &[String], context: &str, issues: &mut Vec<String>)
     }
 
     for pattern in patterns.iter().take(MAX_PATTERNS_PER_RULE) {
+        let pattern = pattern.as_ref();
         if pattern.len() > MAX_PATTERN_BYTES {
             issues.push(format!(
                 "{context}: pattern exceeds {MAX_PATTERN_BYTES} bytes"
@@ -3757,7 +3979,7 @@ where
     }
 }
 
-fn parse_duration(text: &str) -> Result<Duration, String> {
+pub(crate) fn parse_duration(text: &str) -> Result<Duration, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("duration must not be empty".to_owned());
@@ -3918,6 +4140,334 @@ mod tests {
             .collect();
         let error = parse_with(BASE, &format!("content_routes:\n{routes}")).expect_err("must fail");
         assert!(error.to_string().contains("too many entries"));
+    }
+
+    #[test]
+    fn parses_admin_access_functions_and_limits() {
+        let config = parse_with(
+            BASE,
+            r"admin_access:
+  enabled: true
+  default: close
+  presets: false
+  functions:
+    - name: wordpress-admin
+      paths: ['^/wp-admin(?:/|$)']
+    - name: plugin-install
+      paths:
+        - ^/wp-admin/plugin-install\.php$
+        - ^/wp-admin/update\.php$
+",
+        )
+        .expect("valid config");
+
+        assert!(config.admin_access.enabled);
+        assert_eq!(
+            config.admin_access.default,
+            crate::admin_access::AccessState::Close
+        );
+        assert_eq!(config.admin_access.default_ttl, Duration::from_secs(600));
+        assert_eq!(config.admin_access.max_ttl, Duration::from_secs(3600));
+        assert_eq!(config.admin_access.max_overrides, 64);
+        assert_eq!(config.admin_access.functions.len(), 2);
+        assert!(
+            config
+                .admin_access
+                .function("plugin-install")
+                .expect("function")
+                .matches(&crate::request_view::path_forms(
+                    "/wp-admin/plugin-install.php"
+                ))
+        );
+        assert!(config.admin_access_warning().is_none());
+    }
+
+    #[test]
+    fn parses_admin_access_ttls_and_overrides() {
+        let config = parse_with(
+            BASE,
+            "admin_access:
+  enabled: true
+  presets: false
+  default_ttl: 2m
+  max_ttl: 30m
+  max_overrides: 4
+  functions:
+    - name: admin
+      paths: ['^/admin(?:/|$)']
+",
+        )
+        .expect("valid config");
+        assert_eq!(config.admin_access.default_ttl, Duration::from_secs(120));
+        assert_eq!(config.admin_access.max_ttl, Duration::from_secs(1800));
+        assert_eq!(config.admin_access.max_overrides, 4);
+    }
+
+    #[test]
+    fn admin_access_default_state_is_open_unless_configured() {
+        let config = parse_with(BASE, "admin_access:\n  enabled: true\n").expect("valid config");
+        assert_eq!(
+            config.admin_access.default,
+            crate::admin_access::AccessState::Open
+        );
+
+        let config = parse_with(
+            BASE,
+            "admin_access:\n  enabled: true\n  default: close\n  presets: false\n  functions:\n    - name: admin\n      paths: ['^/admin(?:/|$)']\n",
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.admin_access.default,
+            crate::admin_access::AccessState::Close
+        );
+
+        let error = parse_with(BASE, "admin_access:\n  enabled: true\n  default: maybe\n")
+            .expect_err("invalid default state");
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+
+    #[test]
+    fn admin_access_presets_apply_without_custom_functions() {
+        let config = parse_with(BASE, "admin_access:\n  enabled: true\n").expect("valid config");
+        assert!(config.admin_access.enabled);
+        assert_eq!(
+            config.admin_access.default,
+            crate::admin_access::AccessState::Open
+        );
+        assert!(
+            config.admin_access.functions.len() >= 10,
+            "the built-in presets must be loaded"
+        );
+        for name in [
+            "wordpress-admin",
+            "rails-admin",
+            "laravel-admin",
+            "generic-admin",
+            "phpmyadmin",
+            "adminer",
+            "tomcat-manager",
+            "java-console",
+            "solr-admin",
+            "spring-actuator",
+            "nextcloud-admin",
+            "ghost-admin",
+            "typo3-admin",
+        ] {
+            assert!(
+                config.admin_access.function(name).is_some(),
+                "missing default `{name}`"
+            );
+        }
+
+        let wordpress = config
+            .admin_access
+            .function("wordpress-admin")
+            .expect("wordpress default");
+        assert!(wordpress.matches(&crate::request_view::path_forms("/wp-admin/")));
+        assert!(wordpress.matches(&crate::request_view::path_forms("/blog/wp-admin/post.php")));
+        assert!(!wordpress.matches(&crate::request_view::path_forms("/wp-admin/admin-ajax.php")));
+        assert!(!wordpress.matches(&crate::request_view::path_forms(
+            "/wp-content/themes/blog/style.css"
+        )));
+
+        let spring = config
+            .admin_access
+            .function("spring-actuator")
+            .expect("actuator default");
+        assert!(spring.matches(&crate::request_view::path_forms("/actuator/env")));
+        assert!(!spring.matches(&crate::request_view::path_forms(
+            "/actuator/health/liveness"
+        )));
+    }
+
+    #[test]
+    fn admin_access_presets_can_be_replaced_by_name() {
+        let config = parse_with(
+            BASE,
+            "admin_access:
+  enabled: true
+  functions:
+    - name: generic-admin
+      paths: ['^/my-admin(?:/|$)']
+",
+        )
+        .expect("valid config");
+        let admin = config
+            .admin_access
+            .function("generic-admin")
+            .expect("overridden default");
+        assert!(admin.matches(&crate::request_view::path_forms("/my-admin/users")));
+        assert!(!admin.matches(&crate::request_view::path_forms("/admin")));
+        assert!(
+            config.admin_access.function("wordpress-admin").is_some(),
+            "the other presets stay active"
+        );
+    }
+
+    #[test]
+    fn admin_access_exclusions_stay_public() {
+        let config = parse_with(
+            BASE,
+            "admin_access:
+  enabled: true
+  presets: false
+  functions:
+    - name: custom
+      paths: ['^/tools(?:/|$)']
+      exclude: ['^/tools/public(?:/|$)']
+",
+        )
+        .expect("valid config");
+        let custom = config
+            .admin_access
+            .function("custom")
+            .expect("custom function");
+        assert!(custom.matches(&crate::request_view::path_forms("/tools/private")));
+        assert!(!custom.matches(&crate::request_view::path_forms("/tools/public")));
+    }
+
+    #[test]
+    fn rejects_invalid_admin_access_configuration() {
+        for (rest, expected) in [
+            (
+                "admin_access:\n  enabled: true\n  presets: false\n".to_owned(),
+                "requires at least one function",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  functions:\n    - name: bad name\n      paths: ['^/admin']\n".to_owned(),
+                "not a valid function name",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  functions:\n    - name: admin\n      paths: []\n"
+                    .to_owned(),
+                "`paths` must not be empty",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  functions:\n    - name: admin\n      paths: ['']\n"
+                    .to_owned(),
+                "path patterns must not be empty",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  functions:\n    - name: admin\n      paths: ['(']\n"
+                    .to_owned(),
+                "invalid regex",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  functions:\n    - name: admin\n      paths: ['^/admin']\n      exclude: ['']\n".to_owned(),
+                "exclusion patterns must not be empty",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  functions:\n    - name: admin\n      paths: ['^/admin']\n      exclude: ['(']\n".to_owned(),
+                "invalid regex",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  default_ttl: 0\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "default_ttl",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  default_ttl: 2h\n  max_ttl: 1h\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "default_ttl",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  max_ttl: 25h\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "max_ttl",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  max_ttl: 500ms\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "max_ttl",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  default_ttl: 500ms\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "default_ttl",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  max_overrides: 0\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "max_overrides",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  max_overrides: 1025\n  functions:\n    - name: admin\n      paths: ['^/admin']\n".to_owned(),
+                "max_overrides",
+            ),
+            (
+                "admin_access:\n  enabled: true\n  unknown: true\n".to_owned(),
+                "unknown field",
+            ),
+        ] {
+            let error = parse_with(BASE, &rest).expect_err("must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected `{expected}` in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_admin_access_functions() {
+        let error = parse_with(
+            BASE,
+            "admin_access:
+  enabled: true
+  presets: false
+  functions:
+    - name: admin
+      paths: ['^/admin']
+    - name: admin
+      paths: ['^/other']
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("duplicate function name"));
+    }
+
+    #[test]
+    fn rejects_too_many_effective_admin_access_functions() {
+        let functions: String = (0..MAX_ADMIN_ACCESS_FUNCTIONS)
+            .map(|index| format!("  - name: custom-{index}\n    paths: ['^/custom{index}$']\n"))
+            .collect();
+        let error = parse_with(
+            BASE,
+            &format!("admin_access:\n  enabled: true\n  functions:\n{functions}"),
+        )
+        .expect_err("presets plus the maximum number of custom functions is too many");
+        assert!(
+            error
+                .to_string()
+                .contains("too many functions after presets"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn admin_access_without_an_admin_listener_warns() {
+        let config = parse_with(
+            BASE,
+            "admin: { enabled: false }
+admin_access:
+  enabled: true
+  functions:
+    - name: admin
+      paths: ['^/admin(?:/|$)']
+",
+        )
+        .expect("valid config");
+        let warning = config.admin_access_warning().expect("warning");
+        assert!(warning.contains("admin listener is disabled"), "{warning}");
+    }
+
+    #[test]
+    fn disabled_admin_access_ignores_functions() {
+        let config = parse_with(
+            BASE,
+            "admin_access:
+  enabled: false
+  functions:
+    - name: admin
+      paths: ['^/admin(?:/|$)']
+",
+        )
+        .expect("valid config");
+        assert!(!config.admin_access.enabled);
+        assert!(config.admin_access_warning().is_none());
     }
 
     #[test]

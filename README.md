@@ -166,6 +166,29 @@ kunato maintenance on
 kunato maintenance off
 ```
 
+`kunato admin-access` controls declared administrative functions (for example
+`/wp-admin`, plugin installation, and file-update pages) with a default state
+and time-limited overrides. Enabling `admin_access` loads built-in presets for
+WordPress, Rails, Laravel, generic `/admin` panels, phpMyAdmin, Adminer,
+Tomcat/JBoss consoles, Solr, Spring Actuator, Nextcloud, Ghost, and TYPO3, and
+starts them `open` by default; set `default: close` to keep them unreachable
+unless explicitly opened. The simplest commands apply to every client and
+every function:
+
+```sh
+kunato admin-access close            # close everything for the default TTL
+kunato admin-access open --ttl 10m   # open everything for ten minutes
+kunato admin-access open --client 192.168.1.20 --function wordpress-admin --ttl 10m
+kunato admin-access status
+```
+
+`--client` and `--function` are optional. The most recent matching command
+wins, and overrides revert to the configured default when they expire. Closed
+requests receive `404` and never reach the upstream; open requests still pass
+through the normal WAF rules, and all overrides reset when Kunato restarts.
+See [administrative access](docs/development.md#administrative-access) for the
+configuration, path matching, and recovery notes.
+
 ### 3. Configure and Customize Rules
 
 Edit `/etc/kunato/kunato.yaml` to adjust proxy settings or add your own rules;
@@ -271,6 +294,7 @@ and the remaining trust limits.
 | `kunato log [OPTIONS]` | Query and filter Kunato security events from the systemd journal. |
 | `kunato metrics` | Display Prometheus metrics from the loopback admin listener (`127.0.0.1:9090`). |
 | `kunato maintenance on\|off` | Serve the maintenance page without forwarding, or restore normal proxying. |
+| `kunato admin-access status\|open\|close` | List or toggle time-limited access to declared administrative functions. |
 | `kunato update-rules` | Check for, verify, validate, and apply the latest managed rule set once. |
 | `kunato upgrade` | Upgrade the installed binary and systemd unit while preserving configuration. |
 | `kunato banner` | Print the colored mascot banner to the terminal. |

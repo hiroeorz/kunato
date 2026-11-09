@@ -283,6 +283,9 @@ async fn handle_request(
         server::rejected(source, &err)
     } else if let Some(response) = server::maintenance_response(&context, &parts) {
         response
+    } else if let Some(response) = server::admin_access_response(&context, &config, source, &parts)
+    {
+        response
     } else if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
         match read_prefix(recv, &config, source, inspection, &context).await {
             Ok((payload, inspection)) => {

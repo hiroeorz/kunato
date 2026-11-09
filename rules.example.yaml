@@ -2240,6 +2240,32 @@ admin:
   enabled: true
   listen: 127.0.0.1:9090
 
+# Optional administrative functions with a configurable default state.
+# `default: open` (the shipped default) keeps normal access and lets `close`
+# temporarily restrict it; `default: close` is fail-closed and requires an
+# `open` override to use admin pages. The built-in presets cover WordPress,
+# Rails, Laravel, generic /admin panels, phpMyAdmin, Adminer, Tomcat/JBoss
+# consoles, Solr, Spring Actuator, Nextcloud, Ghost, and TYPO3; a `functions`
+# entry with the same name replaces a preset, and `presets: false` removes all
+# of them. Open or close from an administrative channel such as SSH:
+#   kunato admin-access close
+#   kunato admin-access open --ttl 10m
+#   kunato admin-access open --client 192.168.1.20 --function wordpress-admin --ttl 10m
+# The most recent matching command wins and expires automatically. A closed
+# request is answered with 404 and never reaches the upstream; open requests
+# still pass through the normal rules and inspection.
+# admin_access:
+#   enabled: true
+#   default: open          # or close for fail-closed operation
+#   presets: true
+#   default_ttl: 10m
+#   max_ttl: 1h
+#   max_overrides: 64
+#   # functions:
+#   #   - name: my-admin
+#   #     paths: ['^/my-admin(?:/|$)']
+#   #     exclude: ['^/my-admin/public(?:/|$)']
+
 # Response header policy, applied to every response Kunato sends, including
 # upstream responses and its own block/error responses. Header names are
 # case-insensitive and a name in both lists is replaced. Hop-by-hop headers

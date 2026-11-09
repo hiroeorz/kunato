@@ -130,6 +130,17 @@ kunato maintenance on
 kunato maintenance off
 ```
 
+`kunato admin-access` は、宣言した管理機能（たとえば `/wp-admin`、プラグイン導入、ファイル更新ページ）を、デフォルト状態と期間限定の上書きで制御します。`admin_access` を有効にすると、WordPress、Rails、Laravel、汎用 `/admin` パネル、phpMyAdmin、Adminer、Tomcat/JBoss コンソール、Solr、Spring Actuator、Nextcloud、Ghost、TYPO3 の組み込みプリセットが読み込まれ、デフォルトでは `open` になります。`default: close` にすると、明示的に開くまで管理機能へ到達できません。最小限のコマンドは全クライアント・全機能に適用されます：
+
+```sh
+kunato admin-access close            # 既定のTTLだけすべて閉じる
+kunato admin-access open --ttl 10m   # 10分だけすべて開く
+kunato admin-access open --client 192.168.1.20 --function wordpress-admin --ttl 10m
+kunato admin-access status
+```
+
+設定、パスのマッチング、復旧方法は[管理機能のアクセス制御](docs/development.md#administrative-access)を参照してください。
+
 ### 3. 設定とルールのカスタマイズ
 
 プロキシ設定の調整や独自ルールの追加は `/etc/kunato/kunato.yaml` を編集します。変更は自動検知され、再起動なしでホットリロードされます：
@@ -216,6 +227,7 @@ sudo apt-get install -y minisign
 | `kunato log [OPTIONS]` | systemd ジャーナルから Kunato のセキュリティイベントを検索・フィルタリングします。 |
 | `kunato metrics` | ループバック管理リスナー (`127.0.0.1:9090`) から Prometheus メトリクスを表形式で表示します。 |
 | `kunato maintenance on\|off` | 転送を行わずメンテナンス画面を返すか、通常のプロキシ動作に戻します。 |
+| `kunato admin-access status\|open\|close` | 宣言した管理機能へのアクセスを一覧・期間限定で開閉します。 |
 | `kunato update-rules` | 最新のマネージドルールセットのチェック・検証・適用を1回実行します。 |
 | `kunato upgrade` | 設定を保持したまま、インストール済みバイナリと systemd ユニットをアップグレードします。 |
 | `kunato banner` | カラーのマスコットバナーをターミナルに表示します。 |

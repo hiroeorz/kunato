@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{
-    CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderValue,
-    TRANSFER_ENCODING, UPGRADE,
+    CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap,
+    HeaderValue, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{Request, Response, StatusCode};
 use hyper::body::{Body, Frame, Incoming};
@@ -23,6 +23,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::acme::{ACME_TLS_ALPN, AcmeService};
+use crate::admin_access::{AdminAccessState, Decision as AdminAccessDecision};
 use crate::client_ip::ClientSource;
 use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
@@ -454,6 +455,7 @@ pub struct Context {
     protection: Arc<ProtectionState>,
     metrics: Arc<Metrics>,
     maintenance: Arc<MaintenanceState>,
+    admin_access: Arc<AdminAccessState>,
     inspection: Arc<InspectionBudget>,
     upload_slots: Arc<Semaphore>,
     tls: TlsMode,
@@ -537,6 +539,10 @@ impl Context {
     pub(crate) fn protection_state(&self) -> Arc<ProtectionState> {
         Arc::clone(&self.protection)
     }
+
+    pub(crate) fn admin_access_state(&self) -> Arc<AdminAccessState> {
+        Arc::clone(&self.admin_access)
+    }
 }
 
 /// Keeps `kunato_upload_inspection_active` accurate even if an inspection
@@ -618,6 +624,7 @@ impl Server {
                 protection: Arc::new(ProtectionState::new()),
                 metrics,
                 maintenance: Arc::new(MaintenanceState::new()),
+                admin_access: Arc::new(AdminAccessState::new()),
                 inspection: Arc::new(InspectionBudget::new()),
                 upload_slots: Arc::new(Semaphore::new(upload_inspection_concurrency())),
                 tls,
@@ -638,6 +645,12 @@ impl Server {
 
     pub fn maintenance(&self) -> Arc<MaintenanceState> {
         Arc::clone(&self.context.maintenance)
+    }
+
+    /// Time-limited open and close overrides for administrative application
+    /// functions, shared with the loopback admin listener.
+    pub fn admin_access(&self) -> Arc<AdminAccessState> {
+        self.context.admin_access_state()
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -1122,6 +1135,8 @@ async fn handle_request(
         Err(err)
     } else if let Some(response) = maintenance_response(&context, &parts) {
         Ok(response)
+    } else if let Some(response) = admin_access_response(&context, &config, source, &parts) {
+        Ok(response)
     } else if upgrade.is_some()
         && !parts.headers.contains_key(CONTENT_LENGTH)
         && !parts.headers.contains_key(TRANSFER_ENCODING)
@@ -1261,6 +1276,64 @@ pub(crate) fn maintenance_response(
         .maintenance
         .enabled()
         .then(|| crate::maintenance::response(parts.uri.path()))
+}
+
+/// Apply the configured default state and any active open/close overrides to
+/// requests that match a declared administrative function. A denied request
+/// looks like any missing path, so a discovered administrative URL is not a
+/// usable entry point while the gate is closed. An allowed request returns
+/// `None` and continues through the normal body inspection, rule evaluation,
+/// and forwarding path.
+pub(crate) fn admin_access_response(
+    context: &Context,
+    config: &CompiledConfig,
+    source: ClientSource,
+    parts: &http::request::Parts,
+) -> Option<Response<ProxyBody>> {
+    if !config.admin_access.enabled {
+        return None;
+    }
+    let forms = crate::request_view::path_forms(parts.uri.path());
+    match config.admin_access.decide(
+        &context.admin_access,
+        source.client_ip,
+        &forms,
+        std::time::Instant::now(),
+    ) {
+        AdminAccessDecision::NotGated => None,
+        AdminAccessDecision::Allowed(function) => {
+            context
+                .metrics
+                .admin_access_allowed
+                .fetch_add(1, Ordering::Relaxed);
+            debug!(
+                client = %source.client_ip, peer = %source.peer,
+                method = %parts.method,
+                path = %parts.uri.path(),
+                function = %function,
+                "administrative access open"
+            );
+            None
+        }
+        AdminAccessDecision::Denied(function) => {
+            context
+                .metrics
+                .admin_access_denied
+                .fetch_add(1, Ordering::Relaxed);
+            info!(
+                client = %source.client_ip, peer = %source.peer,
+                method = %parts.method,
+                path = %parts.uri.path(),
+                function = %function,
+                "administrative access denied; the effective state is closed"
+            );
+            let mut response = forward::error_response(StatusCode::NOT_FOUND, "not found");
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Some(response)
+        }
+    }
 }
 
 /// Reject a request whose absolute-form authority and `Host` header disagree.

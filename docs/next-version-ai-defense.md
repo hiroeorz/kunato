@@ -33,20 +33,32 @@ that foundation.
 
 Priority: Highest.
 
+Status: Implemented on `main` as the `admin_access` configuration and the
+`kunato admin-access status|open|close` commands. The gate has a configurable
+default state (`open` by default, or `close` for fail-closed operation) and
+time-limited overrides that can target every function, one client, or one
+function; the most recent matching command wins and expires automatically.
+Enabling it loads built-in presets for WordPress, Rails, Laravel, generic
+`/admin` panels, phpMyAdmin, Adminer, Tomcat/JBoss consoles, Solr, Spring
+Actuator, Nextcloud, Ghost, and TYPO3 in addition to owner-defined functions.
+Open requests still pass the normal rule and inspection pipeline. See
+[Administrative access](development.md#administrative-access).
+
 Keep blog browsing publicly available at all times, while allowing access to
 administrative pages, plugin installation, file updates, and similar functions
 only when the owner authorizes it.
 
 For example, the owner could use an administrative channel such as SSH to
 authorize a particular device to use administrative functions for ten minutes.
-Kunato would issue a permit limited to those functions and that period. Access
-would close automatically when the permit expires. Kunato would verify the
-permit before forwarding the request to the application; knowing a hidden URL
-would not be sufficient.
+Kunato would apply a time-limited open/close override limited to those
+functions and that period. The override would expire automatically and return
+to the configured default. Kunato would apply the effective state before
+forwarding the request to the application; knowing a hidden URL would not be
+sufficient.
 
 The value is keeping an administrative entry point unreachable for long periods,
-even if an attacker discovers an unknown vulnerability behind it. Requests with
-a valid permit would still undergo normal WAF inspection.
+even if an attacker discovers an unknown vulnerability behind it. Requests in the open
+state would still undergo normal WAF inspection.
 
 Many home servers have exactly one administrator. That makes this approach a
 promising way to combine effective protection with a usable workflow.
@@ -208,7 +220,7 @@ value. See
 
 ## Recommended implementation order
 
-1. Open administrative functions only when needed.
+1. Open administrative functions only when needed (implemented as `admin_access`).
 2. Detect continuity across an attacker's attempts.
 3. Validate the defenses against real AI agents.
 

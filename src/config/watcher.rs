@@ -287,6 +287,7 @@ fn install_with_stamps(
         .sum();
     let body_inspection_warning = new_config.body_inspection_warning();
     let allowed_hosts_warning = new_config.allowed_hosts_warning();
+    let admin_access_warning = new_config.admin_access_warning();
     config.store(Arc::new(new_config));
     // The snapshot is live: remember the stamps of the sources that were read
     // to build it so the watcher does not compile the same files again, while
@@ -299,6 +300,9 @@ fn install_with_stamps(
         warn!("{warning}");
     }
     if let Some(warning) = allowed_hosts_warning {
+        warn!("{warning}");
+    }
+    if let Some(warning) = admin_access_warning {
         warn!("{warning}");
     }
     info!(categories, rules, "configuration reloaded");

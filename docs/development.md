@@ -1401,9 +1401,17 @@ that could not be decoded: `kunato_response_decode_skipped_total`), GraphQL
 rejections (`kunato_graphql_rejected_total`), and ACME
 certificate issuance, cache loads, and errors; gauges cover active connections,
 upload inspections running on the blocking pool, uptime, the time of the last
-successful rules update, and the time of the last deployed ACME certificate. Non-loopback addresses are rejected at validation
+successful rules update, and the time of the last deployed ACME certificate. The
+administrative access gate adds
+`kunato_admin_access_denied_total` (requests to a declared administrative
+function in the closed state) and `kunato_admin_access_allowed_total`
+(requests in the open state). Non-loopback addresses are rejected at validation
 time, and if the port is already in use Kunato logs a warning and continues
 without the admin endpoint.
+
+The listener also hosts the maintenance controls and the administrative access
+open/close endpoints; see [Maintenance mode](#maintenance-mode) and
+[Administrative access](#administrative-access).
 
 `kunato metrics` renders the `GET /metrics` response as a bordered two-column
 table with a header row: one row per sample with the metric name first and its
@@ -1450,6 +1458,153 @@ The admin listener exposes the same control as `PUT /maintenance/on` and
 `PUT /maintenance/off`; `GET /maintenance` reports `on` or `off`. The
 state-changing methods are not simple cross-origin requests, so a browser must
 pass a CORS preflight that the admin listener never grants.
+
+### Administrative access
+
+`admin_access` declares named administrative functions (path groups) and a
+default state for them. The gate is opt-in: it does nothing until `enabled:
+true`. When it is enabled, built-in presets for common administrative
+interfaces are loaded unless `presets: false`, and the default state is `open`
+unless `default: close` is set. The `open` and `close` commands create
+time-limited overrides; the most recently issued matching override wins, and
+the configured default applies again when it expires.
+
+```yaml
+admin_access:
+  enabled: true
+  default: open          # open (default) or close
+  presets: true          # built-in functions below; a matching name replaces one
+  default_ttl: 10m
+  max_ttl: 1h
+  max_overrides: 64
+  functions:             # optional; a matching name replaces a preset
+    - name: my-admin
+      paths: ['^/my-admin(?:/|$)']
+      exclude: ['^/my-admin/public(?:/|$)']
+```
+
+`default: close` is the fail-closed mode: a matching function answers `404`
+until an `open` override is active. `default: open` keeps normal administrative
+access and lets `close` temporarily restrict it. The shipped default is `open`;
+set `default: close` when the administrative surface should be unreachable
+except during an explicit window.
+
+The built-in functions are:
+
+| Function | Covers |
+| --- | --- |
+| `wordpress-admin` | `/wp-admin` at any depth (including a subdirectory install), `wp-login.php`, and `xmlrpc.php`; keeps `admin-ajax.php` and `admin-post.php` public for logged-out themes and form handlers |
+| `rails-admin` | Rails dev tools (`/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), Sidekiq, PgHero, Flipper, Blazer, Delayed Job, Good Job, ActiveAdmin, RailsAdmin, Avo, and Administrate |
+| `laravel-admin` | Horizon, Telescope, Nova, Pulse, Log Viewer, Clockwork, and Debugbar |
+| `generic-admin` | `/admin`, `/admin.php`, `/administrator`, `/adm` (phpBB), `/-/admin` (Gitea), and `/api/.../admin` at the site root |
+| `phpmyadmin` | phpMyAdmin and `/pma` |
+| `adminer` | Adminer and `/adminer.php` |
+| `tomcat-manager` | Tomcat `/manager` and `/host-manager` |
+| `java-console` | JBoss `/jmx-console` and `/web-console`, and Axis2 admin |
+| `solr-admin` | Solr |
+| `spring-actuator` | Spring Boot Actuator except `/actuator/health` and `/actuator/info`, which stay public for probes |
+| `nextcloud-admin` | Nextcloud/ownCloud `/settings/admin`, with or without the `/index.php` prefix |
+| `ghost-admin` | Ghost `/ghost` |
+| `typo3-admin` | TYPO3 `/typo3` |
+
+The preset patterns are case-insensitive, and the product-specific names also
+match a subdirectory install. `generic-admin` is root-anchored so static paths
+such as `/static/admin/...` remain public; add a custom function for a panel
+under a subdirectory. `wordpress-admin` gates the WordPress login; replace the
+function without `wp-login.php` when the site has public user accounts. Set
+`presets: false` to start from only the declared functions. A `functions`
+entry with the same name as a preset replaces it, so define the complete path
+and exclusion lists when customizing one. Up to 64 effective functions are
+accepted, including the presets.
+
+Open or close access from an administrative channel such as SSH on the host:
+
+```sh
+kunato admin-access close
+kunato admin-access open --ttl 10m
+kunato admin-access open --client 192.168.1.20 --function wordpress-admin --ttl 10m
+kunato admin-access close --client 192.168.1.20
+kunato admin-access status
+```
+
+With neither `--client` nor `--function`, `open` and `close` apply to every
+client and every configured function. `--client` narrows the override to one
+resolved client address and `--function` to one configured function. Without
+`--ttl`, `default_ttl` applies; `max_ttl` is the hard upper bound.
+`max_overrides` bounds the in-memory table.
+
+Overrides are evaluated per request in issuance order: the most recent matching
+override wins, so a broad `close` closes existing narrow opens, and a later
+`open --client 192.168.1.20` reopens only that device while the rest stays
+closed. When an override expires, the configured default applies again. The
+functions hot-reload with the rest of the configuration; existing overrides
+keep their expiry and are matched against the new function names. Overrides are
+not persisted, so a restart returns every function to its configured default.
+
+A request that resolves to the closed state receives `404 Not Found` with
+`Cache-Control: no-store` and is not forwarded. If several functions match one
+path, the request is open only when every one of them is open, so an
+overlapping function cannot bypass a close. The gate is evaluated per HTTP
+request; an established WebSocket tunnel is not torn down when an override
+expires, so use HTTP functions for administrative actions and close the page
+when finished.
+
+The client address is the resolved identity, so with
+`client_ip.trusted_proxies` an override follows the real client rather than the
+proxy. Without a configured `client_ip`, all clients behind the same reverse
+proxy share the peer address and therefore the override; configure `client_ip`
+before relying on client-scoped overrides behind a proxy. An IP address alone
+does not establish that requests belong to the same person.
+
+Path patterns are Rust regular expressions matched against every decoded and
+normalized form of the request path. A request is gated when any form matches
+`paths`, so `%77p-admin`, `//wp-admin`, and `/x/../wp-admin` cannot reach the
+function without the effective state being open. `exclude` patterns keep a
+matching form outside the gate (for example a public AJAX handler below an
+administrative prefix); exclusions are evaluated per form, so a differently
+encoded form that still reaches an administrative page is not hidden by an
+excluded one. Matching happens after percent decoding and dot-segment/border
+normalization only; forms the origin has its own rules for, such as path
+parameters (`;jsessionid=...`) or Windows trailing dots, must be covered by the
+pattern. Custom patterns are case-sensitive unless `(?i)` is written; the
+built-in presets already use it. Only the path is matched; an application that
+selects administrative behavior from the query string or a header needs a rule
+for that input in addition to the gate.
+
+Open requests still run through the whole request pipeline: form and upload
+inspection, GraphQL, JWT, and hardening checks, rule evaluation, and
+response-phase rules. The gate runs before rule evaluation, so an `ALLOW` rule
+cannot bypass a close. Requests the gate rejects never enter rule evaluation,
+so a closed function does not spend inspection CPU, and
+`kunato_admin_access_denied_total` counts them.
+
+The configured default keeps working without the admin listener, but `open` and
+`close` cannot be applied. Kunato warns at startup and on reload while the
+listener is disabled. To recover from a locked-out state, set `default: open`
+or `admin_access.enabled: false` and reload (the configuration watcher or
+`SIGHUP`), or restart with the field changed. Enabling the admin listener
+itself requires a restart, because `admin` listener settings are not applied by
+a reload.
+
+The listener exposes the controls as `GET /admin-access` (configured functions
+and active overrides),
+`PUT /admin-access/open?client=<IP>&function=<name>[&ttl=<seconds>]`, and
+`PUT /admin-access/close?client=<IP>&function=<name>[&ttl=<seconds>]`. Every
+parameter is optional; omitting `client` and `function` applies the override to
+everything. The `ttl` value accepts seconds (`600`) or a duration such as
+`10m`; an override outside `1s..=max_ttl` is rejected. The state-changing
+methods are not simple cross-origin requests, so a browser must pass a CORS
+preflight that the admin listener never grants.
+
+The admin listener is loopback-only but has no per-user authentication: any
+local process that can reach `admin.listen` can open or close access, exactly
+as it can toggle maintenance. This lets the owner use an SSH session on the
+host, and it also means a fully compromised upstream process on the same
+network namespace can open the gate for a remote address. When local
+compromise is in scope, isolate the upstream in a container or network
+namespace that cannot reach the host's loopback admin port. The gate is an
+access-control convenience for a single-administrator host, not a defense
+against full local compromise.
 
 ### Log viewer
 
@@ -1933,6 +2088,7 @@ Limitations:
 - [x] HTTP/2 (ALPN over TLS, h2c prior knowledge)
 - [x] HTTP/3 over QUIC (opt-in, Alt-Svc advertisement)
 - [x] Host/authority allowlist (`allowed_hosts`)
+- [x] Administrative access open/close overrides (`admin_access`)
 - [x] Behavioral bot and authentication-abuse detection
 - [x] Response-phase rules (status, response headers, response body)
 - [x] curl installer and managed rule set with daily updates

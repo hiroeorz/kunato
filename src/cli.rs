@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::time::Duration;
 
 mod parse;
 
 pub use parse::ParseError;
 
+use crate::admin_access::AccessState;
 use crate::allowed_hosts::AllowedHosts;
 use crate::error::Error;
 
@@ -14,8 +16,8 @@ pub const DEFAULT_RULES_URL: &str =
 pub const DEFAULT_RULES_FILE: &str = "/var/lib/kunato/rules.yaml";
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
 
-/// Loopback admin listener queried by `kunato metrics` and
-/// `kunato maintenance`.
+/// Loopback admin listener queried by `kunato metrics`,
+/// `kunato maintenance`, and `kunato admin-access`.
 pub const DEFAULT_METRICS_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9090));
 
@@ -68,6 +70,9 @@ pub enum Command {
 
     /// Enter or leave maintenance mode through the admin listener.
     Maintenance(MaintenanceArgs),
+
+    /// Open, close, or list administrative access through the admin listener.
+    AdminAccess(AdminAccessArgs),
 
     /// Print the Kunato banner.
     Banner(BannerArgs),
@@ -124,6 +129,35 @@ impl MaintenanceAction {
     pub fn enabled(self) -> bool {
         matches!(self, Self::On)
     }
+}
+
+#[derive(Debug)]
+pub struct AdminAccessArgs {
+    /// Open, close, or list administrative access.
+    pub action: AdminAccessAction,
+
+    /// Admin listener address accepting the access control requests.
+    ///
+    /// Only loopback addresses are accepted; the admin listener never binds a
+    /// public interface.
+    pub listen: SocketAddr,
+}
+
+#[derive(Debug)]
+pub enum AdminAccessAction {
+    /// List the configured functions and active overrides.
+    Status,
+    /// Open or close administrative functions for a bounded time.
+    Set {
+        /// State to apply until the override expires.
+        state: AccessState,
+        /// Resolved client address; absent applies to every client.
+        client: Option<IpAddr>,
+        /// Configured function name; absent applies to every function.
+        function: Option<String>,
+        /// Override lifetime; when absent the configured default applies.
+        ttl: Option<Duration>,
+    },
 }
 
 #[derive(Debug)]

@@ -61,6 +61,7 @@ Components:
 | Watcher      | Detects config changes and drives the reload pipeline.                |
 | Form guard   | Bounds decoded form structures before rules and origin forwarding. |
 | PHP profile  | Opt-in host/path-scoped lifecycle and response-cookie mitigations. |
+| Admin access | Default state plus time-limited open/close overrides per client or function. |
 
 ## 3. Runtime and Concurrency Model
 
@@ -113,6 +114,10 @@ Components:
    Request-target length, header size/count, and non-canonical method-case checks
    also run before body ingestion or inspection-memory reservation on every
    transport, so an invalid head never waits for its body.
+   Maintenance mode and the `admin_access` gate are evaluated next, before the
+   body prefix is buffered: maintenance answers with `503`, a declared
+   administrative function in the closed state answers with `404` and is never
+   forwarded, and an open request continues through the normal path.
 5. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
    prefix. With the default `body_inspection: strict`, the prefix is evaluated
    first: a matching ALLOW rule forwards, a matching BLOCK rule uses its
@@ -665,6 +670,23 @@ invariant.
   (`GET /maintenance_in_progress.png`) instead of being forwarded; bodies are
   not read. `GET /maintenance` reports the current state. The switch survives
   configuration reloads and resets when the process restarts.
+- `admin_access` declares named administrative functions as path patterns and
+  a default state (`open` by default, or `close` for fail-closed operation). A
+  request that matches any decoded or normalized form of a function path is
+  answered from the most recent matching `open`/`close` override, or from the
+  default when none is active; a closed request gets `404`, and open requests
+  continue through the normal inspection and rule pipeline. Overrides are set
+  through `PUT /admin-access/open|close` on the loopback listener, optionally
+  scoped to one client address or function, and expire automatically
+  (`max_ttl`); the table is bounded by `max_overrides` and resets on restart.
+  When `presets` is enabled, built-in functions cover WordPress, Rails,
+  Laravel, generic `/admin` panels, phpMyAdmin, Adminer, Tomcat/JBoss consoles,
+  Solr, Spring Actuator, Nextcloud, Ghost, and TYPO3; `exclude` patterns keep
+  public handlers such as `admin-ajax.php` and Actuator health probes outside
+  the gate. `kunato admin-access status|open|close` is the owner-facing client,
+  and `kunato_admin_access_denied_total` /
+  `kunato_admin_access_allowed_total` count gate decisions. See
+  [Administrative access](development.md#administrative-access).
 
 ## 10. CLI and Deployment
 
@@ -678,7 +700,9 @@ invariant.
   target release, keeping the configuration; `--version TAG` pins a release,
   `--dry-run` prints what would run), `metrics` (print the admin listener's
   Prometheus exposition as a table), `maintenance on|off` (serve the maintenance
-  page without forwarding, or restore normal proxying), and `log` (read and
+  page without forwarding, or restore normal proxying), `admin-access
+  status|open|close` (list or toggle time-limited administrative access), and
+  `log` (read and
   filter the systemd journal; see [Log viewer](development.md#log-viewer)). The
   installer remains the only component that writes `/usr/local/bin` and the
   systemd unit, so upgrades behave exactly like a manual installer rerun.
@@ -701,7 +725,8 @@ src/
   cli.rs           # Argument parsing
   error.rs         # Error types
   telemetry.rs     # Logging setup
-  admin.rs         # Loopback admin listener exposing /metrics and /maintenance
+  admin.rs         # Loopback admin listener: /metrics, /maintenance, /admin-access
+  admin_access.rs  # Administrative function matching and open/close overrides
   client_ip.rs     # Bounded identity assertions from explicitly trusted proxies
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching
   maintenance.rs   # In-memory maintenance switch, page, and embedded artwork
@@ -733,7 +758,8 @@ blackbox/          # External black-box test driver (separate crate)
 examples/
   upstream.rs      # Manual test upstream with access logs
 tests/
-  proxy.rs         # Pass-through, rules, limits, protection, metrics, maintenance
+  proxy.rs         # Pass-through, rules, limits, protection, metrics, maintenance,
+                   #   administrative access
 docs/
   DESIGN.md
 packaging/
@@ -870,7 +896,8 @@ exposed by the configuration.
 M0 through M12 are implemented: metrics and the admin listener, maintenance
 mode, the example configuration, the systemd unit, musl static builds, CI, a
 tag-triggered release workflow, optional TLS termination, HTTP/2, HTTP/3,
-WebSocket upgrades, response-phase rules, and behavioral detection.
+WebSocket upgrades, response-phase rules, behavioral detection, and the
+time-limited administrative access gate.
 
 ## 16. Open Questions and Future Work
 

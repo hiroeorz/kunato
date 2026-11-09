@@ -15,13 +15,17 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use tokio::time::timeout;
 
-use crate::cli::{MaintenanceAction, MaintenanceArgs, MetricsArgs};
+use crate::cli::{
+    AdminAccessAction, AdminAccessArgs, MaintenanceAction, MaintenanceArgs, MetricsArgs,
+};
 use crate::error::Error;
 use crate::proxy::{BodyExt, Full};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_METRICS_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MAINTENANCE_BYTES: usize = 4 * 1024;
+const MAX_ADMIN_ACCESS_BYTES: usize = 256 * 1024;
+const MAX_ERROR_BYTES: usize = 4 * 1024;
 
 type AdminClient = Client<HttpConnector, Full<Bytes>>;
 
@@ -48,6 +52,43 @@ fn maintenance_path(action: MaintenanceAction) -> &'static str {
     match action {
         MaintenanceAction::On => "/maintenance/on",
         MaintenanceAction::Off => "/maintenance/off",
+    }
+}
+
+/// Open, close, or list administrative access and write the admin response to
+/// stdout.
+pub async fn run_admin_access(args: AdminAccessArgs) -> Result<(), Error> {
+    let (method, path) = admin_access_request(&args.action);
+    let body = request(args.listen, method, &path, MAX_ADMIN_ACCESS_BYTES).await?;
+    write_stdout(&body)
+}
+
+fn admin_access_request(action: &AdminAccessAction) -> (Method, String) {
+    match action {
+        AdminAccessAction::Status => (Method::GET, "/admin-access".to_owned()),
+        AdminAccessAction::Set {
+            state,
+            client,
+            function,
+            ttl,
+        } => {
+            let mut path = format!("/admin-access/{}", state.as_str());
+            let mut params = Vec::new();
+            if let Some(client) = client {
+                params.push(format!("client={client}"));
+            }
+            if let Some(function) = function {
+                params.push(format!("function={function}"));
+            }
+            if let Some(ttl) = ttl {
+                params.push(format!("ttl={}", ttl.as_secs()));
+            }
+            if !params.is_empty() {
+                path.push('?');
+                path.push_str(&params.join("&"));
+            }
+            (Method::PUT, path)
+        }
     }
 }
 
@@ -86,7 +127,19 @@ async fn request(
 
     let status = response.status();
     if status != StatusCode::OK {
-        return Err(Error::Message(format!("`{url}` returned {status}")));
+        let detail = timeout(
+            REQUEST_TIMEOUT,
+            read_body(response.into_body(), &url, MAX_ERROR_BYTES),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|body| String::from_utf8_lossy(&body).trim().to_owned())
+        .filter(|body| !body.is_empty());
+        return Err(Error::Message(match detail {
+            Some(detail) => format!("`{url}` returned {status}: {detail}"),
+            None => format!("`{url}` returned {status}"),
+        }));
     }
 
     timeout(
@@ -145,6 +198,7 @@ fn write_stdout(body: &[u8]) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    use crate::admin_access::AccessState;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -195,6 +249,154 @@ mod tests {
     fn maintenance_paths_select_the_admin_route() {
         assert_eq!(maintenance_path(MaintenanceAction::On), "/maintenance/on");
         assert_eq!(maintenance_path(MaintenanceAction::Off), "/maintenance/off");
+    }
+
+    #[test]
+    fn admin_access_requests_use_the_expected_routes() {
+        assert_eq!(
+            admin_access_request(&AdminAccessAction::Status),
+            (Method::GET, "/admin-access".to_owned())
+        );
+        assert_eq!(
+            admin_access_request(&AdminAccessAction::Set {
+                state: AccessState::Open,
+                client: None,
+                function: None,
+                ttl: None,
+            }),
+            (Method::PUT, "/admin-access/open".to_owned())
+        );
+        assert_eq!(
+            admin_access_request(&AdminAccessAction::Set {
+                state: AccessState::Close,
+                client: None,
+                function: None,
+                ttl: Some(Duration::from_secs(600)),
+            }),
+            (Method::PUT, "/admin-access/close?ttl=600".to_owned())
+        );
+        assert_eq!(
+            admin_access_request(&AdminAccessAction::Set {
+                state: AccessState::Open,
+                client: Some("192.0.2.10".parse().expect("ip")),
+                function: Some("wordpress-admin".to_owned()),
+                ttl: Some(Duration::from_secs(600)),
+            }),
+            (
+                Method::PUT,
+                "/admin-access/open?client=192.0.2.10&function=wordpress-admin&ttl=600".to_owned()
+            )
+        );
+        assert_eq!(
+            admin_access_request(&AdminAccessAction::Set {
+                state: AccessState::Close,
+                client: Some("192.0.2.10".parse().expect("ip")),
+                function: None,
+                ttl: None,
+            }),
+            (
+                Method::PUT,
+                "/admin-access/close?client=192.0.2.10".to_owned()
+            )
+        );
+        assert_eq!(
+            admin_access_request(&AdminAccessAction::Set {
+                state: AccessState::Open,
+                client: None,
+                function: Some("admin".to_owned()),
+                ttl: None,
+            }),
+            (Method::PUT, "/admin-access/open?function=admin".to_owned())
+        );
+
+        let (_, path) = admin_access_request(&AdminAccessAction::Set {
+            state: AccessState::Open,
+            client: Some("2001:db8::1".parse().expect("ip")),
+            function: Some("admin".to_owned()),
+            ttl: Some(Duration::from_secs(600)),
+        });
+        assert!(
+            format!("http://127.0.0.1:9090{path}")
+                .parse::<http::Uri>()
+                .is_ok(),
+            "the IPv6 override query must be a valid request target"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_is_a_put_request_with_its_query() {
+        let (addr, captured) = serve_once_capturing(response(
+            "200 OK",
+            "open client=192.0.2.10 function=admin expires_in_seconds=600\n",
+        ))
+        .await;
+
+        run_admin_access(AdminAccessArgs {
+            action: AdminAccessAction::Set {
+                state: AccessState::Open,
+                client: Some("192.0.2.10".parse().expect("ip")),
+                function: Some("admin".to_owned()),
+                ttl: Some(Duration::from_secs(600)),
+            },
+            listen: addr,
+        })
+        .await
+        .expect("open");
+
+        let request = captured.await.expect("captured request");
+        assert!(
+            request.starts_with(
+                "PUT /admin-access/open?client=192.0.2.10&function=admin&ttl=600 HTTP/1.1\r\n"
+            ),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_without_options_closes_everything() {
+        let (addr, captured) = serve_once_capturing(response(
+            "200 OK",
+            "close client=* function=* expires_in_seconds=600\n",
+        ))
+        .await;
+
+        run_admin_access(AdminAccessArgs {
+            action: AdminAccessAction::Set {
+                state: AccessState::Close,
+                client: None,
+                function: None,
+                ttl: None,
+            },
+            listen: addr,
+        })
+        .await
+        .expect("close");
+
+        let request = captured.await.expect("captured request");
+        assert!(
+            request.starts_with("PUT /admin-access/close HTTP/1.1\r\n"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_admin_request_reports_the_response_body() {
+        let addr = serve_once(response("400 Bad Request", "unknown function `nope`\n")).await;
+
+        let error = request(
+            addr,
+            Method::PUT,
+            "/admin-access/open?client=192.0.2.10&function=nope",
+            MAX_ADMIN_ACCESS_BYTES,
+        )
+        .await
+        .expect_err("400 is an error");
+
+        assert!(error.to_string().contains("400 Bad Request"), "{error}");
+        assert!(
+            error.to_string().contains("unknown function `nope`"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

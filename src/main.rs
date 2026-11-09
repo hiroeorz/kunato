@@ -51,6 +51,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             Command::Log(args) => kunato::logs::run(*args).await,
             Command::Metrics(args) => kunato::admin_client::run(args).await,
             Command::Maintenance(args) => kunato::admin_client::run_maintenance(args).await,
+            Command::AdminAccess(args) => kunato::admin_client::run_admin_access(args).await,
             Command::Banner(args) => kunato::banner::run(args),
         };
     }
@@ -85,6 +86,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let server = Server::bind(listen, config.clone(), metrics.clone(), acme.as_ref()).await?;
     let protection = server.protection();
     let maintenance = server.maintenance();
+    let admin_access = server.admin_access();
     info!(addr = %server.local_addr()?, config = %cli.config.display(), "kunato started");
 
     let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
@@ -104,7 +106,16 @@ async fn run(cli: Cli) -> Result<(), Error> {
     ));
 
     let admin_task = if admin_config.enabled {
-        match AdminServer::bind(&admin_config, metrics.clone(), protection, maintenance).await {
+        match AdminServer::bind(
+            &admin_config,
+            config.clone(),
+            metrics.clone(),
+            protection,
+            maintenance,
+            admin_access,
+        )
+        .await
+        {
             Ok(admin) => {
                 info!(addr = %admin.local_addr()?, "admin listening");
                 Some(tokio::spawn(admin.run(shutdown_rx.clone())))
@@ -112,7 +123,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
             Err(err) => {
                 warn!(
                     error = %err,
-                    "failed to start admin listener; metrics and maintenance controls unavailable"
+                    "failed to start admin listener; metrics, maintenance, and administrative \
+                     access controls unavailable, and administrative functions stay closed"
                 );
                 None
             }
@@ -155,6 +167,9 @@ fn warn_configuration(config: &CompiledConfig) {
         warn!("{warning}");
     }
     if let Some(warning) = config.allowed_hosts_warning() {
+        warn!("{warning}");
+    }
+    if let Some(warning) = config.admin_access_warning() {
         warn!("{warning}");
     }
 }

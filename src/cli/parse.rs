@@ -1,14 +1,16 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::{
-    BannerArgs, Cli, Command, DEFAULT_CONFIG_PATH, DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE,
-    DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat, LogOutputFormat, MaintenanceAction,
-    MaintenanceArgs, MetricsArgs, UpgradeArgs,
+    AdminAccessAction, AdminAccessArgs, BannerArgs, Cli, Command, DEFAULT_CONFIG_PATH,
+    DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE, DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat,
+    LogOutputFormat, MaintenanceAction, MaintenanceArgs, MetricsArgs, UpgradeArgs,
 };
+use crate::admin_access::AccessState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -87,6 +89,7 @@ enum Kind {
     Log,
     Metrics,
     Maintenance,
+    AdminAccess,
     Banner,
 }
 
@@ -99,6 +102,7 @@ fn kind_from_name(name: &str) -> Option<Kind> {
         "log" => Some(Kind::Log),
         "metrics" => Some(Kind::Metrics),
         "maintenance" => Some(Kind::Maintenance),
+        "admin-access" => Some(Kind::AdminAccess),
         "banner" => Some(Kind::Banner),
         _ => None,
     }
@@ -161,6 +165,22 @@ struct MaintenanceState {
     listen: Option<SocketAddr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminAccessKind {
+    Status,
+    Open,
+    Close,
+}
+
+#[derive(Default)]
+struct AdminAccessParseState {
+    action: Option<AdminAccessKind>,
+    client: Option<IpAddr>,
+    function: Option<String>,
+    ttl: Option<Duration>,
+    listen: Option<SocketAddr>,
+}
+
 #[derive(Default)]
 struct BannerState {
     no_color: bool,
@@ -180,6 +200,7 @@ struct Parser {
     log: LogState,
     metrics: MetricsState,
     maintenance: MaintenanceState,
+    admin_access: AdminAccessParseState,
     banner: BannerState,
 }
 
@@ -199,6 +220,7 @@ impl Parser {
             log: LogState::default(),
             metrics: MetricsState::default(),
             maintenance: MaintenanceState::default(),
+            admin_access: AdminAccessParseState::default(),
             banner: BannerState::default(),
         }
     }
@@ -281,6 +303,7 @@ impl Parser {
             Some(Kind::Upgrade) => self.parse_upgrade_long(name, inline),
             Some(Kind::Metrics) => self.parse_metrics_long(name, inline),
             Some(Kind::Maintenance) => self.parse_maintenance_long(name, inline),
+            Some(Kind::AdminAccess) => self.parse_admin_access_long(name, inline),
             Some(Kind::Banner) => self.parse_banner_long(name, inline),
             Some(Kind::Validate | Kind::UpdateRules) | None => {
                 Err(self.unexpected(format!("--{name}")))
@@ -412,6 +435,68 @@ impl Parser {
         Ok(())
     }
 
+    fn parse_admin_access_long(
+        &mut self,
+        name: &str,
+        inline: Option<&str>,
+    ) -> Result<(), ParseError> {
+        match name {
+            "listen" => {
+                let value = self.value_string(inline, "--listen <ADDR>")?;
+                let address = parse_loopback_address(&value)?;
+                set_once(&mut self.admin_access.listen, address, "--listen <ADDR>")?;
+            }
+            "client" => {
+                let value = self.value_string(inline, "--client <IP>")?;
+                let address = value
+                    .parse::<IpAddr>()
+                    .map_err(|_| invalid_value(&value, "--client <IP>", "an IP address"))?;
+                set_once(&mut self.admin_access.client, address, "--client <IP>")?;
+            }
+            "function" => {
+                let value = self.value_string(inline, "--function <NAME>")?;
+                if !crate::config::valid_admin_function_name(&value) {
+                    return Err(invalid_value(
+                        &value,
+                        "--function <NAME>",
+                        "1-64 ASCII letters, digits, '.', '_', or '-'",
+                    ));
+                }
+                set_once(&mut self.admin_access.function, value, "--function <NAME>")?;
+            }
+            "ttl" => {
+                let value = self.value_string(inline, "--ttl <DURATION>")?;
+                let ttl = crate::config::parse_duration(&value).map_err(|_| {
+                    invalid_value(
+                        &value,
+                        "--ttl <DURATION>",
+                        "a duration such as 600, 10m, or 1h",
+                    )
+                })?;
+                if ttl < Duration::from_secs(1) {
+                    return Err(invalid_value(
+                        &value,
+                        "--ttl <DURATION>",
+                        "a duration of at least 1s",
+                    ));
+                }
+                // The admin API takes whole seconds; round a sub-second
+                // remainder up so `1500ms` does not silently become one
+                // second.
+                let seconds = ttl
+                    .as_secs()
+                    .saturating_add(u64::from(ttl.subsec_nanos() > 0));
+                set_once(
+                    &mut self.admin_access.ttl,
+                    Duration::from_secs(seconds),
+                    "--ttl <DURATION>",
+                )?;
+            }
+            _ => return Err(self.unexpected(format!("--{name}"))),
+        }
+        Ok(())
+    }
+
     fn parse_log_long(&mut self, name: &str, inline: Option<&str>) -> Result<(), ParseError> {
         match name {
             "follow" => {
@@ -529,6 +614,24 @@ impl Parser {
     }
 
     fn parse_positional(&mut self, value: &str) -> Result<(), ParseError> {
+        if self.kind == Some(Kind::AdminAccess) {
+            if self.admin_access.action.is_some() {
+                return Err(self.unexpected(value));
+            }
+            self.admin_access.action = Some(match value {
+                "status" => AdminAccessKind::Status,
+                "open" => AdminAccessKind::Open,
+                "close" => AdminAccessKind::Close,
+                _ => {
+                    return Err(invalid_value(
+                        value,
+                        "<status|open|close>",
+                        "status, open, or close",
+                    ));
+                }
+            });
+            return Ok(());
+        }
         if self.kind == Some(Kind::Maintenance) {
             if self.maintenance.action.is_some() {
                 return Err(self.unexpected(value));
@@ -599,6 +702,52 @@ impl Parser {
                 Some(Command::Maintenance(MaintenanceArgs {
                     action,
                     listen: self.maintenance.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
+                }))
+            }
+            Some(Kind::AdminAccess) => {
+                let state = self.admin_access;
+                let Some(kind) = state.action else {
+                    return Err(ParseError::Message(
+                        "the following required arguments were not provided:\n  \
+                         <status|open|close>"
+                            .to_owned(),
+                    ));
+                };
+                let rejects = |option: &str| {
+                    ParseError::Message(format!(
+                        "the argument '--{option}' cannot be used with this subcommand"
+                    ))
+                };
+                let action = match kind {
+                    AdminAccessKind::Status => {
+                        if state.client.is_some() {
+                            return Err(rejects("client"));
+                        }
+                        if state.function.is_some() {
+                            return Err(rejects("function"));
+                        }
+                        if state.ttl.is_some() {
+                            return Err(rejects("ttl"));
+                        }
+                        AdminAccessAction::Status
+                    }
+                    AdminAccessKind::Open | AdminAccessKind::Close => {
+                        let access = if kind == AdminAccessKind::Open {
+                            AccessState::Open
+                        } else {
+                            AccessState::Close
+                        };
+                        AdminAccessAction::Set {
+                            state: access,
+                            client: state.client,
+                            function: state.function,
+                            ttl: state.ttl,
+                        }
+                    }
+                };
+                Some(Command::AdminAccess(AdminAccessArgs {
+                    action,
+                    listen: state.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
                 }))
             }
             Some(Kind::Banner) => Some(Command::Banner(BannerArgs {
@@ -858,6 +1007,7 @@ fn help_for(kind: Option<Kind>) -> String {
         Some(Kind::Log) => log_help(),
         Some(Kind::Metrics) => metrics_help(),
         Some(Kind::Maintenance) => maintenance_help(),
+        Some(Kind::AdminAccess) => admin_access_help(),
         Some(Kind::Banner) => banner_help(),
     }
 }
@@ -876,6 +1026,7 @@ Commands:
   log           Read the systemd journal for the Kunato service
   metrics       Print the Prometheus metrics served by the admin listener
   maintenance   Enter or leave maintenance mode through the admin listener
+  admin-access  Open, close, or list administrative access through the admin listener
   banner        Print the Kunato banner
   help          Print this message or the help of the given subcommand(s)
 
@@ -997,6 +1148,37 @@ Usage: kunato maintenance <on|off> [OPTIONS]
 
 Options:
       --listen <ADDR>  Admin listener address accepting the control request [default: {}]
+
+{}"#,
+        DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
+    )
+}
+
+fn admin_access_help() -> String {
+    format!(
+        r#"List the configured administrative functions and active overrides, or
+open and close access through the admin listener.
+
+`open` makes matching functions accessible and `close` makes them unavailable
+until the override expires. With neither `--client` nor `--function`, the
+command applies to every client and every configured function, which is the
+quick "open everything for a while" / "close everything now" form. The
+configured default state applies when no override matches. Overrides are kept
+in memory and reset when Kunato restarts.
+
+When `admin_access.presets` is enabled (the default), built-in functions cover
+WordPress, Rails, Laravel, generic /admin panels, phpMyAdmin, Adminer,
+Tomcat/JBoss consoles, Solr, Spring Actuator, Nextcloud, Ghost, and TYPO3.
+`status` lists the effective function names and the current overrides.
+
+Usage: kunato admin-access <status|open|close> [OPTIONS]
+
+Options:
+      --listen <ADDR>     Admin listener address accepting the control request [default: {}]
+      --client <IP>       Limit the override to one resolved client address
+      --function <NAME>   Limit the override to one configured function
+      --ttl <DURATION>    Override lifetime, for example 600, 10m, or 1h
+                          (default: admin_access.default_ttl)
 
 {}"#,
         DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
@@ -1365,6 +1547,183 @@ mod tests {
                 assert!(text.contains("Usage: kunato maintenance <on|off>"));
                 assert!(text.contains("127.0.0.1:9090"));
             }
+            other => panic!("expected help, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_admin_access_actions() {
+        let cli = parse(&["kunato", "admin-access", "status"]).expect("parse");
+        let Some(Command::AdminAccess(args)) = cli.command else {
+            panic!("expected the admin-access command");
+        };
+        assert!(matches!(args.action, AdminAccessAction::Status));
+        assert_eq!(args.listen, DEFAULT_METRICS_LISTEN);
+
+        let cli = parse(&["kunato", "admin-access", "open"]).expect("parse");
+        let Some(Command::AdminAccess(args)) = cli.command else {
+            panic!("expected the admin-access command");
+        };
+        let AdminAccessAction::Set {
+            state,
+            client,
+            function,
+            ttl,
+        } = args.action
+        else {
+            panic!("expected set");
+        };
+        assert_eq!(state, AccessState::Open);
+        assert!(client.is_none());
+        assert!(function.is_none());
+        assert!(ttl.is_none());
+
+        let cli = parse(&[
+            "kunato",
+            "admin-access",
+            "close",
+            "--client",
+            "192.0.2.10",
+            "--function",
+            "wordpress-admin",
+            "--ttl",
+            "10m",
+            "--listen",
+            "127.0.0.1:9100",
+        ])
+        .expect("parse");
+        let Some(Command::AdminAccess(args)) = cli.command else {
+            panic!("expected the admin-access command");
+        };
+        let AdminAccessAction::Set {
+            state,
+            client,
+            function,
+            ttl,
+        } = args.action
+        else {
+            panic!("expected set");
+        };
+        assert_eq!(state, AccessState::Close);
+        assert_eq!(client, Some("192.0.2.10".parse::<IpAddr>().expect("ip")));
+        assert_eq!(function.as_deref(), Some("wordpress-admin"));
+        assert_eq!(ttl, Some(Duration::from_secs(600)));
+        assert_eq!(args.listen, SocketAddr::from(([127, 0, 0, 1], 9100)));
+
+        let cli = parse(&[
+            "kunato",
+            "admin-access",
+            "open",
+            "--function",
+            "admin",
+            "--ttl",
+            "1500ms",
+        ])
+        .expect("parse");
+        let Some(Command::AdminAccess(args)) = cli.command else {
+            panic!("expected the admin-access command");
+        };
+        let AdminAccessAction::Set {
+            state,
+            client,
+            function,
+            ttl,
+        } = args.action
+        else {
+            panic!("expected set");
+        };
+        assert_eq!(state, AccessState::Open);
+        assert!(client.is_none());
+        assert_eq!(function.as_deref(), Some("admin"));
+        assert_eq!(
+            ttl,
+            Some(Duration::from_secs(2)),
+            "sub-second remainders must round up to whole seconds"
+        );
+
+        let cli =
+            parse(&["kunato", "admin-access", "close", "--client", "2001:db8::1"]).expect("parse");
+        let Some(Command::AdminAccess(args)) = cli.command else {
+            panic!("expected the admin-access command");
+        };
+        let AdminAccessAction::Set { state, client, .. } = args.action else {
+            panic!("expected set");
+        };
+        assert_eq!(state, AccessState::Close);
+        assert_eq!(client, Some("2001:db8::1".parse::<IpAddr>().expect("ip")));
+    }
+
+    #[test]
+    fn rejects_invalid_admin_access_arguments() {
+        for (args, expected) in [
+            (vec!["kunato", "admin-access"], "<status|open|close>"),
+            (
+                vec!["kunato", "admin-access", "grant"],
+                "status, open, or close",
+            ),
+            (
+                vec!["kunato", "admin-access", "open", "--client", "not-an-ip"],
+                "an IP address",
+            ),
+            (
+                vec!["kunato", "admin-access", "open", "--function", "bad name"],
+                "1-64 ASCII letters",
+            ),
+            (
+                vec!["kunato", "admin-access", "open", "--ttl", "soon"],
+                "a duration",
+            ),
+            (
+                vec!["kunato", "admin-access", "open", "--ttl", "0"],
+                "at least 1s",
+            ),
+            (
+                vec!["kunato", "admin-access", "close", "--ttl", "500ms"],
+                "at least 1s",
+            ),
+            (
+                vec!["kunato", "admin-access", "status", "--client", "192.0.2.10"],
+                "cannot be used with this subcommand",
+            ),
+            (
+                vec!["kunato", "admin-access", "status", "--function", "admin"],
+                "cannot be used with this subcommand",
+            ),
+            (
+                vec!["kunato", "admin-access", "status", "--ttl", "10m"],
+                "cannot be used with this subcommand",
+            ),
+            (
+                vec!["kunato", "admin-access", "open", "--listen", "0.0.0.0:9090"],
+                "loopback",
+            ),
+            (
+                vec!["kunato", "admin-access", "open", "extra"],
+                "unexpected",
+            ),
+        ] {
+            let error = parse(&args).expect_err("must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected `{expected}` in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_access_help_lists_the_actions() {
+        let error = parse(&["kunato", "help", "admin-access"]).expect_err("help exits");
+        match error {
+            ParseError::Help(text) => {
+                assert!(text.contains("Usage: kunato admin-access"));
+                assert!(text.contains("status|open|close"));
+                assert!(text.contains("127.0.0.1:9090"));
+            }
+            other => panic!("expected help, got {other:?}"),
+        }
+        let error = parse(&["kunato", "--help"]).expect_err("help exits");
+        match error {
+            ParseError::Help(text) => assert!(text.contains("admin-access")),
             other => panic!("expected help, got {other:?}"),
         }
     }

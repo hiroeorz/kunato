@@ -20,11 +20,12 @@ Note: the engine matches `path`, `method`, `source_ip`, `headers`, `cookies`,
 `response_headers`, plus `threshold` categories and per-rule `limit`, so a ❌
 often means "no signature shipped", not "impossible". Engine checks outside that
 match language — GraphQL depth/complexity, strict body sizing,
-`limits.upload_inspection`, the `allowed_hosts` Host/authority policy, and the
-`protection.behavior` source/authentication signals — address classes no regex
-expresses. `content_routes` is an explicit local opt-out of body-targeting rules
-for authored-content endpoints rather than a coverage mechanism, so it removes
-body coverage on those routes and does not change the bundled verdicts.
+`limits.upload_inspection`, the `allowed_hosts` Host/authority policy, the
+`protection.behavior` source/authentication signals, and the opt-in
+`admin_access` gate — address classes no regex expresses. `content_routes`
+is an explicit local opt-out of body-targeting rules for authored-content
+endpoints rather than a coverage mechanism, so it removes body coverage on those
+routes and does not change the bundled verdicts.
 
 ## 1. Injection
 
@@ -146,12 +147,12 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | IDOR / BOLA | ❌ | Undetectable in principle at the WAF layer |
-| Forced Browsing | 🔶 | `sensitive-files` (BLOCK/404) plus `admin-interfaces` (LOG by default) |
+| Forced Browsing | 🔶 | `sensitive-files` (BLOCK/404) plus `admin-interfaces` (LOG by default); opt-in `admin_access` applies a configurable default state and time-limited `open`/`close` overrides to declared administrative functions, and a closed request gets `404` before forwarding |
 | URL Manipulation | 🔶 | Path normalization, matrix parameters, and encoded separators are blocked; general parameter tampering is not |
 | Parameter Tampering | ❌ | Business-logic dependent |
 | Privilege-Escalation Requests | ❌ | No generic rule (many CVE-specific auth-bypass signatures exist) |
-| Admin Interface Access Attempts | 🔶 | `admin-interfaces` logs by default (BLOCK is the documented hardening) plus CVE-specific admin paths (AEM, h2-console, ...) and the Rails dashboards (`sidekiq`, `pghero`, `flipper`, `blazer`, `delayed_job`, `good_job`) |
-| Hidden Endpoints / Non-Public APIs | ❌ | No rules |
+| Admin Interface Access Attempts | 🔶 | `admin_access` (opt-in) applies a configured default state and time-limited `open`/`close` overrides to declared admin/plugin/update functions; `open`/`close` can target everything, one client, or one function through the loopback listener, and the most recent matching command wins. Enabling it loads built-in presets for WordPress, Rails, Laravel, generic `/admin` panels, phpMyAdmin, Adminer, Tomcat/JBoss consoles, Solr, Spring Actuator, Nextcloud, Ghost, and TYPO3 (with exclusions for WordPress `admin-ajax.php`/`admin-post.php` and Actuator health/info). The gate matches every decoded and normalized path form (`%77p-admin`, `//wp-admin`, `/x/../wp-admin`), denies with `404` before body reads in the closed state, and still runs the full WAF pipeline for open requests. Without a declaration, `admin-interfaces` logs at default (BLOCK is the documented hardening) plus CVE-specific admin paths (AEM, h2-console, ...) and the Rails dashboards (`sidekiq`, `pghero`, `flipper`, `blazer`, `delayed_job`, `good_job`) |
+| Hidden Endpoints / Non-Public APIs | ❌ | No rules; `admin_access` covers only declared functions |
 
 ## 8. Server-Side Attacks
 
@@ -183,7 +184,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Struts / Spring | ✅ | S2-xxx, Spring4Shell, and the framework CVE signatures |
 | Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal), `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, generic Ruby deserialization, and the bundled Rack multipart DoS shapes (CVE-2026-34827/34829); the Active Storage attachment-decoder chain (CVE-2026-122006, GHSA-v924-7rp8-4mxh) is covered by the upload check and the `cve-2026-11-09-signatures` coder rules, and the remaining 2025-2026 component CVEs (Rack::Static, Puma, Action View) are not virtual-patchable or not yet bundled. Laravel: only `laravel-ignition-endpoint` |
 | CVE-Based Virtual Patching | ✅ | Core feature: `cve-2010` ... `cve-2026` categories plus the daily `rules_update` (SHA256 verification, atomic swap) |
-| Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards and Laravel Horizon, the per-stack dev-endpoint categories (Rails, Django, Next.js, Laravel, Vite) in BLOCK, plus CVE-specific debug paths (AEM console, actuator, ...) |
+| Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards and Laravel Horizon, the per-stack dev-endpoint categories (Rails, Django, Next.js, Laravel, Vite) in BLOCK, plus CVE-specific debug paths (AEM console, actuator, ...); declared administrative functions can be hidden behind the `admin_access` gate, which answers in the closed state with `404` |
 
 ### Ruby on Rails coverage
 
@@ -280,7 +281,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | `.git` / `.env` / Config File Discovery | ✅ | `sensitive-files.credentials-and-config` (hidden behind a 404), now including Rails `master.key`, `database.yml`, `storage.yml`, and `credentials/` keys, plus `log-files` (`/log/*.log`) and `active-storage-root` (`/storage/`). VCS metadata names with trailing dots or spaces (for example `/.git./HEAD` and `/.git%20/HEAD`) are matched too, because Windows-style origin path handling strips them before reaching the file system |
 | phpinfo-style Information Endpoints | ✅ | `sensitive-files.phpinfo-endpoints` 404s `/phpinfo`, `/phpinfo.php`, `/php_info.php`, `/phpversion.php`, and `/.phpinfo.php`; generic `info.php`/`test.php` names are intentionally left alone to avoid breaking application files |
 | Swagger/OpenAPI Endpoint Discovery | 🔶 | `api-discovery.swagger-endpoints` LOGs the conventional routes (`/swagger*`, `/swagger-resources`, `/v2|v3/api-docs`, `/api-docs`, `/openapi.json|yaml`); raise the category to BLOCK when the docs are not public. The harness pins that these paths stay forwarded (LOG is not assertable there) |
-| Admin Page Discovery | 🔶 | `admin-interfaces` logs by default |
+| Admin Page Discovery | 🔶 | `admin-interfaces` logs by default; `admin_access` makes declared administrative functions and its built-in WordPress/Rails/Laravel/phpMyAdmin/Adminer/Tomcat/JBoss/Solr/Actuator/Nextcloud/Ghost/TYPO3 presets behave like missing paths (`404`) in the closed state |
 | Error Message Collection | 🔶 | `response-leaks` (stack traces, SQL errors, Server version) plus `response_headers.remove`; mostly LOG by default |
 | CMS/Framework Fingerprinting | 🔶 | Server header hiding only |
 

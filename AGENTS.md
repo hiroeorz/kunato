@@ -35,8 +35,9 @@ src/
   cli.rs           # Command-line argument parsing
   error.rs         # Error types
   telemetry.rs     # Logging setup
-  admin.rs         # Loopback admin listener exposing /metrics and /maintenance
-  admin_client.rs  # `kunato metrics` and `kunato maintenance`: admin client
+  admin.rs         # Loopback admin listener: /metrics, /maintenance, /admin-access
+  admin_access.rs  # Administrative function matching and open/close overrides
+  admin_client.rs  # `kunato metrics`, `kunato maintenance`, `kunato admin-access`
   banner.rs        # `kunato banner`: colored mascot and wordmark for install success
   banner_art.rs    # Generated mascot payload embedded by banner.rs
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
@@ -196,6 +197,28 @@ rule-set updates.
   uppercase tokens (an empty list is rejected), and up to 64 entries are
   accepted. See `docs/development.md`, "Content routes"; the exemption is a
   local policy and must not be used for public parameter endpoints.
+- `admin_access` declares named administrative functions (path regex groups)
+  and a default state: `default: open` (the shipped default) or `default:
+  close` for fail-closed operation. Matching uses any decoded/normalized form
+  of the path (the inverse of `content_routes`); a closed request gets `404`
+  before body reads and never enters the rule engine, while an open request
+  still runs the full inspection and rule pipeline. `open` and `close` commands
+  create in-memory overrides, optionally scoped to one client address or one
+  function, that expire automatically (`default_ttl` / `max_ttl`), are bounded
+  by `max_overrides`, and follow the most recent matching command. `presets:
+  true` (the default) loads built-in functions for WordPress, Rails, Laravel,
+  generic `/admin` panels, phpMyAdmin, Adminer, Tomcat/JBoss consoles, Solr,
+  Spring Actuator, Nextcloud, Ghost, and TYPO3; a `functions` entry with the
+  same name replaces a preset, and `presets: false` starts from only declared
+  functions. A function's optional `exclude` patterns keep matching public
+  forms (for example `admin-ajax.php` or Actuator health) outside the gate. The
+  loopback admin listener exposes `GET /admin-access` and
+  `PUT /admin-access/open|close`, and `kunato admin-access status|open|close`
+  is the CLI. `enabled` requires at least one effective function, function
+  names are `[A-Za-z0-9._-]{1,64}`, and a disabled `admin` listener prevents
+  open/close commands while the configured default still applies; Kunato warns
+  at startup and on reload (recover by changing `default` or disabling
+  `admin_access` and reloading).
 - `protection.behavior` enables per-source behavioral detection over upstream
   responses: enumeration (`404` ratio and distinct paths) and authentication
   failures (`401`/`403` on login/token/session/MFA/SSO paths), plus a global

@@ -19,6 +19,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use kunato::admin::AdminServer;
+use kunato::admin_access::AccessState;
 use kunato::config;
 use kunato::metrics::Metrics;
 use kunato::proxy::server::Server;
@@ -680,6 +681,58 @@ impl Running {
     async fn stop(self) {
         let _ = self.shutdown.send(true);
         let _ = self.task.await;
+    }
+}
+
+struct RunningWithAdmin {
+    addr: SocketAddr,
+    admin_addr: SocketAddr,
+    config: Arc<Snapshot<config::CompiledConfig>>,
+    shutdown: watch::Sender<bool>,
+    server_task: JoinHandle<()>,
+    admin_task: JoinHandle<()>,
+}
+
+impl RunningWithAdmin {
+    async fn stop(self) {
+        let _ = self.shutdown.send(true);
+        let _ = self.server_task.await;
+        let _ = self.admin_task.await;
+    }
+}
+
+async fn start_kunato_with_admin(yaml: &str) -> RunningWithAdmin {
+    let compiled = config::parse(yaml).expect("valid config");
+    let listen = compiled.listen;
+    let admin_config = compiled.admin.clone();
+    let config = Arc::new(Snapshot::new(compiled));
+    let metrics = Arc::new(Metrics::new());
+    let server = Server::bind(listen, config.clone(), metrics.clone(), None)
+        .await
+        .expect("bind kunato");
+    let addr = server.local_addr().expect("local address");
+    let admin = AdminServer::bind(
+        &admin_config,
+        config.clone(),
+        metrics.clone(),
+        server.protection(),
+        server.maintenance(),
+        server.admin_access(),
+    )
+    .await
+    .expect("bind admin");
+    let admin_addr = admin.local_addr().expect("admin address");
+
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
+    let admin_task = tokio::spawn(admin.run(shutdown_rx));
+    RunningWithAdmin {
+        addr,
+        admin_addr,
+        config,
+        shutdown,
+        server_task,
+        admin_task,
     }
 }
 
@@ -4846,7 +4899,7 @@ categories:
     let metrics = Arc::new(Metrics::new());
     let server = Server::bind(
         "127.0.0.1:0".parse().expect("address"),
-        config,
+        config.clone(),
         metrics.clone(),
         None,
     )
@@ -4854,11 +4907,19 @@ categories:
     .expect("bind kunato");
     let protection = server.protection();
     let maintenance = server.maintenance();
+    let admin_access = server.admin_access();
     let addr = server.local_addr().expect("local address");
 
-    let admin = AdminServer::bind(&admin_config, metrics.clone(), protection, maintenance)
-        .await
-        .expect("bind admin");
+    let admin = AdminServer::bind(
+        &admin_config,
+        Arc::clone(&config),
+        metrics.clone(),
+        protection,
+        maintenance,
+        admin_access,
+    )
+    .await
+    .expect("bind admin");
     let admin_addr = admin.local_addr().expect("admin address");
 
     let (shutdown, shutdown_rx) = watch::channel(false);
@@ -4921,19 +4982,22 @@ admin: {{ listen: 127.0.0.1:0 }}
     let metrics = Arc::new(Metrics::new());
     let server = Server::bind(
         "127.0.0.1:0".parse().expect("address"),
-        config,
+        config.clone(),
         metrics.clone(),
         None,
     )
     .await
     .expect("bind kunato");
     let maintenance = server.maintenance();
+    let admin_access = server.admin_access();
     let addr = server.local_addr().expect("local address");
     let admin = AdminServer::bind(
         &admin_config,
+        Arc::clone(&config),
         metrics.clone(),
         server.protection(),
         maintenance,
+        admin_access,
     )
     .await
     .expect("bind admin");
@@ -5016,6 +5080,287 @@ admin: {{ listen: 127.0.0.1:0 }}
     let _ = server_task.await;
     let _ = admin_task.await;
     upstream_task.abort();
+}
+
+#[tokio::test]
+async fn administrative_functions_are_closed_until_opened() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+admin_access:
+  enabled: true
+  default: close
+  presets: false
+  functions:
+    - name: wordpress-admin
+      paths: ['^/wp-admin(?:/|$)']
+categories:
+  - name: block-admin-query
+    action: BLOCK
+    rules:
+      - name: admin-query
+        match: {{ path: '^/wp-admin', regex: BLOCKME, in: [query] }}
+"
+    );
+    let running = start_kunato_with_admin(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/public", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "origin");
+
+    let (status, body) = send(running.addr, Method::GET, "/wp-admin", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, "not found");
+
+    let (status, _) = send(running.addr, Method::GET, "/%77p-admin", "").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an encoded path form must not bypass the gate"
+    );
+
+    kunato::admin_client::run_admin_access(kunato::cli::AdminAccessArgs {
+        action: kunato::cli::AdminAccessAction::Set {
+            state: AccessState::Open,
+            client: None,
+            function: None,
+            ttl: Some(Duration::from_secs(60)),
+        },
+        listen: running.admin_addr,
+    })
+    .await
+    .expect("open administrative access");
+
+    let (status, body) = send(running.admin_addr, Method::GET, "/admin-access", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("default: close"), "{body}");
+    assert!(body.contains("function: wordpress-admin"), "{body}");
+    assert!(
+        body.contains("override: state=open client=* function=*"),
+        "{body}"
+    );
+
+    let (status, body) = send(running.addr, Method::GET, "/wp-admin/options.php", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "origin");
+
+    let (status, body) = send(running.addr, Method::GET, "/wp-admin?q=BLOCKME", "").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an open override must not bypass rule evaluation"
+    );
+    assert_eq!(body, "Forbidden");
+
+    kunato::admin_client::run_admin_access(kunato::cli::AdminAccessArgs {
+        action: kunato::cli::AdminAccessAction::Set {
+            state: AccessState::Close,
+            client: None,
+            function: Some("wordpress-admin".to_owned()),
+            ttl: Some(Duration::from_secs(60)),
+        },
+        listen: running.admin_addr,
+    })
+    .await
+    .expect("close the function");
+
+    let (status, _) = send(running.addr, Method::GET, "/wp-admin", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, metrics) = send(running.admin_addr, Method::GET, "/metrics", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        metrics.contains("kunato_admin_access_denied_total 3"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("kunato_admin_access_allowed_total 2"),
+        "{metrics}"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn administrative_overrides_expire_and_revert_to_the_default() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+admin_access:
+  enabled: true
+  default: open
+  presets: false
+  functions:
+    - name: admin
+      paths: ['^/admin(?:/|$)']
+"
+    );
+    let running = start_kunato_with_admin(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "origin");
+
+    kunato::admin_client::run_admin_access(kunato::cli::AdminAccessArgs {
+        action: kunato::cli::AdminAccessAction::Set {
+            state: AccessState::Close,
+            client: None,
+            function: None,
+            ttl: Some(Duration::from_secs(2)),
+        },
+        listen: running.admin_addr,
+    })
+    .await
+    .expect("close administrative access");
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the override must expire and revert to the open default"
+    );
+    assert_eq!(body, "origin");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn an_allow_rule_does_not_bypass_the_administrative_gate() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+admin_access:
+  enabled: true
+  default: close
+  presets: false
+  functions:
+    - name: admin
+      paths: ['^/admin(?:/|$)']
+categories:
+  - name: trust-local
+    action: ALLOW
+    rules:
+      - name: local
+        match: {{ source_ip: 127.0.0.1/32 }}
+"
+    );
+    let running = start_kunato_with_admin(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an ALLOW rule must not open a declared administrative function"
+    );
+
+    kunato::admin_client::run_admin_access(kunato::cli::AdminAccessArgs {
+        action: kunato::cli::AdminAccessAction::Set {
+            state: AccessState::Open,
+            client: None,
+            function: None,
+            ttl: Some(Duration::from_secs(60)),
+        },
+        listen: running.admin_addr,
+    })
+    .await
+    .expect("open administrative access");
+
+    let (status, body) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "origin");
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn administrative_functions_follow_hot_reloads() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+admin_access:
+  enabled: true
+  default: close
+  presets: false
+  functions:
+    - name: admin
+      paths: ['^/admin(?:/|$)']
+"
+    );
+    let running = start_kunato_with_admin(&yaml).await;
+
+    kunato::admin_client::run_admin_access(kunato::cli::AdminAccessArgs {
+        action: kunato::cli::AdminAccessAction::Set {
+            state: AccessState::Open,
+            client: None,
+            function: Some("admin".to_owned()),
+            ttl: Some(Duration::from_secs(60)),
+        },
+        listen: running.admin_addr,
+    })
+    .await
+    .expect("open administrative access");
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let reloaded = config::parse(&format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+admin: {{ listen: 127.0.0.1:0 }}
+admin_access:
+  enabled: true
+  default: close
+  presets: false
+  functions:
+    - name: console
+      paths: ['^/admin(?:/|$)']
+"
+    ))
+    .expect("valid reloaded config");
+    running.config.store(Arc::new(reloaded));
+
+    // Overrides name a function: the old `admin` override no longer matches
+    // the reloaded `console` function, so the closed default applies.
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = send(running.admin_addr, Method::GET, "/admin-access", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("function: console"), "{body}");
+    assert!(
+        body.contains("override: state=open client=* function=admin"),
+        "{body}"
+    );
+
+    kunato::admin_client::run_admin_access(kunato::cli::AdminAccessArgs {
+        action: kunato::cli::AdminAccessAction::Set {
+            state: AccessState::Open,
+            client: None,
+            function: Some("console".to_owned()),
+            ttl: Some(Duration::from_secs(60)),
+        },
+        listen: running.admin_addr,
+    })
+    .await
+    .expect("open the reloaded function");
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
 }
 
 #[tokio::test]
