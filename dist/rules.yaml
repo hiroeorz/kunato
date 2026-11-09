@@ -1894,6 +1894,58 @@ categories:
           regex: '(?i)file_path=(%2f|/)?[^&]*(sqlconf\.php|/etc/(passwd|shadow)|\.\.(%2f|/|%5c))'
           in: [query, body]
 
+  # Request signatures for the 2026-11-09 delta intake.
+  - name: cve-2026-11-09-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-122006 and GHSA-v924-7rp8-4mxh (Ruby on Rails Active Storage):
+      # attaching a file is enough to run ImageMagick, ffprobe, and ffmpeg over
+      # it, and those tools select a coder or decoder from the content and the
+      # uploaded extension. MSL, MVG, and PostScript documents are parsed as
+      # instructions, and `.avs` is an AviSynth script. A verified image is
+      # masked from body matching, so these markers only reach the rules in
+      # unverified or script uploads; the upload check rejects a script behind
+      # an image claim, and these rules cover the remaining coder claims.
+      - name: imagemagick-msl-script-upload
+        match: { method: [POST, PUT, PATCH], regex: '(?is)<image>\s*<(read|write)\s+filename|(^|[\r\n])msl:[/\\]', in: [body] }
+      - name: imagemagick-mvg-script-upload
+        match: { method: [POST, PUT, PATCH], regex: '(?i)push\s+graphic-context', in: [body] }
+      - name: postscript-coder-upload
+        match: { method: [POST, PUT, PATCH], regex: '(?i)(^|[\r\n])%!PS-Adobe-\d', in: [body] }
+      - name: avsynth-script-filename
+        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=\s*"[^"]{0,512}\.avs\b', in: [body] }
+      # CVE-2026-123870 (otterdog webapp): the webhook `action` field is
+      # formatted into an eval() expression when GITHUB_WEBHOOK_SECRET is
+      # unset. A webhook payload has no Python import or subprocess call.
+      - name: otterdog-webhook-eval-payload
+        match:
+          path: '(?i)/github-webhook/receive/?$'
+          regex: '(?i)__import__\s*\(\s*["\x27](os|subprocess|builtins)["\x27]|(os|subprocess)\s*\.\s*(system|popen|execv)'
+          in: [body]
+      # CVE-2026-124430 (Craft CMS): app/render-elements signs a caller-supplied
+      # Twig object template with the global security key and returns the
+      # signature, and the same signed value is evaluated unsandboxed from the
+      # login redirect. A return URL never carries Twig syntax.
+      - name: craft-render-elements-twig-return-url
+        match:
+          path: '(?i)/actions/app/render-elements/?$'
+          regex: '\{\{|\{%'
+          in: [body, query]
+      # CVE-2026-124428 (Craft CMS): app/icon-svg resolves an alias or absolute
+      # path and returns any SVG-content file. Icon names are bare words.
+      - name: craft-icon-svg-path-read
+        match:
+          path: '(?i)/actions/app/icon-svg/?$'
+          regex: '(?i)"?icon"?\s*[:=]\s*"?(\/|@|\.\.|%2f|%40|%2e%2e)'
+          in: [body, query]
+      # CVE-2026-12405 (Foreman remote execution): effective_user reaches the
+      # job-invocation shell. A user value has no separator or substitution.
+      - name: foreman-effective-user-command
+        match:
+          path: '(?i)/api/v2/job_invocations'
+          regex: '(?i)"effective_user"\s*:\s*"[^"]{0,128}([;&|`]|\$\(|\r|\n)'
+          in: [body]
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
   # br, and zstd bodies are decompressed for matching first. When the limit is

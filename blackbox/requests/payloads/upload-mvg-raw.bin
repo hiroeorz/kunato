@@ -1,0 +1,10 @@
+--X
+Content-Disposition: form-data; name="file"; filename="cover.mvg"
+Content-Type: application/octet-stream
+
+push graphic-context
+viewbox 0 0 640 480
+image over 0,0 0,0 "https://198.51.100.7/probe.png"
+pop graphic-context
+
+--X--

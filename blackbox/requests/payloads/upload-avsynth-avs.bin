@@ -1,0 +1,9 @@
+--X
+Content-Disposition: form-data; name="file"; filename="clip.avs"
+Content-Type: application/octet-stream
+
+DirectShowSource("C:\\media\\intro.avi")
+# AviSynth evaluates the script when ffprobe opens the .avs file.
+ConvertToYV12()
+
+--X--

@@ -1,0 +1,11 @@
+--X
+Content-Disposition: form-data; name="file"; filename="logo.eps"
+Content-Type: application/postscript
+
+%!PS-Adobe-3.0 EPSF-3.0
+%%BoundingBox: 0 0 100 100
+%%Pages: 1
+newpath 0 0 moveto 100 100 lineto stroke
+showpage
+
+--X--

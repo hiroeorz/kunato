@@ -1,0 +1,8 @@
+--X
+Content-Disposition: form-data; name="file"; filename="notes.txt"
+Content-Type: text/plain
+
+Upload notes: the markup example <image src="photo.png" /> is a
+documentation sample, not a coder directive.
+
+--X--

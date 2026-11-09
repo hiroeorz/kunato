@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-11-03; the managed set carries 554 rules.
+2026-11-09; the managed set carries 572 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -32,13 +32,13 @@ body coverage on those routes and does not change the bundled verdicts.
 | --- | --- | --- |
 | SQL Injection | ✅ | `sql-injection`: UNION (including padded `/*...*/`, `--`, and `#` comments between UNION and SELECT, closed after the local lab bypassed a fixed 20-character gap), boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
 | NoSQL Injection | ✅ | `nosql-injection`: Mongo operators (`$where/$ne/$regex`, ...) |
-| OS Command Injection | ✅ | `command-injection`: shell metacharacters, newline separators before command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627); the agentic chain regression found and covers the newline-separator gap. The path target matches only executable shapes (`/bin/sh`, `cmd.exe`, `powershell.exe`), so article slugs such as `powershell-tpm` reach the upstream |
+| OS Command Injection | ✅ | `command-injection`: shell metacharacters, newline separators before command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627); the Foreman remote-execution `effective_user` value (CVE-2026-12405) and the otterdog webhook `eval()` sink (CVE-2026-123870) have their own signatures in `cve-2026-11-09-signatures`; the agentic chain regression found and covers the newline-separator gap. The path target matches only executable shapes (`/bin/sh`, `cmd.exe`, `powershell.exe`), so article slugs such as `powershell-tpm` reach the upstream |
 | JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
 | PHP Configuration Injection | ✅ | `config-injection.php-ini-directives` blocks `auto_prepend_file`/`auto_append_file` values and `allow_url_include=on` reaching php.ini (pfSense CE timezone CVE-2026-111222) |
 | LDAP Injection | ✅ | `ldap-injection`: filter breakout (`*)(`, `)(\|(`, `)(attr=`), operator chains (`\|(uid=`, `&(cn=`), wildcard attributes (`(objectClass=*`, `(userPassword=*`), and wildcard credentials on the login paths (`*` as the whole value or anywhere in a user/uid/email parameter); query/body/cookies/headers, plus and percent encodings included |
 | XPath Injection | ✅ | `xpath-injection`: predicate breakouts (`']//`, `'] \| //`, `or //user[...]`), blind-inference functions (`count(/*)`, `string-length(name(/*[1]))`, `substring(//...)`, `contains(//...)`), quote-based function probes (`or name(`), and string taunts (`or '1'='1`, `or ''='`); numeric taunts (`or 1=1`) are also covered by `sql-injection` |
 | XML Injection | 🔶 | XXE (`<!DOCTYPE[`/`<!ENTITY`) is generic and blocked; generic XML structure injection and SOAP deserialization are CVE-specific |
-| SSTI | ✅ | `ssti`: generic arithmetic probes and engine gadgets for Jinja/Twig (`{{7*7}}`, dunder access), Freemarker (`<#assign`, `?new()`), Velocity (`$class.inspect`, `#set($`), ERB/JSP (`<%=`), Thymeleaf (`*{}`), and Smarty (`{7*7}`); `${`/`%{` are covered by `cve-2019-signatures.struts-expression-injection`; the CVE-specific set is retained |
+| SSTI | ✅ | `ssti`: generic arithmetic probes and engine gadgets for Jinja/Twig (`{{7*7}}`, dunder access), Freemarker (`<#assign`, `?new()`), Velocity (`$class.inspect`, `#set($`), ERB/JSP (`<%=`), Thymeleaf (`*{}`), and Smarty (`{7*7}`); the Craft CMS `app/render-elements` Twig signing oracle (CVE-2026-124430) has a dedicated return-URL rule and the Apache OFBiz FreeMarker parameter (CVE-2026-82910) is stopped by the template gadgets; `${`/`%{` are covered by `cve-2019-signatures.struts-expression-injection`; the CVE-specific set is retained |
 | Expression Language Injection | 🔶 | Same: CVE-specific (Ivanti EPMM, Struts OGNL, Nexus JavaEL, ...) |
 | CRLF Injection / HTTP Header Injection | ✅ | `protocol-anomalies.crlf-injection` (`%0d%0a` etc. in path/query/headers) |
 
@@ -59,10 +59,10 @@ body coverage on those routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match. The lab-only CVE-2021-41773 fixture confirms the direct `.%2e` traversal canary extraction is blocked by the decoded path rule |
+| Path Traversal / Directory Traversal | ✅ | `path-traversal` plus `path-normalization`; raw and percent-decoded (2 passes) plus normalized path forms all match, which also closes the Armeria encoded-separator normalization bypass (CVE-2026-121823) and the GleezCMS `/media` traversal (CVE-2026-117127). The lab-only CVE-2021-41773 fixture confirms the direct `.%2e` traversal canary extraction is blocked by the decoded path rule |
 | Local File Inclusion (LFI) | ✅ | Same rules plus `php-wrappers` (`php://filter|input|data`, `expect/zip/phar://`) |
 | Remote File Inclusion (RFI) | ✅ | `remote-file-inclusion`: include-style parameters (`include`, `require`, `page`, `template`, `file`, `module`, `load`, ...) pointing at remote schemes (http/ftp/sftp/tftp/smb/nfs/gopher/dict), protocol-relative `//`, or UNC `\\` hosts; per-host allowlisting is not expressible |
-| Malicious File Upload | 🔶 | Filename rules (`executable-filenames`, `script-filenames`, `binary-filenames`, `server-config-filenames`) reject PHP/JSP/ASP/CGI/Python/shell/executable names, Ruby and extra shell or Windows script hosts, JVM archives and shared libraries, and `.htaccess`/`.user.ini`, in quoted, unquoted, and RFC 5987 (`filename*=`) parameter forms, on `POST`, `PUT`, and `PATCH` writes. `limits.upload_inspection` (engine default `strict`; `mismatch` inspects only safe claims) rejects an executable header or active markup at the leading position, server-side script markers (`<?php`, `<?=`, `<%`, and PHP short tags whose body looks like code) anywhere in the inspected part, and any part that claims an image, PDF, office, media, or font type without starting with that format's signature, so source code renamed to `.jpeg` or `.pdf` is rejected. A non-multipart write request whose declared type or path names an executable or script, or that claims a binary/safe type, has its raw body scanned for the same markers, format mismatches, and archive bombs, covering WebDAV and API uploads. Archive expansion rejects encrypted entries and compression methods it cannot inspect, validates that every local header is listed in the central directory, and rejects BZIP2/XZ/Zstandard/7z/RAR archives it cannot expand. Executable/markup bytes beyond the leading position, script code after a valid signature, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
+| Malicious File Upload | 🔶 | The upload rules also block MSL, MVG, PostScript, and `.avs` AviSynth coder scripts that ImageMagick and ffprobe would execute during attachment analysis (CVE-2026-122006). Filename rules (`executable-filenames`, `script-filenames`, `binary-filenames`, `server-config-filenames`) reject PHP/JSP/ASP/CGI/Python/shell/executable names, Ruby and extra shell or Windows script hosts, JVM archives and shared libraries, and `.htaccess`/`.user.ini`, in quoted, unquoted, and RFC 5987 (`filename*=`) parameter forms, on `POST`, `PUT`, and `PATCH` writes. `limits.upload_inspection` (engine default `strict`; `mismatch` inspects only safe claims) rejects an executable header or active markup at the leading position, server-side script markers (`<?php`, `<?=`, `<%`, and PHP short tags whose body looks like code) anywhere in the inspected part, and any part that claims an image, PDF, office, media, or font type without starting with that format's signature, so source code renamed to `.jpeg` or `.pdf` is rejected. A non-multipart write request whose declared type or path names an executable or script, or that claims a binary/safe type, has its raw body scanned for the same markers, format mismatches, and archive bombs, covering WebDAV and API uploads. Archive expansion rejects encrypted entries and compression methods it cannot inspect, validates that every local header is listed in the central directory, and rejects BZIP2/XZ/Zstandard/7z/RAR archives it cannot expand. Executable/markup bytes beyond the leading position, script code after a valid signature, and parts outside the inspected prefix under `body_inspection: stream` remain uninspected |
 | Web Shell Upload | 🔶 | Same as above plus CVE-specific signatures (`jspws`, shared DAV paths); the upload check scans the whole inspected part for server-side script markers, so a `GIF89a` + padding + `<?php` polyglot is rejected at any offset, `server-config-filenames` rejects the `.htaccess` handler remap that would make an image executable, and signature verification rejects a text or source file stored as an image, short-tag detection rejects `<? system(...)` behind an image signature, and raw write bodies to an executable path are scanned. Known shell filenames (`b374k`, `c99`, `r57`, `wso`, `alfa`, `indoxploit`, `p0wny`, `filesman`) are rejected wherever they sit (`common-webshell-artifacts`), script extensions under upload directories are refused even when the upload happened outside Kunato (`uploaded-script-access`), and a `200` response whose title names a known shell from a script path is replaced (`webshell-page-title`); that response block hides the output and ends the interaction but does not undo a command that already ran. Archive contents are bounded and unsupported/encrypted archives are refused; active markup/executable bytes beyond the leading position, script code after a valid signature, and parts outside the inspected prefix remain uninspected |
 | Double Extension | ✅ | The filename regexes keep the `\b` boundary, so `shell.php.jpg` is still rejected |
 | MIME Type Spoofing | ✅ | `limits.upload_inspection` (engine default `strict`) checks every multipart file part against its declared type or safe filename extension, requires the part to start with the signature of a verifiable claimed format (JPEG, PNG, GIF, PDF, ZIP/OOXML/ODF, OLE/RTF, MP3, MP4, Ogg, FLAC, Matroska, WAV/AVI, WOFF/WOFF2, SFNT), and rejects executable, server-side script, or HTML/XML/SVG content with `403` before rule evaluation; types it cannot verify (for example `image/heic`) still verify the filename extension's format, a declared type that disagrees with the extension (`shell.php` behind `image/heic`, or `photo.jpg` behind `text/html`) is rejected in `strict` mode, `mismatch` inspects only safe claims while `strict` also covers generic `application/octet-stream` claims, `off` disables the check, and an upload over `max_body_bytes` is prefix-only under `body_inspection: stream`. Raw write bodies whose declared type or path names an executable or script are scanned for the same markers |
@@ -181,33 +181,39 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Node.js / Next.js Exploits | 🔶 | Next.js CVE signatures (middleware subrequest, image optimizer SSRF, RSC route variants, route-match headers), `nextjs-dev-endpoints`, and `prototype-pollution`; the npm ecosystem is watched daily and bundled only when a request shape exists (details below) |
 | Django / Python Framework Exploits | 🔶 | `django-debug-endpoints`, `settings.py` discovery, `python-deserialization`, and the Django DEBUG page rule; Django CVEs stay application-side (details below) |
 | Struts / Spring | ✅ | S2-xxx, Spring4Shell, and the framework CVE signatures |
-| Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal), `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, generic Ruby deserialization, and the bundled Rack multipart DoS shapes (CVE-2026-34827/34829); other 2025-2026 component CVEs (Active Storage, Rack::Static, Puma, Action View) are not virtual-patchable or not yet bundled. Laravel: only `laravel-ignition-endpoint` |
+| Rails / Laravel | 🔶 | Rails: CVE-2019-5418 (`Accept` traversal), `rails-debug-endpoints` (dev-only `/rails/info`, `/rails/mailers`, `/rails/conductor`, `/letter_opener`), config/log/storage discovery, generic Ruby deserialization, and the bundled Rack multipart DoS shapes (CVE-2026-34827/34829); the Active Storage attachment-decoder chain (CVE-2026-122006, GHSA-v924-7rp8-4mxh) is covered by the upload check and the `cve-2026-11-09-signatures` coder rules, and the remaining 2025-2026 component CVEs (Rack::Static, Puma, Action View) are not virtual-patchable or not yet bundled. Laravel: only `laravel-ignition-endpoint` |
 | CVE-Based Virtual Patching | ✅ | Core feature: `cve-2010` ... `cve-2026` categories plus the daily `rules_update` (SHA256 verification, atomic swap) |
 | Admin / Debug Endpoint Discovery | 🔶 | `admin-interfaces` (LOG) including the Rails dashboards and Laravel Horizon, the per-stack dev-endpoint categories (Rails, Django, Next.js, Laravel, Vite) in BLOCK, plus CVE-specific debug paths (AEM console, actuator, ...) |
 
 ### Ruby on Rails coverage
 
 Rails-specific attack surface beyond the CVE categories above; the rules live in
-`rails-debug-endpoints`, `ruby-deserialization`, `cve-2026-04-signatures`, the
-`sensitive-files` extensions, and the Rails additions to `admin-interfaces`.
+`rails-debug-endpoints`, `ruby-deserialization`, `cve-2026-04-signatures`,
+`cve-2026-11-09-signatures`, the `sensitive-files` extensions, and the Rails
+additions to `admin-interfaces`.
 
 | Area | Status | Evidence / notes |
 | --- | --- | --- |
-| Rails CVE virtual patching | 🔶 | CVE-2019-5418 (`Accept` traversal) and the Rack multipart DoS shapes (CVE-2026-34827/34829) are bundled; other 2025-2026 component advisories are below the CVSS bar, have no stable request shape, or are patch-side (left-out comments in `blocked.txt`) |
+| Rails CVE virtual patching | 🔶 | CVE-2019-5418 (`Accept` traversal), the Rack multipart DoS shapes (CVE-2026-34827/34829), and the Active Storage ImageMagick/AviSynth coder chain (CVE-2026-122006, GHSA-v924-7rp8-4mxh) are bundled; other 2025-2026 component advisories are below the CVSS bar, have no stable request shape, or are patch-side (left-out comments in `blocked.txt`) |
 | Dev-only endpoints | ✅ | `rails-debug-endpoints` BLOCKs `/rails/info`, `/rails/mailers`, `/rails/conductor`, and `/letter_opener` |
 | Ops dashboards | 🔶 | `admin-interfaces` LOGs `/sidekiq`, `/pghero`, `/flipper`, `/blazer`, `/delayed_job`, `/good_job`; raise to BLOCK once admin addresses are allowlisted |
 | Secrets, config, logs, storage | ✅ | `sensitive-files` 404s `master.key`, `credentials/` keys, `database.yml`, `storage.yml`, `/log/*.log`, and the `/storage/` root |
 | Ruby deserialization | ✅ | `ruby-deserialization` covers base64 Marshal (`BAh7`), encoded raw `%04%08`, and YAML `!ruby/` tags across query/body/cookies; signed wrappers (`signed_id`, GlobalID, `MessageVerifier`) are not statically detectable |
 | Multipart boundary differentials | ✅ | The engine flattens every declared boundary (up to four) and falls back to raw percent passes beyond that, closing the CVE-2026-26961 WAF-bypass class |
+| Multipart filename precedence | ✅ | The form guard rejects a part that carries both `filename` and `filename*` instead of guessing, and the upload check and filename signatures use the RFC 5987 `filename*` value the Go/Python/Node.js/Java parsers prefer (CVE-2026-104269 class) |
+| Client identity headers | ✅ | Client-supplied `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`, and the `X-Forwarded-*` copies are stripped from every forwarded request and `X-Forwarded-For` is rewritten from the resolved client address, so the Rails `RemoteIp` `Forwarded` preference (GHSA-2gff-2mmg-m73p) cannot be used through the proxy |
 | `_method` overrides | 🔶 | Method conditions match the wire method; Rack accepts only standard overrides, so `bad-methods` cannot be bypassed |
 | Host / X-Forwarded-Host | 🔶 | When `allowed_hosts` is configured, a client-supplied `X-Forwarded-Host` is replaced with the Host header and unlisted Host / `:authority` names are rejected with `421` before rule evaluation. Fresh ACME installs seed the list from `--acme-domain`; manual installs opt in, and an unset list keeps the previous behavior |
+| Attachment processing: ImageMagick / ffprobe | ✅ | `cve-2026-11-09-signatures` blocks MSL, MVG, PostScript, and `.avs` AviSynth uploads, including raw direct-upload bodies (CVE-2026-122006, GHSA-v924-7rp8-4mxh); `limits.upload_inspection` rejects a script behind an image or media claim. A valid image is masked from body matching, so only unverified or script parts reach the rules |
 | Patch-side only | ❌ | Active Storage libvips variants (CVE-2026-66066) and Rack::Static prefix exposure (CVE-2026-34785) have no stable request shape — upgrade the gems |
 | Application-side | ❌ | CSRF, strong parameters/mass assignment, authorization, and `secret_key_base` exposure cannot be fixed by the WAF |
 
 Functional Rails routes (`/rails/active_storage/*`, `/rails/action_mailbox/*`,
 `/cable`) are deliberately passed through and pinned by the near-miss guards in
-`allowed.txt`; Active Storage signed URLs are JSON-then-base64 wrappers and do
-not match the Marshal signatures.
+`allowed.txt`: ordinary uploads to the Active Storage routes stay allowed, while
+the attachment payloads that select a dangerous decoder are blocked. Active
+Storage signed URLs are JSON-then-base64 wrappers and do not match the Marshal
+signatures.
 
 ### Django, Next.js, and Node.js coverage
 
@@ -331,7 +337,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Path Traversal / LFI / RFI | ✅ |
 | SSRF | ✅ |
 | XXE / RCE payloads | ✅ |
-| Malicious file upload | 🔶 (script, binary, and server-config filename rules plus declared-type/content check) |
+| Malicious file upload | 🔶 (script, binary, and server-config filename rules, MSL/MVG/PostScript/AviSynth coder scripts, plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
 | Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, and an opt-in global auth block) |
 | Bot | 🔶 (User-Agent signatures plus behavioral probing/auth-failure flags; no JS challenge or 200-only scraping detection) |
@@ -465,6 +471,15 @@ session-cookie disclosures. Application-dependent allocations, other lifecycle
 consumers, alternate disclosure channels, and shared OPcache/heap state remain
 below the WAF. Patching PHP is the only complete fix.
 
+Rails Active Storage image analysis (CVE-2026-122006, GHSA-v924-7rp8-4mxh) stays
+Partial: the upload check and `cve-2026-11-09-signatures` stop the MSL, MVG,
+PostScript, and `.avs` decoders and a script behind an image claim, but a later
+ImageMagick coder that reaches another file-reading or delegate construct, or
+bytes beyond the inspected part under `body_inspection: stream`, still depend on
+the patched gem and an ImageMagick policy that denies the dangerous coders. The
+Rails `RemoteIp` `Forwarded` preference (GHSA-2gff-2mmg-m73p) is not a gap: the
+proxy strips the forged identity headers before forwarding.
+
 CVE-2018-9845 (Etherpad admin bypass) has no request-level signature: the
 attack is a plain `GET` of the admin page, and the Nuclei template confirms
 Etherpad from the response body. The bundled `etherpad-admin-bypass` rule is
@@ -484,4 +499,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled rule count; behavioral actions
-still default to LOG. The snapshot date is 2026-10-28.
+still default to LOG. The snapshot date is 2026-11-09.

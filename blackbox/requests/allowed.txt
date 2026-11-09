@@ -853,3 +853,21 @@ GET /interface/billing/sl_eob_process.php?csrf_token_form=x&paydate=2026-01-01&e
 GET /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument&action=download&file_path=/tmp/oe-module-faxsms/fax/inbox-2026.pdf&csrf_token_form=x
 POST /interface/modules/custom_modules/oe-module-faxsms/index.php?type=fax&_ACTION_COMMAND=fax/disposeDocument header="Content-Type: application/x-www-form-urlencoded" body="action=setup&file_path=/tmp/oe-module-faxsms/fax/outbox-2026.pdf&content=JVBERi0xLjQK&csrf_token_form=x"
 POST /plugin/AI/receiveAsync.json.php header="Content-Type: application/x-www-form-urlencoded" body="type=translation&token=probe&response%5Bvtt%5D=POC-CONTROL-15&response%5Blang%5D=en&response%5Btext%5D=c&response%5Btotal_price%5D=0"
+
+# --- Near-miss guards for the 2026-11-09 delta intake: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-attachment.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-text-image-tag.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-benign-postscript-mention.bin
+POST /github-webhook/receive header="Content-Type: application/json" header="X-Github-Event: workflow_job" body="{\"action\":\"queued\",\"workflow_job\":{\"name\":\"build\",\"labels\":[]}}"
+POST /admin/actions/app/render-elements header="Content-Type: application/json" header="Accept: application/json" body="{\"elements\":[{\"type\":\"Entry\",\"id\":1,\"siteId\":1,\"instances\":[{\"ui\":\"chip\",\"hyperlink\":true,\"returnUrl\":\"https://example.com/admin/entries/1\"}]}]}"
+POST /admin/actions/app/icon-svg header="Content-Type: application/json" header="Accept: application/json" body="{\"icon\":\"add\"}"
+POST /admin/actions/app/icon-svg header="Content-Type: application/json" header="Accept: application/json" body="{\"icon\":\"delete\"}"
+GET /media/theme/main.css
+GET /media/images/logo.png
+POST /api/v2/job_invocations header="Content-Type: application/json" body="{\"job_invocation\":{\"template_id\":1,\"effective_user\":\"root\",\"targeting_type\":\"static_query\"}}"
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-filename-star-benign.txt
+GET /catalog/control/ShowCatalog?category_id=10001
+POST /accounting/control/SendPerEmail header="Content-Type: application/x-www-form-urlencoded" body="invoiceId=1&subject=Invoice&bodyText=Please find the invoice attached."
+GET /admin/dashboard
+GET /internal/metrics
