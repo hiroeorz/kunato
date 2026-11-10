@@ -224,6 +224,25 @@ paths from one source. After 8 paths the source is banned; the blocked requests
 have no origin receipt and the `scraping` flag is logged. The separate normal
 client stays healthy. The result is 8 allowed, 12 blocked, and 1 flag event.
 
+### Local decoy credential replay
+
+`python3 lab/decoy_probe.py --binary target/debug/kunato --output /tmp/kunato-decoy-probe.json`
+runs a bounded loopback-only fake origin and a real Kunato child process.
+It compares disabled, LOG, and BLOCK modes with 23 deterministic cases from
+`lab/cases/decoys.json`. Assertions require correlated issuance/reuse log IDs
+from different trusted-proxy source identities, exact status outcomes,
+per-case origin receipts, continued normal-client success, metric evidence,
+and no raw/once/twice-percent-encoded credentials in WAF logs. The report
+retains binary/case hashes, statuses, receipts, and bounded structured logs;
+a failed mode is retained and fails the command. Processes and listeners are
+closed after each mode.
+
+This local replay is independent of the Docker sandbox controller and its
+`agentic` suite. It uses no scanner, external target, real credential, actual
+LLM, or production CDN. It verifies the implemented credential-return behavior
+and local response policy; adaptive-agent belief and live CDN behavior require
+separate deployment experiments.
+
 ### Agentic TTP chain
 
 The `agentic` suite runs a deterministic Goals/Planner/Worker loop over DVWA and

@@ -2221,9 +2221,11 @@ protection:
     window: 10s
     duration: 60s
     max_duration: 1h
-  # Behavioral detection observes upstream responses. Enumeration is blocked
-  # because scanners probe many distinct missing paths; authentication failure
-  # signals stay in LOG mode until their false-positive rate is known.
+  # Behavioral detection observes upstream responses. Every signal blocks in the
+  # shipped policy, including the release default; the engine default for an
+  # omitted block stays LOG so only this file decides to ban. Lower a signal to
+  # LOG here when it is noisy for this deployment, and review `client_ip` and
+  # this allowlist before running behind a shared egress.
   behavior:
     enabled: true
     window: 60s
@@ -2235,19 +2237,32 @@ protection:
       distinct_paths: 40
     auth:
       enabled: true
-      action: LOG
+      action: BLOCK
       min_failures: 20
     global_auth:
       enabled: true
       window: 60s
       min_failures: 100
-      action: LOG
+      action: BLOCK
       ban: 60s
     scraping:
-      enabled: false
-      action: LOG
+      enabled: true
+      action: BLOCK
       min_requests: 40
       distinct_paths: 40
+    # Cross-request continuity: evidence from upstream outcomes and from the
+    # requests Kunato rejects itself accumulates with decay, and only a source
+    # that returns in a later short window can reach the action.
+    sequence:
+      enabled: true
+      action: BLOCK
+      short_window: 10m
+      long_window: 24h
+      half_life: 6h
+      threshold: 12
+      min_windows: 2
+      min_dimensions: 2
+      ban: 5m
 
 admin:
   enabled: true

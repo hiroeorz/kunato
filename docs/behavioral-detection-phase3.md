@@ -9,6 +9,11 @@ authentication-failure log) is implemented; see
 remains `LOG` by default because of the availability risk below. This document
 evaluates the Phase 3 follow-ups and recommends a scoped implementation.
 
+Note: the engine default for every signal is still `LOG`, but the shipped
+configuration sets each one, including `global_auth` and `scraping`, to `BLOCK`.
+See
+[behavioral-detection.md](behavioral-detection.md) §4.3 and §12.
+
 ## 1. Summary
 
 The remaining behavioral gaps are classes where every individual request looks

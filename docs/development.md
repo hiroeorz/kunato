@@ -1606,6 +1606,159 @@ namespace that cannot reach the host's loopback admin port. The gate is an
 access-control convenience for a single-administrator host, not a defense
 against full local compromise.
 
+### Experimental decoys
+
+`decoys` is an opt-in, local deception experiment. It serves fictional
+configuration files containing credentials for a fake HTTP API also owned by
+Kunato. Both endpoints are generated locally; their requests never contact the
+upstream. The feature is implemented in the working tree and requires a new
+binary release. It does not arrive through daily rule updates.
+
+```yaml
+allowed_hosts: [blog.example.test]
+decoys:
+  enabled: true
+  token_ttl: 30m
+  on_reuse: LOG
+  issuance:
+    per_minute: 60
+    burst: 10
+    per_source_per_minute: 6
+    per_source_burst: 2
+  verification: {per_second: 256, burst: 256}
+  observation: {body: true}
+  sites:
+    - name: blog
+      origin: https://blog.example.test
+      sink: /_decoy/api/v1/storage/list
+      presets: [dotenv]
+      disabled_paths: []
+      paths:
+        - path: /.env.production
+          template: dotenv
+```
+
+| Field | Default | Validation / effect |
+| --- | --- | --- |
+| `enabled` | `false` | Effective only while `protection.enabled` is also true |
+| `token_ttl` | `30m` | Whole seconds in 1m..24h; existing credentials retain their signed expiry on reload |
+| `on_reuse` | `LOG` | `LOG` or `BLOCK`; BLOCK affects only an exact credential presented on the owned sink |
+| `issuance.per_minute` | `60` | Global refill rate, 1..6000 tokens/minute, shared across sites |
+| `issuance.burst` | `10` | Global bucket capacity, 1..100 |
+| `issuance.per_source_per_minute` | `6` | Source refill rate, 1..600/minute, no greater than global |
+| `issuance.per_source_burst` | `2` | Source capacity, 1..100, no greater than global |
+| `verification.per_second` | `256` | Global HMAC-attempt refill rate, 1..4096/second |
+| `verification.burst` | `256` | HMAC-attempt bucket capacity, 1..4096 |
+| `observation.body` | `true` | Passive inspection of at most an 8 KiB body prefix |
+| `sites` | `[]` | Required when enabled; 1..16 sites with unique names and canonical origins |
+| `sites[].name` | Required | 1..64 ASCII letters, digits, periods, underscores, or hyphens |
+| `sites[].origin` | Required | Explicit HTTPS origin, accepted by `allowed_hosts`, without credentials/query/fragment or a non-root path |
+| `sites[].sink` | Required | Exact local fake API path; must not equal a trap |
+| `sites[].presets` | `[]` | Individually selected preset names from the table below; no duplicates |
+| `sites[].disabled_paths` | `[]` | Unique preset paths to remove; unknown removals are errors |
+| `sites[].paths` | `[]` | Local `{path, template}` entries replace a preset at the same path; duplicate or simultaneously disabled entries are errors |
+
+These limits are token buckets: capacity `B` plus rate `R` permits up to
+`B + R * elapsed` operations, rather than an exact rolling-minute ceiling.
+Zero does not mean unlimited. Source history is bounded by the existing
+tracked-source table and uses trusted `client_ip` resolution and IPv6-prefix
+aggregation. Missing tracking suppresses issuance; eviction can reset source
+history while the global bucket remains bounded.
+
+| Preset | Owned trap paths | Template |
+| --- | --- | --- |
+| `dotenv` | `/.env` | `dotenv` |
+| `git-config` | `/.git/config` | `git-config` |
+| `wordpress-backup` | `/wp-config.php.bak`, `/wp-config.php.old` | `wp-config` |
+| `spring-env` | `/actuator/env` | `spring-env` |
+
+Accept at most 32 effective traps per site and 128 across sites. Paths are
+case-sensitive literal absolute paths of at most 512 ASCII bytes, using only
+letters, digits, `/`, `-`, `.`, `_`, and `~`. Repeated slashes, dot segments,
+percent escapes, query/fragment markers, and regex patterns are rejected in
+configuration. Requests match any existing decoded/normalized path form.
+Multiple matching routes return a local fallback instead of choosing one.
+Canonical DNS names and default HTTPS port aliases match; nondefault ports
+must match explicitly. The general Host allowlist remains authoritative and
+may be stricter. Proxy-provided public-host/scheme headers are not trusted for
+site selection or template substitution.
+
+Declaring a route gives Kunato ownership for **every method** while decoys are
+active. Choose paths that the real application does not need. Startup,
+validation, and reload diagnostics list effective routes and warn about
+administrative, content, PHP, and GraphQL overlaps. Maintenance and closed
+`admin_access` functions run first; a closed Spring gate still hides the
+Spring decoy. Open administrative gates do not exempt a request from inspection.
+
+Trap GET returns `200` with a fresh credential; HEAD has the same representation
+length without minting or sending one. Both consume issuance quota. Unsupported
+methods/upgrades, exhausted issuance quota, missing tracking, or unavailable
+inspection scratch return a small local `404`; nonce failures return `503`.
+The sink normally returns `401`. An unexpired site-scoped token presented as
+the entire single `Authorization: Bearer <token>` or `X-Api-Key` value qualifies
+for reuse evidence. Under `BLOCK`, only that sink request gets `403`. Duplicate
+fields or both authentication mechanisms are ambiguous and do not qualify.
+If exact sink authentication cannot be verified within the global budget, the
+sink returns local `503`. None of these responses enters upstream observation,
+response-phase rules, source-ban logic, or the continuity score.
+
+Tokens observed in query/path/cookies/Basic credentials/body or on real
+application endpoints are always passive, even under `BLOCK`. A token-bearing
+image URL must not ban the visitor. Regular WAF rules still apply for their
+own reasons. No decoy source ban is supported, and `ban` is an unknown field.
+An `ALLOW` rule does not bypass owned routes. `protection.allowlist` skips
+observation/enforcement and receives token-free local `404`s on owned routes.
+
+The total scan budget is 32 KiB of representations with at most 16 distinct
+candidate/HMAC attempts. Exact sink authentication is checked first. Passive
+decoding covers two percent passes, bounded Basic credentials, and supported
+textual body forms. Compressed bodies reuse an already inspected decoded
+prefix; decoys never force otherwise unnecessary decompression or a larger
+body read. Uploaded file payloads are excluded. Work beyond the prefix/candidate/
+byte limit, unsupported encodings, and established WebSocket frames can be
+missed. Incomplete observation is counted and never blocks ordinary traffic.
+Mandatory body buffers can reclaim optional decoy scratch before a reservation
+retry; observation then stops while retaining already verified head evidence.
+
+Every decoy response enforces no-store, noindex/nofollow, nosniff, no-referrer,
+and its fixed text/JSON Content-Type after normal response-header rewriting.
+Cookies, redirects, validators, compression, range metadata, and CORS headers
+cannot be injected through global response settings. Verify the actual CDN
+bypass policy and remove older cache objects when deploying the experiment.
+
+The signing key is process-local and retained across reloads; restart
+invalidates every old token. Expiry uses monotonic elapsed time. Removing or
+renaming a site disables recognition of its credentials; restoring the same
+site before expiry can restore recognition. Disable/re-enable does not rotate
+the key. `--disable-protection`, `protection.enabled: false`, or
+`decoys.enabled: false` disables ownership too, so those paths take the ordinary
+rules/proxy path. Retain ordinary rules if the paths must remain closed then.
+
+Structured issuance/reuse logs share a 128-bit hashed `token_id`, source,
+transport peer, site, and age/lifetime metadata. The raw token is never logged;
+token-bearing request paths are redacted, including two percent-decoding
+layers. Issuance records creation, not confirmed receipt. Logs are bounded and
+may be suppressed; IDs permit offline data correlation, not proof of the same
+person or malicious intent.
+
+Prometheus exposes `kunato_decoy_responses_total`, `tokens_issued_total`,
+`reuse_total`, `blocked_total`, `limited_total`, `scan_incomplete_total`,
+`invalid_tokens_total`, `token_errors_total`, and `logs_suppressed_total`, all
+with the `kunato_decoy_` prefix. Labels are fixed kind/context/reason enums;
+there are no per-token, per-IP, path, or site labels. The exact protocol,
+counter labels, and test requirements are in [decoy design](decoy-design.md).
+
+The bounded loopback regression also runs against a built binary:
+
+```sh
+cargo build
+python3 lab/decoy_probe.py --binary target/debug/kunato --output /tmp/kunato-decoy-probe.json
+```
+
+It compares disabled/LOG/BLOCK, correlates two resolved source addresses,
+asserts upstream receipts and log redaction, and checks an independent normal
+client. It runs deterministic replay, not an actual LLM or a production CDN.
+
 ### Log viewer
 
 `kunato log` reads the systemd journal for the `kunato` unit through
@@ -1963,6 +2116,16 @@ protection:
       action: BLOCK
       min_requests: 40
       distinct_paths: 40
+    sequence:
+      enabled: true
+      action: BLOCK
+      short_window: 10m
+      long_window: 24h
+      half_life: 6h
+      threshold: 12
+      min_windows: 2
+      min_dimensions: 2
+      ban: 5m
 ```
 
 The per-IP limiter uses a token bucket (`requests_per_second` refill rate, `burst`
@@ -1978,6 +2141,18 @@ limits.
 `scraping` counts distinct `200` responses on non-static paths per source and
 flags a source that crosses both `min_requests` and `distinct_paths`. It is
 opt-in because API clients and legitimate crawlers can look similar.
+
+`sequence` accumulates weighted evidence for one source across a short and a
+long window. The short window resets on activity-driven rollover and only feeds
+the log line; the long score decays with `half_life`. The action requires
+`score >= threshold`, at least `min_dimensions` distinct evidence kinds, and
+activity in at least `min_windows` short windows, so one burst cannot ban. The
+weights are 1 for an upstream `404`, 2 for an upstream authentication failure,
+3 for a rule `BLOCK` or the closed `admin_access` gate, 4 for a structural
+rejection, and 6 for a rate-limit ban, plus 4 for a retry of a known target in
+a different encoding and 3 when a second attack category appears. A
+`sequence` `BLOCK` bans for `ban`, escalated up to `ban.max_duration`, then
+resets the evidence.
 
 `global_auth` aggregates authentication failures across sources. With the
 default `action: LOG` it only records the threshold; with `action: BLOCK` it
@@ -2017,8 +2192,10 @@ statuses. It runs after the upstream response and before response-phase rules,
 so it uses the status the application actually returned and never observes
 Kunato's own block or error responses. The engine defaults to observation only:
 flags are logged and counted, and no traffic is blocked until a signal's
-`action` is raised to `BLOCK`. The bundled `rules.example.yaml` enables
-enumeration `BLOCK` and leaves authentication signals in `LOG`.
+`action` is raised to `BLOCK`. The shipped policy (`rules.example.yaml` and the
+`kunato init` template) raises every signal to `BLOCK`, and that stays the
+release default; lower a signal to `LOG` where its false-positive rate is not
+yet understood.
 
 - **Enumeration** counts `404` responses on non-static paths and estimates the
   number of distinct paths in the window. A source is flagged when it meets all
@@ -2034,9 +2211,24 @@ enumeration `BLOCK` and leaves authentication signals in `LOG`.
   are still recognized.
 - **Global authentication abuse** sums `401`/`403` authentication failures
   across all sources. This is the signal for distributed spraying where each
-  source stays below the per-source threshold. It is **LOG only** in this
-  release: a global ban or throttle would let an attacker deny authentication
-  to every user.
+  source stays below the per-source threshold. With `action: BLOCK` it rejects
+  authentication paths for `global_auth.ban`, but only for sources that
+  contributed a recent failure themselves, so one attacker cannot lock every
+  user out of the login page. The engine default stays `LOG`; the shipped
+  policy sets `BLOCK`.
+- **Scraping** (opt-in) counts distinct `200` responses on non-static paths and
+  bans a source walking many pages. The shipped policy enables it with
+  `BLOCK`; it is the most aggressive signal and the first one to lower to `LOG`
+  for a public blog with heavy legitimate browsing.
+- **Cross-request continuity** (`sequence`) scores weighted evidence across a
+  short and a long window with decay. Upstream `404`s and authentication
+  failures count, and so do the requests Kunato rejects itself: rule `BLOCK`s,
+  structural rejections, the closed `admin_access` gate, and rate-limit bans.
+  A retry of a known target with a different encoding and a switch to a second
+  attack category add bonus weight. The action requires `min_windows` short
+  windows with activity and `min_dimensions` evidence kinds, so neither a
+  single burst nor one noisy signal can ban on its own. State is fixed-size and
+  decays lazily; a `BLOCK` bans for `sequence.ban`, escalated like any other ban.
 
 A per-source `BLOCK` flag applies a ban after the current response, using the
 same `ban.duration` and escalation as a rate-limit ban; the next request from

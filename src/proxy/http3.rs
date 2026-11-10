@@ -267,7 +267,7 @@ async fn handle_request(
     let config = context.config();
     let head_request = request.method() == Method::HEAD;
     let (mut parts, _) = request.into_parts();
-    let (mut send, recv) = stream.split();
+    let (mut send, mut recv) = stream.split();
     let resolved = server::resolve_source(&context, peer, &config, &parts);
     let source = resolved
         .as_ref()
@@ -286,7 +286,10 @@ async fn handle_request(
     } else if let Some(response) = server::admin_access_response(&context, &config, source, &parts)
     {
         response
-    } else if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
+    } else if let Some(response) = server::decoy_head(&context, &config, source, &mut parts) {
+        recv.stop_sending(Code::H3_NO_ERROR);
+        response
+    } else if let Some(inspection) = server::request_inspection(&context, source, &parts) {
         match read_prefix(recv, &config, source, inspection, &context).await {
             Ok((payload, inspection)) => {
                 server::process_payload(parts, payload, source, &config, &context, inspection).await
@@ -298,6 +301,7 @@ async fn handle_request(
         server::rejected(source, &server::inspection_capacity_error())
     };
     config.response_headers.apply(response.headers_mut());
+    crate::decoy::finalize(&mut response);
     let active = active.into_streaming();
     if let Err(err) = send_response(
         &mut send,

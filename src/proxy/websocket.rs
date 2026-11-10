@@ -611,7 +611,7 @@ async fn pump_client_to_upstream<R, W>(
         {
             warn!(
                 client = %source_ip,
-                path = %request.uri.path(),
+                path = %crate::decoy::log_path(request.uri.path()),
                 ?violation,
                 "WebSocket GraphQL payload rejected"
             );

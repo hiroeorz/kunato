@@ -44,6 +44,11 @@ struct RequestHost {
     port: Option<u16>,
 }
 
+pub(crate) fn normalized_authority(raw: &str) -> Option<(String, Option<u16>)> {
+    let host = RequestHost::parse(raw).ok()?;
+    Some((host.host, host.port))
+}
+
 /// Why a request was rejected by the host policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostViolation {

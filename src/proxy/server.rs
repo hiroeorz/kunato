@@ -29,7 +29,10 @@ use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
 use crate::error::Error;
 use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
-use crate::protection::{BehaviorSignal, ConnectionGuard, Decision, ProtectionState, normalize_ip};
+use crate::protection::{
+    BehaviorSignal, ConnectionGuard, Decision, ProtectionState, SequenceFlag, SequenceKind,
+    normalize_ip,
+};
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
 use crate::proxy::websocket::{self, Upgrade};
@@ -119,6 +122,7 @@ impl InspectionBudget {
             budget: Arc::clone(self),
             source,
             bytes: AtomicUsize::new(bytes),
+            decoy_reclaim: None,
         })
     }
 
@@ -184,6 +188,7 @@ pub(crate) struct InspectionGuard {
     /// reservation once the decoded buffers are gone, without waiting for the
     /// stream to finish.
     bytes: AtomicUsize,
+    decoy_reclaim: Option<crate::decoy::Reclaim>,
 }
 
 impl InspectionGuard {
@@ -192,6 +197,20 @@ impl InspectionGuard {
     }
 
     pub(crate) fn grow(&mut self, additional: usize) -> bool {
+        if self.try_grow(additional) {
+            return true;
+        }
+        self.decoy_reclaim
+            .as_ref()
+            .is_some_and(|reclaim| reclaim.release())
+            && self.try_grow(additional)
+    }
+
+    pub(crate) fn attach_decoy(&mut self, reclaim: crate::decoy::Reclaim) {
+        self.decoy_reclaim = Some(reclaim);
+    }
+
+    fn try_grow(&mut self, additional: usize) -> bool {
         if additional == 0 {
             return true;
         }
@@ -1137,11 +1156,13 @@ async fn handle_request(
         Ok(response)
     } else if let Some(response) = admin_access_response(&context, &config, source, &parts) {
         Ok(response)
+    } else if let Some(response) = decoy_head(&context, &config, source, &mut parts) {
+        Ok(response)
     } else if upgrade.is_some()
         && !parts.headers.contains_key(CONTENT_LENGTH)
         && !parts.headers.contains_key(TRANSFER_ENCODING)
     {
-        if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
+        if let Some(inspection) = request_inspection(&context, source, &parts) {
             let payload = RequestPayload {
                 prefix: Bytes::new(),
                 pending: Vec::new(),
@@ -1156,7 +1177,7 @@ async fn handle_request(
             context.record_overloaded();
             Err(inspection_capacity_error())
         }
-    } else if let Some(inspection) = context.reserve_request_inspection(source.client_ip) {
+    } else if let Some(inspection) = request_inspection(&context, source, &parts) {
         match read_body(body, &config, source, inspection, &context).await {
             Ok((body, inspection)) => {
                 process(parts, body, source, &config, &context, upgrade, inspection).await
@@ -1172,6 +1193,7 @@ async fn handle_request(
         Err(err) => rejected(source, &err),
     };
     config.response_headers.apply(response.headers_mut());
+    crate::decoy::finalize(&mut response);
     if let Some(alt_svc) = &context.alt_svc {
         response.headers_mut().insert("alt-svc", alt_svc.clone());
     }
@@ -1181,6 +1203,69 @@ async fn handle_request(
         None => body,
     };
     Ok(Response::from_parts(parts, body))
+}
+
+pub(crate) fn request_inspection(
+    context: &Context,
+    source: ClientSource,
+    parts: &http::request::Parts,
+) -> Option<InspectionGuard> {
+    let observation = parts.extensions.get::<crate::decoy::Observation>();
+    let mut guard = context
+        .reserve_request_inspection(source.client_ip)
+        .or_else(|| {
+            if observation.is_some_and(|observation| observation.reclaimer().release()) {
+                context.reserve_request_inspection(source.client_ip)
+            } else {
+                None
+            }
+        })?;
+    if let Some(observation) = observation {
+        guard.attach_decoy(observation.reclaimer());
+    }
+    Some(guard)
+}
+
+pub(crate) fn decoy_head(
+    context: &Context,
+    config: &CompiledConfig,
+    source: ClientSource,
+    parts: &mut http::request::Parts,
+) -> Option<Response<ProxyBody>> {
+    let inspection = if crate::decoy::active(config)
+        && config.decoys.site(&parts.headers).is_some()
+        && !crate::decoy::exempt(source.client_ip, &config.protection)
+    {
+        context.inspection.reserve_for(
+            source.client_ip,
+            MIN_INSPECTION_RESERVATION.saturating_add(parts.uri.path().len().saturating_mul(6)),
+        )
+    } else {
+        None
+    };
+    let mut response = crate::decoy::dispatch(
+        parts,
+        config,
+        source,
+        Arc::clone(&context.metrics),
+        Arc::clone(&context.protection),
+        inspection,
+    )?;
+    drop(parts.extensions.remove::<crate::decoy::Observation>());
+    if matches!(
+        parts.version,
+        http::Version::HTTP_10 | http::Version::HTTP_11
+    ) && (parts.headers.contains_key(TRANSFER_ENCODING)
+        || parts
+            .headers
+            .get(CONTENT_LENGTH)
+            .is_some_and(|length| length.as_bytes() != b"0"))
+    {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    Some(response)
 }
 
 pub(crate) fn resolve_source(
@@ -1216,7 +1301,7 @@ pub(crate) fn admission_error(
             .fetch_add(1, Ordering::Relaxed);
         warn!(
             client = %source.client_ip, peer = %source.peer,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             remaining_secs = remaining.as_secs(),
             "global authentication abuse mitigation active"
         );
@@ -1309,7 +1394,7 @@ pub(crate) fn admin_access_response(
             debug!(
                 client = %source.client_ip, peer = %source.peer,
                 method = %parts.method,
-                path = %parts.uri.path(),
+                path = %crate::decoy::log_path(parts.uri.path()),
                 function = %function,
                 "administrative access open"
             );
@@ -1323,9 +1408,17 @@ pub(crate) fn admin_access_response(
             info!(
                 client = %source.client_ip, peer = %source.peer,
                 method = %parts.method,
-                path = %parts.uri.path(),
+                path = %crate::decoy::log_path(parts.uri.path()),
                 function = %function,
                 "administrative access denied; the effective state is closed"
+            );
+            record_sequence(
+                context,
+                source,
+                config,
+                SequenceKind::AdminGate,
+                parts.uri.path(),
+                Some(function),
             );
             let mut response = forward::error_response(StatusCode::NOT_FOUND, "not found");
             response
@@ -1593,7 +1686,7 @@ pub(crate) fn protection_error(
                 retry_after_ms = duration_millis(retry_after),
                 suppressed = report.suppressed,
                 method = method.unwrap_or("-"),
-                path = path.unwrap_or("-"),
+                path = %crate::decoy::log_path(path.unwrap_or("-")),
                 "{}",
                 message
             );
@@ -1607,11 +1700,22 @@ pub(crate) fn protection_error(
                 suppressed = report.suppressed,
                 limit_rps = config.protection.requests_per_second,
                 method = method.unwrap_or("-"),
-                path = path.unwrap_or("-"),
+                path = %crate::decoy::log_path(path.unwrap_or("-")),
                 "{}",
                 message
             );
         }
+    }
+    if matches!(decision, Decision::Banned { .. }) {
+        let path = request.map(|(_, path)| path).unwrap_or("-");
+        record_sequence(
+            context,
+            source,
+            config,
+            SequenceKind::RateLimitBan,
+            path,
+            None,
+        );
     }
     protection_http_error(context, decision)
 }
@@ -1913,6 +2017,12 @@ fn record_behavior(
             .behavior_auth_failures
             .fetch_add(1, Ordering::Relaxed);
     }
+    if outcome.observed_sequence {
+        context
+            .metrics
+            .behavior_sequence_events
+            .fetch_add(1, Ordering::Relaxed);
+    }
 
     if let Some(flag) = outcome.source {
         let blocked = flag.ban.is_some();
@@ -1931,7 +2041,7 @@ fn record_behavior(
                 warn!(
                     client = %source.client_ip, peer = %source.peer,
                     signal = flag.signal.as_str(),
-                    path = %parts.uri.path(),
+                    path = %crate::decoy::log_path(parts.uri.path()),
                     requests = flag.requests,
                     not_found = flag.not_found,
                     ratio,
@@ -1951,7 +2061,7 @@ fn record_behavior(
                 warn!(
                     client = %source.client_ip, peer = %source.peer,
                     signal = flag.signal.as_str(),
-                    path = %parts.uri.path(),
+                    path = %crate::decoy::log_path(parts.uri.path()),
                     auth_failures = flag.auth_failures,
                     threshold = config.protection.behavior.auth.min_failures,
                     action = flag.action.as_str(),
@@ -1968,7 +2078,7 @@ fn record_behavior(
                 warn!(
                     client = %source.client_ip, peer = %source.peer,
                     signal = flag.signal.as_str(),
-                    path = %parts.uri.path(),
+                    path = %crate::decoy::log_path(parts.uri.path()),
                     content = flag.content,
                     distinct_paths = flag.distinct_paths,
                     threshold = config.protection.behavior.scraping.distinct_paths,
@@ -2008,6 +2118,73 @@ fn record_behavior(
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    if let Some(flag) = outcome.sequence {
+        record_sequence_flag(context, source, config, parts.uri.path(), flag);
+    }
+}
+
+fn record_sequence(
+    context: &Context,
+    source: ClientSource,
+    config: &CompiledConfig,
+    kind: SequenceKind,
+    path: &str,
+    category: Option<&str>,
+) {
+    let outcome = context.protection.observe_sequence(
+        source.client_ip,
+        &config.protection,
+        kind,
+        path,
+        category,
+    );
+    if outcome.recorded {
+        context
+            .metrics
+            .behavior_sequence_events
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(flag) = outcome.flag {
+        record_sequence_flag(context, source, config, path, flag);
+    }
+}
+
+fn record_sequence_flag(
+    context: &Context,
+    source: ClientSource,
+    config: &CompiledConfig,
+    path: &str,
+    flag: SequenceFlag,
+) {
+    context
+        .metrics
+        .behavior_sequence_flags
+        .fetch_add(1, Ordering::Relaxed);
+    let blocked = flag.ban.is_some();
+    let ban_seconds = flag.ban.map(|duration| duration.as_secs()).unwrap_or(0);
+    warn!(
+        client = %source.client_ip, peer = %source.peer,
+        signal = "sequence",
+        path = %crate::decoy::log_path(path),
+        score = flag.score,
+        score_short = flag.score_short,
+        kinds = flag.kinds,
+        windows = flag.windows,
+        threshold = config.protection.behavior.sequence.threshold,
+        min_windows = config.protection.behavior.sequence.min_windows,
+        min_dimensions = config.protection.behavior.sequence.min_dimensions,
+        action = flag.action.as_str(),
+        blocked,
+        ban_seconds,
+        "behavior sequence threshold reached"
+    );
+    if blocked {
+        context
+            .metrics
+            .behavior_blocked
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn record_upstream_error(context: &Context, err: &HttpError) {
@@ -2028,7 +2205,43 @@ fn record_upstream_error(context: &Context, err: &HttpError) {
     }
 }
 
+/// Wraps `process_inner` so a request Kunato rejected on its own (malformed
+/// body, oversized upload, charset, hardening, and so on) still contributes
+/// continuity evidence. Upstream responses and rule blocks are recorded at
+/// their own decision points.
 async fn process(
+    parts: http::request::Parts,
+    payload: RequestPayload,
+    source: ClientSource,
+    config: &CompiledConfig,
+    context: &Context,
+    upgrade: Option<Upgrade>,
+    inspection: InspectionGuard,
+) -> Result<Response<ProxyBody>, HttpError> {
+    let sequence_uri = config
+        .protection
+        .behavior
+        .sequence
+        .enabled
+        .then(|| parts.uri.clone());
+    let result = process_inner(parts, payload, source, config, context, upgrade, inspection).await;
+    if let (Some(uri), Err(error)) = (sequence_uri, &result)
+        && error.status.is_client_error()
+        && error.status != StatusCode::TOO_MANY_REQUESTS
+    {
+        record_sequence(
+            context,
+            source,
+            config,
+            SequenceKind::StructuralReject,
+            uri.path(),
+            None,
+        );
+    }
+    result
+}
+
+async fn process_inner(
     mut parts: http::request::Parts,
     payload: RequestPayload,
     source: ClientSource,
@@ -2045,6 +2258,25 @@ async fn process(
     if let Some(err) = request_head_error(config, &parts) {
         return Err(err);
     }
+    if crate::decoy::active(config)
+        && parts
+            .extensions
+            .get::<crate::decoy::HeadChecked>()
+            .is_none()
+    {
+        if let Some(error) = admission_error(context, source, &parts, config) {
+            return Err(error);
+        }
+        if let Some(response) = maintenance_response(context, &parts)
+            .or_else(|| admin_access_response(context, config, source, &parts))
+        {
+            return Ok(response);
+        }
+        if let Some(response) = decoy_head(context, config, source, &mut parts) {
+            return Ok(response);
+        }
+    }
+    let decoy_observation = parts.extensions.remove::<crate::decoy::Observation>();
     let body = &payload.prefix;
     if payload.truncated {
         context
@@ -2054,7 +2286,7 @@ async fn process(
         debug!(
             client = %source.client_ip, peer = %source.peer,
             limit = config.limits.max_body_bytes,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "request body truncated for inspection"
         );
     }
@@ -2105,7 +2337,7 @@ async fn process(
         warn!(
             client = %source.client_ip, peer = %source.peer,
             charset = %charset,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "request body charset cannot be inspected; rejecting"
         );
         return Err(HttpError::new(
@@ -2156,7 +2388,7 @@ async fn process(
                 warn!(
                     client = %source.client_ip, peer = %source.peer,
                     limit = config.limits.max_body_bytes,
-                    path = %parts.uri.path(),
+                    path = %crate::decoy::log_path(parts.uri.path()),
                     decoded_complete = complete,
                     raw_truncated = payload.truncated,
                     "request body could not be fully decoded for inspection; rejecting"
@@ -2177,7 +2409,7 @@ async fn process(
                 .fetch_add(1, Ordering::Relaxed);
             warn!(
                 client = %source.client_ip, peer = %source.peer,
-                path = %parts.uri.path(),
+                path = %crate::decoy::log_path(parts.uri.path()),
                 "request body encoding cannot be inspected; rejecting"
             );
             return Err(HttpError::new(
@@ -2192,7 +2424,7 @@ async fn process(
                 .fetch_add(1, Ordering::Relaxed);
             warn!(
                 client = %source.client_ip, peer = %source.peer,
-                path = %parts.uri.path(),
+                path = %crate::decoy::log_path(parts.uri.path()),
                 "request body encoding is malformed; rejecting"
             );
             return Err(HttpError::new(
@@ -2211,7 +2443,7 @@ async fn process(
         warn!(
             client = %source.client_ip, peer = %source.peer,
             charset = %charset,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "decoded request body charset cannot be inspected; rejecting"
         );
         return Err(HttpError::new(
@@ -2226,7 +2458,7 @@ async fn process(
         warn!(
             client = %source.client_ip, peer = %source.peer,
             kind,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "structured request body is nested too deeply; rejecting"
         );
         return Err(HttpError::new(
@@ -2297,7 +2529,7 @@ async fn process(
                     .php_request_rejected
                     .fetch_add(1, Ordering::Relaxed);
             }
-            debug!(client = %source.client_ip, peer = %source.peer, path = %parts.uri.path(), ?violation, "form request rejected");
+            debug!(client = %source.client_ip, peer = %source.peer, path = %crate::decoy::log_path(parts.uri.path()), ?violation, "form request rejected");
             return Err(HttpError::new(status, violation.message()));
         }
     }
@@ -2343,7 +2575,7 @@ async fn process(
                 .fetch_add(1, Ordering::Relaxed);
             debug!(
                 client = %source.client_ip, peer = %source.peer,
-                path = %parts.uri.path(),
+                path = %crate::decoy::log_path(parts.uri.path()),
                 filename = %rejection.filename,
                 declared = rejection.declared.as_deref().unwrap_or("-"),
                 kind = rejection.kind.as_str(),
@@ -2368,7 +2600,7 @@ async fn process(
             .fetch_add(1, Ordering::Relaxed);
         debug!(
             client = %source.client_ip, peer = %source.peer,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             filename = %rejection.filename,
             declared = rejection.declared.as_deref().unwrap_or("-"),
             kind = rejection.kind.as_str(),
@@ -2398,7 +2630,7 @@ async fn process(
             .fetch_add(1, Ordering::Relaxed);
         debug!(
             client = %source.client_ip, peer = %source.peer,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             ?violation,
             "graphql request rejected"
         );
@@ -2433,12 +2665,23 @@ async fn process(
     if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
         debug!(
             client = %source.client_ip, peer = %source.peer,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             reason = violation.reason(),
             "request hardening rejected"
         );
         return Err(HttpError::new(violation.status(), violation.reason()));
     }
+    if config.decoys.observation.body
+        && let Some(observation) = &decoy_observation
+    {
+        observation.body(
+            inspected_body.as_ref(),
+            &parts.headers,
+            !encoded || body_was_decoded,
+            body_truncated,
+        );
+    }
+    drop(decoy_observation);
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
 
     if !outcome.logs.is_empty() {
@@ -2452,7 +2695,7 @@ async fn process(
             action = record.action.as_str(),
             client = %source.client_ip, peer = %source.peer,
             method = %parts.method,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "rule matched"
         );
     }
@@ -2470,8 +2713,16 @@ async fn process(
             rate_limited = blocked.rate_limited,
             client = %source.client_ip, peer = %source.peer,
             method = %parts.method,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "request blocked"
+        );
+        record_sequence(
+            context,
+            source,
+            config,
+            SequenceKind::RuleBlock,
+            parts.uri.path(),
+            Some(blocked.category.as_str()),
         );
         return Ok(forward::block_response(&blocked.response));
     }
@@ -2491,7 +2742,7 @@ async fn process(
         debug!(
             client = %source.client_ip, peer = %source.peer,
             limit = config.limits.max_body_bytes,
-            path = %parts.uri.path(),
+            path = %crate::decoy::log_path(parts.uri.path()),
             "request body exceeds the inspection limit; rejecting"
         );
         return Err(HttpError::new(

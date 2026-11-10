@@ -169,7 +169,6 @@ pub fn reload(
     let prior_rules_stamp = prior_rules.as_deref().map(file_stamp);
     match config::load(path) {
         Ok(new_config) => {
-            metrics.reload_success.fetch_add(1, Ordering::Relaxed);
             let sources = source_paths(path, &new_config);
             let mut stamps = source_stamps(&sources);
             stamps.insert(main_abs, main_stamp);
@@ -183,13 +182,14 @@ pub fn reload(
             {
                 stamps.insert(rules, stamp);
             }
-            Some(install_with_stamps(
+            install_with_stamps(
                 path,
                 new_config,
                 config,
                 disable_protection,
                 Some(stamps),
-            ))
+                metrics,
+            )
         }
         Err(err) => {
             metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
@@ -210,14 +210,7 @@ pub fn apply(
     disable_protection: bool,
 ) -> Option<Vec<PathBuf>> {
     let _serialized = lock_reload();
-    metrics.reload_success.fetch_add(1, Ordering::Relaxed);
-    Some(install_with_stamps(
-        path,
-        new_config,
-        config,
-        disable_protection,
-        None,
-    ))
+    install_with_stamps(path, new_config, config, disable_protection, None, metrics)
 }
 
 pub(crate) fn apply_with_stamps(
@@ -228,14 +221,14 @@ pub(crate) fn apply_with_stamps(
     disable_protection: bool,
     stamps: Stamps,
 ) -> Option<Vec<PathBuf>> {
-    metrics.reload_success.fetch_add(1, Ordering::Relaxed);
-    Some(install_with_stamps(
+    install_with_stamps(
         path,
         new_config,
         config,
         disable_protection,
         Some(stamps),
-    ))
+        metrics,
+    )
 }
 
 fn install_with_stamps(
@@ -244,12 +237,24 @@ fn install_with_stamps(
     config: &Snapshot<CompiledConfig>,
     disable_protection: bool,
     stamps: Option<Stamps>,
-) -> Vec<PathBuf> {
+    metrics: &Metrics,
+) -> Option<Vec<PathBuf>> {
     if disable_protection {
         new_config.protection.enabled = false;
     }
     let (active_listen, active_tls, active_http3, active_admin) = {
         let current = config.load();
+        if let Err(reason) = new_config
+            .decoys
+            .adopt_runtime(&current.decoys, new_config.protection.enabled)
+        {
+            metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
+            error!(
+                reason,
+                "cannot prepare decoy runtime; keeping previous configuration"
+            );
+            return None;
+        }
         (
             current.listen,
             current.tls.clone(),
@@ -288,7 +293,10 @@ fn install_with_stamps(
     let body_inspection_warning = new_config.body_inspection_warning();
     let allowed_hosts_warning = new_config.allowed_hosts_warning();
     let admin_access_warning = new_config.admin_access_warning();
+    let decoy_warnings = new_config.decoy_warnings();
+    let decoy_routes = new_config.decoy_routes();
     config.store(Arc::new(new_config));
+    metrics.reload_success.fetch_add(1, Ordering::Relaxed);
     // The snapshot is live: remember the stamps of the sources that were read
     // to build it so the watcher does not compile the same files again, while
     // any concurrent edit made during compilation still triggers a reload.
@@ -305,8 +313,14 @@ fn install_with_stamps(
     if let Some(warning) = admin_access_warning {
         warn!("{warning}");
     }
+    for warning in decoy_warnings {
+        warn!("{warning}");
+    }
+    for route in decoy_routes {
+        info!("{route}");
+    }
     info!(categories, rules, "configuration reloaded");
-    sources
+    Some(sources)
 }
 
 #[cfg(test)]

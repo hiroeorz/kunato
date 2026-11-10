@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-11-09; the managed set carries 572 rules.
+2026-11-11; the managed set carries 573 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -119,7 +119,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | API Parameter Tampering | ❌ | Business-logic dependent |
 | Mass Assignment | 🔶 | `mass-assignment.privileged-field-assignment` blocks high-risk assignments such as `is_admin=true` and `permission=root` in query/form/JSON bodies. `role=admin` alone is not blocked because legitimate admin APIs use it; nested authorization logic remains application-side. |
 | Excessive Data Exposure Requests | 🔶 | Response-phase inspection can express it, but no bundled rules (only private keys, SQL errors, ...) |
-| API Endpoint Enumeration | 🔶 | Scanner UA blocking, rate limits, and behavioral `404`/distinct-path flags; the example config enables `enumeration.action: BLOCK` (engine default is LOG) |
+| API Endpoint Enumeration | 🔶 | Scanner UA blocking, rate limits, behavioral `404`/distinct-path flags, and the continuity score that accumulates repeated probing across windows; the shipped config sets `enumeration` and `sequence` to `BLOCK` (engine default is LOG) |
 | API Version Abuse | ❌ | No rules |
 | Cache Deception | 🔶 | `cache-deception.authenticated-static-suffix` and opt-in `limits.hardening.cache_deception` (configurable suffixes/cookie names) block authenticated requests addressed as static assets; cache-key normalization outside the suffix/cookie heuristic remains deployment-specific |
 | Content-Type Spoofing | ❌ | No rules |
@@ -131,9 +131,9 @@ tests exercise these paths without adding attack signatures or changing verdicts
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. Protection also flags per-source `401`/`403` bursts on authentication paths (`protection.behavior.auth`, LOG default, per-signal `BLOCK` opt-in) and logs global bursts for distributed attempts. The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
-| Password Spraying | 🔶 | Same throttle, bans, and per-source auth-failure flags slow a single source; `protection.behavior.global_auth` aggregates failures across sources and, with `action: BLOCK`, rejects subsequent auth requests for `ban`. The default remains LOG, and attacker source diversity is not otherwise modeled |
-| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs, and opt-in `action: BLOCK` mitigates subsequent attempts globally, but individual stolen credentials cannot be identified |
+| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. Protection also flags per-source `401`/`403` bursts on authentication paths (`protection.behavior.auth`) and aggregates global bursts for distributed attempts; the continuity score adds rule blocks, structural rejections, and encoded retries across windows; the shipped config sets these signals to `BLOCK` (engine default is LOG). The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
+| Password Spraying | 🔶 | Same throttle, bans, and per-source auth-failure flags slow a single source; `protection.behavior.global_auth` aggregates failures across sources and, with `action: BLOCK`, rejects subsequent auth requests for `ban`. The engine default remains LOG and the shipped config blocks both signals plus continuity; attacker source diversity is not otherwise modeled |
+| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs, and, with the shipped `action: BLOCK`, mitigates subsequent attempts globally; continuity adds repeat-offender weight across windows, but individual stolen credentials cannot be identified |
 | Account / Login Enumeration | 🔶 | `response-leaks.login-enumeration-message` blocks common "user not found"/"invalid username" error text on authentication paths; application-specific wording needs a local response rule |
 | MFA Flooding | 🔶 | Rate limits only |
 | OTP Brute Force | 🔶 | Rate limits only |
@@ -274,7 +274,7 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
 | Vulnerability Scanner | ✅ | 20+ tools blocked by User-Agent (sqlmap, nikto, nmap, nuclei, Acunetix, ...) |
-| Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, rate limits, and behavioral `404`/distinct-path flags; the example config enables `enumeration.action: BLOCK` (engine default is LOG), but a slow prober below every threshold still passes |
+| Directory / File / Endpoint Enumeration | 🔶 | Scanner UA, `limit`, rate limits, behavioral `404`/distinct-path flags, and the continuity score (rule blocks, blocked admin paths, encoded retries); the shipped config sets `enumeration` and `sequence` to `BLOCK` (engine default is LOG), but a prober that never returns in a later window still passes |
 | Directory Index Browsing | 🔶 | `directory-index.directory-index-html` blocks default Apache/nginx HTML autoindex pages with a 403 in the response phase; nginx JSON/XML autoindex formats and custom Apache templates are not covered, and autoindex should still be disabled upstream |
 | Default Web Server Pages | 🔶 | `default-pages` blocks the stock Apache (`Apache2 Ubuntu/Debian Default Page`, `It works!`, RHEL/CentOS test page), nginx (`Welcome to nginx!`), and IIS (`IIS Windows Server`) pages at `/`, `/index.html`, `/index.nginx-debian.html`, and `/iisstart.htm` with a 403 in the response phase; localized or custom templates and other document names are not covered, and removing the default content upstream remains the primary defense |
 | Backup File Discovery | ✅ | `sensitive-files.backup-and-dump-files` (`.bak/.old/.sql/.swp`, ...) |
@@ -285,12 +285,30 @@ are integration-tested rather than claimed as request-corpus coverage.
 | Error Message Collection | 🔶 | `response-leaks` (stack traces, SQL errors, Server version) plus `response_headers.remove`; mostly LOG by default |
 | CMS/Framework Fingerprinting | 🔶 | Server header hiding only |
 
+## Experimental decoy evidence
+
+Opt-in `decoys` adds local lures and bounded recognition of returned fictional
+HTTP API credentials. It does not change the bundled class counts or verdicts:
+ordinary occurrences are LOG-only, optional BLOCK affects only the owned fake
+API, and it creates no source ban or behavioral score. It cannot observe AWS,
+database, or external Git credential use outside Kunato's request path.
+
+`tests/proxy/decoys.rs` exercises cross-source correlation, HTTP/1.1/2/3,
+normal-traffic preservation, route ownership, response-header finalization,
+quotas, incomplete observation, and reload. `lab/decoy_probe.py` with
+`lab/cases/decoys.json` compares disabled/LOG/BLOCK in 23 deterministic cases,
+asserts per-case origin receipts, joins issuance/reuse by hashed token ID, and
+checks that raw and percent-encoded tokens do not appear in WAF logs. This is
+experimental mitigation/observation evidence, not proof of same-person
+attribution or effectiveness against adaptive AI agents. See
+[design and limits](decoy-design.md).
+
 ## 11. Bot and Automation
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Malicious Bot | 🔶 | User-Agent signatures plus behavioral probing and authentication-abuse flags; the example config blocks enumeration and leaves authentication signals in LOG (engine default is LOG for every signal). No JS challenge, and `200`-only scraping is not detected |
-| Scraping / Crawling Abuse | 🔶 | SEO/AI crawlers are logged; opt-in `behavior.scraping` flags a source walking distinct `200` non-static paths and can ban it. A slow, multi-source scraper below the threshold still passes. |
+| Malicious Bot | 🔶 | User-Agent signatures plus behavioral probing, authentication-abuse, `200`-only scraping, and continuity flags; the shipped config blocks every signal (engine default is LOG). No JS challenge |
+| Scraping / Crawling Abuse | 🔶 | SEO/AI crawlers are logged; `behavior.scraping` flags a source walking distinct `200` non-static paths, and the shipped config enables it with `BLOCK`. A slow, multi-source scraper below the threshold still passes. |
 | Account Creation Bots / Login Bots | 🔶 | Rate limits and bans only |
 | Inventory Hoarding / Ticket Scalping | ❌ | Not covered |
 | Coupon Abuse / Carding / Card Cracking | ❌ | Not covered (business logic) |
@@ -340,8 +358,8 @@ are integration-tested rather than claimed as request-corpus coverage.
 | XXE / RCE payloads | ✅ |
 | Malicious file upload | 🔶 (script, binary, and server-config filename rules, MSL/MVG/PostScript/AviSynth coder scripts, plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
-| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, and an opt-in global auth block) |
-| Bot | 🔶 (User-Agent signatures plus behavioral probing/auth-failure flags; no JS challenge or 200-only scraping detection) |
+| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, a global auth block shipped in BLOCK mode, and continuity across retries) |
+| Bot | 🔶 (User-Agent signatures plus behavioral probing, auth-failure, 200-only scraping, and continuity flags; no JS challenge) |
 | API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |
 | HTTP Flood | ✅ |
@@ -500,4 +518,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled rule count; behavioral actions
-still default to LOG. The snapshot date is 2026-11-09.
+still default to LOG. The snapshot date is 2026-11-11.

@@ -96,7 +96,7 @@ pub(crate) async fn inspect(
         metrics
             .php_response_rejected
             .fetch_add(1, Ordering::Relaxed);
-        warn!(client = %source.client_ip, peer = %source.peer, path = %request.uri.path(), "PHP profile rejected an anomalous session cookie");
+        warn!(client = %source.client_ip, peer = %source.peer, path = %crate::decoy::log_path(request.uri.path()), "PHP profile rejected an anomalous session cookie");
         return Ok(forward::error_response(
             StatusCode::FORBIDDEN,
             "invalid PHP session response",

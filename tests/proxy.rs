@@ -26,6 +26,9 @@ use kunato::proxy::server::Server;
 use kunato::proxy::{BodyExt, Full};
 use kunato::snapshot::Snapshot;
 
+#[path = "proxy/decoys.rs"]
+mod decoys;
+
 struct PendingBody;
 
 impl Body for PendingBody {
@@ -3102,6 +3105,269 @@ protection:
 }
 
 #[tokio::test]
+async fn behavior_auth_block_bans_the_source() {
+    let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: true, action: BLOCK, min_failures: 2 }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for _ in 0..2 {
+        let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        running.metrics.behavior_auth_flags.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 1);
+
+    let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(running.metrics.banned.load(Ordering::Relaxed), 1);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_global_auth_block_covers_auth_paths_only() {
+    let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: true, min_failures: 2, action: BLOCK, ban: 60s }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for _ in 0..2 {
+        let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        running
+            .metrics
+            .behavior_global_auth_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+
+    let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = send(running.addr, Method::GET, "/index", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_scraping_block_bans_the_source() {
+    let upstream = spawn_upstream(StatusCode::OK, "page").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+    scraping: {{ enabled: true, action: BLOCK, min_requests: 2, distinct_paths: 1 }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/one", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(running.addr, Method::GET, "/two", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_scraping_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 1);
+
+    let (status, _) = send(running.addr, Method::GET, "/three", "").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_sequence_blocks_a_campaign_across_windows() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: probe
+    action: BLOCK
+    rules:
+      - name: admin
+        match: {{ path: '^/admin' }}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+    scraping: {{ enabled: false }}
+    sequence:
+      enabled: true
+      action: BLOCK
+      short_window: 1s
+      threshold: 3
+      min_windows: 2
+      min_dimensions: 1
+      ban: 60s
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_sequence_events
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        running
+            .metrics
+            .behavior_sequence_flags
+            .load(Ordering::Relaxed),
+        0
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_sequence_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 1);
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_sequence_ignores_a_single_window_burst() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: probe
+    action: BLOCK
+    rules:
+      - name: admin
+        match: {{ path: '^/admin' }}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+    scraping: {{ enabled: false }}
+    sequence:
+      enabled: true
+      action: BLOCK
+      short_window: 30s
+      threshold: 3
+      min_windows: 2
+      min_dimensions: 1
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for _ in 0..3 {
+        let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        running
+            .metrics
+            .behavior_sequence_flags
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 0);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_sequence_needs_two_evidence_kinds() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: probe
+    action: BLOCK
+    rules:
+      - name: admin
+        match: {{ path: '^/admin' }}
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+    scraping: {{ enabled: false }}
+    sequence:
+      enabled: true
+      action: BLOCK
+      short_window: 1s
+      threshold: 3
+      min_windows: 2
+      min_dimensions: 2
+      ban: 60s
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        running
+            .metrics
+            .behavior_sequence_flags
+            .load(Ordering::Relaxed),
+        0
+    );
+
+    let (status, _) = send(running.addr, Method::GET, "/admin", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn behavior_auth_failures_only_count_auth_paths() {
     let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
     let yaml = format!(
@@ -3150,7 +3416,7 @@ protection:
 }
 
 #[tokio::test]
-async fn behavior_ignores_locally_blocked_requests() {
+async fn behavior_enumeration_ignores_locally_blocked_requests() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
         "listen: 127.0.0.1:0
@@ -3183,6 +3449,14 @@ protection:
             .behavior_enumeration_flags
             .load(Ordering::Relaxed),
         0
+    );
+    // The continuity signal deliberately observes Kunato's own rejects.
+    assert_eq!(
+        running
+            .metrics
+            .behavior_sequence_events
+            .load(Ordering::Relaxed),
+        1
     );
 
     running.stop().await;

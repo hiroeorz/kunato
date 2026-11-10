@@ -57,6 +57,9 @@ const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const MAX_BEHAVIOR_WINDOW: Duration = Duration::from_secs(60 * 60);
 const MAX_BEHAVIOR_DISTINCT_PATHS: u32 = 256;
+const MAX_SEQUENCE_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_SEQUENCE_DIMENSIONS: u32 = 6;
+const MAX_SEQUENCE_WINDOWS: u32 = 32;
 const DEFAULT_AUTH_PATHS: &[&str] = &[
     r"(?i)^/(wp-login\.php|xmlrpc\.php|login|logon|signin|sign_in|sign-in|session)(\.(php|do|jsp|aspx|html))?/?$",
     r"(?i)^/(users/sign_in|admin/login|api(/v[0-9]+)?/(auth|login|token|session|oauth|mfa|otp)|oauth|saml|auth|realms|openid-connect)(/|$)",
@@ -292,6 +295,8 @@ pub struct ConfigSpec {
     pub client_ip: Option<ClientIpSpec>,
     #[serde(default)]
     pub content_routes: Vec<ContentRouteSpec>,
+    #[serde(default)]
+    pub decoys: crate::decoy::config::Spec,
     #[serde(default)]
     pub categories: Vec<CategorySpec>,
     #[serde(default)]
@@ -838,6 +843,8 @@ pub struct BehaviorSpec {
     pub global_auth: GlobalAuthSpec,
     #[serde(default)]
     pub scraping: ScrapingSpec,
+    #[serde(default)]
+    pub sequence: SequenceSpec,
 }
 
 impl Default for BehaviorSpec {
@@ -850,6 +857,49 @@ impl Default for BehaviorSpec {
             auth: AuthSpec::default(),
             global_auth: GlobalAuthSpec::default(),
             scraping: ScrapingSpec::default(),
+            sequence: SequenceSpec::default(),
+        }
+    }
+}
+
+/// Cross-request continuity: evidence accumulates across short windows, decays
+/// with `half_life`, and only a source that returns in a later window can reach
+/// the action.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: BehaviorAction,
+    #[serde(default = "minutes10", deserialize_with = "de_duration")]
+    pub short_window: Duration,
+    #[serde(default = "hours24", deserialize_with = "de_duration")]
+    pub long_window: Duration,
+    #[serde(default = "hours6", deserialize_with = "de_duration")]
+    pub half_life: Duration,
+    #[serde(default = "default_sequence_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_sequence_min_windows")]
+    pub min_windows: u32,
+    #[serde(default = "default_sequence_min_dimensions")]
+    pub min_dimensions: u32,
+    #[serde(default = "minutes5", deserialize_with = "de_duration")]
+    pub ban: Duration,
+}
+
+impl Default for SequenceSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            action: BehaviorAction::Log,
+            short_window: minutes10(),
+            long_window: hours24(),
+            half_life: hours6(),
+            threshold: default_sequence_threshold(),
+            min_windows: default_sequence_min_windows(),
+            min_dimensions: default_sequence_min_dimensions(),
+            ban: minutes5(),
         }
     }
 }
@@ -961,6 +1011,18 @@ fn default_scraping_distinct_paths() -> u32 {
     40
 }
 
+fn default_sequence_threshold() -> f64 {
+    12.0
+}
+
+fn default_sequence_min_windows() -> u32 {
+    2
+}
+
+fn default_sequence_min_dimensions() -> u32 {
+    2
+}
+
 fn default_max_connections_per_ip() -> u32 {
     32
 }
@@ -1035,6 +1097,14 @@ fn secs30() -> Duration {
 
 fn minutes10() -> Duration {
     Duration::from_secs(600)
+}
+
+fn minutes5() -> Duration {
+    Duration::from_secs(300)
+}
+
+fn hours6() -> Duration {
+    Duration::from_secs(6 * 3600)
 }
 
 fn default_max_path_bytes() -> usize {
@@ -1624,6 +1694,7 @@ pub struct BehaviorConfig {
     pub auth: AuthConfig,
     pub global_auth: GlobalAuthConfig,
     pub scraping: ScrapingConfig,
+    pub sequence: SequenceConfig,
 }
 
 impl BehaviorConfig {
@@ -1656,6 +1727,17 @@ impl BehaviorConfig {
                 action: BehaviorAction::Log,
                 min_requests: default_scraping_min_requests(),
                 distinct_paths: default_scraping_distinct_paths(),
+            },
+            sequence: SequenceConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                short_window: minutes10(),
+                long_window: hours24(),
+                half_life: hours6(),
+                threshold: default_sequence_threshold(),
+                min_windows: default_sequence_min_windows(),
+                min_dimensions: default_sequence_min_dimensions(),
+                ban: minutes5(),
             },
         }
     }
@@ -1698,6 +1780,19 @@ pub struct ScrapingConfig {
     pub action: BehaviorAction,
     pub min_requests: u32,
     pub distinct_paths: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SequenceConfig {
+    pub enabled: bool,
+    pub action: BehaviorAction,
+    pub short_window: Duration,
+    pub long_window: Duration,
+    pub half_life: Duration,
+    pub threshold: f64,
+    pub min_windows: u32,
+    pub min_dimensions: u32,
+    pub ban: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1750,6 +1845,7 @@ pub struct CompiledConfig {
     pub allowed_hosts: Option<AllowedHosts>,
     pub client_ip: ClientIp,
     pub content_routes: Vec<ContentRoute>,
+    pub decoys: crate::decoy::config::Policy,
     pub categories: Vec<CompiledCategory>,
     pub timeouts: Timeouts,
     pub limits: Limits,
@@ -1766,6 +1862,67 @@ pub struct CompiledConfig {
 }
 
 impl CompiledConfig {
+    pub fn decoy_routes(&self) -> Vec<String> {
+        if !self.decoys.enabled {
+            return Vec::new();
+        }
+        let mut routes = Vec::new();
+        for site in &self.decoys.sites {
+            routes.push(format!(
+                "decoy site={} origin={} path={} sink",
+                site.name, site.origin, site.sink
+            ));
+            for (path, template) in &site.traps {
+                routes.push(format!(
+                    "decoy site={} origin={} path={} template={}",
+                    site.name,
+                    site.origin,
+                    path,
+                    template.name()
+                ));
+            }
+        }
+        routes
+    }
+
+    pub fn decoy_warnings(&self) -> Vec<String> {
+        if !self.decoys.enabled {
+            return Vec::new();
+        }
+        let mut warnings = Vec::new();
+        if !self.protection.enabled {
+            warnings.push("decoys are suppressed because protection is disabled; owned paths use normal routing".to_owned());
+        }
+        for site in &self.decoys.sites {
+            for path in
+                std::iter::once(site.sink.as_str()).chain(site.traps.keys().map(String::as_str))
+            {
+                let forms = crate::request_view::path_forms(path);
+                let admin = self.admin_access.enabled
+                    && self
+                        .admin_access
+                        .functions
+                        .iter()
+                        .any(|function| function.matches(&forms));
+                let content = self
+                    .content_routes
+                    .iter()
+                    .any(|route| route.path.is_match(path));
+                let graphql = self.limits.graphql.enabled && self.limits.graphql.matches_path(path);
+                let php = http::Request::builder()
+                    .uri(path)
+                    .header("host", site.origin.trim_start_matches("https://"))
+                    .body(())
+                    .ok()
+                    .is_some_and(|request| self.php.matches(&request.into_parts().0));
+                if admin || content || graphql || php {
+                    warnings.push(format!("decoy site={} path={} overlaps application scope (admin_access={}, content_route={}, graphql={}, php={}); early gates take precedence",site.name,path,admin,content,graphql,php));
+                }
+            }
+        }
+        warnings
+    }
+
     /// Route check for callers that only have the request head, so body
     /// inspection can be skipped before the body is collected.
     pub fn is_content_route(&self, method: &Method, uri: &Uri) -> bool {
@@ -2090,6 +2247,12 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     validate_tls(&spec.tls, &mut issues);
     validate_http3(&spec.http3, &spec.tls, &mut issues);
     let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
+    let decoys = crate::decoy::config::Policy::compile(
+        &spec.decoys,
+        allowed_hosts.as_ref(),
+        protection.enabled,
+        &mut issues,
+    );
     let client_ip = compile_client_ip(spec.client_ip.as_ref(), &mut issues);
     let content_routes = compile_content_routes(&spec.content_routes, &mut issues);
     let admin_access = compile_admin_access(&spec.admin_access, &mut issues);
@@ -2133,6 +2296,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         allowed_hosts,
         client_ip,
         content_routes,
+        decoys,
         categories,
         timeouts: Timeouts::from(&spec.timeouts),
         limits: Limits::from(&spec.limits),
@@ -3324,6 +3488,48 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
             "protection.behavior.scraping.distinct_paths must be between 1 and 256".to_owned(),
         );
     }
+    let sequence = &spec.sequence;
+    if sequence.short_window.is_zero()
+        || sequence.short_window > MAX_SEQUENCE_WINDOW
+        || sequence.short_window > sequence.long_window
+    {
+        issues.push(
+            "protection.behavior.sequence.short_window must be greater than zero and at most long_window"
+                .to_owned(),
+        );
+    }
+    if sequence.long_window.is_zero() || sequence.long_window > MAX_SEQUENCE_WINDOW {
+        issues.push(
+            "protection.behavior.sequence.long_window must be greater than zero and at most 7d"
+                .to_owned(),
+        );
+    }
+    if sequence.half_life.is_zero() || sequence.half_life > sequence.long_window {
+        issues.push(
+            "protection.behavior.sequence.half_life must be greater than zero and at most long_window"
+                .to_owned(),
+        );
+    }
+    if !sequence.threshold.is_finite() || sequence.threshold < 1.0 {
+        issues.push(
+            "protection.behavior.sequence.threshold must be finite and at least 1".to_owned(),
+        );
+    }
+    if !(1..=MAX_SEQUENCE_WINDOWS).contains(&sequence.min_windows) {
+        issues.push(format!(
+            "protection.behavior.sequence.min_windows must be between 1 and {MAX_SEQUENCE_WINDOWS}"
+        ));
+    }
+    if !(1..=MAX_SEQUENCE_DIMENSIONS).contains(&sequence.min_dimensions) {
+        issues.push(format!(
+            "protection.behavior.sequence.min_dimensions must be between 1 and {MAX_SEQUENCE_DIMENSIONS}"
+        ));
+    }
+    if sequence.ban.is_zero() || sequence.ban > MAX_SEQUENCE_WINDOW {
+        issues.push(
+            "protection.behavior.sequence.ban must be greater than zero and at most 7d".to_owned(),
+        );
+    }
 
     let patterns: Vec<String> = match &spec.auth.paths {
         Some(paths) => paths.clone(),
@@ -3362,6 +3568,17 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
             action: spec.scraping.action,
             min_requests: spec.scraping.min_requests,
             distinct_paths: spec.scraping.distinct_paths,
+        },
+        sequence: SequenceConfig {
+            enabled: spec.sequence.enabled,
+            action: spec.sequence.action,
+            short_window: spec.sequence.short_window,
+            long_window: spec.sequence.long_window,
+            half_life: spec.sequence.half_life,
+            threshold: spec.sequence.threshold,
+            min_windows: spec.sequence.min_windows,
+            min_dimensions: spec.sequence.min_dimensions,
+            ban: spec.sequence.ban,
         },
     }
 }
@@ -3967,7 +4184,7 @@ enum DurationValue {
     Text(String),
 }
 
-fn de_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+pub(crate) fn de_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -5145,6 +5362,18 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert!(!behavior.scraping.enabled);
         assert_eq!(behavior.scraping.min_requests, 40);
         assert_eq!(behavior.scraping.distinct_paths, 40);
+        assert!(behavior.sequence.enabled);
+        assert_eq!(behavior.sequence.action, BehaviorAction::Log);
+        assert_eq!(behavior.sequence.short_window, Duration::from_secs(600));
+        assert_eq!(
+            behavior.sequence.long_window,
+            Duration::from_secs(24 * 3600)
+        );
+        assert_eq!(behavior.sequence.half_life, Duration::from_secs(6 * 3600));
+        assert_eq!(behavior.sequence.threshold, 12.0);
+        assert_eq!(behavior.sequence.min_windows, 2);
+        assert_eq!(behavior.sequence.min_dimensions, 2);
+        assert_eq!(behavior.sequence.ban, Duration::from_secs(300));
     }
 
     #[test]
@@ -5195,6 +5424,28 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
         assert_eq!(scraping.action, BehaviorAction::Block);
         assert_eq!(scraping.min_requests, 3);
         assert_eq!(scraping.distinct_paths, 4);
+    }
+
+    #[test]
+    fn parses_sequence_behavior() {
+        let config = parse_with(
+            BASE,
+            "protection:
+  behavior:
+    sequence: { enabled: true, action: BLOCK, short_window: 2m, long_window: 2h, half_life: 30m, threshold: 7, min_windows: 3, min_dimensions: 1, ban: 90s }
+",
+        )
+        .expect("valid config");
+        let sequence = config.protection.behavior.sequence;
+        assert!(sequence.enabled);
+        assert_eq!(sequence.action, BehaviorAction::Block);
+        assert_eq!(sequence.short_window, Duration::from_secs(120));
+        assert_eq!(sequence.long_window, Duration::from_secs(7200));
+        assert_eq!(sequence.half_life, Duration::from_secs(1800));
+        assert_eq!(sequence.threshold, 7.0);
+        assert_eq!(sequence.min_windows, 3);
+        assert_eq!(sequence.min_dimensions, 1);
+        assert_eq!(sequence.ban, Duration::from_secs(90));
     }
 
     #[test]
@@ -5254,6 +5505,38 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
             (
                 "protection: { behavior: { scraping: { distinct_paths: 0 } } }\n",
                 "scraping.distinct_paths",
+            ),
+            (
+                "protection: { behavior: { sequence: { short_window: 0s } } }\n",
+                "sequence.short_window",
+            ),
+            (
+                "protection: { behavior: { sequence: { short_window: 2h, long_window: 1h } } }\n",
+                "sequence.short_window",
+            ),
+            (
+                "protection: { behavior: { sequence: { long_window: 169h } } }\n",
+                "sequence.long_window",
+            ),
+            (
+                "protection: { behavior: { sequence: { half_life: 0s } } }\n",
+                "sequence.half_life",
+            ),
+            (
+                "protection: { behavior: { sequence: { threshold: 0 } } }\n",
+                "sequence.threshold",
+            ),
+            (
+                "protection: { behavior: { sequence: { min_windows: 0 } } }\n",
+                "sequence.min_windows",
+            ),
+            (
+                "protection: { behavior: { sequence: { min_dimensions: 0 } } }\n",
+                "sequence.min_dimensions",
+            ),
+            (
+                "protection: { behavior: { sequence: { ban: 0s } } }\n",
+                "sequence.ban",
             ),
             (
                 "protection: { behavior: { auth: { paths: ['('] } } }\n",
@@ -5592,11 +5875,14 @@ http3: { enabled: true, listen: 127.0.0.1:8443 }
             .expect("example configuration must stay valid");
         assert!(!config.categories.is_empty());
         assert!(config.admin.enabled);
-        assert_eq!(
-            config.protection.behavior.enumeration.action,
-            BehaviorAction::Block
-        );
-        assert_eq!(config.protection.behavior.auth.action, BehaviorAction::Log);
+        let behavior = &config.protection.behavior;
+        assert_eq!(behavior.enumeration.action, BehaviorAction::Block);
+        assert_eq!(behavior.auth.action, BehaviorAction::Block);
+        assert_eq!(behavior.global_auth.action, BehaviorAction::Block);
+        assert!(behavior.scraping.enabled);
+        assert_eq!(behavior.scraping.action, BehaviorAction::Block);
+        assert!(behavior.sequence.enabled);
+        assert_eq!(behavior.sequence.action, BehaviorAction::Block);
     }
 
     #[test]

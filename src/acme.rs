@@ -25,7 +25,7 @@ use crate::error::Error;
 use crate::metrics::Metrics;
 use crate::proxy::tls;
 
-mod base64;
+pub(crate) mod base64;
 mod cache;
 mod client;
 mod der;

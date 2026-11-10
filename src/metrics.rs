@@ -4,6 +4,7 @@ use std::time::Instant;
 
 #[derive(Debug)]
 pub struct Metrics {
+    pub decoys: crate::decoy::metrics::Metrics,
     started: Instant,
     pub requests: AtomicU64,
     pub blocked: AtomicU64,
@@ -35,6 +36,8 @@ pub struct Metrics {
     pub behavior_auth_flags: AtomicU64,
     pub behavior_global_auth_flags: AtomicU64,
     pub behavior_scraping_flags: AtomicU64,
+    pub behavior_sequence_events: AtomicU64,
+    pub behavior_sequence_flags: AtomicU64,
     pub behavior_blocked: AtomicU64,
     pub overloaded: AtomicU64,
     pub upstream_connect_errors: AtomicU64,
@@ -56,6 +59,7 @@ pub struct Metrics {
 impl Metrics {
     pub fn new() -> Self {
         Self {
+            decoys: crate::decoy::metrics::Metrics::default(),
             started: Instant::now(),
             requests: AtomicU64::new(0),
             blocked: AtomicU64::new(0),
@@ -87,6 +91,8 @@ impl Metrics {
             behavior_auth_flags: AtomicU64::new(0),
             behavior_global_auth_flags: AtomicU64::new(0),
             behavior_scraping_flags: AtomicU64::new(0),
+            behavior_sequence_events: AtomicU64::new(0),
+            behavior_sequence_flags: AtomicU64::new(0),
             behavior_blocked: AtomicU64::new(0),
             overloaded: AtomicU64::new(0),
             upstream_connect_errors: AtomicU64::new(0),
@@ -108,6 +114,7 @@ impl Metrics {
 
     pub fn render(&self, active_connections: u64) -> String {
         let mut out = String::with_capacity(1024);
+        self.decoys.render(&mut out);
         for (name, help, count) in [
             (
                 "kunato_form_rejected_total",
@@ -286,6 +293,18 @@ impl Metrics {
         );
         counter(
             &mut out,
+            "kunato_behavior_sequence_events_total",
+            "Evidence recorded for the cross-request continuity signal.",
+            self.behavior_sequence_events.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_behavior_sequence_flags_total",
+            "Sources flagged for cross-request continuity (transitions, not every observation).",
+            self.behavior_sequence_flags.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
             "kunato_behavior_blocked_total",
             "Behavioral flags that applied a ban.",
             self.behavior_blocked.load(Ordering::Relaxed),
@@ -458,6 +477,8 @@ mod tests {
         assert!(text.contains("kunato_behavior_enumeration_flags_total 0"));
         assert!(text.contains("kunato_behavior_auth_flags_total 0"));
         assert!(text.contains("kunato_behavior_scraping_flags_total 0"));
+        assert!(text.contains("kunato_behavior_sequence_events_total 0"));
+        assert!(text.contains("kunato_behavior_sequence_flags_total 0"));
         assert!(text.contains("kunato_behavior_global_auth_flags_total 0"));
         assert!(text.contains("kunato_behavior_blocked_total 0"));
         assert!(text.contains("# TYPE kunato_active_connections gauge"));

@@ -65,6 +65,14 @@ promising way to combine effective protection with a usable workflow.
 
 ## 2. Remember an attacker's trial and error
 
+Status: Implemented on `main` as `protection.behavior.sequence`. Evidence from
+upstream outcomes and from the requests Kunato rejects itself (rule blocks,
+structural rejections, the administrative gate, and rate-limit bans) is weighted
+and decays; the action requires activity in at least two short windows plus two
+evidence kinds, so a single burst cannot reach it. A retry of a known target with
+a different encoding earns extra weight. See the continuity section in
+[behavioral detection](behavioral-detection.md#47-cross-request-continuity).
+
 Extend behavioral detection to recognize an attack's progression across
 multiple requests.
 
@@ -110,7 +118,17 @@ replace authorization decisions inside the application.
 
 ## 4. Use decoys to obtain evidence of attack progression
 
-Status: Promising experiment.
+Status: First release implemented in the working tree; experimental, opt-in,
+and not yet released. See the
+[experimental decoy design](decoy-design.md) for the configuration,
+token protocol, routing order, resource bounds, and acceptance tests.
+
+The first release is scoped to fictional credentials for an HTTP API served
+entirely by Kunato. It defaults to observation; opt-in `BLOCK` affects only a
+qualified credential presentation on that owned API. Arbitrary token
+occurrences never trigger a decoy source ban or continuity score. A returned
+token links related data, not necessarily the same person, and use outside
+Kunato's HTTP request path is not observable.
 
 Respond to suspicious reconnaissance with fake configuration files or
 administrative APIs that exist entirely inside Kunato.
@@ -221,7 +239,8 @@ value. See
 ## Recommended implementation order
 
 1. Open administrative functions only when needed (implemented as `admin_access`).
-2. Detect continuity across an attacker's attempts.
+2. Detect continuity across an attacker's attempts (implemented as
+   `behavior.sequence`).
 3. Validate the defenses against real AI agents.
 
 Evaluate decoys in parallel as an experimental feature. Treat static public

@@ -11,6 +11,7 @@ pub mod cli;
 pub mod client_ip;
 pub mod config;
 pub mod decoding;
+pub mod decoy;
 pub mod error;
 mod form;
 pub mod graphql;

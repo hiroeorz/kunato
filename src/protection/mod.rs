@@ -9,7 +9,9 @@ use regex::RegexSet;
 use tokio::time::Instant;
 
 use crate::cidr::IpNet;
-use crate::config::{BehaviorAction, BehaviorConfig, Protection, RuleLimit, RuleLimitKey};
+use crate::config::{
+    BehaviorAction, BehaviorConfig, Protection, RuleLimit, RuleLimitKey, SequenceConfig,
+};
 use crate::decoding::{normalize_path, percent_decode_forms};
 
 const SHARD_COUNT: usize = 16;
@@ -66,6 +68,51 @@ impl BehaviorSignal {
     }
 }
 
+/// Evidence kinds for the cross-request continuity signal. Upstream kinds are
+/// recorded from the forwarded response; the others are requests Kunato itself
+/// rejected, which the per-window signals deliberately ignore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceKind {
+    UpstreamNotFound,
+    UpstreamAuthFailure,
+    RuleBlock,
+    StructuralReject,
+    AdminGate,
+    RateLimitBan,
+}
+
+impl SequenceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UpstreamNotFound => "upstream-not-found",
+            Self::UpstreamAuthFailure => "upstream-auth-failure",
+            Self::RuleBlock => "rule-block",
+            Self::StructuralReject => "structural-reject",
+            Self::AdminGate => "admin-gate",
+            Self::RateLimitBan => "rate-limit-ban",
+        }
+    }
+
+    fn weight(self) -> f64 {
+        match self {
+            Self::UpstreamNotFound => 1.0,
+            Self::UpstreamAuthFailure => 2.0,
+            Self::RuleBlock => 3.0,
+            Self::StructuralReject => 4.0,
+            Self::AdminGate => 3.0,
+            Self::RateLimitBan => 6.0,
+        }
+    }
+
+    fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+const SEQUENCE_VARIANT_WEIGHT: f64 = 4.0;
+const SEQUENCE_CATEGORY_WEIGHT: f64 = 3.0;
+const MAX_SEQUENCE_WINDOWS: u32 = 32;
+
 #[derive(Debug)]
 pub struct BehaviorFlag {
     pub signal: BehaviorSignal,
@@ -86,12 +133,30 @@ pub struct GlobalAuthFlag {
     pub ban: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SequenceFlag {
+    pub score: f64,
+    pub score_short: f64,
+    pub kinds: u8,
+    pub windows: u32,
+    pub action: BehaviorAction,
+    pub ban: Option<Duration>,
+}
+
+#[derive(Debug, Default)]
+pub struct SequenceOutcome {
+    pub recorded: bool,
+    pub flag: Option<SequenceFlag>,
+}
+
 #[derive(Debug, Default)]
 pub struct BehaviorOutcome {
     pub observed_not_found: bool,
     pub observed_auth_failure: bool,
+    pub observed_sequence: bool,
     pub source: Option<BehaviorFlag>,
     pub global: Option<GlobalAuthFlag>,
+    pub sequence: Option<SequenceFlag>,
 }
 
 pub struct ProtectionState {
@@ -110,6 +175,42 @@ pub struct ProtectionState {
 }
 
 impl ProtectionState {
+    pub(crate) fn decoy_issue(
+        &self,
+        ip: IpAddr,
+        config: &Protection,
+        policy: crate::decoy::QuotaPolicy,
+    ) -> Result<(), usize> {
+        let key = tracking_key(ip, config);
+        let now = Instant::now();
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        let entry = shard.entries.get_mut(&key).ok_or(2usize)?;
+        let bucket = entry
+            .decoy_quota
+            .get_or_insert_with(|| crate::decoy::Bucket::new(policy, now));
+        if bucket.take(policy, now) {
+            Ok(())
+        } else {
+            Err(1)
+        }
+    }
+
+    pub(crate) fn decoy_reuse_log(&self, key: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        let Some(entry) = shard.entries.get_mut(&key) else {
+            return true;
+        };
+        if entry
+            .decoy_log
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(10))
+        {
+            return false;
+        }
+        entry.decoy_log = Some(now);
+        true
+    }
+
     pub fn new() -> Self {
         let shards = (0..SHARD_COUNT)
             .map(|_| Mutex::new(Shard::default()))
@@ -282,8 +383,9 @@ impl ProtectionState {
         let auth_failure = (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
             && (auth_enabled || global_enabled)
             && auth_path_matches(&behavior.auth.paths, path);
+        let sequence_enabled = behavior.sequence.enabled;
 
-        if !enumeration_enabled && !auth_failure && !scraping_enabled {
+        if !enumeration_enabled && !auth_failure && !scraping_enabled && !sequence_enabled {
             return BehaviorOutcome::default();
         }
 
@@ -355,6 +457,7 @@ impl ProtectionState {
                 if behavior.enumeration.action == BehaviorAction::Block {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
+                    entry.sequence.reset(now);
                 }
                 outcome.source = Some(flag);
             }
@@ -378,6 +481,7 @@ impl ProtectionState {
                 if behavior.auth.action == BehaviorAction::Block {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
+                    entry.sequence.reset(now);
                 }
                 outcome.source = Some(flag);
             }
@@ -401,8 +505,25 @@ impl ProtectionState {
                 if behavior.scraping.action == BehaviorAction::Block {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
+                    entry.sequence.reset(now);
                 }
                 outcome.source = Some(flag);
+            }
+
+            if sequence_enabled && entry.banned_until.is_none_or(|until| until <= now) {
+                let normalized = normalize_path(path);
+                let normalized = normalized.as_deref().unwrap_or(path);
+                let kind = if status == StatusCode::NOT_FOUND && !is_static_asset(normalized) {
+                    Some(SequenceKind::UpstreamNotFound)
+                } else if auth_failure {
+                    Some(SequenceKind::UpstreamAuthFailure)
+                } else {
+                    None
+                };
+                if let Some(kind) = kind {
+                    outcome.observed_sequence = true;
+                    outcome.sequence = apply_sequence(entry, config, now, kind, path, None);
+                }
             }
         }
 
@@ -440,6 +561,55 @@ impl ProtectionState {
                 action: config.behavior.global_auth.action,
                 ban: config.behavior.global_auth.ban,
             });
+        }
+    }
+
+    /// Record evidence for the cross-request continuity signal. The proxy calls
+    /// this for the requests Kunato itself rejects (rule blocks, structural
+    /// rejections, the administrative gate, and rate-limit bans); upstream
+    /// outcomes arrive through `observe_response`.
+    pub fn observe_sequence(
+        &self,
+        ip: IpAddr,
+        config: &Protection,
+        kind: SequenceKind,
+        path: &str,
+        category: Option<&str>,
+    ) -> SequenceOutcome {
+        if !config.enabled
+            || !config.behavior.enabled
+            || !config.behavior.sequence.enabled
+            || is_allowlisted(normalize_ip(ip), &config.allowlist)
+        {
+            return SequenceOutcome::default();
+        }
+        let now = Instant::now();
+        let key = tracking_key(ip, config);
+        let mut shard = lock(&self.shards[shard_index(key)]);
+        let Some(entry) = shard.entries.get_mut(&key) else {
+            return SequenceOutcome::default();
+        };
+        if entry.banned_until.is_some_and(|until| until > now) {
+            // A ban is evidence, but the source's own 429s must neither extend
+            // the ban nor be lost. Record it once per ban episode.
+            if kind == SequenceKind::RateLimitBan && !entry.sequence.ban_recorded {
+                entry.sequence.ban_recorded = true;
+                entry.sequence.roll(now, &config.behavior.sequence);
+                let normalized = normalize_path(path);
+                let canonical = normalized.as_deref().unwrap_or(path);
+                entry.sequence.record(kind, canonical, path, category);
+                return SequenceOutcome {
+                    recorded: true,
+                    flag: None,
+                };
+            }
+            return SequenceOutcome::default();
+        }
+        entry.sequence.ban_recorded = false;
+        let flag = apply_sequence(entry, config, now, kind, path, category);
+        SequenceOutcome {
+            recorded: true,
+            flag,
         }
     }
 
@@ -765,6 +935,7 @@ impl ProtectionState {
             );
             entry.banned_until = Some(now + duration);
             entry.behavior.reset(now);
+            entry.sequence.reset(now);
             return Some(Decision::Banned {
                 retry_after: duration,
             });
@@ -955,6 +1126,8 @@ impl RuleBucket {
 }
 
 struct Entry {
+    decoy_quota: Option<crate::decoy::Bucket>,
+    decoy_log: Option<Instant>,
     tokens: f64,
     last_refill: Instant,
     violations: u32,
@@ -964,12 +1137,15 @@ struct Entry {
     connections: u32,
     last_seen: Instant,
     behavior: BehaviorEntry,
+    sequence: SequenceEntry,
     throttle: ThrottleLog,
 }
 
 impl Entry {
     fn new(now: Instant, burst: f64) -> Self {
         Self {
+            decoy_quota: None,
+            decoy_log: None,
             tokens: burst,
             last_refill: now,
             violations: 0,
@@ -979,6 +1155,7 @@ impl Entry {
             connections: 0,
             last_seen: now,
             behavior: BehaviorEntry::new(now),
+            sequence: SequenceEntry::new(now),
             throttle: ThrottleLog::default(),
         }
     }
@@ -1057,10 +1234,170 @@ impl BehaviorEntry {
 
 fn add_hashed_path(paths: &mut [u64; 4], path: &str) {
     let hash = mix64(fnv1a64(path));
+    insert_bloom(paths, hash);
+}
+
+/// Fixed-size cross-request evidence for one source. The short window resets
+/// on activity-driven rollover and only feeds the log line; `min_windows`
+/// forces the source to come back in a later window before the action fires,
+/// so a single burst cannot ban through this signal.
+struct SequenceEntry {
+    score_short: f64,
+    score_long: f64,
+    last_update: Instant,
+    short_start: Instant,
+    long_start: Instant,
+    canonical: [u64; 4],
+    raw: [u64; 4],
+    kinds: u8,
+    windows: u32,
+    events: u32,
+    categories: u16,
+    flagged: bool,
+    ban_recorded: bool,
+}
+
+impl SequenceEntry {
+    fn new(now: Instant) -> Self {
+        Self {
+            score_short: 0.0,
+            score_long: 0.0,
+            last_update: now,
+            short_start: now,
+            long_start: now,
+            canonical: [0; 4],
+            raw: [0; 4],
+            kinds: 0,
+            windows: 0,
+            events: 0,
+            categories: 0,
+            flagged: false,
+            ban_recorded: false,
+        }
+    }
+
+    fn reset(&mut self, now: Instant) {
+        *self = Self::new(now);
+    }
+
+    fn roll(&mut self, now: Instant, config: &SequenceConfig) {
+        if now.saturating_duration_since(self.long_start) >= config.long_window {
+            self.reset(now);
+            return;
+        }
+        if now.saturating_duration_since(self.short_start) >= config.short_window {
+            if self.events > 0 {
+                self.windows = self.windows.saturating_add(1).min(MAX_SEQUENCE_WINDOWS);
+            }
+            self.score_short = 0.0;
+            self.short_start = now;
+        }
+        let elapsed = now
+            .saturating_duration_since(self.last_update)
+            .as_secs_f64();
+        if elapsed > 0.0 {
+            let factor = 0.5f64.powf(elapsed / config.half_life.as_secs_f64());
+            self.score_long *= factor;
+            self.score_short *= factor;
+        }
+        self.last_update = now;
+    }
+
+    fn record(&mut self, kind: SequenceKind, canonical: &str, raw: &str, category: Option<&str>) {
+        if self.events == 0 {
+            self.windows = 1;
+        }
+        self.events = self.events.saturating_add(1);
+        self.kinds |= kind.bit();
+
+        let canonical_hash = mix64(fnv1a64(canonical));
+        let raw_hash = mix64(fnv1a64(raw));
+        let mut weight = kind.weight();
+        if contains_bloom(&self.canonical, canonical_hash) && !contains_bloom(&self.raw, raw_hash) {
+            weight += SEQUENCE_VARIANT_WEIGHT;
+        }
+        insert_bloom(&mut self.canonical, canonical_hash);
+        insert_bloom(&mut self.raw, raw_hash);
+
+        if let Some(category) = category {
+            let bit = (mix64(fnv1a64(category)) % 16) as u16;
+            self.categories |= 1u16 << bit;
+            if self.categories.count_ones() == 2 {
+                weight += SEQUENCE_CATEGORY_WEIGHT;
+            }
+        }
+
+        self.score_short += weight;
+        self.score_long += weight;
+    }
+
+    fn triggered(&self, config: &SequenceConfig) -> bool {
+        self.score_long >= config.threshold
+            && self.kinds.count_ones() >= config.min_dimensions
+            && self.windows >= config.min_windows
+    }
+}
+
+fn apply_sequence(
+    entry: &mut Entry,
+    config: &Protection,
+    now: Instant,
+    kind: SequenceKind,
+    path: &str,
+    category: Option<&str>,
+) -> Option<SequenceFlag> {
+    let sequence = &config.behavior.sequence;
+    entry.sequence.roll(now, sequence);
+    let normalized = normalize_path(path);
+    let canonical = normalized.as_deref().unwrap_or(path);
+    entry.sequence.record(kind, canonical, path, category);
+
+    if entry.sequence.flagged || !entry.sequence.triggered(sequence) {
+        return None;
+    }
+    entry.sequence.flagged = true;
+    let mut flag = SequenceFlag {
+        score: entry.sequence.score_long,
+        score_short: entry.sequence.score_short,
+        kinds: entry.sequence.kinds,
+        windows: entry.sequence.windows,
+        action: sequence.action,
+        ban: None,
+    };
+    if sequence.action == BehaviorAction::Block {
+        flag.ban = Some(apply_sequence_ban(entry, config, now));
+    }
+    Some(flag)
+}
+
+fn apply_sequence_ban(entry: &mut Entry, config: &Protection, now: Instant) -> Duration {
+    entry.violations = 0;
+    entry.window_start = now;
+    entry.ban_count = entry.ban_count.saturating_add(1);
+    let duration = escalated_duration(
+        config.behavior.sequence.ban,
+        config.ban.max_duration,
+        entry.ban_count,
+    );
+    entry.banned_until = Some(now + duration);
+    entry.behavior.reset(now);
+    entry.sequence.reset(now);
+    entry.sequence.ban_recorded = true;
+    duration
+}
+
+fn insert_bloom(bits: &mut [u64; 4], hash: u64) {
     let first = (hash & 0xff) as usize;
     let second = ((hash >> 32) & 0xff) as usize;
-    paths[first / 64] |= 1u64 << (first % 64);
-    paths[second / 64] |= 1u64 << (second % 64);
+    bits[first / 64] |= 1u64 << (first % 64);
+    bits[second / 64] |= 1u64 << (second % 64);
+}
+
+fn contains_bloom(bits: &[u64; 4], hash: u64) -> bool {
+    let first = (hash & 0xff) as usize;
+    let second = ((hash >> 32) & 0xff) as usize;
+    bits[first / 64] & (1u64 << (first % 64)) != 0
+        && bits[second / 64] & (1u64 << (second % 64)) != 0
 }
 
 fn estimate_paths(paths: &[u64; 4]) -> u32 {
@@ -1204,7 +1541,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn is_allowlisted(ip: IpAddr, allowlist: &[IpNet]) -> bool {
+pub(crate) fn is_allowlisted(ip: IpAddr, allowlist: &[IpNet]) -> bool {
     allowlist.iter().any(|network| network.contains(ip))
 }
 
@@ -1218,7 +1555,7 @@ pub(crate) fn normalize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-fn tracking_key(ip: IpAddr, config: &Protection) -> IpAddr {
+pub(crate) fn tracking_key(ip: IpAddr, config: &Protection) -> IpAddr {
     match normalize_ip(ip) {
         IpAddr::V6(address) => IpAddr::V6(mask_ipv6(address, config.aggregate_ipv6_prefix)),
         address => address,
@@ -1320,7 +1657,7 @@ fn escalated_duration(base: Duration, max: Duration, ban_count: u32) -> Duration
 mod tests {
     use super::*;
     use crate::config::{
-        AuthConfig, BanConfig, EnumerationConfig, GlobalAuthConfig, ScrapingConfig,
+        AuthConfig, BanConfig, EnumerationConfig, GlobalAuthConfig, ScrapingConfig, SequenceConfig,
     };
 
     fn config() -> Protection {
@@ -2054,7 +2391,28 @@ mod tests {
                 min_requests: 3,
                 distinct_paths: 2,
             },
+            sequence: SequenceConfig {
+                enabled: false,
+                action: BehaviorAction::Log,
+                short_window: Duration::from_secs(10),
+                long_window: Duration::from_secs(3600),
+                half_life: Duration::from_secs(1800),
+                threshold: 3.0,
+                min_windows: 2,
+                min_dimensions: 1,
+                ban: Duration::from_secs(60),
+            },
         }
+    }
+
+    fn sequence_config() -> BehaviorConfig {
+        let mut behavior = behavior_config();
+        behavior.enumeration.enabled = false;
+        behavior.auth.enabled = false;
+        behavior.global_auth.enabled = false;
+        behavior.scraping.enabled = false;
+        behavior.sequence.enabled = true;
+        behavior
     }
 
     fn behavior_state(config: &Protection) -> ProtectionState {
@@ -2327,6 +2685,156 @@ mod tests {
         );
         assert!(third.source.is_none());
         assert!(third.observed_not_found);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequence_requires_a_later_window() {
+        let mut config = config();
+        config.behavior = sequence_config();
+        let state = behavior_state(&config);
+        let source = ip("10.0.0.1");
+        let observe = |state: &ProtectionState| {
+            state.observe_sequence(
+                source,
+                &config,
+                SequenceKind::RuleBlock,
+                "/admin",
+                Some("probe"),
+            )
+        };
+
+        for _ in 0..2 {
+            let outcome = observe(&state);
+            assert!(outcome.recorded);
+            assert!(outcome.flag.is_none(), "one short window is not continuity");
+        }
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let outcome = observe(&state);
+        let flag = outcome.flag.expect("sequence flag");
+        assert_eq!(flag.windows, 2);
+        assert!(flag.score >= config.behavior.sequence.threshold);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequence_requires_two_evidence_kinds() {
+        let mut config = config();
+        let mut behavior = sequence_config();
+        behavior.sequence.min_dimensions = 2;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+        let source = ip("10.0.0.1");
+
+        state.observe_sequence(
+            source,
+            &config,
+            SequenceKind::RuleBlock,
+            "/admin",
+            Some("probe"),
+        );
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let outcome = state.observe_sequence(
+            source,
+            &config,
+            SequenceKind::RuleBlock,
+            "/admin",
+            Some("probe"),
+        );
+        assert!(
+            outcome.flag.is_none(),
+            "one evidence kind is not progression"
+        );
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let outcome = state.observe_sequence(
+            source,
+            &config,
+            SequenceKind::StructuralReject,
+            "/admin",
+            Some("probe"),
+        );
+        assert!(outcome.flag.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequence_scores_a_retry_with_a_different_encoding() {
+        let mut config = config();
+        let mut behavior = sequence_config();
+        behavior.sequence.threshold = 7.0;
+        behavior.sequence.min_windows = 1;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+
+        let source = ip("10.0.0.1");
+        let first = state.observe_sequence(source, &config, SequenceKind::RuleBlock, "/a//b", None);
+        assert!(first.flag.is_none());
+        let second = state.observe_sequence(source, &config, SequenceKind::RuleBlock, "/a/b", None);
+        assert!(
+            second.flag.is_some(),
+            "a variant retry earns the extra weight"
+        );
+
+        let other = ip("10.0.0.2");
+        assert_eq!(state.check_request(other, &config), Decision::Allow);
+        state.observe_sequence(other, &config, SequenceKind::RuleBlock, "/a//b", None);
+        let repeat = state.observe_sequence(other, &config, SequenceKind::RuleBlock, "/a//b", None);
+        assert!(
+            repeat.flag.is_none(),
+            "an identical retry stays below the threshold"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequence_block_applies_a_ban_and_resets_evidence() {
+        let mut config = config();
+        let mut behavior = sequence_config();
+        behavior.sequence.min_windows = 1;
+        behavior.sequence.action = BehaviorAction::Block;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+        let source = ip("10.0.0.1");
+
+        let outcome = state.observe_sequence(
+            source,
+            &config,
+            SequenceKind::RuleBlock,
+            "/admin",
+            Some("probe"),
+        );
+        let flag = outcome.flag.expect("sequence flag");
+        assert_eq!(flag.action, BehaviorAction::Block);
+        assert_eq!(flag.ban, Some(Duration::from_secs(60)));
+        assert!(matches!(
+            state.check_request(source, &config),
+            Decision::Banned { .. }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequence_ignores_disabled_and_allowlisted_sources() {
+        let mut config = config();
+        config.behavior = sequence_config();
+        config.allowlist = vec!["10.0.0.0/8".parse().expect("allowlist")];
+        let state = ProtectionState::new();
+        let outcome = state.observe_sequence(
+            ip("10.0.0.1"),
+            &config,
+            SequenceKind::RuleBlock,
+            "/admin",
+            None,
+        );
+        assert!(!outcome.recorded);
+
+        config.allowlist.clear();
+        config.enabled = false;
+        let outcome = state.observe_sequence(
+            ip("10.0.0.1"),
+            &config,
+            SequenceKind::RuleBlock,
+            "/admin",
+            None,
+        );
+        assert!(!outcome.recorded);
     }
 
     #[tokio::test(start_paused = true)]

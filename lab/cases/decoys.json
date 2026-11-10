@@ -1,0 +1,13 @@
+[
+  {"id":"credential", "method":"GET", "path":"/_decoy/api", "headers":{"Authorization":"Bearer {{TOKEN}}"}, "log_status":401, "block_status":403, "origin":false},
+  {"id":"query", "method":"GET", "path":"/public?token={{TOKEN}}", "status":200, "origin":true},
+  {"id":"path", "method":"GET", "path":"/public/{{TOKEN}}", "status":200, "origin":true},
+  {"id":"path-once", "method":"GET", "path":"/public/{{ONCE}}", "status":200, "origin":true},
+  {"id":"path-twice", "method":"GET", "path":"/public/{{TWICE}}", "status":200, "origin":true},
+  {"id":"admin", "method":"GET", "path":"/admin/{{TOKEN}}", "status":404, "origin":false},
+  {"id":"admin-twice", "method":"GET", "path":"/admin/{{TWICE}}", "status":404, "origin":false},
+  {"id":"rule", "method":"GET", "path":"/blocked/{{TOKEN}}", "status":403, "origin":false},
+  {"id":"rule-twice", "method":"GET", "path":"/blocked/{{TWICE}}", "status":403, "origin":false},
+  {"id":"early", "method":"get", "path":"/public/{{TOKEN}}", "status":400, "origin":false},
+  {"id":"healthy", "method":"GET", "path":"/healthy", "status":200, "origin":true}
+]

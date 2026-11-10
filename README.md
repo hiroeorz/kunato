@@ -47,8 +47,9 @@ Traditional WAF setups often require either paid cloud services or a complex sta
 - **Response header rewriting** — Removes or replaces identifying response headers such as `Server` and `X-Powered-By` on upstream responses and Kunato's own block/error responses alike.
 
 ### DoS / DDoS & Behavioral Protection
+- **Experimental decoys** — Opt-in local configuration lures carry fictional HTTP API credentials whose return can be correlated across source addresses. Observation is the default; optional BLOCK affects only the owned fake API, without source bans or behavioral scoring. See the [configuration reference](docs/development.md#experimental-decoys).
 - **DoS / DDoS detection and mitigation** — Detects abnormal request patterns and automatically throttles or blocks abusive sources.
-- **Behavioral abuse detection** — Per-source windows over upstream responses flag iterative `404` probing and authentication-failure bursts, and a global window records distributed authentication failures. The example configuration blocks enumeration and leaves authentication signals in observation mode; `BLOCK` remains configurable per signal.
+- **Behavioral abuse detection** — Per-source windows over upstream responses flag iterative `404` probing, authentication-failure bursts, and `200`-only crawling, a global window records distributed authentication failures, and a continuity score follows an attacker's progress across requests — including the ones Kunato blocked — before it acts on a return visit with a second evidence kind. The shipped configuration blocks every signal, including at release; the engine default remains observation only and each signal's `action` is configurable.
 
 ### Operations & Reliability
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule file are detected at runtime and reloaded on the fly without restarting the process or dropping connections.

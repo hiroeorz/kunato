@@ -118,6 +118,14 @@ Components:
    body prefix is buffered: maintenance answers with `503`, a declared
    administrative function in the closed state answers with `404` and is never
    forwarded, and an open request continues through the normal path.
+   When opt-in `decoys` is active for the validated authority, classify its
+   explicitly owned paths after these gates. Traps and the fake API return
+   bounded local responses on every method, including local fallback during
+   quota/entropy failures; they never contact the upstream. A returned HMAC
+   credential is observed with fixed work/byte limits; optional BLOCK affects
+   only exact authentication on the owned API. There is no decoy source ban or
+   continuity-score contribution. A shared runtime retains the signing key and
+   quotas across reloads. See [decoy design](decoy-design.md).
 5. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
    prefix. With the default `body_inspection: strict`, the prefix is evaluated
    first: a matching ALLOW rule forwards, a matching BLOCK rule uses its
@@ -515,10 +523,13 @@ Protection is automatic and independent of the rule set. It consists of:
    `404`s hit many distinct non-static paths, and for authentication abuse when
    many `401`/`403`s hit login/token/session/MFA/SSO paths. A separate global
    window sums authentication failures across sources for distributed attempts.
-   The compiled defaults for the per-source signals are `LOG`;
-   `rules.example.yaml` enables enumeration `BLOCK` while leaving authentication
-   `LOG`. A `BLOCK` flag applies a normal ban after the current response. The
-   global signal is `LOG` only. State is inline in the tracked-source entry, and no
+   The compiled defaults for every signal are `LOG`. The shipped policy,
+   `rules.example.yaml` and the `kunato init` template, raises
+   enumeration, authentication, global authentication, and `200`-only scraping
+   to `BLOCK` so the ban path is exercised; the global signal with `BLOCK`
+   rejects authentication paths only for sources that contributed a recent
+   failure. A `BLOCK` flag applies a normal ban after the current response.
+   State is inline in the tracked-source entry, and no
    path contents are stored. See
    [the design and operations notes](behavioral-detection.md) for the signal
    definitions, thresholds, and limitations.
@@ -566,12 +577,19 @@ protection:
       distinct_paths: 40
     auth:
       enabled: true
-      action: LOG
+      action: BLOCK
       min_failures: 20
     global_auth:
       enabled: true
       window: 60s
       min_failures: 100
+      action: BLOCK
+      ban: 60s
+    scraping:
+      enabled: true
+      action: BLOCK
+      min_requests: 40
+      distinct_paths: 40
 ```
 
 Adaptive tightening (lowering per-IP burst under global pressure) is future work.
@@ -752,6 +770,7 @@ src/
     tls.rs         # Certificate loading and rustls server configuration
     http3.rs       # QUIC endpoint and HTTP/3 request handling
   request_view.rs  # Borrowed request and response representations for the rule engine
+  decoy/           # Opt-in local lures, token correlation, bounded observation
   snapshot.rs      # Immutable config and runtime snapshots
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)

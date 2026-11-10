@@ -67,6 +67,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
     if cli.disable_protection {
         warn!("DoS/DDoS protection disabled by --disable-protection");
         initial.protection.enabled = false;
+        for warning in initial.decoy_warnings() {
+            warn!("{warning}");
+        }
     }
 
     let listen = initial.listen;
@@ -163,6 +166,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
 }
 
 fn warn_configuration(config: &CompiledConfig) {
+    for route in config.decoy_routes() {
+        info!("{route}");
+    }
+    for warning in config.decoy_warnings() {
+        warn!("{warning}");
+    }
     if let Some(warning) = config.body_inspection_warning() {
         warn!("{warning}");
     }

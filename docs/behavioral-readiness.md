@@ -6,6 +6,11 @@ the detector; it does not measure false positives or authorize deployment.
 Copy the tables into deployment notes and fill them with observed evidence.
 An unfilled item is pending, not a passing result.
 
+The shipped policy (`rules.example.yaml` and `kunato init`) sets every signal
+to `BLOCK`, and that is the release default. A deployment that has not completed
+this assessment should lower the signals to `LOG` as shown below until it has;
+the rest of the checklist is the gate for keeping `BLOCK`.
+
 ## Deployment inventory
 
 | Item | Required record | Evidence |
@@ -25,7 +30,8 @@ overwrite the selected single-address header. Forwarded scheme and host are
 not trusted by this feature. Confirm that untrusted direct-origin connections
 cannot assert an arbitrary client identity.
 
-Keep behavior in LOG while assessing readiness:
+While assessing readiness, run behavior in LOG (the shipped config blocks, so
+lower it before measuring):
 
 ```yaml
 protection:
@@ -34,6 +40,7 @@ protection:
     enumeration: { action: LOG }
     auth: { action: LOG }
     global_auth: { enabled: true, action: LOG }
+    sequence: { action: LOG }
 ```
 
 `global_auth.action: BLOCK` is opt-in and blocks subsequent requests on
@@ -108,9 +115,11 @@ one client on a busy instance.
   normal authentication transitions are not misclassified as credential errors.
 - Proxy clients have independent request state, and the transport connection
   budgets can accommodate the proxy's connection model.
-- Behavioral enumeration/auth actions remain LOG for the next tuning phase;
-  controlled BLOCK checks are reverted after verification.
+- Behavioral actions follow the policy this deployment validated: `LOG` for
+  the tuning phase, or the shipped `BLOCK` once the inventory above is
+  evidenced; controlled `BLOCK` checks are reverted after verification.
 
-The outcome is either **Ready for LOG evaluation** or **Needs integration
-changes**, with the unresolved items listed. False-positive measurement and
-enabling production BLOCK belong to the next rollout phase.
+The outcome is either **Ready for LOG evaluation** or **Ready to keep the
+shipped `BLOCK` policy**, or **Needs integration changes**, with the unresolved
+items listed. False-positive measurement against `LOG` belongs to the same
+assessment before `BLOCK` is trusted.

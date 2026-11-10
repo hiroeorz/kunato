@@ -455,17 +455,21 @@ impl InitArgs {
              #   header: x-forwarded-for\n",
         );
 
-        out.push_str(
-            "\n# Behavioral detection observes upstream response statuses and can flag\n\
-             # sources that probe missing paths or fail authentication repeatedly. It\n\
-             # starts in LOG mode; uncomment and raise a signal's action to BLOCK after\n\
-             # reviewing the logs.\n\
-             # protection:\n\
-             #   behavior:\n\
-             #     enabled: true\n\
-             #     enumeration: { action: LOG }\n\
-             #     auth: { action: LOG }\n",
-        );
+        out.push_str(concat!(
+            "\n# Behavioral detection observes upstream response statuses and bans sources\n",
+            "# that probe missing paths, fail authentication repeatedly, or walk many\n",
+            "# distinct pages. Every signal blocks in the shipped policy; lower one to\n",
+            "# LOG if it is noisy in this deployment. Behind a CDN, configure\n",
+            "# `client_ip` first.\n",
+            "protection:\n",
+            "  behavior:\n",
+            "    enabled: true\n",
+            "    enumeration: { action: BLOCK }\n",
+            "    auth: { action: BLOCK }\n",
+            "    global_auth: { action: BLOCK }\n",
+            "    scraping: { enabled: true, action: BLOCK }\n",
+            "    sequence: { action: BLOCK }\n",
+        ));
 
         out.push_str("\nrules_update:\n");
         out.push_str("  enabled: true\n");
@@ -567,6 +571,20 @@ mod tests {
             compiled.overrides_file.as_deref(),
             Some(std::path::Path::new("/etc/kunato/overrides.yaml"))
         );
+    }
+
+    #[test]
+    fn renders_block_behavior_policy() {
+        let text = args().render().expect("render");
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        let behavior = &compiled.protection.behavior;
+        assert_eq!(behavior.enumeration.action, config::BehaviorAction::Block);
+        assert_eq!(behavior.auth.action, config::BehaviorAction::Block);
+        assert_eq!(behavior.global_auth.action, config::BehaviorAction::Block);
+        assert!(behavior.scraping.enabled);
+        assert_eq!(behavior.scraping.action, config::BehaviorAction::Block);
+        assert!(behavior.sequence.enabled);
+        assert_eq!(behavior.sequence.action, config::BehaviorAction::Block);
     }
 
     #[test]
