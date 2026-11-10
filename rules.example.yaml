@@ -2264,6 +2264,25 @@ protection:
       min_dimensions: 2
       ban: 5m
 
+# Experimental local decoys, enabled in the shipped policy. Replace this example
+# origin with your public HTTPS origin. `allowed_hosts` remains optional; when
+# configured, it must accept this origin. Only this site's paths are owned.
+# BLOCK rejects credential reuse on the fake API with 403; it does not ban IPs.
+decoys:
+  enabled: true
+  on_reuse: BLOCK
+  token_ttl: 30m
+  issuance:
+    per_minute: 60
+    burst: 10
+    per_source_per_minute: 6
+    per_source_burst: 2
+  sites:
+    - name: blog
+      origin: https://blog.example.com
+      sink: /_decoy/api/v1/storage/list
+      presets: [dotenv, git-config, wordpress-backup]
+
 admin:
   enabled: true
   listen: 127.0.0.1:9090

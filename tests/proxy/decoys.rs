@@ -69,10 +69,13 @@ async fn request(
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("host", HOST);
+    let mut builder = Request::builder().method(method).uri(path);
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        builder = builder.header("host", HOST);
+    }
     if !headers
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
@@ -103,6 +106,53 @@ async fn request(
 fn extract_token(body: &str) -> String {
     let start = body.find("kdt1.").expect("response token");
     body[start..start + 169].to_owned()
+}
+
+#[tokio::test]
+async fn decoy_without_host_allowlisting_keeps_other_sites_on_normal_routing() {
+    let (upstream, count) = receipts().await;
+    let config = decoy_config(upstream).replace(
+        "allowed_hosts: [blog.example.test, other.example.test]\n",
+        "",
+    );
+    let running = start_kunato(&config).await;
+    let (status, body, _) = request(running.addr, Method::GET, "/.env", &[], &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&format!("https://{HOST}{SINK}")));
+    let token = extract_token(&body);
+    assert_eq!(
+        request(
+            running.addr,
+            Method::GET,
+            SINK,
+            &[("x-api-key", &token)],
+            &[]
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(count.load(Ordering::Relaxed), 0);
+
+    for host in [
+        "other.example.test",
+        "unlisted.example.test",
+        "blog.example.test:8443",
+    ] {
+        let headers = [
+            ("host", host),
+            ("x-forwarded-host", HOST),
+            ("x-api-key", &token),
+        ];
+        for path in ["/.env", SINK, "/healthy"] {
+            let (status, body, _) = request(running.addr, Method::GET, path, &headers, &[]).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("kdt1."));
+        }
+    }
+    assert_eq!(count.load(Ordering::Relaxed), 9);
+    assert_eq!(running.metrics.decoys.blocked.load(Ordering::Relaxed), 1);
+    running.stop().await;
 }
 
 #[tokio::test]

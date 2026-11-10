@@ -229,7 +229,8 @@ client stays healthy. The result is 8 allowed, 12 blocked, and 1 flag event.
 `python3 lab/decoy_probe.py --binary target/debug/kunato --output /tmp/kunato-decoy-probe.json`
 runs a bounded loopback-only fake origin and a real Kunato child process.
 It compares disabled, LOG, and BLOCK modes with 23 deterministic cases from
-`lab/cases/decoys.json`. Assertions require correlated issuance/reuse log IDs
+`lab/cases/decoys.json`, with `allowed_hosts` omitted in every mode. Assertions
+require correlated issuance/reuse log IDs
 from different trusted-proxy source identities, exact status outcomes,
 per-case origin receipts, continued normal-client success, metric evidence,
 and no raw/once/twice-percent-encoded credentials in WAF logs. The report

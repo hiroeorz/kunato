@@ -118,17 +118,22 @@ replace authorization decisions inside the application.
 
 ## 4. Use decoys to obtain evidence of attack progression
 
-Status: First release implemented in the working tree; experimental, opt-in,
+Status: First release implemented; experimental, enabled in starter configurations,
 and not yet released. See the
 [experimental decoy design](decoy-design.md) for the configuration,
 token protocol, routing order, resource bounds, and acceptance tests.
 
 The first release is scoped to fictional credentials for an HTTP API served
-entirely by Kunato. It defaults to observation; opt-in `BLOCK` affects only a
+entirely by Kunato. Starter configurations select `BLOCK`, which affects only a
 qualified credential presentation on that owned API. Arbitrary token
 occurrences never trigger a decoy source ban or continuity score. A returned
 token links related data, not necessarily the same person, and use outside
 Kunato's HTTP request path is not observable.
+
+`allowed_hosts` remains optional. Each site's explicit public origin scopes
+the local routes; a configured Host allowlist must also accept that origin.
+Existing configurations without `decoys` remain disabled, and an omitted
+`on_reuse` action still selects `LOG`.
 
 Respond to suspicious reconnaissance with fake configuration files or
 administrative APIs that exist entirely inside Kunato.

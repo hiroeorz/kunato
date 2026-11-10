@@ -192,8 +192,8 @@ impl Policy {
         issues: &mut Vec<String>,
     ) -> Self {
         let mut error = |reason: &str| issues.push(format!("decoys: {reason}"));
-        if spec.enabled && (spec.sites.is_empty() || allowed.is_none()) {
-            error("enabled decoys require sites and allowed_hosts");
+        if spec.enabled && spec.sites.is_empty() {
+            error("enabled decoys require sites");
         }
         if spec.sites.len() > 16 {
             error("at most 16 sites are allowed");
@@ -233,12 +233,6 @@ impl Policy {
             if !origins.insert(origin.clone()) {
                 error("duplicate site origin");
             }
-            if spec.enabled
-                && !allowed
-                    .is_some_and(|a| a.matches(origin.strip_prefix("https://").unwrap_or("")))
-            {
-                error("site origin must be accepted by allowed_hosts");
-            }
             let Some(authority) = origin
                 .strip_prefix("https://")
                 .and_then(crate::allowed_hosts::normalized_authority)
@@ -246,6 +240,14 @@ impl Policy {
                 error("invalid site authority");
                 continue;
             };
+            if spec.enabled
+                && allowed.is_some_and(|a| {
+                    let raw = origin.strip_prefix("https://").unwrap_or("");
+                    !a.matches(raw) && !(authority.1.is_none() && a.matches(&format!("{raw}:443")))
+                })
+            {
+                error("site origin must be accepted by allowed_hosts");
+            }
             let id = token::site_id(&site.name, &origin);
             if !ids.insert(id) {
                 error("site identity collision");

@@ -65,12 +65,29 @@ fn config_rejects_unsupported_ambiguous_and_unbounded_inputs() {
         text.replace("presets: [dotenv]","presets: [dotenv]\n      disabled_paths: [/.env]"),
         text.replace("presets: [dotenv]","presets: [dotenv]\n      paths: [{path: /.x, template: dotenv}, {path: /.x, template: dotenv}]"),
         text.replace("presets: [dotenv]","presets: [dotenv]\n      paths: [{path: /.x, template: dotenv, extra: true}]"),
-        text.replace("allowed_hosts: [example.test]\n",""),
+        format!("{BASE}decoys: {{enabled: true}}\n"),
     ] {assert!(crate::config::parse(&invalid).is_err(),"accepted: {invalid}");}
     let many=(0..17).map(|i|format!("    - name: s{i}\n      origin: https://example.test:{port}\n      sink: /sink\n      presets: [dotenv]\n",port=8000+i)).collect::<String>();
     assert!(
         crate::config::parse(&format!("{BASE}decoys:\n  enabled: true\n  sites:\n{many}")).is_err()
     );
+}
+
+#[test]
+fn host_allowlisting_is_optional_and_checked_only_when_configured() {
+    let base = BASE.replace("allowed_hosts: [example.test]\n", "");
+    let config = crate::config::parse(&format!("{base}{DECOYS}")).unwrap();
+    assert!(config.allowed_hosts.is_none());
+    assert!(config.decoys.enabled);
+    assert!(config.decoys.site(&parts("/.env").headers).is_some());
+    for allowed in ["example.test", "example.test:443", "*.test"] {
+        let text = format!("{base}allowed_hosts: ['{allowed}']\n{DECOYS}");
+        assert!(crate::config::parse(&text).is_ok(), "rejected: {allowed}");
+    }
+    for allowed in ["other.test", "example.test:8443", "*.example.test"] {
+        let text = format!("{base}allowed_hosts: ['{allowed}']\n{DECOYS}");
+        assert!(crate::config::parse(&text).is_err(), "accepted: {allowed}");
+    }
 }
 
 #[test]

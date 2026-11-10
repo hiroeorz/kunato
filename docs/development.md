@@ -147,6 +147,12 @@ NAME`; installs that manage certificates manually can opt in the same way (see
 Running the installer again upgrades the binary and unit while keeping the
 existing configuration.
 
+New starter configurations also enable experimental decoys with `on_reuse:
+BLOCK`. The site origin uses the first ACME domain or allowed host; a wildcard
+host uses its `blog` subdomain. Without either input, edit the generated
+`https://blog.example.com` example to your public HTTPS origin. Decoys do not
+require `allowed_hosts`. See [Experimental decoys](#experimental-decoys).
+
 A successful install or `kunato upgrade` prints the banner produced by
 `kunato banner` when stdout is a terminal. `--no-banner` (or
 `KUNATO_NO_BANNER`) skips it, and `NO_COLOR` keeps the banner but drops the
@@ -1608,18 +1614,17 @@ against full local compromise.
 
 ### Experimental decoys
 
-`decoys` is an opt-in, local deception experiment. It serves fictional
+`decoys` is a local deception experiment. It serves fictional
 configuration files containing credentials for a fake HTTP API also owned by
 Kunato. Both endpoints are generated locally; their requests never contact the
-upstream. The feature is implemented in the working tree and requires a new
+upstream. The feature is implemented and requires a new
 binary release. It does not arrive through daily rule updates.
 
 ```yaml
-allowed_hosts: [blog.example.test]
 decoys:
   enabled: true
   token_ttl: 30m
-  on_reuse: LOG
+  on_reuse: BLOCK
   issuance:
     per_minute: 60
     burst: 10
@@ -1629,14 +1634,31 @@ decoys:
   observation: {body: true}
   sites:
     - name: blog
-      origin: https://blog.example.test
+      origin: https://blog.example.com
       sink: /_decoy/api/v1/storage/list
-      presets: [dotenv]
+      presets: [dotenv, git-config, wordpress-backup]
       disabled_paths: []
       paths:
         - path: /.env.production
           template: dotenv
 ```
+
+`rules.example.yaml` and `kunato init` enable these presets with `on_reuse:
+BLOCK`. The example origin must be replaced with the site's public HTTPS
+origin; `kunato init` instead uses the first ACME domain or allowed host when
+provided. Wildcard inputs select the `blog` subdomain. Only that origin owns
+the declared routes. Other domains use normal routing unless independently
+restricted by `allowed_hosts`. Add more sites explicitly when needed.
+
+`allowed_hosts` is optional. When present, the enabled site's origin must
+match it; a canonical HTTPS origin also accepts an explicit `:443` entry in
+the allowlist. The allowlist still enforces the actual request authority and
+may reject aliases the site matcher accepts. Templates always use the
+configured origin, never a client-provided host or forwarding header.
+
+Omitting `decoys` keeps existing configurations disabled. An omitted
+`on_reuse` keeps `LOG`; the explicit shipped policy chooses `BLOCK`. The table
+below describes schema defaults rather than the starter policy.
 
 | Field | Default | Validation / effect |
 | --- | --- | --- |
@@ -1652,7 +1674,7 @@ decoys:
 | `observation.body` | `true` | Passive inspection of at most an 8 KiB body prefix |
 | `sites` | `[]` | Required when enabled; 1..16 sites with unique names and canonical origins |
 | `sites[].name` | Required | 1..64 ASCII letters, digits, periods, underscores, or hyphens |
-| `sites[].origin` | Required | Explicit HTTPS origin, accepted by `allowed_hosts`, without credentials/query/fragment or a non-root path |
+| `sites[].origin` | Required | Explicit HTTPS origin without credentials/query/fragment or a non-root path; accepted by `allowed_hosts` when that policy is configured |
 | `sites[].sink` | Required | Exact local fake API path; must not equal a trap |
 | `sites[].presets` | `[]` | Individually selected preset names from the table below; no duplicates |
 | `sites[].disabled_paths` | `[]` | Unique preset paths to remove; unknown removals are errors |

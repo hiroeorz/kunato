@@ -118,7 +118,7 @@ Components:
    body prefix is buffered: maintenance answers with `503`, a declared
    administrative function in the closed state answers with `404` and is never
    forwarded, and an open request continues through the normal path.
-   When opt-in `decoys` is active for the validated authority, classify its
+   When `decoys` is active for the configured authority, classify its
    explicitly owned paths after these gates. Traps and the fake API return
    bounded local responses on every method, including local fallback during
    quota/entropy failures; they never contact the upstream. A returned HMAC
@@ -770,7 +770,7 @@ src/
     tls.rs         # Certificate loading and rustls server configuration
     http3.rs       # QUIC endpoint and HTTP/3 request handling
   request_view.rs  # Borrowed request and response representations for the rule engine
-  decoy/           # Opt-in local lures, token correlation, bounded observation
+  decoy/           # Site-scoped local lures, token correlation, bounded observation
   snapshot.rs      # Immutable config and runtime snapshots
 blackbox/          # External black-box test driver (separate crate)
   requests/        # Request lists (blocked.txt / allowed.txt)

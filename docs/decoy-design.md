@@ -2,7 +2,7 @@
 
 Date: 2026-11-10
 
-Status: First release implemented in the working tree; experimental, opt-in,
+Status: First release implemented; experimental, enabled in starter configurations,
 and not yet released. The configuration requires a new binary release and is
 not distributed through managed rule updates. Source bans, simulated
 navigation, and adaptive-agent evaluations remain future work.
@@ -20,12 +20,12 @@ from a different source address.
 
 | Area | First-release decision |
 | --- | --- |
-| Activation | Opt-in; absent `decoys` means disabled |
+| Activation | Shipped and generated configs enable explicit sites; absent `decoys` means disabled |
 | Lure | A fictional credential for a configured, same-site HTTP API |
 | Ownership | Explicit sites and exact paths; every method on an owned path stays local |
 | Evidence | Distinguish a credential presented to the fake API from a token occurrence elsewhere |
-| Default action | `LOG`; no decoy event adds to a behavioral score |
-| Optional action | `BLOCK` rejects only a qualified request to the fake API |
+| Shipped action | `BLOCK` rejects only a qualified request to the fake API; no behavioral score |
+| Schema fallback | An omitted action remains `LOG` for existing local configurations |
 | Source ban | Excluded from the first release |
 | Tokens | Process-local HMAC key, random nonce, authenticated expiry and site scope |
 | State | No token table; fixed global state and fixed additions to tracked-source entries |
@@ -72,16 +72,16 @@ validation service is involved.
 ## 3. Proposed configuration
 
 The following block is the complete first-release configuration surface.
-Values shown for limits and actions are defaults. Site definitions have no
-implicit default.
+Values shown for limits are schema defaults. The shipped and generated policy
+explicitly enables the three sample presets and `BLOCK`; an omitted block is
+still disabled and an omitted action is still `LOG`. Site definitions have no
+implicit schema default.
 
 ```yaml
-allowed_hosts: [blog.example.test]
-
 decoys:
   enabled: true
   token_ttl: 30m
-  on_reuse: LOG
+  on_reuse: BLOCK
   issuance:
     per_minute: 60
     burst: 10
@@ -94,9 +94,9 @@ decoys:
     body: true
   sites:
     - name: blog
-      origin: https://blog.example.test
+      origin: https://blog.example.com
       sink: /_decoy/api/v1/storage/list
-      presets: [dotenv]
+      presets: [dotenv, git-config, wordpress-backup]
       disabled_paths: []
       paths:
         - path: /.env.production
@@ -109,9 +109,12 @@ Configuration rules:
   `BLOCK`. `ban` and `source_ban` are unsupported fields in this release.
 - An omitted block is disabled. An explicitly disabled block may omit sites;
   any supplied values must still validate. An enabled block requires 1..16
-  sites and a configured `allowed_hosts` policy.
+  sites. `allowed_hosts` is optional.
 - Site names match `[A-Za-z0-9._-]{1,64}` and must be unique. Origins must also
-  be unique after canonicalization. There is no wildcard or inferred site.
+  be unique after canonicalization. Runtime site matching has no wildcard or
+  inferred site. `kunato init` writes one explicit site using the first ACME
+  domain or allowed host; wildcard inputs use the `blog` subdomain. Without
+  either input it writes `https://blog.example.com` for the owner to replace.
 - An origin is an absolute `https` origin without user information, a query,
   or a fragment; its path is empty or `/`. Reuse Host parsing for ASCII DNS
   names, IPv4, bracketed IPv6, and ports. DNS names are lowercase with the
@@ -119,8 +122,10 @@ Configuration rules:
 - Match requests by the validated Host/authority, not by `X-Forwarded-Host`,
   `Forwarded`, or a guessed TLS scheme. For site matching, an absent port and
   explicit 443 are equivalent; a nondefault port must match explicitly. The
-  existing `allowed_hosts` check still runs first and may be stricter.
-- Validate that the origin authority is accepted by `allowed_hosts`. The
+  existing `allowed_hosts` check, when configured, still runs first and may be
+  stricter. Without it, nonmatching domains keep their normal routing.
+- When `allowed_hosts` is configured, validate that the origin authority or
+  its explicit default HTTPS port alias is accepted by that policy. The
   owner must allow the actual authorities used by their proxy. A TLS-terminating
   CDN can use HTTP to Kunato; the configured public origin remains HTTPS.
 - `token_ttl` is a whole number of seconds in 1m..24h. Issuance rates are
@@ -534,8 +539,8 @@ be explicitly opt-in, limited to qualified credential evidence, and use the
 existing bounded ban manager, trusted `client_ip`, source allowlist, and ban
 limits. Document shared IPv4 and aggregated IPv6 collateral effects; do not
 extend bans on replays from already banned sources. Token sharing and induced
-requests remain possible even with these restrictions, so default LOG and
-request-local BLOCK remain the recommended modes. There is no automatic action
+requests remain possible even with these restrictions. The shipped policy
+chooses request-local BLOCK; operators may select LOG for observation. There is no automatic action
 against the source that originally fetched a token.
 
 ## 9. Resource and concurrency model
@@ -631,7 +636,7 @@ Proposed metrics use fixed labels only:
 | `kunato_decoy_responses_total` | `kind=trap\|sink\|fallback`; all local decoy responses |
 | `kunato_decoy_tokens_issued_total` | Tokens minted for GET responses |
 | `kunato_decoy_reuse_total` | `context=credential\|occurrence`; at most one count per context per request |
-| `kunato_decoy_blocked_total` | Qualified sink requests rejected by opt-in BLOCK |
+| `kunato_decoy_blocked_total` | Qualified sink requests rejected by BLOCK |
 | `kunato_decoy_limited_total` | `reason=global-issuance\|source-issuance\|tracking\|verification\|inspection` |
 | `kunato_decoy_scan_incomplete_total` | `reason=bytes\|candidates\|body-prefix\|encoding\|verification\|ambiguous\|inspection` |
 | `kunato_decoy_invalid_tokens_total` | `reason=syntax\|mac\|expired\|scope`; bounded candidate counts |
@@ -742,12 +747,14 @@ with decoys explicitly enabled for authoritative behavior assertions.
 
 ## 13. Rollout and experiments
 
-1. Implement the complete bounded first release with opt-in sites and LOG.
+1. Implement the complete bounded first release with explicit sites.
    Include token-safe logs, metrics, local fallback paths, and all acceptance
-   tests. Do not enable it in generated default configuration.
+   tests. The experimental project's shipped and generated starter policy
+   enables dotenv, git-config, and wordpress-backup with `on_reuse: BLOCK`.
+   Keep the omitted-block and omitted-action schema fallbacks unchanged.
 2. Observe a representative deployment, validate the actual CDN path and proxy
    identity configuration, and review token occurrences and lost-observation
-   counters. BLOCK is an explicit operator setting for the owned sink only.
+   counters. BLOCK applies to the owned sink only; LOG remains available.
 3. Evaluate templates and optional simulated navigation in an isolated lab.
    Navigation needs a separately domain-separated token purpose that cannot
    qualify as credential reuse. Bound page depth, total responses, and work;
@@ -772,7 +779,7 @@ This implementation changes no current attack-coverage verdict. Release obligati
   in `docs/development.md`; this document specifies the protocol and tests.
 - Architecture, logging/metrics references, and the next-version concept state
   the implemented first-release scope.
-- `docs/attack-coverage.md` records experimental/opt-in evidence and honest
+- `docs/attack-coverage.md` records experimental evidence and honest
   limits. Do not promote a
   general attack class to Covered based on token replay alone.
 - Release a new binary for the new configuration schema. Keep the managed
@@ -822,3 +829,23 @@ bind restriction was confirmed. This record covers local deterministic
 behavior; production CDN validation and actual adaptive-agent evaluations
 remain the deployment/experimental work described in Section 13. Source-wide
 bans and simulated navigation are explicitly outside this first release.
+
+### Starter-policy follow-up (2026-11-11)
+
+`allowed_hosts` is now optional, with origin consistency checked only when
+the policy is configured. Shipped and generated starters explicitly enable
+dotenv, git-config, and wordpress-backup with `on_reuse: BLOCK`. Existing
+omitted-block and omitted-action schema behavior remains unchanged.
+
+- Configuration tests cover absent/matching/mismatched allowlists, default
+  HTTPS ports, and generated DNS, IPv4, IPv6, wildcard, and ACME origins.
+- The added proxy test checks local issuance/enforcement without an allowlist
+  and confirms that other hosts retain normal upstream routing.
+- Required checks passed: formatting, Clippy with warnings denied, dependency
+  audit, and 1035 tests (0 failed, 3 existing ignored).
+- The unchanged CVE corpus passed: 704 allowed, 0 false blocks, 2242 blocked
+  responses, 0 forwarded attacks, and one incomplete chunked-framing probe
+  with no response. Origin accesses were exactly 704.
+- The loopback replay now omits `allowed_hosts` in all three modes; all 23
+  cases passed against the release binary. Managed rules and their checksum
+  remain unchanged and synchronized with the example's categories.

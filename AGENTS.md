@@ -52,7 +52,7 @@ src/
   php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations
   upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
-  decoy/           # Opt-in local lures, scoped HMAC tokens, bounded correlation
+  decoy/           # Site-scoped local lures, HMAC tokens, bounded correlation
   snapshot.rs      # Immutable config and runtime snapshots
   yaml/            # In-tree YAML parser and serde deserializer
   config/
@@ -220,12 +220,16 @@ rule-set updates.
   open/close commands while the configured default still applies; Kunato warns
   at startup and on reload (recover by changing `default` or disabling
   `admin_access` and reloading).
-- `decoys` optionally owns explicit per-site paths and serves embedded fictional
-  configuration files plus a local fake API. It requires `allowed_hosts` when
-  enabled, runs after maintenance and `admin_access`, and is inactive when
+- `decoys` owns explicit per-site paths and serves embedded fictional
+  configuration files plus a local fake API. `allowed_hosts` is optional; when
+  configured, it must accept each enabled site's origin. Decoys run after
+  maintenance and `admin_access`, and are inactive when
   protection is disabled. Issuance, verification, inspection scratch, and logs
-  are bounded; local fallback paths never reach the upstream. The default is
-  `on_reuse: LOG`; `BLOCK` changes only qualified Bearer/X-Api-Key presentations
+  are bounded; local fallback paths never reach the upstream. The shipped and
+  generated configurations enable the dotenv, git-config, and wordpress-backup
+  presets with `on_reuse: BLOCK`. Omitting the block keeps decoys disabled;
+  omitting its action keeps `LOG`. `BLOCK` changes only qualified
+  Bearer/X-Api-Key presentations
   on the owned API to `403`. Other token occurrences remain passive. Decoys add
   no source bans or Sequence scores. Keys survive valid reloads and reset on
   restart. See `docs/development.md`, "Experimental decoys", and

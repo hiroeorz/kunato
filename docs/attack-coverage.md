@@ -287,11 +287,19 @@ are integration-tested rather than claimed as request-corpus coverage.
 
 ## Experimental decoy evidence
 
-Opt-in `decoys` adds local lures and bounded recognition of returned fictional
+Experimental `decoys` adds local lures and bounded recognition of returned fictional
 HTTP API credentials. It does not change the bundled class counts or verdicts:
-ordinary occurrences are LOG-only, optional BLOCK affects only the owned fake
+ordinary occurrences are LOG-only, BLOCK affects only the owned fake
 API, and it creates no source ban or behavioral score. It cannot observe AWS,
 database, or external Git credential use outside Kunato's request path.
+
+The shipped and generated configurations enable the dotenv, git-config, and
+wordpress-backup presets with `on_reuse: BLOCK`; set the site's public origin
+before use. `allowed_hosts` is optional, and a configured list must accept the
+origin. Other hosts keep normal routing when no allowlist is configured.
+Omitting `decoys` still disables it, so existing configurations do not acquire
+new routes. These defaults do not broaden the evidence into a general attack
+coverage verdict.
 
 `tests/proxy/decoys.rs` exercises cross-source correlation, HTTP/1.1/2/3,
 normal-traffic preservation, route ownership, response-header finalization,

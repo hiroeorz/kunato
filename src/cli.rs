@@ -462,6 +462,7 @@ impl InitArgs {
             "# LOG if it is noisy in this deployment. Behind a CDN, configure\n",
             "# `client_ip` first.\n",
             "protection:\n",
+            "  enabled: true\n",
             "  behavior:\n",
             "    enabled: true\n",
             "    enumeration: { action: BLOCK }\n",
@@ -469,6 +470,44 @@ impl InitArgs {
             "    global_auth: { action: BLOCK }\n",
             "    scraping: { enabled: true, action: BLOCK }\n",
             "    sequence: { action: BLOCK }\n",
+        ));
+
+        let decoy_host = match allowed_hosts.first() {
+            Some(host) => host
+                .strip_prefix("*.")
+                .map_or_else(|| host.clone(), |suffix| format!("blog.{suffix}")),
+            None => "blog.example.com".to_owned(),
+        };
+        if crate::allowed_hosts::normalized_authority(&decoy_host).is_none() {
+            return Err(Error::Message(
+                "cannot infer a decoy origin; put a concrete host before wildcard --allowed-host entries"
+                    .to_owned(),
+            ));
+        }
+        out.push_str(concat!(
+            "\n# Experimental local decoys. Only the configured origin owns these paths.\n",
+            "# The origin uses the first ACME/allowed host, or the example below when\n",
+            "# neither was supplied. Replace the example with your public HTTPS origin.\n",
+            "# BLOCK rejects credential reuse on the fake API with 403; no source ban.\n",
+            "decoys:\n",
+            "  enabled: true\n",
+            "  on_reuse: BLOCK\n",
+            "  token_ttl: 30m\n",
+            "  issuance:\n",
+            "    per_minute: 60\n",
+            "    burst: 10\n",
+            "    per_source_per_minute: 6\n",
+            "    per_source_burst: 2\n",
+            "  sites:\n",
+            "    - name: blog\n",
+        ));
+        out.push_str(&format!(
+            "      origin: {}\n",
+            yaml_scalar(&format!("https://{decoy_host}"))
+        ));
+        out.push_str(concat!(
+            "      sink: /_decoy/api/v1/storage/list\n",
+            "      presets: [dotenv, git-config, wordpress-backup]\n",
         ));
 
         out.push_str("\nrules_update:\n");
@@ -588,6 +627,61 @@ mod tests {
     }
 
     #[test]
+    fn generated_and_example_configurations_enable_block_decoys() {
+        for text in [
+            args().render().expect("render"),
+            include_str!("../rules.example.yaml").to_owned(),
+        ] {
+            let compiled = config::parse(&text).expect("valid shipped policy");
+            assert!(compiled.allowed_hosts.is_none());
+            assert!(compiled.protection.enabled);
+            assert!(compiled.decoys.enabled);
+            assert_eq!(
+                compiled.decoys.on_reuse,
+                crate::decoy::config::Action::Block
+            );
+            assert_eq!(compiled.decoys.token_ttl.as_secs(), 1800);
+            let site = &compiled.decoys.sites[0];
+            assert_eq!(site.origin, "https://blog.example.com");
+            assert_eq!(site.sink, "/_decoy/api/v1/storage/list");
+            for path in [
+                "/.env",
+                "/.git/config",
+                "/wp-config.php.bak",
+                "/wp-config.php.old",
+            ] {
+                assert!(site.traps.contains_key(path));
+            }
+        }
+    }
+
+    #[test]
+    fn generated_decoy_origins_follow_the_first_host_including_wildcards_and_ports() {
+        for (host, origin) in [
+            ("app.example.com", "https://app.example.com"),
+            ("APP.EXAMPLE.COM.:443", "https://app.example.com"),
+            ("app.example.com:8443", "https://app.example.com:8443"),
+            ("*.example.com", "https://blog.example.com"),
+            ("*.example.com:8443", "https://blog.example.com:8443"),
+            ("127.0.0.1", "https://127.0.0.1"),
+            ("[::1]:443", "https://[::1]"),
+            ("[::1]:8443", "https://[::1]:8443"),
+        ] {
+            let mut args = args();
+            args.allowed_hosts = vec![host.to_owned()];
+            let text = args.render().expect("render");
+            let compiled = config::parse(&text).expect("valid generated origin");
+            assert_eq!(compiled.decoys.sites[0].origin, origin);
+            assert!(
+                compiled
+                    .allowed_hosts
+                    .expect("allowlist")
+                    .matches(host.replace("*.", "blog.").as_str())
+            );
+        }
+    }
+
+    #[test]
     fn renders_without_tls_when_not_requested() {
         let mut args = args();
         args.cert_file = None;
@@ -606,6 +700,7 @@ mod tests {
         args.acme_contact = Some("admin@example.com".to_owned());
         let text = args.render().expect("render");
         let compiled = config::parse(&text).expect("generated config must be valid");
+        assert_eq!(compiled.decoys.sites[0].origin, "https://example.com");
         let acme = compiled
             .tls
             .expect("tls block")

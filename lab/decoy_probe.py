@@ -49,7 +49,6 @@ def configuration(upstream, enabled, action):
     return f"""listen: 127.0.0.1:0
 upstream: http://127.0.0.1:{upstream}
 admin: {{listen: 127.0.0.1:0}}
-allowed_hosts: [{HOST}]
 client_ip: {{trusted_proxies: [127.0.0.1]}}
 protection:
   requests_per_second: 1000
