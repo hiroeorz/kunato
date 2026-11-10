@@ -1946,6 +1946,19 @@ categories:
           regex: '(?i)"effective_user"\s*:\s*"[^"]{0,128}([;&|`]|\$\(|\r|\n)'
           in: [body]
 
+  # Request signatures for the 2026-11-10 delta intake.
+  - name: cve-2026-11-10-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-102895 (GPUStack, KEV): get_current_user trusts a loopback
+      # source as the built-in administrator, and client_ip_getter accepts the
+      # client-supplied X-GPUStack-Real-IP value, so a remote caller can forge
+      # the loopback identity and reach administrative routes. A forwarded
+      # client address is never a loopback literal.
+      - name: gpustack-loopback-identity-header
+        match:
+          headers: { X-GPUStack-Real-IP: '(?i)^(?:127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|::1|\[::1\]|localhost|0\.0\.0\.0)(?::[0-9]{1,5})?$' }
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
   # br, and zstd bodies are decompressed for matching first. When the limit is

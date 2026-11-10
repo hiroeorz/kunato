@@ -871,3 +871,14 @@ GET /catalog/control/ShowCatalog?category_id=10001
 POST /accounting/control/SendPerEmail header="Content-Type: application/x-www-form-urlencoded" body="invoiceId=1&subject=Invoice&bodyText=Please find the invoice attached."
 GET /admin/dashboard
 GET /internal/metrics
+
+# --- Near-miss guards for the 2026-11-10 delta intake: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+GET /v2/users header="X-GPUStack-Real-IP: 203.0.113.7"
+GET /v2/inference-backends header="X-GPUStack-Real-IP: 198.51.100.20"
+GET /index.php?module=AOW_WorkFlow&action=DetailView&aow_action=save
+GET /signalk/v2/api/resources/routes/route-1
+GET /signalk/v2/api/resources/waypoints/harbor
+GET /api/media/device-1/photo.jpg
+POST /societe/card.php header="Content-Type: application/x-www-form-urlencoded" body="action=update&socid=1&lt1=5.5&lt2=0"
+POST /ajax/dropdownValue.php header="Content-Type: application/x-www-form-urlencoded" body="itemtype=User&table=glpi_users&field=name&value=alice"
