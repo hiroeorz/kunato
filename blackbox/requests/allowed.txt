@@ -898,3 +898,24 @@ GET /assets/app.css
 POST /api/v1/reporting/members/all header="Content-Type: application/json" body="{\"projects\":\"project-1\",\"status\":\"active\"}"
 GET /api/v1/reporting/members/export?projects=project-1&status=active
 POST /panel/upload.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227065726d697373696f6e220d0a0d0a310d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616450617468220d0a0d0a75706c6f6164732f323032360d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d2270686f746f2e6a7067220d0a436f6e74656e742d547970653a20696d6167652f6a7065670d0a0d0affd8ffe000104a46494600010100000100010000ffd90d0a2d2d582d2d0d0a
+
+# --- Near-miss guards for the 2026-11-11 delta intake: the same endpoints and
+#     parameters with ordinary values must keep passing. ---
+POST /api/tus/hooks header="Content-Type: application/json" body="{\"type\":\"post-finish\",\"event\":{\"upload\":{\"metadata\":{\"filename\":\"backup.sql\"}}}}"
+GET /admin/banner-zone.php?clientid=1&campaignid=2&zoneid=3
+POST /api/mcp/fetch-tools header="Content-Type: application/json" body="{\"url\":\"https://docs.example.com/openapi.json\",\"transport\":\"sse\"}"
+POST /api/mcp/fetch-tools header="Content-Type: application/json" body="{\"command\":\"/usr/local/bin/mcp-server\",\"args\":[\"--port\",\"8080\"],\"transport\":\"stdio\"}"
+POST /uploads header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227265706f72742e637376220d0a436f6e74656e742d547970653a20746578742f6373760d0a0d0a717561727465726c792c7265706f72740a0d0a2d2d582d2d0d0a
+POST /command-api header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"method\":\"runCmds\",\"params\":{\"cmds\":[\"show version\"],\"format\":\"json\"},\"id\":1}"
+POST /samba/save_euser.cgi header="Content-Type: application/x-www-form-urlencoded" body="user=alice&opts=--create-home"
+DELETE /Library/VirtualFolders?name=Movies&refreshLibrary=false
+POST /Library/VirtualFolders/Name header="Content-Type: application/json" body="{\"name\":\"Movies\",\"path\":\"/media/movies\"}"
+POST /roller-services/atom/entries header="Content-Type: application/atom+xml" body="<?xml version=\"1.0\"?><entry xmlns=\"http://www.w3.org/2005/Atom\"><title>Hello</title></entry>"
+POST /v1/immediate header="Content-Type: application/json" body="{\"group\":{\"key\":\"daily-sync\"}}"
+POST /authenticate header="Content-Type: application/x-www-form-urlencoded" body="username=admin&password=secret"
+POST /bss/sysmgnt/api/menu/icon/upload header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d2269636f6e2e737667220d0a436f6e74656e742d547970653a20696d6167652f7376672b786d6c0d0a0d0a3c73766720786d6c6e733d22687474703a2f2f7777772e77332e6f72672f323030302f737667223e3c726563742077696474683d22313622206865696768743d223136222f3e3c2f7376673e0d0a2d2d582d2d0d0a
+POST /livewire/update header="Content-Type: application/json" body="{\"components\":[{\"snapshot\":\"{}\",\"updates\":{\"sortDirection\":\"desc\"},\"calls\":[]}]}"
+POST /api/webhooks header="Content-Type: application/json" body="{\"url\":\"https://hooks.example.com/fider\"}"
+POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fetch_docs\",\"arguments\":{\"url\":\"https://docs.example.com/api\"}}}"
+POST /api/comment header="Content-Type: application/json" body="{\"comment\":\"Thanks, great post!\"}"
+POST /api/links header="Content-Type: application/json" body="{\"url\":\"https://example.com/page\"}"

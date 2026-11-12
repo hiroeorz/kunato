@@ -1281,6 +1281,11 @@ categories:
         match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(0x[0-9a-f]{1,8}|0[0-7]{6,}|[0-9]{8,10})([/:?#&"\x27\s]|$)', in: [query, body, headers, cookies] }
       - name: ipv6-mapped-private-or-metadata-addresses
         match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://\[::ffff:(127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+|169\.254\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+|7f00:1|a9fe:a9fe|a00:1|c0a8:1)\]', in: [query, body, headers, cookies] }
+      # CVE-2026-103980 (ideon): IPv6 transition addresses embed IPv4 targets
+      # that destination checks miss. NAT64, 6to4, and Teredo literals in a
+      # request-supplied URL have no legitimate request-side use.
+      - name: ipv6-transition-private-or-metadata-addresses
+        match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://\[(64:ff9b:1?:[0-9a-f:.]*|2002:[0-9a-f:.]*|2001:0:[0-9a-f:.]*)\]', in: [query, body, headers, cookies] }
       - name: single-label-host
         match: { regex: '(?i)(https?|gopher|dict|ftp|sftp|tftp|ldap|ldaps)://(?:[^/?#@\s]{1,64}@)?[a-z0-9_-]+\.?([:/?#&"\x27\s]|$)', in: [query, body, headers, cookies] }
       - name: protocol-relative-internal

