@@ -11,6 +11,10 @@
 #
 # Test with a manual workflow_dispatch run first; enable "dry run" to stop
 # before the commit and push. The agent never receives the push token.
+#
+# The signing job runs no cargo or third-party build code. Build and test steps
+# run in the read-only `verify` job, so a build script cannot write a file that
+# inherits the rule artifact's push authority.
 
 name: Daily CVE update
 
@@ -47,7 +51,7 @@ jobs:
       MODEL: ${{ inputs.model || 'opencode-go/deepseek-v4.1-flash' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -68,7 +72,7 @@ jobs:
 
       - name: Upload the candidate list
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cve-candidates
           path: |
@@ -77,9 +81,11 @@ jobs:
           if-no-files-found: warn
 
       - name: Install opencode
+        env:
+          OPENCODE_VERSION: 1.0.180
         run: |
           set -euo pipefail
-          curl -fsSL https://opencode.ai/install | bash
+          curl -fsSL https://opencode.ai/install | bash -s -- --version "$OPENCODE_VERSION"
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Run the daily CVE agent
@@ -114,7 +120,7 @@ jobs:
           exit "$status"
 
       - name: Upload allowlisted changes
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: daily-cve-changes
           path: |
@@ -133,7 +139,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: daily-cve-diagnostics
           path: |
@@ -142,24 +148,112 @@ jobs:
             ${{ runner.temp }}/changed.txt
           if-no-files-found: warn
 
-  sign-and-push:
+  verify:
     needs: generate
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: write
-    # Signing and push run on a fresh runner VM isolated from the untrusted
-    # agent step: only the allowlisted data files cross the job boundary.
-    environment: rules-signing
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download allowlisted changes
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: daily-cve-changes
+          path: ${{ runner.temp }}/staged-changes
+
+      - name: Apply allowlisted data files
+        run: |
+          set -euo pipefail
+          for path in \
+            blackbox/requests/blocked.txt \
+            blackbox/requests/allowed.txt \
+            rules.example.yaml \
+            docs/cve-coverage.md \
+            docs/engine-gaps.md; do
+            staged="$RUNNER_TEMP/staged-changes/$path"
+            if [ -f "$staged" ] && [ ! -L "$staged" ]; then
+              cp -- "$staged" "$path"
+            fi
+          done
+
+      - name: Regenerate the managed rule set
+        run: scripts/update-dist-rules.sh
+
+      - name: Check the rules policy
+        run: python3 scripts/check-rules-policy.py rules.example.yaml dist/rules.yaml
+
+      - name: Test the rules policy gate
+        run: python3 scripts/test_check_rules_policy.py
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+
+      - name: Check the published rules against the newest release
+        run: scripts/check-rules-compat.sh
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Check blackbox formatting
+        run: cargo fmt --manifest-path blackbox/Cargo.toml --check
+
+      - name: Lint blackbox
+        run: cargo clippy --manifest-path blackbox/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Validate the example rules
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          ./target/release/kunato --config rules.example.yaml --validate
+
+      - name: Run the black-box test
+        run: scripts/blackbox-test.sh --color never --workdir "$RUNNER_TEMP/kunato-blackbox"
+
+      - name: Upload blackbox logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: daily-cve-blackbox-logs
+          path: ${{ runner.temp }}/kunato-blackbox/*.log
+          if-no-files-found: warn
+
+  sign-and-push:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Signing and push run on a fresh runner VM isolated from the untrusted
+    # agent and from all build code: only the allowlisted data files cross the
+    # job boundary, and this job runs no cargo command.
+    environment: rules-signing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download allowlisted changes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: daily-cve-changes
           path: ${{ runner.temp }}/staged-changes
@@ -188,6 +282,26 @@ jobs:
       - name: Regenerate the managed rule set
         run: scripts/update-dist-rules.sh
 
+      - name: Check the rules policy
+        run: python3 scripts/check-rules-policy.py rules.example.yaml dist/rules.yaml
+
+      - name: Test the rules policy gate
+        run: python3 scripts/test_check_rules_policy.py
+
+      - name: Verify the corpus is append-only
+        run: |
+          set -euo pipefail
+          for file in blackbox/requests/blocked.txt blackbox/requests/allowed.txt; do
+            stats=$(git diff --numstat -- "$file")
+            if [ -n "$stats" ]; then
+              deleted=$(printf '%s\n' "$stats" | awk '{sum += $2} END {print sum + 0}')
+              if [ "$deleted" -ne 0 ]; then
+                echo "::error::$file may only be appended to ($deleted deleted lines)"
+                exit 1
+              fi
+            fi
+          done
+
       - name: Sign the managed rule set
         env:
           RULES_SIGNING_KEY: ${{ secrets.RULES_SIGNING_KEY }}
@@ -206,48 +320,23 @@ jobs:
             -m dist/rules.yaml -x dist/rules.yaml.minisig \
             -t "rules.yaml $(date -u +%FT%TZ)"
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Check the published rules against the newest release
-        run: scripts/check-rules-compat.sh
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
-
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
-      - name: Test
-        run: cargo test
-
-      - name: Check blackbox formatting
-        run: cargo fmt --manifest-path blackbox/Cargo.toml --check
-
-      - name: Lint blackbox
-        run: cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
-
-      - name: Validate the example rules
+      - name: Verify the managed rule set signature
         run: |
           set -euo pipefail
-          cargo build --release
-          ./target/release/kunato --config rules.example.yaml --validate
+          python3 - "$RUNNER_TEMP/rules.pub" <<'PY'
+          import re
+          import sys
 
-      - name: Run the black-box test
-        run: scripts/blackbox-test.sh --color never --workdir "$RUNNER_TEMP/kunato-blackbox"
-
-      - name: Upload blackbox logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: daily-cve-blackbox-logs
-          path: ${{ runner.temp }}/kunato-blackbox/*.log
-          if-no-files-found: warn
+          text = open("src/trust.rs", encoding="utf-8").read()
+          rules = text.split("pub const RULES_KEYS", 1)[1]
+          match = re.search(r'"(untrusted comment: minisign public key [^"]+?\\n[^"]+?)"', rules)
+          if not match:
+              raise SystemExit("could not read the rules public key from src/trust.rs")
+          open(sys.argv[1], "w", encoding="utf-8").write(
+              match.group(1).replace("\\n", "\n") + "\n"
+          )
+          PY
+          minisign -V -m dist/rules.yaml -x dist/rules.yaml.minisig -p "$RUNNER_TEMP/rules.pub"
 
       - name: Commit and push
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
@@ -255,13 +344,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
-            echo "no changes to commit"
+          allowed='^(blackbox/requests/(blocked|allowed)\.txt|rules\.example\.yaml|docs/(cve-coverage|engine-gaps)\.md|dist/rules\.yaml(\.sha256|\.minisig)?)$'
+          unexpected=$(
+            {
+              git diff --name-only
+              git ls-files --others --exclude-standard
+            } | sort -u | grep -vE "$allowed" || true
+          )
+          if [ -n "$unexpected" ]; then
+            echo "::error::workspace change outside the rule artifact: $unexpected"
+            exit 1
+          fi
+          git add -- blackbox/requests/blocked.txt blackbox/requests/allowed.txt \
+            rules.example.yaml docs/cve-coverage.md docs/engine-gaps.md \
+            dist/rules.yaml dist/rules.yaml.sha256 dist/rules.yaml.minisig
+          unexpected=$(git diff --cached --name-only | sort -u | grep -vE "$allowed" || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::staged change outside the rule artifact: $unexpected"
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "no rule artifact changes to commit"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
           gaps=$(git diff --cached -- docs/engine-gaps.md \
             | grep '^+| CVE-' \
             | grep -oE 'CVE-[0-9]{4}-[0-9]{4,}' \

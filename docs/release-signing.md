@@ -121,6 +121,17 @@ signs only when `dist/rules.yaml` changed; otherwise the committed signature is
 kept. `cargo test` then verifies the committed pair, so an unsigned or stale
 rule set fails the job before anything is pushed.
 
+Build and test steps run in a separate read-only `verify` job. The signing job
+runs only the checkout, artifact download, regeneration, policy check, minisign,
+and the scoped commit; it has no cargo command, so a dependency build script
+cannot write a file that the `git add` would inherit. It stages only the rule
+artifact and corpus paths, fails on any other tracked or untracked change, and
+rejects deletions in `blocked.txt` or `allowed.txt`. The black-box suite runs
+against the exact `dist/rules.yaml` that is signed, and
+`scripts/check-rules-policy.py` rejects an enabled ALLOW category and every
+rule-level ALLOW; a disabled ALLOW category needs a reviewed entry in
+`.github/rules-policy-allowlist`. Signing happens only after those gates pass.
+
 The environment has no protection rules so the scheduled run stays unattended.
 The compensating controls are: repository write access, required review for
 `.github/workflows/**` via CODEOWNERS, SHA-pinned actions, the smallest workflow

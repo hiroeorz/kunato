@@ -31,7 +31,7 @@ use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
 use crate::protection::{
     BehaviorSignal, ConnectionGuard, Decision, ProtectionState, SequenceFlag, SequenceKind,
-    normalize_ip,
+    normalize_ip, tracking_key,
 };
 use crate::proxy::client::UpstreamClient;
 use crate::proxy::forward::{self, HttpError};
@@ -96,12 +96,21 @@ impl InspectionBudget {
         self.reserve_inner(None, bytes)
     }
 
+    pub(crate) fn reserve_for_key(
+        self: &Arc<Self>,
+        key: IpAddr,
+        bytes: usize,
+    ) -> Option<InspectionGuard> {
+        self.reserve_inner(Some(key), bytes)
+    }
+
+    #[cfg(test)]
     pub(crate) fn reserve_for(
         self: &Arc<Self>,
         source: IpAddr,
         bytes: usize,
     ) -> Option<InspectionGuard> {
-        self.reserve_inner(Some(normalize_ip(source)), bytes)
+        self.reserve_for_key(normalize_ip(source), bytes)
     }
 
     fn reserve_inner(
@@ -525,8 +534,11 @@ impl Context {
     /// body. The raw prefix and decoded forms grow it as needed, and the
     /// reservation is charged to the resolved client source.
     pub(crate) fn reserve_request_inspection(&self, source: IpAddr) -> Option<InspectionGuard> {
-        self.inspection
-            .reserve_for(source, MIN_INSPECTION_RESERVATION)
+        let config = self.config();
+        self.inspection.reserve_for_key(
+            tracking_key(source, &config.protection),
+            MIN_INSPECTION_RESERVATION,
+        )
     }
 
     /// Reserve the worst-case memory for inspecting one upstream response.
@@ -544,7 +556,8 @@ impl Context {
         } else {
             0
         };
-        self.inspection.reserve_for(source, bytes)
+        self.inspection
+            .reserve_for_key(tracking_key(source, &config.protection), bytes)
     }
 
     pub(crate) fn record_overloaded(&self) {
@@ -1236,9 +1249,9 @@ pub(crate) fn decoy_head(
         && config.decoys.site(&parts.headers).is_some()
         && !crate::decoy::exempt(source.client_ip, &config.protection)
     {
-        context.inspection.reserve_for(
-            source.client_ip,
-            MIN_INSPECTION_RESERVATION.saturating_add(parts.uri.path().len().saturating_mul(6)),
+        context.inspection.reserve_for_key(
+            tracking_key(source.client_ip, &config.protection),
+            crate::decoy::SCAN_BYTES,
         )
     } else {
         None
@@ -1544,6 +1557,15 @@ pub(crate) fn request_head_error(
         return Some(HttpError::new(
             StatusCode::BAD_REQUEST,
             "non-canonical HTTP method",
+        ));
+    }
+    // A reverse proxy does not implement tunnels. Forwarding CONNECT (and its
+    // declared content) would let a non-consuming origin parse the bytes as a
+    // second request, so refuse the method before any body is read.
+    if parts.method == http::Method::CONNECT {
+        return Some(HttpError::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "CONNECT is not supported",
         ));
     }
 
@@ -3133,6 +3155,48 @@ mod tests {
     }
 
     #[test]
+    fn inspection_budget_uses_the_protection_tracking_key() {
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:1\nprotection: { aggregate_ipv6_prefix: 64 }\ncategories: []\n",
+        )
+        .expect("config");
+        let budget = Arc::new(InspectionBudget::new());
+        let first = budget
+            .reserve_for_key(
+                tracking_key(
+                    "2001:db8:aa:bb::1".parse().expect("source"),
+                    &config.protection,
+                ),
+                SOURCE_INSPECTION_BUDGET_BYTES,
+            )
+            .expect("first reservation");
+        assert!(
+            budget
+                .reserve_for_key(
+                    tracking_key(
+                        "2001:db8:aa:bb::2".parse().expect("source"),
+                        &config.protection,
+                    ),
+                    1,
+                )
+                .is_none(),
+            "addresses in one aggregated prefix must share the source budget"
+        );
+        drop(first);
+        assert!(
+            budget
+                .reserve_for_key(
+                    tracking_key(
+                        "2001:db8:aa:bb::2".parse().expect("source"),
+                        &config.protection,
+                    ),
+                    1,
+                )
+                .is_some()
+        );
+    }
+
+    #[test]
     fn inspection_budget_reserves_and_releases_capacity() {
         let budget = Arc::new(InspectionBudget::new());
         let half = INSPECTION_BUDGET_BYTES / 2;
@@ -3290,6 +3354,74 @@ mod tests {
         shutdown.send(true).expect("shutdown");
         server_task.await.expect("server task");
         upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn decoy_scratch_reservation_is_bounded_and_reclaimable() {
+        let config = Arc::new(Snapshot::new(
+            crate::config::parse(
+                "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+allowed_hosts: [example.test]
+protection: { enabled: true }
+decoys:
+  enabled: true
+  sites:
+    - name: blog
+      origin: https://example.test
+      sink: /_decoy/api
+      presets: [dotenv]
+",
+            )
+            .expect("config"),
+        ));
+        let server = Server::bind(
+            "127.0.0.1:0".parse().expect("listen"),
+            Arc::clone(&config),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("server");
+        let config = config.load();
+        let source = ClientSource::direct("203.0.113.1:1234".parse().expect("source"));
+        let path = format!("/{}", "a".repeat(8191));
+        let request = Request::builder()
+            .uri(path)
+            .header("host", "example.test")
+            .body(())
+            .expect("request");
+        let (mut parts, ()) = request.into_parts();
+
+        assert!(
+            decoy_head(&server.context, &config, source, &mut parts).is_none(),
+            "a non-trap path must stay in the body phase"
+        );
+        assert!(
+            parts
+                .extensions
+                .get::<crate::decoy::Observation>()
+                .is_some(),
+            "the observation must own the scratch reservation"
+        );
+        assert_eq!(
+            server.context.inspection.reserved.load(Ordering::Relaxed),
+            crate::decoy::SCAN_BYTES
+        );
+
+        let guard = request_inspection(&server.context, source, &parts)
+            .expect("the body inspection baseline must fit");
+        assert_eq!(
+            server.context.inspection.reserved.load(Ordering::Relaxed),
+            crate::decoy::SCAN_BYTES + MIN_INSPECTION_RESERVATION
+        );
+
+        drop(guard);
+        drop(parts);
+        assert_eq!(
+            server.context.inspection.reserved.load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[tokio::test]

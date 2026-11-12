@@ -457,7 +457,9 @@ body-inspection rule because there is no body rule to satisfy, but the form and
 upload guards still apply.
 
 `path` is a regular expression matched against every decoded and normalized
-form of the request path. The route applies only when every form matches, so a
+form of the request path. It must be anchored at the start with `^` so an
+unanchored pattern cannot exempt a different subtree. The route applies only
+when every form matches, so a
 request cannot be normalized by the upstream into a different endpoint after
 the body rules were skipped. `methods` is optional and defaults to every
 method; names are the case-sensitive uppercase tokens used by rule matches, and
@@ -830,6 +832,7 @@ Defaults:
 | `body_read`         | `30s`   |
 | `upstream_connect`  | `5s`    |
 | `upstream_response` | `30s`   |
+| `response_body`     | `5m`    |
 | `shutdown_grace`    | `10s`   |
 | `connection_idle`   | `60s`   |
 | `websocket_idle`    | `10m`   |
@@ -848,6 +851,9 @@ Every served connection also has a write-progress deadline: a client that makes
 no write progress for `connection_idle` is disconnected, so a stalled reader
 cannot hold an inspection reservation or a connection slot forever. Streaming
 responses must therefore make progress (or send heartbeats) within that window.
+HTTP/3 response bodies also carry a total `response_body` deadline (default
+`5m`), so an origin that emits a frame just inside the idle interval cannot keep
+the request task and its connection slot alive indefinitely.
 
 `max_path_bytes` bounds the whole request target (path plus query string), not
 just the path. Request-target length, header size/count, and method-case checks
@@ -1041,10 +1047,10 @@ HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes use the same policy, resolved
 anew for each request. Request decision logs distinguish `client` (resolved IP)
 from `peer` (transport address). Before forwarding, Kunato removes the selected
 identity header and the alternate `Forwarded`, `X-Real-IP`, `X-Client-IP`,
-`X-Forwarded-Port`, `CF-Connecting-IP`, and `True-Client-IP` assertions. It then
-writes a single canonical `X-Forwarded-For` containing the resolved client IP.
-`X-Forwarded-Proto` continues to describe the connection to Kunato; this setting
-does not trust forwarded scheme or host assertions.
+`X-Forwarded-Port`, `X-Forwarded-Host`, `CF-Connecting-IP`, and `True-Client-IP`
+assertions. It then writes a single canonical `X-Forwarded-For` containing the
+resolved client IP. `X-Forwarded-Proto` continues to describe the connection to
+Kunato; this setting does not trust forwarded scheme or host assertions.
 
 Each trusted proxy must overwrite a single-address header or correctly append
 its observed peer to XFF. Restrict the trusted ranges to actual proxies and
@@ -1170,7 +1176,11 @@ name but has no recognizable archive structure keeps the previous content
 checks.
 ZIP deflate entries are counted by their actual output, ZIP64 is read, and
 encrypted or unsupported-compression entries fall back to the declared
-uncompressed size. Nested archives are not expanded. The check covers the
+uncompressed size. A ZIP whose end record declares zero entries but whose body
+contains a local file header is rejected as malformed, while a genuinely empty
+archive still passes: a streaming extractor such as Java `ZipInputStream`
+follows local headers, so a zero-count central directory must not hide one.
+Nested archives are not expanded. The check covers the
 inspected part of the body only, so `body_inspection: stream` limits it to the
 buffered prefix, and `upload_inspection: off` disables it together with the
 rest of the upload checks.
@@ -1251,7 +1261,11 @@ The document is read from a GET `query` parameter, a form `query` field, a JSON
 object or batch array, an `application/graphql` body, or the `operations` field of
 a multipart upload. JSON bodies are parsed regardless of the declared content
 type (the usual labels are `application/json` and `+json`), so relabelling a
-query as `text/plain` does not hide it. Fragment spreads are expanded before
+query as `text/plain` does not hide it. GraphQL-over-WebSocket messages are
+inspected in the tunnel too: `start` (graphql-ws) and `subscribe`
+(graphql-transport-ws) envelopes are read from `payload.query`, and an
+operation envelope without an extractable document closes the tunnel with
+`1008` instead of being forwarded. Fragment spreads are expanded before
 both the depth and the field count are computed; fragment cycles, duplicate or
 undefined fragment definitions, and documents that exceed the parser's bounded
 node budget are rejected. Strings, block strings, comments, variable definitions, and
@@ -1319,7 +1333,10 @@ repeats a JSON key (the WAF and the application could read different values), is
 rejected instead of skipped. `Authorization` separates the scheme with any
 optional whitespace (including a tab), and cookies are inspected both raw and
 after percent-decoding. The check is part of `limits` and therefore remains
-active with `--disable-protection`. Algorithm names are compared
+active with `--disable-protection`. Body inspection applies the same
+content-type decoding as the rule engine (form percent decoding and JSON string
+unescaping), so a token written as `eyJ...%2E...` or `eyJ...\u002E...` is still
+checked. Algorithm names are compared
 case-insensitively after normalization; each entry is 1-32 ASCII letters,
 digits, `-`, or `_`, and at most 16 entries are accepted.
 
@@ -1352,7 +1369,13 @@ limits:
 `ssrf` rejects URL values whose host is a configured internal host or suffix.
 Each query value, the raw body (not only its decoded forms), every decoded body
 form, and every header value is searched, and all URLs in a value are examined,
-so a public URL cannot hide an internal one behind it. `duplicate_parameters`
+so a public URL cannot hide an internal one behind it. The scan removes tabs,
+CR, and LF, treats `\` as `/`, and accepts the WHATWG special schemes (`http`,
+`https`, `ws`, `wss`, `ftp`, `file`) with zero, one, or two separators, so
+`http:/internal`, `http:\internal`, and `http:internal` reach the same host
+check as `http://internal`. A non-special `word:value` pair is not treated as a
+URL.
+`duplicate_parameters`
 rejects conflicting duplicate query, form, multipart, and JSON fields or keys
 (`+` decodes to a space in parameter names and values, matching form parsers);
 `allow_parameters` exempts intentional list parameters, and multipart file parts
@@ -1360,9 +1383,12 @@ are not compared. `cache_deception` rejects a request for a configured static
 suffix when an authentication cookie is present, checking every decoded and
 normalized path form. `redirects` rejects an absolute or protocol-relative
 redirect target whose host is not in `allowed_hosts` on the configured parameter
-names, in query, form, multipart, and nested JSON values; control characters and
-surrounding whitespace are ignored and `\` is read as `/`, matching what a
-browser resolves.
+names, in query, form, multipart, and nested JSON values. Parameter names are
+decoded with form rules and the PHP dots/spaces-to-underscore mapping before
+comparison, so `redirect.uri`, `redirect+uri`, and `redirect%2Euri` cannot reach
+the same application parameter while skipping the configured `redirect_uri`.
+Control characters and surrounding whitespace are ignored and `\` is read as
+`/`, matching what a browser resolves.
 
 ### Response headers
 
@@ -1385,14 +1411,25 @@ must be non-empty; use `remove` to drop a header.
 
 ### Admin and metrics
 
-An optional admin listener exposes Prometheus metrics and the maintenance
-controls on a loopback address:
+An admin listener exposes Prometheus metrics and the maintenance controls on a
+loopback address. It is enabled by default even when the block is omitted;
+`kunato init` writes the block explicitly so the listener is visible:
 
 ```yaml
 admin:
   enabled: true
   listen: 127.0.0.1:9090
 ```
+
+Set `enabled: false` to turn it off. The listener requires an explicit `Host`
+that names a loopback address or `localhost`, and rejects requests carrying
+`X-Forwarded-For`, `X-Forwarded-Proto`, or `X-Forwarded-Host`. Those headers are
+added by the data plane, so a request forwarded from a configured upstream
+cannot use Kunato as a confused deputy against its own metrics or maintenance
+endpoints. Kunato also warns at startup when the upstream authority is the
+admin listener itself. The `kunato metrics`, `kunato maintenance`, and
+`kunato admin-access` clients strip terminal control and escape sequences from
+the response before printing it.
 
 `GET /metrics` returns the text exposition format. Counters cover total requests,
 BLOCK rule hits, LOG matches, rate-limit and ban decisions, behavioral
@@ -1920,6 +1957,9 @@ sudo kunato log --ip 203.0.113.9 --status 429 --format json |
   only matches the recorded path.
 - Attack classification is category-level, not per-rule metadata.
 - The viewer depends on `journalctl` and the systemd journal retention policy.
+- A single journal line is capped at 64 KiB before parsing. An oversized line
+  is truncated and marked in the rendered output, so a local journal writer
+  cannot force the viewer to allocate an unbounded line.
 
 ### TLS
 
@@ -2044,7 +2084,10 @@ under normal deployments both share one port. TCP responses then carry an
 
 HTTP/3 requests pass through the same protection, limits, and rule evaluation
 as TCP requests. HEAD responses carry no content, including Kunato-generated
-block and error responses. Settings are applied at startup (like TLS); changing or
+block and error responses. QUIC active migration is disabled: client identity,
+per-source limits, and source allowlists are keyed by the address the
+connection was admitted from, so a client that changes its path address must
+open a fresh connection. Settings are applied at startup (like TLS); changing or
 disabling them requires a restart. If the UDP socket cannot be bound, Kunato
 logs a warning and keeps serving over TCP.
 
@@ -2065,7 +2108,9 @@ hop-by-hop fields are removed, then `Connection: upgrade` and
 
 Application payloads are inspected in both directions. Client-to-server
 messages are reassembled (up to `limits.websocket_message_bytes`) and matched
-against body-target rules. Server-to-client messages are reassembled the same
+against body-target rules; the opt-in `limits.jwt` policy also checks each
+client message, as does the GraphQL limits check on a recognized GraphQL path.
+Server-to-client messages are reassembled the same
 way and matched against response-phase rules that inspect `response_body`, with
 the `101` handshake response scoping `status` and `response_headers`. A matching
 `BLOCK` closes the tunnel with `1008`; malformed frames close with `1002`, an
@@ -2074,7 +2119,8 @@ WebSocket extensions are not negotiated, so compressed frames are never
 accepted. `max_body_bytes` still does not apply to tunnel frames. Tunnels with
 no traffic in either direction are closed after `timeouts.websocket_idle`
 (default `10m`), and all tunnels are closed on shutdown. WebSocket over HTTP/2
-or HTTP/3 (extended CONNECT) is not supported yet.
+or HTTP/3 (extended CONNECT) is not supported: a `CONNECT` request is rejected
+with `405` at head validation, before any body is read.
 
 ### Hot reload
 

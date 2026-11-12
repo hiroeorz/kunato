@@ -72,6 +72,12 @@ and detect.
   fails the workflow before it pushes. The signed trusted-comment timestamp is
   persisted in the update state, and a candidate whose timestamp is older than
   the installed rule set is refused as a rollback. See `release-signing.md`.
+- Before signing, the workflow runs the black-box suite against the exact
+  `dist/rules.yaml` that is published, rejects any enabled ALLOW category and
+  every rule-level ALLOW (a disabled ALLOW category needs a reviewed allowlist
+  entry), and refuses a corpus that was not append-only. The signing job runs no
+  cargo or third-party build code, so a build script cannot add a file to the
+  signed commit.
 - Adding a field, match target, action, or phase to the engine is a **release
   event**, not a rule-update event: rules may use it only after a release that
   understands it.

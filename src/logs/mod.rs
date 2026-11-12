@@ -6,13 +6,18 @@ mod parse;
 use std::io::{self, IsTerminal, Write};
 use std::process::Stdio;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::cli::{LogArgs, LogOutputFormat};
 use crate::error::Error;
 
 use filter::Filters;
+
+/// One journal line is bounded before it is parsed. `journalctl` normally
+/// respects the journal's `LineMax`, but a local writer can still publish a
+/// large field; the viewer must not allocate it without a bound.
+const MAX_JOURNAL_LINE_BYTES: usize = 64 * 1024;
 
 /// Read the systemd journal for the Kunato unit. `journalctl` does the reading;
 /// this command only parses, filters, and renders its lines.
@@ -61,8 +66,8 @@ pub async fn run(args: LogArgs) -> Result<(), Error> {
 
     loop {
         line.clear();
-        let read = reader.read_until(b'\n', &mut line).await?;
-        if read == 0 {
+        let read = read_capped_line(&mut reader, &mut line).await?;
+        if read.bytes == 0 && !read.truncated {
             break;
         }
         if line.last() == Some(&b'\n') {
@@ -71,7 +76,10 @@ pub async fn run(args: LogArgs) -> Result<(), Error> {
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        let text = String::from_utf8_lossy(&line);
+        let mut text = String::from_utf8_lossy(&line);
+        if read.truncated {
+            text = std::borrow::Cow::Owned(format!("{text} [line truncated]"));
+        }
         if text.trim().is_empty() || text.trim() == "-- No entries --" {
             continue;
         }
@@ -134,6 +142,54 @@ fn handle_write_error(err: io::Error) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::Io(err))
+    }
+}
+
+struct ReadLine {
+    bytes: usize,
+    truncated: bool,
+}
+
+/// Read one newline-terminated line, storing at most
+/// [`MAX_JOURNAL_LINE_BYTES`]. The rest of an oversized line is consumed
+/// without being buffered so the next iteration starts at a line boundary.
+async fn read_capped_line<R>(reader: &mut R, line: &mut Vec<u8>) -> io::Result<ReadLine>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(ReadLine {
+                bytes: line.len(),
+                truncated,
+            });
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        if line.len() + take > MAX_JOURNAL_LINE_BYTES {
+            let room = MAX_JOURNAL_LINE_BYTES.saturating_sub(line.len());
+            line.extend_from_slice(&available[..room.min(take)]);
+            reader.consume(take);
+            truncated = true;
+            if newline.is_some() {
+                return Ok(ReadLine {
+                    bytes: line.len(),
+                    truncated,
+                });
+            }
+            continue;
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            return Ok(ReadLine {
+                bytes: line.len(),
+                truncated,
+            });
+        }
     }
 }
 
@@ -262,5 +318,28 @@ mod tests {
         let mut args = base();
         args.since = Some("--all".to_owned());
         assert!(journal_args(&args).is_err());
+    }
+
+    #[tokio::test]
+    async fn journal_lines_are_capped_before_parsing() {
+        let input = format!("{}\nshort\n", "a".repeat(MAX_JOURNAL_LINE_BYTES + 100));
+        let mut reader = BufReader::new(input.as_bytes());
+        let mut line = Vec::new();
+
+        let first = read_capped_line(&mut reader, &mut line)
+            .await
+            .expect("first line");
+        assert!(first.truncated);
+        assert_eq!(line.len(), MAX_JOURNAL_LINE_BYTES);
+
+        let second = read_capped_line(&mut reader, &mut line)
+            .await
+            .expect("second line");
+        assert!(!second.truncated);
+        assert_eq!(line, b"short\n");
+
+        let eof = read_capped_line(&mut reader, &mut line).await.expect("eof");
+        assert_eq!(eof.bytes, 0);
+        assert!(!eof.truncated);
     }
 }

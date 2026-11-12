@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{client_ip::ClientSource, metrics::Metrics, protection::ProtectionState};
 
-const SCAN_BYTES: usize = 32768;
+pub(crate) const SCAN_BYTES: usize = 32768;
 const MAX_CANDIDATES: usize = 16;
 const BODY_BYTES: usize = 8192;
 

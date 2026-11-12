@@ -12,7 +12,7 @@ mod token;
 pub(crate) use response::finalize;
 pub use runtime::Runtime;
 pub(crate) use runtime::{Bucket, QuotaPolicy};
-pub(crate) use scan::{Observation, Reclaim};
+pub(crate) use scan::{Observation, Reclaim, SCAN_BYTES};
 
 use crate::{
     client_ip::ClientSource,

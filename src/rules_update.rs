@@ -711,7 +711,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
@@ -739,14 +739,31 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             .open(&temporary)?;
         file.write_all(bytes)?;
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
-        file.sync_all()?;
-        drop(file);
+        // The parent directory is writable by the service user, so the
+        // temporary name can be unlinked and replaced by a symlink after
+        // `create_new`. Keep the descriptor and apply ownership through it;
+        // resolving the path again would chown an attacker-chosen target.
         if let Some((uid, gid)) = owner
-            && let Err(err) = set_owner(&temporary, uid, gid)
+            && let Err(err) = set_owner(&file, uid, gid)
         {
             warn!(error = %err, path = %temporary.display(), "failed to keep the rule file owner");
         }
+        file.sync_all()?;
         std::fs::rename(&temporary, path)?;
+        // A raced rename can install a symlink instead of the inode we wrote.
+        // Verify the installed path is our descriptor before reporting success.
+        let written = file.metadata()?;
+        let installed = std::fs::symlink_metadata(path)?;
+        if !installed.file_type().is_file()
+            || installed.dev() != written.dev()
+            || installed.ino() != written.ino()
+        {
+            let _ = std::fs::remove_file(path);
+            return Err(std::io::Error::other(
+                "the rules file was replaced during the atomic write",
+            ));
+        }
+        drop(file);
         if let Ok(dir) = std::fs::File::open(parent) {
             // Best effort; some filesystems do not support directory fsync.
             let _ = dir.sync_all();
@@ -765,15 +782,19 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     }
 }
 
-/// Owner and mode the replaced file should keep: the existing file's, or the
-/// state directory's with a readable default for a fresh install.
+/// Owner and mode the replaced file should keep: the existing regular file's,
+/// or the state directory's with a readable default for a fresh install or a
+/// non-regular replacement target. A symlink is never followed: its target is
+/// outside the writer's control.
 fn target_attributes(path: &Path, parent: &Path) -> (Option<(u32, u32)>, u32) {
     use std::os::unix::fs::MetadataExt;
 
     let parent_owner = std::fs::metadata(parent)
         .ok()
         .map(|metadata| (metadata.uid(), metadata.gid()));
-    if let Ok(metadata) = std::fs::metadata(path) {
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.is_file()
+    {
         let file_owner = (metadata.uid(), metadata.gid());
         // If `kunato init` wrote a root-owned stub inside a state directory
         // owned by the service user, hand the replaced file to the directory's
@@ -787,15 +808,12 @@ fn target_attributes(path: &Path, parent: &Path) -> (Option<(u32, u32)>, u32) {
     (parent_owner, 0o640)
 }
 
-fn set_owner(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+fn set_owner(file: &std::fs::File, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
 
-    let path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::other("path contains a NUL byte"))?;
-    // SAFETY: `path` is a valid NUL-terminated string and the ids are plain
-    // integers; the call does not retain the pointer.
-    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
+    // SAFETY: the descriptor stays open for the call and `fchown` does not
+    // retain it.
+    let result = unsafe { libc::fchown(file.as_raw_fd(), uid, gid) };
     if result == 0 {
         Ok(())
     } else {
@@ -1231,5 +1249,78 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "the reader must keep access after the swap");
+    }
+
+    #[test]
+    fn a_symlink_replacement_target_uses_safe_defaults() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"victim").expect("seed");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600))
+            .expect("set mode");
+        let path = dir.path().join("rules.yaml");
+        symlink(&victim, &path).expect("symlink");
+
+        let parent = std::fs::metadata(dir.path()).expect("parent metadata");
+        assert_eq!(
+            target_attributes(&path, dir.path()),
+            (Some((parent.uid(), parent.gid())), 0o640),
+            "a symlink must not contribute its target's owner or mode"
+        );
+    }
+
+    #[test]
+    fn write_atomic_replaces_a_symlink_with_a_regular_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"victim").expect("seed");
+        let path = dir.path().join("rules.yaml");
+        symlink(&victim, &path).expect("symlink");
+
+        write_atomic(&path, b"new").expect("atomic write");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
+        assert_eq!(std::fs::read(&victim).expect("victim read"), b"victim");
+    }
+
+    #[test]
+    fn set_owner_changes_the_open_inode_not_a_planted_symlink() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"victim").expect("seed");
+        let before = std::fs::metadata(&victim).expect("metadata");
+
+        let temporary = dir.path().join("temporary");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .expect("create temporary");
+        std::fs::remove_file(&temporary).expect("unlink temporary");
+        symlink(&victim, &temporary).expect("plant symlink");
+
+        // SAFETY: the test only reads the process credentials.
+        let uid = unsafe { libc::getuid() };
+        // SAFETY: the test only reads the process credentials.
+        let gid = unsafe { libc::getgid() };
+        set_owner(&file, uid, gid).expect("fchown the open descriptor");
+
+        let after = std::fs::metadata(&victim).expect("metadata");
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec()),
+            "the descriptor ownership change must not follow the planted link"
+        );
     }
 }

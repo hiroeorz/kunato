@@ -430,7 +430,17 @@ initialize_configuration() {
             :
         elif [ "$ALLOW_EMPTY_RULES" -eq 1 ]; then
             log "warning: initial rules download failed; starting with an empty rule set per --allow-empty-rules"
-            printf 'categories: []\n' >"$RULES_FILE"
+            # Write from the root-owned configuration directory and rename over
+            # the state path. A shell redirect would follow a symlink planted
+            # in the service-owned state directory and truncate its target as
+            # root.
+            empty_rules_tmp=$(mktemp "$CONFIG_DIR/.rules-empty.XXXXXX")
+            printf 'categories: []\n' >"$empty_rules_tmp"
+            chmod 0640 "$empty_rules_tmp"
+            mv -f "$empty_rules_tmp" "$RULES_FILE" || {
+                rm -f "$empty_rules_tmp"
+                die "failed to write the empty rule set to $RULES_FILE"
+            }
         else
             die "the initial rules download failed; fix the network or --rules-url and re-run the installer (kunato update-rules --config $CONFIG_PATH retries it; --allow-empty-rules starts without rules anyway)"
         fi

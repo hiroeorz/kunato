@@ -135,11 +135,12 @@ pub async fn forward_request(
 /// copies are removed from every forwarded request. Routing overrides
 /// (`X-Original-URL` and friends) are removed too: letting them reach the
 /// origin would let a request that passed path rules be routed somewhere else.
-const LEGACY_IDENTITY_HEADERS: [&str; 11] = [
+const LEGACY_IDENTITY_HEADERS: [&str; 12] = [
     "forwarded",
     "x-real-ip",
     "x-client-ip",
     "x-forwarded-port",
+    "x-forwarded-host",
     "cf-connecting-ip",
     "true-client-ip",
     "x-original-url",

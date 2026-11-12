@@ -144,6 +144,15 @@ async fn handle(
     request: Request<Incoming>,
     context: AdminContext,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    // The data plane always adds its forwarding markers. A request that
+    // carries them did not come from a local administrative client, so the
+    // loopback listener must not act as a confused deputy for a remote client
+    // whose request was forwarded to this socket.
+    if has_data_plane_markers(request.headers()) {
+        let mut response = Response::new(full_body("proxy headers are not accepted"));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(response);
+    }
     if !admin_host_allowed(request.headers().get(http::header::HOST)) {
         let mut response = Response::new(full_body("misdirected request"));
         *response.status_mut() = StatusCode::MISDIRECTED_REQUEST;
@@ -395,14 +404,19 @@ fn text_response(status: StatusCode, body: impl Into<Bytes>) -> Response<ProxyBo
     response
 }
 
+fn has_data_plane_markers(headers: &http::HeaderMap) -> bool {
+    ["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+}
+
 /// Reject DNS-rebinding requests: the admin listener only accepts loopback
 /// names, so a browser resolving an attacker-controlled name to 127.0.0.1
-/// still sends that name in `Host`.
+/// still sends that name in `Host`. A missing Host is also rejected: every
+/// supported admin client is HTTP/1.1 or newer and sends one.
 fn admin_host_allowed(host: Option<&HeaderValue>) -> bool {
     let Some(host) = host else {
-        // HTTP/1.0 clients may omit Host; they cannot be driven by a browser
-        // rebinding attack.
-        return true;
+        return false;
     };
     let Ok(host) = host.to_str() else {
         return false;
@@ -443,7 +457,10 @@ mod tests {
                 "{host}"
             );
         }
-        assert!(admin_host_allowed(None));
+        assert!(
+            !admin_host_allowed(None),
+            "a missing Host must not reach the admin listener"
+        );
     }
 
     #[test]
@@ -453,6 +470,17 @@ mod tests {
                 !admin_host_allowed(Some(&HeaderValue::from_str(host).expect("host"))),
                 "{host}"
             );
+        }
+    }
+
+    #[test]
+    fn rejects_data_plane_forwarding_markers() {
+        let headers = http::HeaderMap::new();
+        assert!(!has_data_plane_markers(&headers));
+        for name in ["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"] {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static("203.0.113.1"));
+            assert!(has_data_plane_markers(&headers), "{name}");
         }
     }
 

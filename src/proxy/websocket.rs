@@ -316,7 +316,8 @@ async fn pump_upstream_to_client<R, W>(
     W: AsyncWrite + Unpin,
 {
     let mut message = Message::default();
-    let mut budget = MessageBudget::new(inspection, source_ip);
+    let source_key = crate::protection::tracking_key(source_ip, &live_config.load().protection);
+    let mut budget = MessageBudget::new(inspection, source_key);
     let mut message_deadline: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
@@ -469,7 +470,8 @@ async fn pump_client_to_upstream<R, W>(
     W: AsyncWrite + Unpin,
 {
     let mut message = Message::default();
-    let mut budget = MessageBudget::new(inspection, source_ip);
+    let source_key = crate::protection::tracking_key(source_ip, &live_config.load().protection);
+    let mut budget = MessageBudget::new(inspection, source_key);
     let mut message_deadline: Option<tokio::time::Instant> = None;
     loop {
         // A frame header may declare the whole message limit again even when
@@ -590,6 +592,17 @@ async fn pump_client_to_upstream<R, W>(
         }
         if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
             send_close(&close, 1008, violation.reason()).await;
+            return;
+        }
+        if let Some(reason) =
+            crate::jwt::violation_in_request(&request.headers, None, &payload, &config.limits.jwt)
+        {
+            warn!(
+                client = %source_ip,
+                reason = %reason,
+                "WebSocket JWT policy violation"
+            );
+            send_close(&close, 1008, "jwt policy violation").await;
             return;
         }
         let graphql_path = config.limits.graphql.enabled
@@ -746,15 +759,15 @@ enum WsError {
 
 struct MessageBudget {
     budget: Arc<InspectionBudget>,
-    source: IpAddr,
+    source_key: IpAddr,
     guard: Option<InspectionGuard>,
 }
 
 impl MessageBudget {
-    fn new(budget: Arc<InspectionBudget>, source: IpAddr) -> Self {
+    fn new(budget: Arc<InspectionBudget>, source_key: IpAddr) -> Self {
         Self {
             budget,
-            source,
+            source_key,
             guard: None,
         }
     }
@@ -767,7 +780,7 @@ impl MessageBudget {
         if let Some(guard) = &mut self.guard {
             return guard.grow(requested);
         }
-        match self.budget.reserve_for(self.source, requested) {
+        match self.budget.reserve_for_key(self.source_key, requested) {
             Some(guard) => {
                 self.guard = Some(guard);
                 true

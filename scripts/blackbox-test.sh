@@ -52,6 +52,7 @@ if [ -z "$workdir" ]; then
 fi
 mkdir -p "$workdir"
 config="$workdir/rules-test.yaml"
+rules_under_test="$repo_root/dist/rules.yaml"
 blackbox_log="$workdir/blackbox.log"
 upstream_log="$workdir/upstream.log"
 kunato_log="$workdir/kunato.log"
@@ -65,25 +66,29 @@ if [ "$skip_build" -eq 0 ]; then
     cargo build --release --manifest-path blackbox/Cargo.toml
 fi
 
-# Remove the trusted-sources category so the test client is inspected.
-python3 - "$repo_root/rules.example.yaml" "$config" <<'PY'
-import re
+# Exercise the exact categories file that the daily job signs. The shipped
+# `kunato init` layout has an empty inline category list and a managed
+# `rules_file`, so the test configuration mirrors that layout instead of
+# testing a locally filtered copy of rules.example.yaml.
+python3 - "$repo_root/rules.example.yaml" "$rules_under_test" "$config" <<'PY'
 import sys
 
-source, destination = sys.argv[1], sys.argv[2]
+source, rules_under_test, destination = sys.argv[1], sys.argv[2], sys.argv[3]
 lines = open(source, encoding="utf-8").read().splitlines(keepends=True)
 result = []
-skipping = False
+in_categories = False
 for line in lines:
-    if skipping:
-        if re.match(r"^  - name: ", line) or re.match(r"^\S", line):
-            skipping = False
+    if line.startswith("categories:"):
+        in_categories = True
+        continue
+    if in_categories:
+        if line and not line[0].isspace():
+            in_categories = False
         else:
             continue
-    if re.match(r"^  - name: trusted-sources\s*$", line):
-        skipping = True
-        continue
     result.append(line)
+result.append("\ncategories: []\n")
+result.append(f"rules_file: {rules_under_test}\n")
 open(destination, "w", encoding="utf-8").writelines(result)
 PY
 

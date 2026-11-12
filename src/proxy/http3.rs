@@ -65,6 +65,11 @@ pub fn bind(
         transport.max_idle_timeout(Some(idle));
     }
     server_config.transport_config(Arc::new(transport));
+    // Client identity, limits, and allowlists are keyed by the address the
+    // connection was admitted from. Active migration would let a connection
+    // keep that identity after moving to a new path address, so a client must
+    // open a fresh connection instead.
+    server_config.migration(false);
     let endpoint =
         quinn::Endpoint::server(server_config, listen).map_err(|source| Error::Bind {
             addr: listen.to_string(),
@@ -206,12 +211,14 @@ async fn serve_h3(
     let idle = limits.timeouts.connection_idle;
     let mut requests = JoinSet::new();
     let mut closing = false;
+    let mut shutting_down = false;
     loop {
         tokio::select! {
             changed = shutdown.changed(), if !closing => {
                 if changed.is_err() || *shutdown.borrow_and_update() {
                     let _ = connection.shutdown(0).await;
                     closing = true;
+                    shutting_down = true;
                 }
             }
             _ = server::connection_is_idle(
@@ -241,7 +248,30 @@ async fn serve_h3(
         }
     }
 
-    while requests.join_next().await.is_some() {}
+    if shutting_down {
+        // The listener is draining for `shutdown_grace`; let in-flight
+        // requests finish inside that bound, then cancel the remainder.
+        let grace = context.config().timeouts.shutdown_grace;
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            match tokio::time::timeout_at(deadline, requests.join_next()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    requests.abort_all();
+                    while requests.join_next().await.is_some() {}
+                    break;
+                }
+            }
+        }
+    } else {
+        // The QUIC connection is gone (peer close, error, or idle watchdog).
+        // A request task must not outlive it: a stalled upstream body would
+        // otherwise retain the connection guard and the shared connection
+        // budget after the client is gone.
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
+    }
 }
 
 async fn handle_request(
@@ -308,6 +338,7 @@ async fn handle_request(
         response,
         head_request,
         config.timeouts.connection_idle,
+        config.timeouts.response_body,
         &active,
     )
     .await
@@ -442,9 +473,11 @@ async fn send_response(
     response: Response<ProxyBody>,
     head_request: bool,
     idle: std::time::Duration,
+    total: std::time::Duration,
     active: &server::ActiveRequest,
 ) -> Result<(), StreamError> {
     let (parts, mut body) = response.into_parts();
+    let deadline = tokio::time::Instant::now() + total;
     let mut head = Response::new(());
     *head.status_mut() = parts.status;
     *head.headers_mut() = parts.headers;
@@ -462,13 +495,30 @@ async fn send_response(
         return Ok(());
     }
 
-    while let Some(frame) = body.frame().await {
+    loop {
+        let read_deadline = deadline.min(tokio::time::Instant::now() + idle);
+        let frame = match tokio::time::timeout_at(read_deadline, body.frame()).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(_) => {
+                // An upstream that withholds body bytes must not park this
+                // task (and the connection guard it was spawned under)
+                // indefinitely after the client stops reading. The total
+                // deadline also bounds an origin that drips frames just
+                // inside the idle interval.
+                stream.stop_stream(Code::H3_REQUEST_CANCELLED);
+                return Ok(());
+            }
+        };
         match frame {
             Ok(frame) => {
                 // Drop trailer fields: they are not inspected, so they must
                 // not reach the client.
                 if let Ok(data) = frame.into_data() {
-                    let Ok(sent) = tokio::time::timeout(idle, stream.send_data(data)).await else {
+                    let write_deadline = deadline.min(tokio::time::Instant::now() + idle);
+                    let Ok(sent) =
+                        tokio::time::timeout_at(write_deadline, stream.send_data(data)).await
+                    else {
                         stream.stop_stream(Code::H3_REQUEST_CANCELLED);
                         return Ok(());
                     };

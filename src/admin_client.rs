@@ -183,8 +183,9 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 }
 
 fn write_stdout(body: &[u8]) -> Result<(), Error> {
+    let sanitized = sanitize_output(body);
     let mut stdout = io::stdout().lock();
-    let written = stdout.write_all(body).and_then(|()| stdout.flush());
+    let written = stdout.write_all(&sanitized).and_then(|()| stdout.flush());
     match written {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
@@ -192,6 +193,51 @@ fn write_stdout(body: &[u8]) -> Result<(), Error> {
             "failed to write admin response to stdout: {err}"
         ))),
     }
+}
+
+/// Remove terminal control sequences from a local admin response. The listener
+/// is loopback-only, but a compromised local process or a future handler can
+/// still return bytes that rewrite the operator's terminal. Keep newlines and
+/// tabs; drop every other C0/C1 control character and the CSI/OSC escape
+/// sequences a terminal would execute.
+fn sanitize_output(body: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(body);
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\n' | '\t' => output.push(character),
+            '\u{1b}' => match characters.next() {
+                // CSI: parameter bytes, intermediate bytes, final byte.
+                Some('[') => {
+                    while let Some(&next) = characters.peek() {
+                        characters.next();
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: terminated by BEL or ST; consume until either.
+                Some(']') => {
+                    while let Some(next) = characters.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && characters.peek() == Some(&'\\') {
+                            characters.next();
+                            break;
+                        }
+                    }
+                }
+                // Any other two-byte escape is dropped with its introducer.
+                Some(_) => {}
+                None => {}
+            },
+            other if other.is_control() => {}
+            other => output.push(other),
+        }
+    }
+    output.into_bytes()
 }
 
 #[cfg(test)]
@@ -475,5 +521,18 @@ mod tests {
             .await
             .expect_err("oversized body");
         assert!(error.to_string().contains("byte limit"), "{error}");
+    }
+
+    #[test]
+    fn admin_output_drops_terminal_control_sequences() {
+        assert_eq!(
+            sanitize_output(b"ok\x1b[31mred\x1b[0m\n"),
+            b"okred\n".to_vec()
+        );
+        assert_eq!(sanitize_output(b"a\rb\0c\x7f"), b"abc".to_vec());
+        assert_eq!(
+            sanitize_output(b"link\x1b]0;title\x07next"),
+            b"linknext".to_vec()
+        );
     }
 }

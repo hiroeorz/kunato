@@ -106,20 +106,51 @@ fn internal_host(view: &RequestView<'_>, policy: &Hardening) -> Option<String> {
 /// Unlike [`find_host`], every URL is examined: putting a public URL first must
 /// not hide an internal target later in the same parameter.
 fn internal_host_in(text: &str, policy: &Hardening) -> Option<String> {
+    // Tabs, newlines, and backslashes are removed or rewritten by WHATWG URL
+    // parsers. Normalization only allocates when one of those bytes is
+    // present, so the common header and query value stays on the raw path.
+    if text
+        .bytes()
+        .any(|byte| matches!(byte, b'\\' | b'\t' | b'\r' | b'\n'))
+    {
+        let normalized = normalize_url_text(text);
+        internal_host_in_normalized(&normalized, policy)
+    } else {
+        internal_host_in_normalized(text, policy)
+    }
+}
+
+fn normalize_url_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\t' | '\r' | '\n' => {}
+            '\\' => normalized.push('/'),
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn internal_host_in_normalized(text: &str, policy: &Hardening) -> Option<String> {
     let bytes = text.as_bytes();
-    let mut index = 0;
-    while index + 3 <= bytes.len() {
-        if &bytes[index..index + 3] != b"://" {
-            index += 1;
+    for (scheme_end, _) in text.match_indices(':') {
+        if !scheme_precedes(text, scheme_end) {
             continue;
         }
-        if scheme_precedes(text, index)
-            && let Some(host) = authority_host(&text[index + 3..])
+        let rest = &text[scheme_end + 1..];
+        // A non-special scheme only names a network host with `//`. A special
+        // scheme also accepts `http:/host` and `http:host`, which WHATWG URL
+        // parsers normalize to the same authority.
+        let has_authority = rest.starts_with("//") || special_scheme_before(text, scheme_end);
+        if !has_authority {
+            continue;
+        }
+        if let Some(host) = authority_host(rest.trim_start_matches('/'))
             && matches_host(&host, policy)
         {
             return Some(host);
         }
-        index += 3;
     }
     for (at, _) in text.match_indices("//") {
         if at > 0 && bytes[at - 1] == b':' {
@@ -132,6 +163,21 @@ fn internal_host_in(text: &str, policy: &Hardening) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether a WHATWG special scheme ends immediately before the `:` at
+/// `scheme_end`. Only these schemes treat `scheme:host` as a network URL; an
+/// arbitrary `word:value` pair does not.
+fn special_scheme_before(text: &str, scheme_end: usize) -> bool {
+    let start = text[..scheme_end]
+        .rfind(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
+        })
+        .map_or(0, |index| index + 1);
+    let scheme = &text[start..scheme_end];
+    ["http", "https", "ws", "wss", "ftp", "file"]
+        .iter()
+        .any(|candidate| scheme.eq_ignore_ascii_case(candidate))
 }
 
 /// Whether a URL scheme ends immediately before the `://` at `scheme_end`.
@@ -362,14 +408,17 @@ fn form_value(value: &str) -> String {
 /// PHP normalizes dots, spaces, and `[` in request parameter names to `_`.
 /// Comparing raw names lets `is.admin` and `is_admin` reach the same PHP key
 /// while the duplicate check sees two different names.
-fn php_parameter_name(name: &str) -> String {
+pub(crate) fn php_parameter_key(name: &str) -> String {
     name.chars()
         .map(|character| match character {
             '.' | ' ' | '[' => '_',
             character => character,
         })
-        .collect::<String>()
-        .to_ascii_lowercase()
+        .collect()
+}
+
+pub(crate) fn php_parameter_name(name: &str) -> String {
+    php_parameter_key(name).to_ascii_lowercase()
 }
 
 fn redirect_host(value: &str, policy: &Hardening) -> Option<String> {
@@ -500,12 +549,16 @@ fn absolute_redirect(value: &str) -> Option<String> {
 fn redirect_in_pairs(pairs: &str, policy: &Hardening) -> Option<String> {
     for pair in pairs.split('&') {
         let (raw_name, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-        let name = percent_decode(raw_name).to_ascii_lowercase();
+        // PHP and servlet containers normalize dots and spaces in parameter
+        // names to underscores before the application sees them. Compare the
+        // normalized name so `redirect.uri` cannot reach the same application
+        // parameter while skipping the configured `redirect_uri`.
+        let name = php_parameter_name(&form_value(raw_name));
         if !policy
             .redirects
             .parameters
             .iter()
-            .any(|entry| entry == &name)
+            .any(|entry| php_parameter_name(entry) == name)
         {
             continue;
         }
@@ -693,6 +746,92 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    #[test]
+    fn detects_internal_hosts_with_alternate_slashes() {
+        let headers = HeaderMap::new();
+        for target in [
+            "/fetch?url=http%3A%2Fvuln.corp%2F",
+            "/fetch?url=http%3A%5Cvuln.corp%2F",
+            "/fetch?url=http%3Avuln.corp%2F",
+            "/fetch?url=http%3A%2F%2F%2F%2Fvuln.corp%2F",
+            "/fetch?url=%2F%2Fvuln.corp%2F",
+            "/fetch?url=http%3A%2F%2Fuser%3Apass%40vuln.corp%2F",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy()),
+                    Some(Violation::InternalHost(_))
+                ),
+                "{target}"
+            );
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-target-url", HeaderValue::from_static("http:/vuln.corp/"));
+        let uri: Uri = "/fetch".parse().unwrap();
+        assert!(matches!(
+            inspect(&view(&uri, &headers, b""), &policy()),
+            Some(Violation::InternalHost(_))
+        ));
+    }
+
+    #[test]
+    fn does_not_treat_every_colon_pair_as_a_url_scheme() {
+        let headers = HeaderMap::new();
+        for target in [
+            "/fetch?url=https%3A%2F%2Fexample.com%2F",
+            "/fetch?url=note%3Ametadata.internal",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert_eq!(inspect(&view(&uri, &headers, b""), &policy()), None);
+        }
+    }
+
+    #[test]
+    fn php_normalized_redirect_names_are_inspected() {
+        let headers = HeaderMap::new();
+        for target in [
+            "/login?redirect.uri=https%3A%2F%2Fevil.test%2F",
+            "/login?redirect+uri=https%3A%2F%2Fevil.test%2F",
+            "/login?redirect%2Euri=https%3A%2F%2Fevil.test%2F",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy()),
+                    Some(Violation::Redirect(_))
+                ),
+                "{target}"
+            );
+        }
+
+        let mut form_headers = HeaderMap::new();
+        form_headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        let uri: Uri = "/login".parse().unwrap();
+        assert!(matches!(
+            inspect(
+                &view(
+                    &uri,
+                    &form_headers,
+                    b"redirect.uri=https%3A%2F%2Fevil.test%2F"
+                ),
+                &policy()
+            ),
+            Some(Violation::Redirect(_))
+        ));
+
+        let uri: Uri = "/login?next_page=1".parse().unwrap();
+        assert_eq!(inspect(&view(&uri, &headers, b""), &policy()), None);
+        let uri: Uri = "/login?redirect_uri=https%3A%2F%2Fapp.test%2F"
+            .parse()
+            .unwrap();
+        assert_eq!(inspect(&view(&uri, &headers, b""), &policy()), None);
     }
 
     #[test]

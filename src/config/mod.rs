@@ -388,6 +388,8 @@ pub struct TimeoutsSpec {
     pub upstream_connect: Duration,
     #[serde(default = "secs30", deserialize_with = "de_duration")]
     pub upstream_response: Duration,
+    #[serde(default = "minutes5", deserialize_with = "de_duration")]
+    pub response_body: Duration,
     #[serde(default = "secs10", deserialize_with = "de_duration")]
     pub shutdown_grace: Duration,
     #[serde(default = "secs60", deserialize_with = "de_duration")]
@@ -403,6 +405,7 @@ impl Default for TimeoutsSpec {
             body_read: secs30(),
             upstream_connect: secs5(),
             upstream_response: secs30(),
+            response_body: minutes5(),
             shutdown_grace: secs10(),
             connection_idle: secs60(),
             websocket_idle: minutes10(),
@@ -1141,6 +1144,7 @@ pub struct Timeouts {
     pub body_read: Duration,
     pub upstream_connect: Duration,
     pub upstream_response: Duration,
+    pub response_body: Duration,
     pub shutdown_grace: Duration,
     pub connection_idle: Duration,
     pub websocket_idle: Duration,
@@ -1153,6 +1157,7 @@ impl From<&TimeoutsSpec> for Timeouts {
             body_read: spec.body_read,
             upstream_connect: spec.upstream_connect,
             upstream_response: spec.upstream_response,
+            response_body: spec.response_body,
             shutdown_grace: spec.shutdown_grace,
             connection_idle: spec.connection_idle,
             websocket_idle: spec.websocket_idle,
@@ -1810,6 +1815,10 @@ pub struct Upstream {
 }
 
 impl Upstream {
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
     pub fn request_uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
         Uri::builder()
             .scheme(self.scheme.as_str())
@@ -2334,6 +2343,15 @@ fn compile_content_routes(
         let Some(path) = regexes.pop() else {
             continue;
         };
+        if !regex_syntax::Parser::new()
+            .parse(&route.path)
+            .is_ok_and(|hir| anchored_start(&hir))
+        {
+            issues.push(format!(
+                "{context}: `path` must be anchored at the start with `^` so it cannot exempt a different path prefix"
+            ));
+            continue;
+        }
         let methods = match &route.methods {
             None => None,
             Some(values) if values.is_empty() => {
@@ -3084,6 +3102,7 @@ fn validate_timeouts(timeouts: &TimeoutsSpec, issues: &mut Vec<String>) {
         ("body_read", timeouts.body_read),
         ("upstream_connect", timeouts.upstream_connect),
         ("upstream_response", timeouts.upstream_response),
+        ("response_body", timeouts.response_body),
         ("shutdown_grace", timeouts.shutdown_grace),
         ("connection_idle", timeouts.connection_idle),
         ("websocket_idle", timeouts.websocket_idle),
@@ -4295,6 +4314,7 @@ mod tests {
         assert_eq!(config.limits.upload_inspection, UploadInspection::Strict);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
+        assert_eq!(config.timeouts.response_body, Duration::from_secs(300));
     }
 
     #[test]
@@ -4332,6 +4352,7 @@ mod tests {
     fn rejects_invalid_content_routes() {
         for (rest, expected) in [
             ("content_routes:\n  - path: '('\n", "invalid regex"),
+            ("content_routes:\n  - path: /admin\n", "must be anchored"),
             (
                 "content_routes:\n  - path: ^/admin\n    methods: [post]\n",
                 "case-sensitive",

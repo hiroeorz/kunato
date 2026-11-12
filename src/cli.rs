@@ -376,6 +376,13 @@ impl InitArgs {
         }
         out.push_str(&format!("upstream: {}\n", yaml_scalar(&self.upstream)));
 
+        out.push_str(
+            "\n# Loopback admin listener for metrics, maintenance, and administrative\n\
+             # access controls. It is enabled by default even when this block is\n\
+             # omitted; set `enabled: false` to turn it off.\n\
+             admin:\n  enabled: true\n  listen: 127.0.0.1:9090\n",
+        );
+
         let allowed_hosts = self.render_allowed_hosts()?;
         if allowed_hosts.is_empty() {
             out.push_str(

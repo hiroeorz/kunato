@@ -507,6 +507,19 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, 
     if entries > max_entries as u64 {
         return Err(ExpansionError::TooLarge);
     }
+    if entries == 0 {
+        // A streaming extractor follows local file headers instead of the
+        // central directory, so an archive that declares an empty central
+        // directory must not contain any. Otherwise a small deflate bomb can
+        // hide behind a zero-count EOCD and reach the origin's extractor.
+        if value[..end]
+            .windows(4)
+            .any(|window| window == &ZIP_LOCAL_HEADER[..])
+        {
+            return Err(ExpansionError::Malformed);
+        }
+        return Ok(0);
+    }
     // A self-extracting archive may carry an arbitrary prefix before the
     // first local header. The central directory records offsets relative to
     // the original archive start, so derive the prefix length from the EOCD
@@ -2084,6 +2097,43 @@ mod tests {
         )
         .expect("rejected");
         assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
+    }
+
+    #[test]
+    fn empty_central_directory_cannot_hide_local_entries() {
+        let mut archive = zip(&vec![b'a'; 128 * 1024], 8);
+        let end = archive
+            .windows(4)
+            .rposition(|window| window == ZIP_END_OF_CENTRAL_DIRECTORY)
+            .expect("end of central directory");
+        archive[end + 10..end + 12].copy_from_slice(&0u16.to_le_bytes());
+        archive[end + 12..end + 16].copy_from_slice(&0u32.to_le_bytes());
+        archive[end + 16..end + 20].copy_from_slice(&0u32.to_le_bytes());
+
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        let rejection =
+            super::inspect(&headers(), &body, UploadInspection::Strict, expansion(1024))
+                .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveMalformed);
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_genuinely_empty_zip_still_passes() {
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&ZIP_END_OF_CENTRAL_DIRECTORY[..]);
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+
+        let body = body(&[("data.zip", Some("application/zip"), &archive)]);
+        assert!(
+            super::inspect(&headers(), &body, UploadInspection::Strict, expansion(1024),).is_none()
+        );
     }
 
     #[test]

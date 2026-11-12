@@ -1,0 +1,9 @@
+# Reviewed ALLOW actions permitted in the published rule set.
+#
+# The daily CVE workflow runs this gate before signing. A category entry is
+# allowed only while the category is disabled; a rule-level ALLOW is never
+# permitted, so the allowlist has no rule form. Format:
+#
+#   category <name>
+#
+category trusted-sources

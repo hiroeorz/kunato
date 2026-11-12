@@ -3,10 +3,12 @@ all-features = true
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-musl" },
 ]
 
 [advisories]
 version = 2
+yanked = "deny"
 ignore = []
 
 [licenses]
@@ -27,6 +29,31 @@ private = { ignore = true }
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+
+# A build script runs arbitrary code during a release build. Review every new
+# entry: removing a crate from this list or adding a dependency with a build
+# script is a supply-chain change, not a routine update.
+[bans.build]
+allow-build-scripts = [
+    "crc32fast",
+    "getrandom",
+    "httparse",
+    "libc",
+    "num-traits",
+    "oid-registry",
+    "proc-macro2",
+    "quinn",
+    "quinn-udp",
+    "quote",
+    "ring",
+    "rustix",
+    "rustls",
+    "serde",
+    "serde_core",
+    "serde_json",
+    "thiserror",
+    "zmij",
+]
 
 [sources]
 unknown-registry = "deny"

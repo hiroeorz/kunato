@@ -226,7 +226,16 @@ fn inspect_part(
         }
     }
     let name = name.as_deref().unwrap_or_default();
-    if disabled_fields.iter().any(|disabled| disabled == name) {
+    // PHP maps dots and spaces in a request parameter name to underscores
+    // before `session.upload_progress` matches it. Compare the normalized key
+    // without changing case: if the mapping were absent, `PHP_SESSION.UPLOAD
+    // PROGRESS` would reach the progress handler while the guard saw a
+    // different name.
+    let normalized_name = crate::hardening::php_parameter_key(name);
+    if disabled_fields
+        .iter()
+        .any(|disabled| crate::hardening::php_parameter_key(disabled) == normalized_name)
+    {
         return Err(Violation::DisabledField);
     }
     stats.field(name, filename.is_some(), limits)
@@ -433,6 +442,44 @@ mod tests {
                 &names
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn php_normalizes_upload_progress_field_names() {
+        let names = vec!["PHP_SESSION_UPLOAD_PROGRESS".to_owned()];
+        for name in [
+            "PHP_SESSION.UPLOAD_PROGRESS",
+            "PHP SESSION UPLOAD PROGRESS",
+            "PHP_SESSION.UPLOAD PROGRESS",
+        ] {
+            let body = format!(
+                "--X\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\np\r\n--X--\r\n"
+            );
+            assert_eq!(
+                inspect(
+                    &headers(),
+                    body.as_bytes(),
+                    false,
+                    &FormLimits::default(),
+                    &names
+                ),
+                Err(Violation::DisabledField),
+                "{name}"
+            );
+        }
+
+        let body = "--X\r\nContent-Disposition: form-data; name=\"php_session_upload_progress\"\r\n\r\np\r\n--X--\r\n";
+        assert_eq!(
+            inspect(
+                &headers(),
+                body.as_bytes(),
+                false,
+                &FormLimits::default(),
+                &names
+            ),
+            Ok(()),
+            "the mapping must not change case"
         );
     }
 

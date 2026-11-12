@@ -1,3 +1,4 @@
+use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -77,6 +78,17 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let acme_spec = initial.tls.as_ref().and_then(|tls| tls.acme.clone());
     let config = Arc::new(Snapshot::new(initial));
     let metrics = Arc::new(Metrics::new());
+
+    if admin_config.enabled {
+        let compiled = config.load();
+        if admin_overlaps_upstream(&compiled.upstream, compiled.admin.listen) {
+            warn!(
+                upstream = %compiled.upstream.authority(),
+                admin = %compiled.admin.listen,
+                "upstream targets the admin listener; remote requests could reach metrics and maintenance controls"
+            );
+        }
+    }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let acme = match &acme_spec {
@@ -183,6 +195,23 @@ fn warn_configuration(config: &CompiledConfig) {
     }
 }
 
+/// Whether the configured upstream authority is the admin listener itself.
+/// Only literal IPs and `localhost` can be decided at startup; a hostname that
+/// resolves to the admin socket is deployment-dependent.
+fn admin_overlaps_upstream(upstream: &config::Upstream, admin: SocketAddr) -> bool {
+    let Ok(uri) = format!("http://{}", upstream.authority()).parse::<http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    let port = uri.port_u16().unwrap_or(80);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return SocketAddr::new(ip, port) == admin;
+    }
+    host.eq_ignore_ascii_case("localhost") && admin.ip().is_loopback() && port == admin.port()
+}
+
 fn run_init(args: &InitArgs) -> Result<(), Error> {
     if args.output.exists() && !args.force {
         return Err(Error::Message(format!(
@@ -226,12 +255,33 @@ fn run_init(args: &InitArgs) -> Result<(), Error> {
 }
 
 fn write_starter_rules(path: &std::path::Path, header: &str) -> Result<(), Error> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("# {header}\ncategories: []\n"))?;
+    // The state directory belongs to the service user. A planted symlink must
+    // not make root create or truncate a file outside it; `create_new` also
+    // refuses a path that appeared between the caller's existence check and
+    // this open.
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && !metadata.is_file()
+    {
+        return Err(Error::Message(format!(
+            "refusing to replace non-regular file `{}`",
+            path.display()
+        )));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o640)
+        .open(path)?;
+    file.write_all(format!("# {header}\ncategories: []\n").as_bytes())?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -307,4 +357,44 @@ async fn wait_for_shutdown_signal() -> Result<(), Error> {
         tokio::signal::ctrl_c().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starter_rules_refuse_a_planted_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"victim").expect("seed victim");
+        let path = dir.path().join("rules.yaml");
+        std::os::unix::fs::symlink(&victim, &path).expect("symlink");
+
+        assert!(write_starter_rules(&path, "header").is_err());
+        assert_eq!(std::fs::read(&victim).expect("victim read"), b"victim");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn starter_rules_create_a_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rules.yaml");
+        write_starter_rules(&path, "header").expect("starter write");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            b"# header\ncategories: []\n"
+        );
+    }
 }

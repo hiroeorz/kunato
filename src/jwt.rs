@@ -45,16 +45,18 @@ pub fn violation_in_request(
     {
         return Some(reason);
     }
-    if !body.is_empty() && body.contains(&b'.') {
+    if !body.is_empty() {
         let text = String::from_utf8_lossy(body);
         if let Some(reason) = check_text(&text, policy) {
             return Some(reason);
         }
-        if body.contains(&b'%') {
-            let decoded = crate::decoding::percent_decode(&text);
-            if decoded.as_ref() != text
-                && let Some(reason) = check_text(decoded.as_ref(), policy)
-            {
+        // Inspect the representations the origin's form or JSON parser hands
+        // to the application: form decode resolves `%2E` and `+`, and JSON
+        // unescaping resolves `\u002E`. The raw scan above already handles
+        // plain percent-encoded tokens, so these forms only add the escape
+        // layers that the raw text cannot show.
+        for form in crate::decoding::decoded_body_forms(body, headers) {
+            if let Some(reason) = check_text(&String::from_utf8_lossy(&form), policy) {
                 return Some(reason);
             }
         }
@@ -74,26 +76,53 @@ fn check_text(text: &str, policy: &Jwt) -> Option<String> {
         // splits our token scanner. Scan compact runs anchored at the JWT
         // header prefix too, so `eyJ...!.payload.signature` still reaches the
         // header check.
-        for (index, _) in form.match_indices("eyJ") {
-            let candidate = &form[index..];
-            let end = candidate
-                .find(|character: char| {
-                    character.is_whitespace()
-                        || matches!(
-                            character,
-                            '"' | '\'' | ',' | ';' | '&' | '(' | ')' | '[' | ']' | '{' | '}'
-                        )
-                })
-                .unwrap_or(candidate.len());
-            let candidate = &candidate[..end];
-            if candidate.matches('.').count() >= 2
-                && let Some(reason) = check_token(candidate, policy)
-            {
-                return Some(reason);
+        //
+        // The scan is linear: each run is segmented once, its dot count is
+        // computed once, and an occurrence is examined only when its suffix
+        // has the three- or five-segment JWT/JWE shape. A repeated `eyJ` run
+        // therefore costs one pass instead of one tail scan per occurrence.
+        for run in form.split(is_token_terminator) {
+            if !run.contains("eyJ") {
+                continue;
+            }
+            let bytes = run.as_bytes();
+            let total_dots = bytes.iter().filter(|byte| **byte == b'.').count();
+            let mut dots_before = 0usize;
+            let mut scanned = 0usize;
+            for (index, _) in run.match_indices("eyJ") {
+                while scanned < index {
+                    if bytes[scanned] == b'.' {
+                        dots_before += 1;
+                    }
+                    scanned += 1;
+                }
+                let remaining_dots = total_dots.saturating_sub(dots_before);
+                if !matches!(remaining_dots, 2 | 4) {
+                    continue;
+                }
+                let candidate = &run[index..];
+                if candidate.len() > MAX_TOKEN_BYTES {
+                    return Some("jwt is too large to inspect".to_owned());
+                }
+                if let Some(reason) = check_token(candidate, policy) {
+                    return Some(reason);
+                }
             }
         }
     }
     None
+}
+
+/// Characters that end a compact token run in the loose fallback scan. A
+/// lenient origin decoder can skip punctuation inside a token, so the check
+/// anchors on `eyJ` and deliberately allows the characters that the strict
+/// scanner treats as separators.
+fn is_token_terminator(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '"' | '\'' | ',' | ';' | '&' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
 }
 
 /// Split text into compact-token candidates. JWT and JWE segments use the
@@ -536,6 +565,98 @@ mod tests {
         assert_eq!(
             violation(&bearer(&malformed), &policy()),
             Some("jwt header is not valid base64url".to_owned())
+        );
+    }
+
+    #[test]
+    fn repeated_eyj_body_is_scanned_linearly() {
+        let body = format!("{}.", "eyJ".repeat(300_000));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            violation_in_request(&HeaderMap::new(), None, body.as_bytes(), &policy()),
+            None
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the repeated-marker scan is not linear: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_token_embedded_after_a_long_marker_run_is_still_rejected() {
+        let hs = token("eyJhbGciOiJIUzI1NiJ9", "e30");
+        let body = format!("{}{hs}", "eyJ".repeat(100));
+        assert!(
+            violation_in_request(&HeaderMap::new(), None, body.as_bytes(), &policy()).is_some()
+        );
+    }
+
+    #[test]
+    fn an_oversized_jwt_shaped_run_fails_closed() {
+        let body = format!("{}.e30.c2ln", "eyJ".repeat(3_000));
+        assert_eq!(
+            violation_in_request(&HeaderMap::new(), None, body.as_bytes(), &policy()),
+            Some("jwt is too large to inspect".to_owned())
+        );
+    }
+
+    #[test]
+    fn encoded_body_separators_are_inspected() {
+        let hs = "eyJhbGciOiJIUzI1NiJ9.e30.c2ln";
+
+        let mut form_headers = HeaderMap::new();
+        form_headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        assert!(
+            violation_in_request(
+                &form_headers,
+                None,
+                format!("access_token={}", hs.replace('.', "%2E")).as_bytes(),
+                &policy()
+            )
+            .is_some()
+        );
+
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        assert!(
+            violation_in_request(
+                &json_headers,
+                None,
+                format!("{{\"access_token\":\"{}\"}}", hs.replace('.', "\\u002E")).as_bytes(),
+                &policy()
+            )
+            .is_some()
+        );
+        assert!(
+            violation_in_request(
+                &json_headers,
+                None,
+                format!(
+                    "{{\"access_token\":\"{}\",\"note\":\"x.y\"}}",
+                    hs.replace('.', "\\u002E")
+                )
+                .as_bytes(),
+                &policy()
+            )
+            .is_some()
+        );
+
+        let rs = "eyJhbGciOiJSUzI1NiJ9.e30.c2ln";
+        assert_eq!(
+            violation_in_request(
+                &json_headers,
+                None,
+                format!("{{\"access_token\":\"{}\"}}", rs.replace('.', "\\u002E")).as_bytes(),
+                &policy()
+            ),
+            None
         );
     }
 }

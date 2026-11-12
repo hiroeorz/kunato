@@ -396,7 +396,13 @@ async fn spawn_stalling_upstream() -> SocketAddr {
             };
             tokio::spawn(async move {
                 let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request).await;
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                if String::from_utf8_lossy(&request[..read]).starts_with("GET /ok ") {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                        .await;
+                    return;
+                }
                 let _ = stream
                     .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\npartial")
                     .await;
@@ -454,7 +460,10 @@ async fn spawn_upgrade_upstream() -> SocketAddr {
                 let io = TokioIo::new(stream);
                 let service = service_fn(move |mut request: Request<Incoming>| async move {
                     let path = request.uri().path().to_owned();
-                    if !matches!(path.as_str(), "/ws" | "/ws-push" | "/ws-push-fragmented") {
+                    if !matches!(
+                        path.as_str(),
+                        "/ws" | "/ws-push" | "/ws-push-fragmented" | "/graphql"
+                    ) {
                         return Ok::<_, Infallible>(upstream_error(StatusCode::NOT_FOUND));
                     }
                     let forwarded_for = request.headers().contains_key("x-forwarded-for");
@@ -916,6 +925,61 @@ async fn send_raw_request(addr: SocketAddr, request: &str) -> StatusCode {
     read_status(&mut stream).await
 }
 
+async fn send_raw_request_body(addr: SocketAddr, request: &str) -> (StatusCode, String) {
+    let mut stream = TcpStream::connect(addr).await.expect("connect kunato");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("read timeout")
+            .expect("read response");
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..read]);
+        let Some(end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+            if response.len() > 65536 {
+                break;
+            }
+            continue;
+        };
+        let head = String::from_utf8_lossy(&response[..end]).into_owned();
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse().ok())
+            .and_then(|code| StatusCode::from_u16(code).ok())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while response.len() < end + 4 + length {
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+                .await
+                .expect("read timeout")
+                .expect("read response");
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
+        }
+        let body = response.get(end + 4..).unwrap_or_default().to_vec();
+        return (status, String::from_utf8_lossy(&body).into_owned());
+    }
+    (StatusCode::BAD_GATEWAY, String::new())
+}
+
 fn config_with_allowed_hosts(upstream: SocketAddr, allowed: &str) -> String {
     format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\nallowed_hosts: {allowed}\ncategories: []\n"
@@ -1229,6 +1293,25 @@ async fn send_h3_request_inner(
     body: &str,
     finish_body: bool,
 ) -> (StatusCode, String, http::HeaderMap) {
+    send_h3_request_from_source(
+        addr,
+        certificate,
+        request,
+        body,
+        finish_body,
+        "127.0.0.1:0".parse().expect("client address"),
+    )
+    .await
+}
+
+async fn send_h3_request_from_source(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    request: Request<()>,
+    body: &str,
+    finish_body: bool,
+    source: SocketAddr,
+) -> (StatusCode, String, http::HeaderMap) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).expect("trust test certificate");
     let mut client_config = rustls::ClientConfig::builder()
@@ -1240,8 +1323,7 @@ async fn send_h3_request_inner(
             .expect("QUIC client config"),
     ));
 
-    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().expect("client address"))
-        .expect("create client endpoint");
+    let mut endpoint = quinn::Endpoint::client(source).expect("create client endpoint");
     endpoint.set_default_client_config(client_config);
     let connection = endpoint
         .connect(addr, "localhost")
@@ -1280,6 +1362,159 @@ async fn send_h3_request_inner(
         String::from_utf8_lossy(&received).into_owned(),
         headers,
     )
+}
+
+async fn send_h3_from(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    source: SocketAddr,
+    method: Method,
+    path: &str,
+    body: &str,
+) -> (StatusCode, String, http::HeaderMap) {
+    let request = Request::builder()
+        .method(method)
+        .uri(format!("https://localhost{path}"))
+        .body(())
+        .expect("build request");
+    send_h3_request_from_source(addr, certificate, request, body, true, source).await
+}
+
+/// Read only the response head and close the QUIC connection. Used to model a
+/// client that stops reading when the upstream withholds the response body.
+async fn send_h3_headers_then_close(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    source: SocketAddr,
+    path: &str,
+) -> StatusCode {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h3".to_vec()];
+    let client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
+            .expect("QUIC client config"),
+    ));
+
+    let mut endpoint = quinn::Endpoint::client(source).expect("create client endpoint");
+    endpoint.set_default_client_config(client_config);
+    let connection = endpoint
+        .connect(addr, "localhost")
+        .expect("start connection")
+        .await
+        .expect("QUIC handshake");
+    let (mut h3_connection, mut send_request) =
+        h3::client::new(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .expect("HTTP/3 handshake");
+    let _connection_task = tokio::spawn(async move { h3_connection.wait_idle().await });
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("https://localhost{path}"))
+        .body(())
+        .expect("build request");
+    let mut stream = send_request
+        .send_request(request)
+        .await
+        .expect("send request");
+    stream.finish().await.expect("finish request");
+    let response = stream.recv_response().await.expect("response");
+    let status = response.status();
+    drop(stream);
+    drop(send_request);
+    connection.close(0u32.into(), b"test close");
+    endpoint.wait_idle().await;
+    status
+}
+
+async fn send_h3_wait_for_stream_end(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    source: SocketAddr,
+    path: &str,
+) -> bool {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h3".to_vec()];
+    let client_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
+            .expect("QUIC client config"),
+    ));
+
+    let mut endpoint = quinn::Endpoint::client(source).expect("create client endpoint");
+    endpoint.set_default_client_config(client_config);
+    let connection = endpoint
+        .connect(addr, "localhost")
+        .expect("start connection")
+        .await
+        .expect("QUIC handshake");
+    let (mut h3_connection, mut send_request) =
+        h3::client::new(h3_quinn::Connection::new(connection.clone()))
+            .await
+            .expect("HTTP/3 handshake");
+    let _connection_task = tokio::spawn(async move { h3_connection.wait_idle().await });
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("https://localhost{path}"))
+        .body(())
+        .expect("build request");
+    let mut stream = send_request
+        .send_request(request)
+        .await
+        .expect("send request");
+    stream.finish().await.expect("finish request");
+    let _response = stream.recv_response().await.expect("response");
+
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match stream.recv_data().await {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return true,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    drop(stream);
+    drop(send_request);
+    connection.close(0u32.into(), b"test close");
+    endpoint.wait_idle().await;
+    ended
+}
+
+#[tokio::test]
+async fn http3_total_response_deadline_ends_a_dripping_stream() {
+    let upstream = spawn_stalling_upstream().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ntls:\n  cert_file: {}\n  key_file: {}\nhttp3: {{ enabled: true }}\ntimeouts: {{ connection_idle: 30s, response_body: 500ms, shutdown_grace: 500ms }}\ncategories: []\n",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    assert!(
+        send_h3_wait_for_stream_end(
+            running.addr,
+            certificate,
+            "127.0.0.1:0".parse().expect("client address"),
+            "/stall",
+        )
+        .await,
+        "the total response deadline must end a stalled HTTP/3 body"
+    );
+
+    running.stop().await;
 }
 
 #[tokio::test]
@@ -1719,6 +1954,28 @@ async fn allowed_hosts_ignores_x_forwarded_host() {
     )
     .await;
     assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_x_forwarded_host_without_a_host_is_stripped() {
+    let upstream = spawn_header_echo_upstream("x-forwarded-host").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let (status, body) = send_raw_request_body(
+        running.addr,
+        "GET / HTTP/1.0\r\nX-Forwarded-Host: evil.example\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body, "",
+        "a client X-Forwarded-Host must be removed when no Host can replace it"
+    );
 
     running.stop().await;
 }
@@ -2884,6 +3141,35 @@ async fn graphql_limit_applies_to_h2c_and_upgrade_handshakes() {
         "unexpected handshake response: {response}"
     );
 
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn graphql_over_websocket_envelopes_are_rejected_before_forwarding() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ graphql: {{ block_introspection: true }} }}\ncategories: []\n"
+    ))
+    .await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/graphql").await;
+    assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+
+    let payload = br#"{"type":"start","payload":{"query":"{__schema}"}}"#;
+    stream
+        .write_all(&client_ws_frame(0x1, payload, true))
+        .await
+        .expect("write frame");
+
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(
+        opcode, 0x8,
+        "expected a close frame, got opcode {opcode:#x}"
+    );
+    assert!(payload.len() >= 2);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1008);
+
+    drop(stream);
     running.stop().await;
 }
 
@@ -4309,6 +4595,24 @@ async fn non_canonical_method_case_is_rejected() {
 }
 
 #[tokio::test]
+async fn connect_requests_are_rejected_before_the_body_is_forwarded() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\ntimeouts: {{ body_read: 2s }}\n"
+    ))
+    .await;
+
+    let status = send_raw_request(
+        running.addr,
+        "CONNECT 127.0.0.1:80 HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Length: 18\r\nConnection: close\r\n\r\nGET /smuggled HTTP",
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn tls_termination_forwards_https_proto() {
     let upstream = spawn_header_echo_upstream("x-forwarded-proto").await;
     let certified =
@@ -4731,6 +5035,159 @@ async fn http3_oversized_body_without_body_rules_is_streamed() {
 }
 
 #[tokio::test]
+async fn http3_client_close_releases_the_connection_budget() {
+    let upstream = spawn_stalling_upstream().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ntls:\n  cert_file: {}\n  key_file: {}\nhttp3: {{ enabled: true }}\nprotection: {{ max_connections: 1, max_connections_per_ip: 1 }}\ntimeouts: {{ connection_idle: 2s, shutdown_grace: 500ms }}\ncategories: []\n",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let status = send_h3_headers_then_close(
+        running.addr,
+        certificate.clone(),
+        "127.0.0.1:0".parse().expect("client address"),
+        "/stall",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The client is gone while the upstream withholds the body. The request
+    // task and its connection guard must be reaped so a second source can be
+    // admitted under a one-connection budget.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut admitted = false;
+    while Instant::now() < deadline {
+        if let Ok((status, body, _)) = tokio::time::timeout(
+            Duration::from_secs(1),
+            send_h3_from(
+                running.addr,
+                certificate.clone(),
+                "127.0.0.2:0".parse().expect("second client address"),
+                Method::GET,
+                "/ok",
+                "",
+            ),
+        )
+        .await
+            && status == StatusCode::OK
+            && body == "ok"
+        {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        admitted,
+        "the closed HTTP/3 connection retained the shared connection budget"
+    );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn request_hardening_rejects_alternate_ssrf_and_redirect_spellings() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits:
+  hardening:
+    ssrf: {{ enabled: true, internal_hosts: [vuln.corp] }}
+    redirects: {{ enabled: true, allowed_hosts: [app.test], parameters: [redirect_uri] }}
+categories: []
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for path in [
+        "/fetch?url=http%3A%2Fvuln.corp%2F",
+        "/fetch?url=http%3A%5Cvuln.corp%2F",
+        "/fetch?url=http%3Avuln.corp%2F",
+    ] {
+        let (status, _) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/fetch",
+        "kunato.test",
+        &[("x-target-url", "http:/vuln.corp/")],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    for path in [
+        "/login?redirect.uri=https%3A%2F%2Fevil.test%2F",
+        "/login?redirect+uri=https%3A%2F%2Fevil.test%2F",
+        "/login?redirect%2Euri=https%3A%2F%2Fevil.test%2F",
+    ] {
+        let (status, _) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+
+    let (status, _) = send(
+        running.addr,
+        Method::GET,
+        "/fetch?url=https%3A%2F%2Fexample.com%2F",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn jwt_body_policy_inspects_encoded_separators() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ jwt: {{ enabled: true, allowed_algorithms: [RS256] }} }}\ncategories: []\n"
+    ))
+    .await;
+
+    let hs = "eyJhbGciOiJIUzI1NiJ9.e30.c2ln";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/token",
+        format!("access_token={}", hs.replace('.', "%2E")).into_bytes(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/token",
+        format!("{{\"access_token\":\"{}\"}}", hs.replace('.', "\\u002E")).into_bytes(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let rs = "eyJhbGciOiJSUzI1NiJ9.e30.c2ln";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/token",
+        format!("{{\"access_token\":\"{}\"}}", rs.replace('.', "\\u002E")).into_bytes(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn websocket_upgrade_is_tunneled() {
     let upstream = spawn_upgrade_upstream().await;
     let running = start_kunato(&format!(
@@ -4750,6 +5207,34 @@ async fn websocket_upgrade_is_tunneled() {
     let mut echo = vec![0u8; expected.len()];
     stream.read_exact(&mut echo).await.expect("read echo");
     assert_eq!(echo, expected);
+
+    drop(stream);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_frames_are_checked_by_the_jwt_policy() {
+    let upstream = spawn_upgrade_upstream().await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ jwt: {{ enabled: true, allowed_algorithms: [RS256] }} }}\ncategories: []\n"
+    ))
+    .await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+
+    let payload = b"access_token=eyJhbGciOiJIUzI1NiJ9.e30.c2ln";
+    stream
+        .write_all(&client_ws_frame(0x1, payload, true))
+        .await
+        .expect("write frame");
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(
+        opcode, 0x8,
+        "expected a close frame, got opcode {opcode:#x}"
+    );
+    assert!(payload.len() >= 2);
+    assert_eq!(u16::from_be_bytes([payload[0], payload[1]]), 1008);
 
     drop(stream);
     running.stop().await;

@@ -952,6 +952,8 @@ impl<'de> Deserialize<'de> for QueryValue {
 #[derive(Debug, Default)]
 struct QueryDocuments {
     queries: Vec<String>,
+    payload_queries: Vec<String>,
+    operation: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for QueryDocuments {
@@ -974,12 +976,28 @@ impl<'de> Deserialize<'de> for QueryDocuments {
             {
                 let mut documents = QueryDocuments::default();
                 while let Some(key) = map.next_key::<String>()? {
-                    if key == "query" {
-                        if let QueryValue::Text(query) = map.next_value::<QueryValue>()? {
-                            documents.queries.push(query);
+                    match key.as_str() {
+                        "query" => {
+                            if let QueryValue::Text(query) = map.next_value::<QueryValue>()? {
+                                documents.queries.push(query);
+                            }
                         }
-                    } else {
-                        map.next_value::<IgnoredAny>()?;
+                        // graphql-ws `start` and graphql-transport-ws
+                        // `subscribe` carry the executable document under
+                        // `payload.query`. Collect it without materializing
+                        // `variables`.
+                        "payload" => {
+                            let payload: PayloadDocuments = map.next_value()?;
+                            documents.payload_queries.extend(payload.queries);
+                        }
+                        "type" => {
+                            if let QueryValue::Text(kind) = map.next_value::<QueryValue>()? {
+                                documents.operation = Some(kind);
+                            }
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
                     }
                 }
                 Ok(documents)
@@ -992,6 +1010,10 @@ impl<'de> Deserialize<'de> for QueryDocuments {
                 let mut documents = QueryDocuments::default();
                 while let Some(element) = seq.next_element::<QueryDocuments>()? {
                     documents.queries.extend(element.queries);
+                    documents.payload_queries.extend(element.payload_queries);
+                    if documents.operation.is_none() {
+                        documents.operation = element.operation;
+                    }
                 }
                 Ok(documents)
             }
@@ -1001,11 +1023,132 @@ impl<'de> Deserialize<'de> for QueryDocuments {
     }
 }
 
+/// The operation payload of a GraphQL-over-WebSocket envelope. A `payload` may
+/// be absent, `null`, or a non-standard scalar; only a `query` string is
+/// collected, and every other shape is consumed without failing the request.
+#[derive(Debug, Default)]
+struct PayloadDocuments {
+    queries: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for PayloadDocuments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PayloadVisitor;
+
+        impl<'de> Visitor<'de> for PayloadVisitor {
+            type Value = PayloadDocuments;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a GraphQL operation payload")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut payload = PayloadDocuments::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "query" {
+                        if let QueryValue::Text(query) = map.next_value::<QueryValue>()? {
+                            payload.queries.push(query);
+                        }
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(payload)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PayloadDocuments::default())
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                PayloadDocuments::deserialize(deserializer)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                // A non-standard payload array is consumed, not interpreted.
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(PayloadDocuments::default())
+            }
+        }
+
+        deserializer.deserialize_any(PayloadVisitor)
+    }
+}
+
 fn collect_json_body_queries(body: &[u8], candidates: &mut Vec<String>) -> Result<(), Violation> {
     match serde_json::from_slice::<QueryDocuments>(body) {
         Ok(documents) => {
-            for query in documents.queries {
-                push_candidate(candidates, &query);
+            if documents.operation.as_deref().is_some_and(is_operation) {
+                // The upstream reads the document from `payload.query`, so a
+                // top-level `query` must not make an empty payload look
+                // inspectable.
+                if documents.payload_queries.is_empty() {
+                    return Err(Violation::Uninspectable);
+                }
+                for query in documents.payload_queries {
+                    push_candidate(candidates, &query);
+                }
+            } else {
+                for query in documents.queries {
+                    push_candidate(candidates, &query);
+                }
             }
             Ok(())
         }
@@ -1017,11 +1160,20 @@ fn collect_json_body_queries(body: &[u8], candidates: &mut Vec<String>) -> Resul
     }
 }
 
+fn is_operation(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("start") || kind.eq_ignore_ascii_case("subscribe")
+}
+
 fn collect_json_text_queries(text: &str, candidates: &mut Vec<String>) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut deserializer = serde_json::Deserializer::from_str(text);
     if let Ok(documents) = QueryDocuments::deserialize(&mut deserializer) {
-        for query in documents.queries {
+        let queries = if documents.operation.as_deref().is_some_and(is_operation) {
+            documents.payload_queries
+        } else {
+            documents.queries
+        };
+        for query in queries {
             push_candidate(candidates, &query);
         }
     }
@@ -1691,6 +1843,73 @@ mod tests {
                     block_introspection: false,
                 },
             );
+        }
+    }
+
+    #[test]
+    fn graphql_over_websocket_envelopes_are_inspected() {
+        let headers = HeaderMap::new();
+        let limits = Limits {
+            max_depth: 20,
+            max_fields: 1000,
+            block_introspection: true,
+        };
+
+        for body in [
+            br#"{"type":"start","id":"1","payload":{"query":"{__schema{types{name}}}"}}"#
+                .as_slice(),
+            br#"{"type":"subscribe","id":"1","payload":{"query":"{__schema}"}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                inspect(None, &headers, body, false, limits),
+                Some(Violation::Introspection)
+            );
+        }
+
+        let deep = format!(
+            "{{\"type\":\"subscribe\",\"id\":\"1\",\"payload\":{{\"query\":{}}}}}",
+            serde_json::to_string(&nested(21)).expect("encode")
+        );
+        assert!(matches!(
+            inspect(None, &headers, deep.as_bytes(), false, limits),
+            Some(Violation::TooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn operation_envelopes_without_a_document_fail_closed() {
+        let headers = HeaderMap::new();
+        let limits = Limits {
+            max_depth: 20,
+            max_fields: 1000,
+            block_introspection: true,
+        };
+        for body in [
+            br#"{"type":"start","id":"1","payload":{}}"#.as_slice(),
+            br#"{"type":"subscribe","id":"1","payload":null}"#.as_slice(),
+            br#"{"type":"start","payload":{"query":123}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                inspect(None, &headers, body, false, limits),
+                Some(Violation::Uninspectable)
+            );
+        }
+    }
+
+    #[test]
+    fn non_operation_envelopes_are_not_graphql_documents() {
+        let headers = HeaderMap::new();
+        let limits = Limits {
+            max_depth: 20,
+            max_fields: 1000,
+            block_introspection: true,
+        };
+        for body in [
+            br#"{"type":"connection_init","payload":{}}"#.as_slice(),
+            br#"{"type":"ping"}"#.as_slice(),
+            br#"{"type":"complete","id":"1"}"#.as_slice(),
+        ] {
+            assert_eq!(inspect(None, &headers, body, false, limits), None);
         }
     }
 

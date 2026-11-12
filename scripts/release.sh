@@ -84,13 +84,13 @@ fi
 if [ "$skip_checks" -eq 0 ]; then
     log "running fmt, clippy, deny, and tests"
     cargo fmt --check
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --locked -- -D warnings
     if [ -x scripts/check-deny.sh ]; then
         scripts/check-deny.sh
     else
         cargo deny check
     fi
-    cargo test
+    cargo test --locked
 fi
 
 restore() {
@@ -117,6 +117,16 @@ host=$(rustc -vV | sed -n 's/^host: //p')
 CARGO_NET_OFFLINE=true cargo metadata --format-version 1 --filter-platform "$host" >/dev/null
 grep -A1 '^name = "kunato"$' Cargo.lock | grep -q "^version = \"$version\"$" ||
     die "failed to update Cargo.lock"
+
+# The version bump must be the only change to the reviewed lock. A metadata
+# step that re-resolved a dependency would otherwise ship a graph that CI never
+# tested, and every newly resolved build script would run in the tagged build.
+lock_diff=$(git diff --unified=0 -- Cargo.lock | grep -E '^[-+]' | grep -vE '^(\+\+\+|---)' || true)
+lock_lines=$(printf '%s\n' "$lock_diff" | sed '/^$/d' | wc -l | tr -d ' ')
+lock_unexpected=$(printf '%s\n' "$lock_diff" | sed '/^$/d' | grep -vE '^[-+]version = "[0-9]+\.[0-9]+\.[0-9]+"$' || true)
+if [ "$lock_lines" -ne 2 ] || [ -n "$lock_unexpected" ]; then
+    die "the version bump changed the dependency resolution in Cargo.lock; commit the reviewed lock update before releasing"
+fi
 
 if [ "$dry_run" -eq 1 ]; then
     log "dry run: would commit 'Release v$version', push main, and push tag v$version"
