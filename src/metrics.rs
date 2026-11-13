@@ -17,6 +17,7 @@ pub struct Metrics {
     pub upload_rejected: AtomicU64,
     pub upload_inspection_active: AtomicU64,
     pub form_rejected: AtomicU64,
+    pub saml_rejected: AtomicU64,
     pub php_request_rejected: AtomicU64,
     pub php_response_rejected: AtomicU64,
     pub host_rejected: AtomicU64,
@@ -72,6 +73,7 @@ impl Metrics {
             upload_rejected: AtomicU64::new(0),
             upload_inspection_active: AtomicU64::new(0),
             form_rejected: AtomicU64::new(0),
+            saml_rejected: AtomicU64::new(0),
             php_request_rejected: AtomicU64::new(0),
             php_response_rejected: AtomicU64::new(0),
             host_rejected: AtomicU64::new(0),
@@ -188,6 +190,12 @@ impl Metrics {
             "kunato_upload_rejected_total",
             "Multipart uploads rejected because their content is executable, script, or active markup.",
             self.upload_rejected.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_saml_rejected_total",
+            "Requests rejected by SAML message decoding or structural checks.",
+            self.saml_rejected.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -469,6 +477,7 @@ mod tests {
         assert!(text.contains("kunato_graphql_rejected_total 0"));
         assert!(text.contains("kunato_request_body_rejected_total 0"));
         assert!(text.contains("kunato_upload_rejected_total 0"));
+        assert!(text.contains("kunato_saml_rejected_total 0"));
         assert!(text.contains("kunato_host_rejected_total 0"));
         assert!(text.contains("kunato_admin_access_denied_total 0"));
         assert!(text.contains("kunato_admin_access_allowed_total 0"));

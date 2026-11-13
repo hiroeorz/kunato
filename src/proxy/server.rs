@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use crate::acme::{ACME_TLS_ALPN, AcmeService};
 use crate::admin_access::{AdminAccessState, Decision as AdminAccessDecision};
 use crate::client_ip::ClientSource;
-use crate::config::{BodyInspection, CompiledConfig, UploadInspection};
+use crate::config::{BodyInspection, CompiledConfig, SamlInspection, UploadInspection};
 use crate::error::Error;
 use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
@@ -2323,6 +2323,8 @@ async fn process_inner(
         || config.limits.hardening.duplicates.enabled
         || config.limits.hardening.redirects.enabled;
     let php_profile = config.php.matches(&parts);
+    let saml_body = config.limits.saml.mode != SamlInspection::Off
+        && crate::saml::is_saml_content_type(&parts.headers);
     let form_body = crate::form::is_form(&parts.headers);
     let inspect_form = form_body && (config.limits.form.enabled || php_profile);
     if php_profile && config.php.block_multipart && crate::upload::is_multipart(&parts.headers) {
@@ -2345,7 +2347,7 @@ async fn process_inner(
         && crate::upload::wants_raw_inspection(&parts.method, &parts.uri, &parts.headers);
     let inspect_uploads = inspect_multipart || inspect_raw_body;
     let encoded = parts.headers.contains_key(CONTENT_ENCODING);
-    let decode_body = inspect_body || ((inspect_uploads || inspect_form) && encoded);
+    let decode_body = inspect_body || ((inspect_uploads || inspect_form || saml_body) && encoded);
     if (decode_body || inspect_uploads || inspect_form)
         && !body.is_empty()
         && let Some(charset) = if encoded {
@@ -2487,6 +2489,32 @@ async fn process_inner(
             StatusCode::BAD_REQUEST,
             "structured request body nesting too deep",
         ));
+    }
+    if saml_body
+        && let Some(inspection) =
+            crate::saml::inspect(&parts.headers, inspected_body.as_ref(), &config.limits.saml)
+    {
+        if let Some(finding) = inspection.blocking {
+            context
+                .metrics
+                .saml_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                client = %source.client_ip, peer = %source.peer,
+                path = %crate::decoy::log_path(parts.uri.path()),
+                finding = finding.as_str(),
+                "SAML message rejected"
+            );
+            return Err(HttpError::new(finding.status(), finding.message()));
+        }
+        for finding in &inspection.findings {
+            debug!(
+                client = %source.client_ip, peer = %source.peer,
+                path = %crate::decoy::log_path(parts.uri.path()),
+                finding = finding.as_str(),
+                "SAML structural finding"
+            );
+        }
     }
     if body_was_decoded {
         // The decoded size is known now. Reserve the form-decoding worst case

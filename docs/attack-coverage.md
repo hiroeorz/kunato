@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-11-11; the managed set carries 573 rules.
+2026-11-14; the managed set carries 577 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -137,6 +137,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Account / Login Enumeration | 🔶 | `response-leaks.login-enumeration-message` blocks common "user not found"/"invalid username" error text on authentication paths; application-specific wording needs a local response rule |
 | MFA Flooding | 🔶 | Rate limits only |
 | OTP Brute Force | 🔶 | Rate limits only |
+| SAML Response Manipulation | 🔶 | `limits.saml` decodes base64 and DEFLATE `SAMLResponse`/`SAMLRequest` values from form and JSON bodies before rule evaluation. `strict` rejects malformed or oversized messages, DTDs, duplicate IDs, signature references that do not name their enclosing element, and plaintext assertions outside the response; `multi_assertion: block` also rejects multiple subjects and `unsigned: block` rejects a response without a signature (both `log` by default). XML signature verification and canonicalization remain impossible at the WAF, so the service provider must still be patched (CVE-2026-123798, CVE-2026-123802) |
 | Session ID Anomalies | ❌ | No rules |
 | Cookie Tampering | 🔶 | Only specific CVE shapes (forged `STATE_COOKIE`, rememberMe `rO0`, ...) |
 | JWT Tampering | 🔶 | The `jwt` category blocks unsecured (`alg:none`) and signature-less tokens, `kid`/`jku`/`jwk`/`x5u`/`x5c` key-lookup injection, and the zero-signature CVE-2022-21449 PoCs, across headers/cookies/query/body; claim tampering and re-signing with an unknown weak secret remain undetectable |
@@ -149,6 +150,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | IDOR / BOLA | ❌ | Undetectable in principle at the WAF layer |
 | Forced Browsing | 🔶 | `sensitive-files` (BLOCK/404) plus `admin-interfaces` (LOG by default); opt-in `admin_access` applies a configurable default state and time-limited `open`/`close` overrides to declared administrative functions, and a closed request gets `404` before forwarding |
 | URL Manipulation | 🔶 | Path normalization, matrix parameters, and encoded separators are blocked; general parameter tampering is not |
+| Fragment-confused path | ✅ | `cve-2026-11-13-signatures.oauth2-proxy-encoded-fragment-path` rejects a raw or once-decoded `%23` in the path, the OAuth2 Proxy skip-auth bypass primitive (CVE-2026-41059). Query values may still carry `%23`; a site that needs a literal encoded hash in a path needs a local override |
 | Parameter Tampering | ❌ | Business-logic dependent |
 | Privilege-Escalation Requests | ❌ | No generic rule (many CVE-specific auth-bypass signatures exist) |
 | Admin Interface Access Attempts | 🔶 | `admin_access` (opt-in) applies a configured default state and time-limited `open`/`close` overrides to declared admin/plugin/update functions; `open`/`close` can target everything, one client, or one function through the loopback listener, and the most recent matching command wins. Enabling it loads built-in presets for WordPress, Rails, Laravel, generic `/admin` panels, phpMyAdmin, Adminer, Tomcat/JBoss consoles, Solr, Spring Actuator, Nextcloud, Ghost, and TYPO3 (with exclusions for WordPress `admin-ajax.php`/`admin-post.php` and Actuator health/info). The gate matches every decoded and normalized path form (`%77p-admin`, `//wp-admin`, `/x/../wp-admin`), denies with `404` before body reads in the closed state, and still runs the full WAF pipeline for open requests. Without a declaration, `admin-interfaces` logs at default (BLOCK is the documented hardening) plus CVE-specific admin paths (AEM, h2-console, ...) and the Rails dashboards (`sidekiq`, `pghero`, `flipper`, `blazer`, `delayed_job`, `good_job`) |
@@ -166,6 +168,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 | Object Injection | 🔶 | CVE-specific (Joomla, Yii, CraftCMS, ...) |
 | Log4Shell / JNDI Injection | ✅ | `known-exploits.log4shell` plus nested lookups (`${${...}}`) and `javax.naming.InitialContext` |
 | Metadata-Service SSRF | ✅ | `ssrf.metadata-endpoints` |
+| SOAP WS-Addressing callback SSRF | ✅ | `cve-2026-11-13-signatures.axis2-wsa-non-anonymous-replyto` admits only the W3C anonymous `ReplyTo`/`FaultTo` address; any other callback host is blocked, and internal or metadata targets also hit the `ssrf` rules (CVE-2026-123753) |
 | Internal Network Discovery | 🔶 | Loopback and metadata endpoints are blocked; arbitrary internal IPs are not (rate limits still apply) |
 
 ## 9. CMS and Framework Attacks
@@ -202,7 +205,7 @@ additions to `admin-interfaces`.
 | Ruby deserialization | ✅ | `ruby-deserialization` covers base64 Marshal (`BAh7`), encoded raw `%04%08`, and YAML `!ruby/` tags across query/body/cookies; signed wrappers (`signed_id`, GlobalID, `MessageVerifier`) are not statically detectable |
 | Multipart boundary differentials | ✅ | The engine flattens every declared boundary (up to four) and falls back to raw percent passes beyond that, closing the CVE-2026-26961 WAF-bypass class |
 | Multipart filename precedence | ✅ | The form guard rejects a part that carries both `filename` and `filename*` instead of guessing, and the upload check and filename signatures use the RFC 5987 `filename*` value the Go/Python/Node.js/Java parsers prefer (CVE-2026-104269 class) |
-| Client identity headers | ✅ | Client-supplied `Forwarded`, `X-Real-IP`, `X-Client-IP`, `X-Forwarded-Port`, `X-Forwarded-Host`, `CF-Connecting-IP`, `True-Client-IP`, and the remaining `X-Forwarded-*` copies are stripped from every forwarded request and `X-Forwarded-For` is rewritten from the resolved client address, so the Rails `RemoteIp` `Forwarded` preference (GHSA-2gff-2mmg-m73p) cannot be used through the proxy |
+| Client identity headers | ✅ | Client-supplied `Forwarded`, `X-Real-IP`, `X-Client-IP`, `CF-Connecting-IP`, `True-Client-IP`, and every `X-Forwarded-*` field Kunato does not write itself (including `X-Forwarded-Uri`, `X-Forwarded-Port`, `X-Forwarded-Prefix`, and `X-Forwarded-Server`) are stripped from every forwarded request, and `X-Forwarded-For` is rewritten from the resolved client address. This closes the Rails `RemoteIp` `Forwarded` preference (GHSA-2gff-2mmg-m73p) and the OAuth2 Proxy `X-Forwarded-Uri` skip-auth bypass (CVE-2026-40575) for applications reached through the proxy |
 | `_method` overrides | 🔶 | Method conditions match the wire method; Rack accepts only standard overrides, so `bad-methods` cannot be bypassed |
 | Host / X-Forwarded-Host | 🔶 | When `allowed_hosts` is configured, a client-supplied `X-Forwarded-Host` is replaced with the Host header and unlisted Host / `:authority` names are rejected with `421` before rule evaluation. When the request has no Host or authority, the client value is removed instead of forwarded. Fresh ACME installs seed the list from `--acme-domain`; manual installs opt in, and an unset list keeps the previous behavior |
 | Attachment processing: ImageMagick / ffprobe | ✅ | `cve-2026-11-09-signatures` blocks MSL, MVG, PostScript, and `.avs` AviSynth uploads, including raw direct-upload bodies (CVE-2026-122006, GHSA-v924-7rp8-4mxh); `limits.upload_inspection` rejects a script behind an image or media claim. A valid image is masked from body matching, so only unverified or script parts reach the rules |
@@ -239,6 +242,8 @@ signatures.
 | PHP object injection | ✅ | `php-deserialization` blocks serialized `O:`/`C:` object values across cookies, query, and body |
 | Spring Actuator | ✅ | `spring-actuator` BLOCKs the secret- and state-dumping endpoints (`env`, `heapdump`, `mappings`, `jolokia`, `shutdown`, ...); `health` and `info` stay pinned as allowed |
 | Java deserialization | ✅ | `java-deserialization` covers base64 `rO0AB` and the encoded stream header `%AC%ED%00%05`; raw bytes are unmatched by design |
+| Axis2 request-body bounds | ✅ | `limits.max_body_bytes` and `limits.form` bound form, multipart, MTOM, and SOAP bodies before Axis2 reads them; Axis2 2.0.2 also ships its own per-builder limits (CVE-2026-123770) |
+| ASP.NET data-source filter recursion | ✅ | `cve-2026-11-13-signatures.telerik-filter-nested-expressions` rejects a `filter` or `$filter` value carrying 16 or more group opens in the query or a form body, the Telerik `FilterParser` stack-overflow shape (CVE-2026-106154) |
 | Vite / Nuxt dev exposure | ✅ | `vite-dev-endpoints` BLOCKs the Vite internals and Nuxt devtools; production assets stay open |
 | AI / notebook service management | 🔶 | `ai-service-management` BLOCKs the Ollama model-management and Jupyter kernel/terminal endpoints; deployments that drive them through Kunato need an override |
 | AI/LLM CVE shapes | 🔶 | Gradio (FileExplorer traversal, `proxy_url` SSRF), vLLM, and Flowise (sandbox escapes, OAuth token leaks) advisories have no stable request signatures; generic pickle, traversal, and SSRF layers apply |
@@ -526,4 +531,4 @@ transport-based. Unit and proxy tests cover spoofed prefixes, untrusted peers,
 bounded/malformed chains, shared HTTP/2 connections, HTTP/3, WebSocket, and
 authentication outcome counts. This closes a deployment limitation without
 changing category verdicts or the bundled rule count; behavioral actions
-still default to LOG. The snapshot date is 2026-11-11.
+still default to LOG. The snapshot date is 2026-11-13.

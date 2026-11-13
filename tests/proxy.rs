@@ -2516,6 +2516,193 @@ async fn stream_body_inspection_only_inspects_the_prefix() {
     running.stop().await;
 }
 
+fn saml_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let value =
+            (u32::from(buffer[0]) << 16) | (u32::from(buffer[1]) << 8) | u32::from(buffer[2]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                output.push(ALPHABET[((value >> (18 - index * 6)) & 0x3f) as usize] as char);
+            } else {
+                output.push('=');
+            }
+        }
+    }
+    output
+}
+
+fn saml_response_xml(reference: Option<&str>) -> String {
+    let signature = reference.map_or_else(String::new, |reference| {
+        format!(
+            "<ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\">\
+             <ds:SignedInfo><ds:Reference URI=\"{reference}\"/></ds:SignedInfo>\
+             <ds:SignatureValue>c2lnbmF0dXJl</ds:SignatureValue></ds:Signature>"
+        )
+    });
+    format!(
+        "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+         xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_response\" \
+         Version=\"2.0\" IssueInstant=\"2026-11-14T00:00:00Z\">\
+         <saml:Issuer>https://idp.example</saml:Issuer>{signature}\
+         <saml:Assertion ID=\"_assertion\" Version=\"2.0\">\
+         <saml:Subject><saml:NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">alice@example.com</saml:NameID></saml:Subject>\
+         </saml:Assertion></samlp:Response>"
+    )
+}
+
+fn saml_json(xml: &str) -> Vec<u8> {
+    format!(
+        "{{\"SAMLResponse\":\"{}\",\"RelayState\":\"state\"}}",
+        saml_base64(xml.as_bytes())
+    )
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn saml_signature_wrapping_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let body = saml_json(&saml_response_xml(Some("#_other")));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        body,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 1"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_valid_response_is_forwarded() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let body = saml_json(&saml_response_xml(Some("#_response")));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        body,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 0"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_log_mode_forwards_structural_findings() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ saml: {{ mode: log }} }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = saml_json(&saml_response_xml(Some("#_other")));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        body,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 0"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_malformed_message_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        b"SAMLResponse=not-base64!".to_vec(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_unsigned_response_is_logged_not_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let body = saml_json(&saml_response_xml(None));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        body,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 0"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_inspection_can_be_disabled() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ saml: {{ mode: off }} }}\ncategories: []\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let body = saml_json(&saml_response_xml(Some("#_other")));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        body,
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    running.stop().await;
+}
+
 #[tokio::test]
 async fn upload_inspection_rejects_spoofed_content() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;

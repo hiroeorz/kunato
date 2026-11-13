@@ -820,6 +820,61 @@ Form limits and the PHP profile are binary features: upgrade Kunato before
 using these local configuration fields. Managed signatures continue to use the
 v0.7.3 rule-set format and pass the release compatibility gate.
 
+#### SAML message inspection
+
+`limits.saml` decodes a `SAMLResponse` or `SAMLRequest` carried in an
+`application/x-www-form-urlencoded` or JSON body and structurally checks the
+decoded XML before rule evaluation. It runs independently of rule actions, so an
+`ALLOW` rule cannot bypass it; only `limits.saml.mode: off` disables it. The
+decoded bytes are not exposed as a rule target; the guard is the inspection
+mechanism.
+
+| Field under `limits.saml` | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `strict` | `off`, `log` (decode and log findings only), or `strict` (reject malformed messages and high-confidence findings) |
+| `max_decoded_bytes` | 1 MiB | 1..8 MiB; bound on the base64-decoded or DEFLATE-inflated message |
+| `multi_assertion` | `log` | `log` or `block`; multiple plaintext assertions with different `NameID` values |
+| `unsigned` | `log` | `log` or `block`; a `Response` with no XML signature anywhere |
+
+The guard decodes standard base64; a value may carry plain XML or a
+raw-DEFLATE or zlib-compressed document. XML is tokenized with an internal
+subset that handles declarations, comments, CDATA, namespace prefixes, and
+quoted attributes; it does not expand entities or DTDs. Element count (4096),
+depth (64), attributes per element (64), and retained `NameID` bytes (4096) are
+bounded. UTF-16 messages are rejected as uninspectable in `strict` mode rather
+than guessed at.
+
+In `strict` mode the guard rejects:
+
+- a `<!DOCTYPE>` or any DTD in the decoded message (`403`),
+- duplicate element ID values across the message (`403`),
+- a `<Signature>` whose `<Reference URI="#...">` does not name the element that
+  contains the signature, or a signature without a parent ID (`403`),
+- a plaintext `<Assertion>` that is not a direct child of `<Response>` (`403`),
+- malformed base64, malformed DEFLATE, malformed XML, or an over-limit message
+  (`400`/`413`), and an uninspectable encoding (`415`).
+
+`log` mode records the same findings without rejecting. The
+`multi_assertion`/`unsigned` actions are independent: their engine default is
+`log`, and the shipped example configuration raises `multi_assertion` to
+`block`. A deployment whose identity provider legitimately sends two assertions
+with different subjects must keep that action at `log` or add a local
+exception path.
+
+An application that uses a `SAMLResponse` or `SAMLRequest` field for non-SAML
+data must set `limits.saml.mode: log` or `off`; `strict` rejects a value that
+does not decode to XML. The guard cannot verify XML signatures or
+canonicalization; it detects the structural residue of signature-wrapping and
+assertion-confusion attacks. A
+signed response and a signed assertion are both accepted, encrypted assertions
+are not inspected, and a legitimate multi-assertion response with different
+subjects can be rejected when `multi_assertion: block` is set. Update the SAML
+service provider (for example SuperTokens) to the fixed release; the guard is
+defense in depth, not a replacement for signature verification.
+
+Metrics are `kunato_saml_rejected_total` for strict rejections; logged findings
+are written at debug level with a `finding` field, and rejections at warn level.
+
 #### General limits and timeouts
 
 Durations accept `ms`, `s`, `m`, and `h` suffixes (plain numbers are seconds).
@@ -915,7 +970,8 @@ Every duration must be greater than zero (`shutdown_grace: 0` would abort the
 drain immediately). Limits are validated with hard caps so the "bounded
 resources" invariant cannot be disabled by configuration: `max_path_bytes`
 64 KiB, `max_header_bytes` 1 MiB, `max_headers` 1000, and
-`max_body_bytes` / `max_response_body_bytes` 8 MiB.
+`max_body_bytes` / `max_response_body_bytes` 8 MiB, and
+`limits.saml.max_decoded_bytes` 8 MiB.
 
 ```yaml
 timeouts: { header_read: 10s, body_read: 30s }
@@ -1046,11 +1102,13 @@ failure, so a flood of new addresses does not reset an attacker's escalation.
 HTTP/1.1, HTTP/2, HTTP/3, and WebSocket handshakes use the same policy, resolved
 anew for each request. Request decision logs distinguish `client` (resolved IP)
 from `peer` (transport address). Before forwarding, Kunato removes the selected
-identity header and the alternate `Forwarded`, `X-Real-IP`, `X-Client-IP`,
-`X-Forwarded-Port`, `X-Forwarded-Host`, `CF-Connecting-IP`, and `True-Client-IP`
-assertions. It then writes a single canonical `X-Forwarded-For` containing the
-resolved client IP. `X-Forwarded-Proto` continues to describe the connection to
-Kunato; this setting does not trust forwarded scheme or host assertions.
+identity header, the alternate `Forwarded`, `X-Real-IP`, `X-Client-IP`,
+`CF-Connecting-IP`, and `True-Client-IP` assertions, and every
+`X-Forwarded-*` field it does not write itself (including `X-Forwarded-Uri`,
+`X-Forwarded-Port`, and `X-Forwarded-Prefix`). It then writes a single canonical
+`X-Forwarded-For` containing the resolved client IP. `X-Forwarded-Proto`
+continues to describe the connection to Kunato; this setting does not trust
+forwarded scheme or host assertions.
 
 Each trusted proxy must overwrite a single-address header or correctly append
 its observed peer to XFF. Restrict the trusted ranges to actual proxies and

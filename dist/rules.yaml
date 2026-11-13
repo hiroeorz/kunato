@@ -1964,6 +1964,32 @@ categories:
         match:
           headers: { X-GPUStack-Real-IP: '(?i)^(?:127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|::1|\[::1\]|localhost|0\.0\.0\.0)(?::[0-9]{1,5})?$' }
 
+  # Request signatures for the 2026-11-13 delta intake: the week's web-server,
+  # framework, and authentication-library advisories with a request shape.
+  - name: cve-2026-11-13-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-123753 (Apache Axis2/Java): a non-anonymous WS-Addressing
+      # ReplyTo or FaultTo makes the server open a connection to the caller's
+      # address, reaching internal hosts and delivering the response off-host.
+      # Synchronous clients use the W3C anonymous endpoint, and Axis2 2.0.2
+      # refuses every other address by default. The pattern admits only that
+      # endpoint; a deployment with decoupled responses enabled locally must
+      # disable or override this rule.
+      - name: axis2-wsa-non-anonymous-replyto
+        match: { regex: '(?is)<(?:[a-z0-9_.-]+:)?(?:ReplyTo|FaultTo)\b[^>]*>.*?<(?:[a-z0-9_.-]+:)?Address\b[^>]*>\s*https?://(?:[^w<]|w[^w<]|ww[^w<]|www[^.<]|www\.[^w<]|www\.w[^3<]|www\.w3[^.<]|www\.w3\.[^o<]|www\.w3\.o[^r<]|www\.w3\.or[^g<]|www\.w3\.org[^/<])', in: [body] }
+      # CVE-2026-41059 (OAuth2 Proxy): a number sign in the path, raw or
+      # `%23`, makes skip-auth matching see a different path from the one the
+      # backend serves. The advisory recommends rejecting it at the WAF.
+      - name: oauth2-proxy-encoded-fragment-path
+        match: { regex: '(?i)%23', in: [path] }
+      # CVE-2026-106154 (Telerik UI for ASP.NET Core/MVC): the server-side
+      # FilterParser recurses without a depth limit and the lexer has no input
+      # bound, so a deeply nested filter throws StackOverflowException. Normal
+      # data-source filters nest a few groups at most.
+      - name: telerik-filter-nested-expressions
+        match: { regex: '(?i)(^|[?&\r\n])\$?filter=(?:[^&(]*\(){16}', in: [query, body] }
+
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,
   # br, and zstd bodies are decompressed for matching first. When the limit is

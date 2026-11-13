@@ -49,6 +49,7 @@ src/
   acme/            # RFC 8555 client, TLS-ALPN-01 resolver, and certificate cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
   form.rs          # Origin-facing multipart and URL-encoded resource limits
+  saml.rs          # Bounded SAML decoding and signature-wrapping shape checks
   php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations
   upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
@@ -167,12 +168,20 @@ rule-set updates.
   is still checked. Nested archives are not expanded.
 - `limits.form` defaults to enabled: decoded multipart and URL-encoded bodies
   must be complete and pass field/part/header/name/nesting/complexity limits
-  before ALLOW or forwarding. This also applies in body `stream` mode; explicitly
-  disable the form guard to stream larger forms, accepting incomplete inspection.
-  `php` is an opt-in, explicitly host/path-scoped profile that always applies
-  form limits in scope, optionally rejects multipart or upload-progress fields,
-  and validates only configured PHP session response cookies before body reads
-  and response ALLOW. Neither mechanism replaces PHP security updates.
+  before ALLOW or forwarding. This also applies in body `stream` mode;
+  explicitly disable the form guard to stream larger forms, accepting
+  incomplete inspection. `php` is an opt-in, explicitly host/path-scoped profile
+  that always applies form limits in scope, optionally rejects multipart or
+  upload-progress fields, and validates only configured PHP session response
+  cookies before body reads and response ALLOW. Neither mechanism replaces PHP
+  security updates.
+- `limits.saml` defaults to `strict`: a `SAMLResponse`/`SAMLRequest` in a form or
+  JSON body is base64-decoded (and DEFLATE-inflated for the redirect binding)
+  and structurally checked before rules run. `strict` rejects malformed or
+  oversized messages, DTDs, duplicate IDs, signature references that do not name
+  their enclosing element, and assertions outside the response; `log` records
+  findings only. `multi_assertion` and `unsigned` choose `log` (default) or
+  `block`. XML signature verification remains with the service provider.
 - `allowed_hosts` is an optional Host/authority allowlist. When set, a missing,
   malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority`
   (HTTP/2 / HTTP/3) is rejected with `400`/`421` before rule evaluation, and

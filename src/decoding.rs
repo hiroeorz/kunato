@@ -1034,7 +1034,7 @@ fn decode_deflate(input: &[u8], limit: usize) -> (Vec<u8>, ReadStatus) {
     }
 }
 
-fn form_decode(body: &[u8]) -> Vec<u8> {
+pub(crate) fn form_decode(body: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(body.len());
     let mut index = 0;
     while index < body.len() {

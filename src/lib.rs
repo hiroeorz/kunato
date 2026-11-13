@@ -27,6 +27,7 @@ pub mod proxy;
 pub mod request_view;
 pub mod rules;
 pub mod rules_update;
+mod saml;
 pub mod signing;
 pub mod snapshot;
 pub mod telemetry;

@@ -42,6 +42,7 @@ const MAX_HEADERS_LIMIT: usize = 1000;
 const MAX_BODY_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_UPLOAD_EXPANSION_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_UPLOAD_EXPANSION_ENTRIES: usize = 65_536;
+const MAX_SAML_DECODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_GRAPHQL_DEPTH_LIMIT: usize = 1000;
 const MAX_GRAPHQL_FIELDS_LIMIT: usize = 10_000;
 const MAX_GRAPHQL_PATHS: usize = 16;
@@ -126,6 +127,56 @@ pub enum UploadInspection {
     /// or explicitly executable claim, and markup behind a generic claim.
     #[default]
     Strict,
+}
+
+/// Policy for decoding and structurally checking SAML messages carried in
+/// request bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SamlInspection {
+    /// Do not inspect SAML messages.
+    Off,
+    /// Decode SAML messages and log structural findings without rejecting.
+    Log,
+    /// Decode SAML messages and reject malformed messages plus high-confidence
+    /// structural findings.
+    #[default]
+    Strict,
+}
+
+/// Action for a SAML structural finding that is not universally malicious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SamlFindingAction {
+    /// Record the finding and forward the request.
+    #[default]
+    Log,
+    /// Reject the request with `403`.
+    Block,
+}
+
+/// Limits for SAML message inspection.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SamlLimits {
+    pub mode: SamlInspection,
+    /// Decoded bytes allowed for one SAML message after base64 and DEFLATE.
+    pub max_decoded_bytes: usize,
+    /// Multiple plaintext assertions with different subjects.
+    pub multi_assertion: SamlFindingAction,
+    /// A SAML response without any XML signature.
+    pub unsigned: SamlFindingAction,
+}
+
+impl Default for SamlLimits {
+    fn default() -> Self {
+        Self {
+            mode: SamlInspection::Strict,
+            max_decoded_bytes: 1024 * 1024,
+            multi_assertion: SamlFindingAction::Log,
+            unsigned: SamlFindingAction::Log,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -444,6 +495,8 @@ pub struct LimitsSpec {
     pub hardening: HardeningSpec,
     #[serde(default)]
     pub form: FormLimits,
+    #[serde(default)]
+    pub saml: SamlLimits,
 }
 
 impl Default for LimitsSpec {
@@ -463,6 +516,7 @@ impl Default for LimitsSpec {
             jwt: JwtSpec::default(),
             hardening: HardeningSpec::default(),
             form: FormLimits::default(),
+            saml: SamlLimits::default(),
         }
     }
 }
@@ -1181,6 +1235,7 @@ pub struct Limits {
     pub jwt: Jwt,
     pub hardening: Hardening,
     pub form: FormLimits,
+    pub saml: SamlLimits,
 }
 
 impl From<&LimitsSpec> for Limits {
@@ -1200,6 +1255,7 @@ impl From<&LimitsSpec> for Limits {
             jwt: Jwt::from(&spec.jwt),
             hardening: Hardening::from(&spec.hardening),
             form: spec.form.clone(),
+            saml: spec.saml,
         }
     }
 }
@@ -2787,6 +2843,12 @@ fn validate_limits(limits: &LimitsSpec, issues: &mut Vec<String>) {
              {MAX_UPLOAD_EXPANSION_ENTRIES}"
         ));
     }
+    if limits.saml.max_decoded_bytes == 0 || limits.saml.max_decoded_bytes > MAX_SAML_DECODED_BYTES
+    {
+        issues.push(format!(
+            "limits.saml.max_decoded_bytes must be between 1 and {MAX_SAML_DECODED_BYTES}"
+        ));
+    }
     validate_graphql(&limits.graphql, issues);
     validate_jwt(&limits.jwt, issues);
     validate_hardening(&limits.hardening, issues);
@@ -4312,6 +4374,10 @@ mod tests {
         assert_eq!(config.limits.max_body_bytes, 8 * 1024 * 1024);
         assert_eq!(config.limits.body_inspection, BodyInspection::Strict);
         assert_eq!(config.limits.upload_inspection, UploadInspection::Strict);
+        assert_eq!(config.limits.saml.mode, SamlInspection::Strict);
+        assert_eq!(config.limits.saml.max_decoded_bytes, 1024 * 1024);
+        assert_eq!(config.limits.saml.multi_assertion, SamlFindingAction::Log);
+        assert_eq!(config.limits.saml.unsigned, SamlFindingAction::Log);
         assert_eq!(config.timeouts.header_read, Duration::from_secs(10));
         assert_eq!(config.timeouts.connection_idle, Duration::from_secs(60));
         assert_eq!(config.timeouts.response_body, Duration::from_secs(300));
@@ -7120,6 +7186,41 @@ categories:
             .expect("config");
         assert!(!config.limits.form.enabled);
         assert_eq!(config.limits.form.max_parts, 8);
+    }
+
+    #[test]
+    fn saml_limits_default_to_strict_bounded_inspection() {
+        let config = parse(BASE).expect("config");
+        assert_eq!(config.limits.saml.mode, SamlInspection::Strict);
+        assert_eq!(config.limits.saml.max_decoded_bytes, 1024 * 1024);
+
+        let config = parse_with(
+            BASE,
+            "limits: { saml: { mode: log, max_decoded_bytes: 2048, multi_assertion: block, unsigned: block } }\n",
+        )
+        .expect("config");
+        assert_eq!(config.limits.saml.mode, SamlInspection::Log);
+        assert_eq!(config.limits.saml.max_decoded_bytes, 2048);
+        assert_eq!(config.limits.saml.multi_assertion, SamlFindingAction::Block);
+        assert_eq!(config.limits.saml.unsigned, SamlFindingAction::Block);
+    }
+
+    #[test]
+    fn rejects_unbounded_saml_message_limits() {
+        for (body, expected) in [
+            (
+                "limits: { saml: { max_decoded_bytes: 0 } }\n",
+                "max_decoded_bytes",
+            ),
+            (
+                "limits: { saml: { max_decoded_bytes: 8388609 } }\n",
+                "max_decoded_bytes",
+            ),
+            ("limits: { saml: { mode: sometimes } }\n", "unknown variant"),
+        ] {
+            let error = parse_with(BASE, body).expect_err("invalid saml limit must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]

@@ -135,12 +135,13 @@ pub async fn forward_request(
 /// copies are removed from every forwarded request. Routing overrides
 /// (`X-Original-URL` and friends) are removed too: letting them reach the
 /// origin would let a request that passed path rules be routed somewhere else.
-const LEGACY_IDENTITY_HEADERS: [&str; 12] = [
+const LEGACY_IDENTITY_HEADERS: [&str; 13] = [
     "forwarded",
     "x-real-ip",
     "x-client-ip",
     "x-forwarded-port",
     "x-forwarded-host",
+    "x-forwarded-uri",
     "cf-connecting-ip",
     "true-client-ip",
     "x-original-url",
@@ -149,6 +150,27 @@ const LEGACY_IDENTITY_HEADERS: [&str; 12] = [
     "x-http-method-override",
     "x-method-override",
 ];
+
+/// The only forwarded-prefixed headers Kunato writes itself. Every other
+/// `X-Forwarded-*` copy is client-controlled and is stripped, so a proxy or
+/// authentication service behind Kunato cannot be steered by a forged value
+/// such as `X-Forwarded-Uri` (OAuth2 Proxy CVE-2026-40575).
+const CANONICAL_FORWARDED_HEADERS: [&str; 3] =
+    ["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"];
+
+fn strip_forged_forwarded_headers(target: &mut HeaderMap) {
+    let forged: Vec<HeaderName> = target
+        .keys()
+        .filter(|name| {
+            name.as_str().starts_with("x-forwarded-")
+                && !CANONICAL_FORWARDED_HEADERS.contains(&name.as_str())
+        })
+        .cloned()
+        .collect();
+    for name in forged {
+        target.remove(name);
+    }
+}
 
 pub(crate) fn set_forwarded_headers(
     target: &mut HeaderMap,
@@ -160,6 +182,7 @@ pub(crate) fn set_forwarded_headers(
     for name in LEGACY_IDENTITY_HEADERS {
         target.remove(name);
     }
+    strip_forged_forwarded_headers(target);
     if let Ok(forwarded_for) = HeaderValue::from_str(&normalize_ip(client_ip).to_string()) {
         target.insert("x-forwarded-for", forwarded_for);
     }
@@ -363,6 +386,10 @@ mod tests {
         target.insert("x-original-url", HeaderValue::from_static("/admin"));
         target.insert("x-rewrite-url", HeaderValue::from_static("/admin"));
         target.insert("x-forwarded-prefix", HeaderValue::from_static("/admin"));
+        target.insert("x-forwarded-uri", HeaderValue::from_static("/public"));
+        target.insert("x-forwarded-server", HeaderValue::from_static("internal"));
+        target.insert("x-forwarded-scheme", HeaderValue::from_static("https"));
+        target.insert("x-forwarded-path", HeaderValue::from_static("/public"));
         target.insert("x-http-method-override", HeaderValue::from_static("DELETE"));
         target.insert("x-method-override", HeaderValue::from_static("DELETE"));
         let mut source = HeaderMap::new();
@@ -373,6 +400,17 @@ mod tests {
         set_forwarded_headers(&mut target, &source, &uri, peer.ip(), "http");
 
         for name in LEGACY_IDENTITY_HEADERS {
+            assert!(
+                target.get(name).is_none(),
+                "{name} must not survive forwarding"
+            );
+        }
+        for name in [
+            "x-forwarded-uri",
+            "x-forwarded-server",
+            "x-forwarded-scheme",
+            "x-forwarded-path",
+        ] {
             assert!(
                 target.get(name).is_none(),
                 "{name} must not survive forwarding"

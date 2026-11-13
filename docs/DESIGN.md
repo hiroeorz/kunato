@@ -147,6 +147,12 @@ Components:
    array work are bounded; malformed/ambiguous metadata is rejected rather than
    silently skipped. The opt-in host/path-scoped PHP profile can deny multipart
    or configured upload-progress fields and always enforces form limits in scope.
+   Form-encoded or JSON SAML messages are decoded from base64 and DEFLATE and
+   structurally checked before rules run: DTDs, duplicate IDs, signature
+   references that do not name their enclosing element, assertions moved out of
+   the response, and (when configured to block) multiple subjects or unsigned
+   responses are rejected. XML signature verification and canonicalization stay
+   with the service provider.
 6. **GraphQL complexity check** — on a configured GraphQL endpoint, extract the
    document from the URL query, form, JSON, `application/graphql`, or multipart
    body and compute its depth and expanded field count. Fragment spreads are
@@ -305,9 +311,10 @@ budget, so decompression cannot stall the asynchronous request workers.
   this identity; transport connection caps keep using the actual peer. See
   `docs/development.md`, "Client identity behind trusted proxies".
 - Remove legacy identity headers (`Forwarded`, `X-Real-IP`, `X-Client-IP`,
-  `X-Forwarded-Port`, `CF-Connecting-IP`, `True-Client-IP`, and the selected
-  client identity header): clients can forge them, so applications behind
-  Kunato must trust the canonical `X-Forwarded-*` trio above instead.
+  `CF-Connecting-IP`, `True-Client-IP`, the selected client identity header,
+  and every `X-Forwarded-*` field Kunato does not write itself): clients can
+  forge them, so applications behind Kunato must trust the canonical
+  `X-Forwarded-*` trio above instead.
 - WebSocket handshakes keep `Connection` and `Upgrade` (normalized to
   `Connection: Upgrade` and `Upgrade: websocket`) while all other hop-by-hop
   headers, including fields nominated by the original `Connection`, are stripped

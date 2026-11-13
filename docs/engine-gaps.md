@@ -20,6 +20,9 @@ a cell breaks the table.
 | CVE | Product | Engine change | Why a rule cannot cover it | Reported | Status |
 | --- | --- | --- | --- | --- | --- |
 
-No open engine gaps as of 2026-11-03: generic JSON/XML nesting depth and the
-GraphQL batch/depth differentials are handled by the request-body checks added
-in this release.
+No open engine gaps as of 2026-11-14. The base64 SAML decoding gap (CVE-2026-123798
+and CVE-2026-123802) is implemented on main as `limits.saml`; installs gain it
+with the next binary release, and the managed rule set does not depend on it
+because the check is an engine limit. Generic JSON/XML nesting depth and the
+GraphQL batch/depth differentials are handled by the request-body checks added in
+the 0.18.0 release.
