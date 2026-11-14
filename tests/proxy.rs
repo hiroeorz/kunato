@@ -5892,6 +5892,48 @@ async fn websocket_upgrade_is_tunneled() {
 }
 
 #[tokio::test]
+async fn jwt_body_policy_forces_body_decoding() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nlimits: {{ jwt: {{ enabled: true, allowed_algorithms: [RS256] }}, saml: {{ mode: off }} }}\ncategories: []\n"
+    ))
+    .await;
+
+    // `text/plain` is not decoded by the form guard or the SAML guard, so only
+    // the JWT policy itself can require the body to be decompressed. The
+    // padding keeps the compressed stream from storing the token literally.
+    let hs = "eyJhbGciOiJIUzI1NiJ9.e30.c2ln";
+    let mut plain = vec![b'a'; 4096];
+    plain.extend_from_slice(format!("access_token={hs}").as_bytes());
+    let body = gzip(&plain);
+    assert!(
+        !body.windows(3).any(|window| window == b"eyJ"),
+        "the fixture must not carry the token literally"
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/token",
+        body,
+        &[("content-type", "text/plain"), ("content-encoding", "gzip")],
+    )
+    .await;
+    let (benign, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/token",
+        gzip(b"hello"),
+        &[("content-type", "text/plain"), ("content-encoding", "gzip")],
+    )
+    .await;
+    println!("jwt_status={status:?} benign_status={benign:?}");
+    assert_eq!(benign, StatusCode::OK);
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn websocket_frames_are_checked_by_the_jwt_policy() {
     let upstream = spawn_upgrade_upstream().await;
     let running = start_kunato(&format!(
@@ -6100,6 +6142,71 @@ categories:
     assert_eq!(
         opcode, 0x8,
         "an established tunnel must apply the reloaded rules"
+    );
+    assert_eq!(&payload[..2], &1008u16.to_be_bytes());
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_content_route_removal_applies_to_open_tunnels() {
+    let upstream = spawn_upgrade_upstream().await;
+    let base = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+content_routes:
+  - path: ^/ws$
+    methods: [GET]
+categories:
+  - name: ws-payload
+    action: BLOCK
+    rules:
+      - name: block-marker
+        match: {{ regex: FORBIDDEN_MARKER, in: [body] }}
+"
+    );
+    let running = start_kunato(&base).await;
+
+    let (handshake, mut stream) = websocket_handshake(running.addr, "/ws").await;
+    assert!(
+        handshake.starts_with("HTTP/1.1 101"),
+        "unexpected handshake: {handshake}"
+    );
+    stream
+        .write_all(&client_ws_frame(0x1, b"FORBIDDEN_MARKER", true))
+        .await
+        .expect("write marker");
+    let (opcode, _) = read_server_frame(&mut stream).await;
+    assert_eq!(
+        opcode, 0x1,
+        "the content route exempts body rules at handshake"
+    );
+
+    // The reload removes the route; the open tunnel must re-enable the body
+    // rule instead of keeping the handshake-time exemption.
+    let without = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+categories:
+  - name: ws-payload
+    action: BLOCK
+    rules:
+      - name: block-marker
+        match: {{ regex: FORBIDDEN_MARKER, in: [body] }}
+"
+    );
+    running
+        .config
+        .store(Arc::new(config::parse(&without).expect("valid config")));
+
+    stream
+        .write_all(&client_ws_frame(0x1, b"FORBIDDEN_MARKER", true))
+        .await
+        .expect("write marker");
+    let (opcode, payload) = read_server_frame(&mut stream).await;
+    assert_eq!(
+        opcode, 0x8,
+        "removing the content route must apply to established tunnels"
     );
     assert_eq!(&payload[..2], &1008u16.to_be_bytes());
 

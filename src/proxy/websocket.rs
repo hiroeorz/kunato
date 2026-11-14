@@ -193,7 +193,6 @@ pub(crate) async fn forward_handshake(
         uri: parts.uri.clone(),
         headers: parts.headers.clone(),
     };
-    let body_rules_exempt = snapshot.is_content_route(&parts.method, &parts.uri);
     tokio::spawn(tunnel(
         upgrade.on_upgrade,
         upstream_upgrade,
@@ -205,7 +204,6 @@ pub(crate) async fn forward_handshake(
         inspection,
         protection,
         owned,
-        body_rules_exempt,
         response_headers,
     ));
     Ok(Handshake::Upgraded(handshake))
@@ -230,7 +228,6 @@ async fn tunnel(
     inspection: Arc<InspectionBudget>,
     protection: Arc<ProtectionState>,
     request: OwnedRequest,
-    body_rules_exempt: bool,
     response_headers: HeaderMap,
 ) {
     let _guard = guard;
@@ -278,7 +275,6 @@ async fn tunnel(
         inspection,
         request,
         source.client_ip,
-        body_rules_exempt,
         message_limit,
     );
 
@@ -463,7 +459,6 @@ async fn pump_client_to_upstream<R, W>(
     inspection: Arc<InspectionBudget>,
     request: OwnedRequest,
     source_ip: IpAddr,
-    body_rules_exempt: bool,
     message_limit: usize,
 ) where
     R: AsyncRead + Unpin,
@@ -562,9 +557,11 @@ async fn pump_client_to_upstream<R, W>(
             return;
         }
         // Established tunnels follow a hot reload: each message is evaluated
-        // against the configuration current at that moment.
+        // against the configuration current at that moment, including the
+        // content-route exemption (a route removed by a reload must re-enable
+        // body rules on tunnels that are already open).
         let config = live_config.load();
-        let exempt = body_rules_exempt || config.is_content_route(&request.method, &request.uri);
+        let exempt = config.is_content_route(&request.method, &request.uri);
         let decode_body =
             !exempt && (config.has_body_target_rules() || config.limits.hardening.ssrf.enabled);
         let view = RequestView::with_body_decoding(

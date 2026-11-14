@@ -2364,7 +2364,12 @@ async fn process_inner(
             "multipart is disabled by the PHP profile",
         ));
     }
-    let inspect_body = (body_rules && !body_rules_exempt) || graphql_path || hardening_body;
+    // An enabled JWT policy scans the request body, so it is a body-inspection
+    // consumer: it must see a fully decoded body and the strict over-limit
+    // rejection must apply, like every other body policy.
+    let jwt_body = config.limits.jwt.enabled;
+    let inspect_body =
+        (body_rules && !body_rules_exempt) || graphql_path || hardening_body || jwt_body;
     let inspect_multipart = config.limits.upload_inspection != UploadInspection::Off
         && crate::upload::is_multipart(&parts.headers)
         && !body.is_empty();

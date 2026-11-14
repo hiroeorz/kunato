@@ -1415,7 +1415,9 @@ rejected instead of skipped. `Authorization` separates the scheme with any
 optional whitespace (including a tab), and cookies are inspected both raw and
 after percent-decoding. The check is part of `limits` and therefore remains
 active with `--disable-protection`. Body inspection applies the same
-content-type decoding as the rule engine (form percent decoding and JSON string
+content-type decoding as the rule engine (an enabled policy makes the request
+body an inspection consumer, so a supported `Content-Encoding` is decoded and an
+over-limit body is rejected in strict mode), with form percent decoding and JSON string
 unescaping), so a token written as `eyJ...%2E...` or `eyJ...\u002E...` is still
 checked. Algorithm names are compared
 case-insensitively after normalization; each entry is 1-32 ASCII letters,

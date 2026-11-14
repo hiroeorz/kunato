@@ -700,8 +700,8 @@ before the ordering repair.
 | S-07 | fixed | `has_saml_hint` is a strict superset of the field-name decoders (a literal name contains `SAML`; any escaped spelling contains `%` or `\`), so `SAM%4CResponse`, `S%41MLResponse` and `S\u0041MLResponse` reach the extractors; `mid_name_form_escapes_are_inspected`, `mid_name_json_escapes_are_inspected` and `saml_escaped_field_name_is_still_inspected` fail on the previous marker. |
 | S-08 | fixed | the placement check now requires the assertion to be a direct child of the message root `<Response>`; `assertion_under_a_wrapped_response_element_is_reported`, `root_level_assertion_is_reported` and `saml_assertion_under_a_wrapped_response_is_rejected` fail on the previous immediate-parent check. |
 | S-09 | fixed | `saml::inspect_truncated` returns a blocking `TooLarge` finding for a SAML-capable body cut at `max_body_bytes` (log-mode finding only under `mode: log`), before rule evaluation so `ALLOW` cannot bypass it; the documented trade-off is that over-limit form/JSON bodies are rejected while SAML strict is on. `truncated_saml_bodies_fail_closed_in_strict_mode`, `truncated_saml_bodies_are_logged_in_log_mode`, `truncated_non_saml_content_types_are_ignored` and `saml_message_past_the_inspection_prefix_is_rejected` cover it (the integration test fails on the previous behavior). |
-| S-10 | open | |
-| S-11 | open | |
+| S-10 | fixed | an enabled `limits.jwt` now joins `inspect_body`, so supported content encodings are decoded and the strict over-limit rejection applies; `jwt_body_policy_forces_body_decoding` (gzip `text/plain` carrier, token not literal in the compressed bytes) fails on the previous behavior. |
+| S-11 | fixed | the tunnel no longer captures the handshake-time `body_rules_exempt`; every message computes the exemption from the live configuration, so removing a content route re-enables body rules on open tunnels. `websocket_content_route_removal_applies_to_open_tunnels` detects a stale exemption. |
 | S-12 | open | |
 | S-13 | open | |
 | S-14 | open | |
