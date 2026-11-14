@@ -1491,6 +1491,152 @@ async fn send_h3_wait_for_stream_end(
     ended
 }
 
+/// Connect a raw QUIC (HTTP/3 ALPN) client without speaking HTTP/3.
+///
+/// `window` overrides the stream receive window the client grants, which is how
+/// a peer can leave the server's control stream without flow-control credit.
+async fn connect_raw_quic(
+    addr: SocketAddr,
+    certificate: rustls::pki_types::CertificateDer<'static>,
+    source: SocketAddr,
+    window: Option<u64>,
+) -> Result<(quinn::Endpoint, quinn::Connection), String> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).expect("trust test certificate");
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h3".to_vec()];
+    let quic = quinn::crypto::rustls::QuicClientConfig::try_from(client_config)
+        .expect("QUIC client config");
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
+    if let Some(window) = window {
+        let mut transport = quinn::TransportConfig::default();
+        transport.stream_receive_window(quinn::VarInt::from_u64(window).expect("window"));
+        transport.keep_alive_interval(Some(Duration::from_millis(300)));
+        client_config.transport_config(Arc::new(transport));
+    }
+    let mut endpoint = quinn::Endpoint::client(source).expect("client endpoint");
+    endpoint.set_default_client_config(client_config);
+    let connection = endpoint
+        .connect(addr, "localhost")
+        .expect("start QUIC connection")
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok((endpoint, connection))
+}
+
+#[tokio::test]
+async fn http3_rejects_an_oversized_headers_frame_before_buffering_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+tls:
+  cert_file: {}
+  key_file: {}
+http3: {{ enabled: true }}
+timeouts: {{ header_read: 10s, connection_idle: 30s, shutdown_grace: 500ms }}
+limits: {{ max_header_bytes: 32768 }}
+categories: []
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+    let (_endpoint, connection) = connect_raw_quic(
+        running.addr,
+        certificate,
+        "127.0.0.4:0".parse().expect("client source"),
+        None,
+    )
+    .await
+    .expect("client connection");
+
+    // A client control stream with a minimal SETTINGS frame, like a normal h3
+    // client, so the server accepts request streams.
+    let mut control = connection.open_uni().await.expect("control stream");
+    control
+        .write_all(&[0x00, 0x04, 0x00])
+        .await
+        .expect("client settings");
+
+    let (mut send, _recv) = connection.open_bi().await.expect("request stream");
+    // HEADERS declaring 256 MiB (four-byte varint) against a 32 KiB limit, then
+    // payload that the server must never retain.
+    send.write_all(&[0x01, 0x90, 0x00, 0x00, 0x00])
+        .await
+        .expect("oversized headers declaration");
+    let _ = send.write_all(&vec![0u8; 64 * 1024]).await;
+
+    let rejected = tokio::select! {
+        _ = send.stopped() => true,
+        _ = connection.closed() => true,
+        _ = tokio::time::sleep(Duration::from_secs(3)) => false,
+    };
+    assert!(
+        rejected,
+        "the server must reject an oversized HEADERS frame instead of buffering it"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn http3_idle_connection_releases_its_slot_without_control_credit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+tls:
+  cert_file: {}
+  key_file: {}
+http3: {{ enabled: true }}
+protection: {{ max_connections: 1 }}
+timeouts: {{ header_read: 2s, connection_idle: 3s, shutdown_grace: 500ms }}
+categories: []
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    // The attacker grants only the SETTINGS-sized window, never reads the
+    // server control stream, and keeps the connection alive with 300 ms pings.
+    // Closing an idle h3 connection writes GOAWAY on that control stream, so an
+    // unbounded close would hold the only connection slot forever.
+    let (attack_endpoint, attack_connection) = connect_raw_quic(
+        running.addr,
+        certificate.clone(),
+        "127.0.0.2:0".parse().expect("attack source"),
+        Some(31),
+    )
+    .await
+    .expect("attack connection");
+
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+
+    let admitted = tokio::time::timeout(
+        Duration::from_secs(3),
+        connect_raw_quic(
+            running.addr,
+            certificate,
+            "127.0.0.3:0".parse().expect("second source"),
+            None,
+        ),
+    )
+    .await;
+    assert!(
+        matches!(admitted, Ok(Ok(_))),
+        "an idle HTTP/3 connection must not hold the shared connection slot: {admitted:?}"
+    );
+
+    drop(attack_connection);
+    drop(attack_endpoint);
+    running.stop().await;
+}
+
 #[tokio::test]
 async fn http3_total_response_deadline_ends_a_dripping_stream() {
     let upstream = spawn_stalling_upstream().await;

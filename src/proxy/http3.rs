@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use h3::error::{Code, StreamError};
@@ -20,6 +21,7 @@ use crate::error::Error;
 use crate::protection::ConnectionGuard;
 use crate::proxy::BodyExt;
 use crate::proxy::forward::HttpError;
+use crate::proxy::h3_limits::{BoundedConnection, BoundedRecv, BoundedSend};
 use crate::proxy::server::{self, Context, InspectionGuard, RequestPayload};
 use crate::proxy::tls;
 use crate::proxy::{ProxyBody, settle_body_end};
@@ -190,7 +192,10 @@ async fn serve_h3(
     builder.max_field_section_size(max_field_section_size);
     let mut connection = match tokio::time::timeout(
         handshake_timeout,
-        builder.build(h3_quinn::Connection::new(connection)),
+        builder.build(BoundedConnection::new(
+            h3_quinn::Connection::new(connection),
+            max_field_section_size,
+        )),
     )
     .await
     {
@@ -209,6 +214,11 @@ async fn serve_h3(
     let limits = context.config();
     let header_read = limits.timeouts.header_read;
     let idle = limits.timeouts.connection_idle;
+    // Closing an h3 connection writes GOAWAY on the server control stream,
+    // which needs peer flow-control credit. A peer that never reads the control
+    // stream would otherwise keep this task (and the connection guard) alive
+    // past `connection_idle`, so every close attempt is bounded.
+    let close_timeout = idle.min(Duration::from_secs(1));
     let mut requests = JoinSet::new();
     let mut closing = false;
     let mut shutting_down = false;
@@ -216,7 +226,7 @@ async fn serve_h3(
         tokio::select! {
             changed = shutdown.changed(), if !closing => {
                 if changed.is_err() || *shutdown.borrow_and_update() {
-                    let _ = connection.shutdown(0).await;
+                    let _ = tokio::time::timeout(close_timeout, connection.shutdown(0)).await;
                     closing = true;
                     shutting_down = true;
                 }
@@ -227,7 +237,7 @@ async fn serve_h3(
                 idle,
             ) => {
                 debug!(client = %peer, "closing idle HTTP/3 connection");
-                let _ = connection.shutdown(0).await;
+                let _ = tokio::time::timeout(close_timeout, connection.shutdown(0)).await;
                 break;
             }
             accepted = connection.accept() => {
@@ -275,7 +285,7 @@ async fn serve_h3(
 }
 
 async fn handle_request(
-    resolver: RequestResolver<h3_quinn::Connection, Bytes>,
+    resolver: RequestResolver<BoundedConnection, Bytes>,
     peer: SocketAddr,
     context: Context,
     active: server::ActiveRequest,
@@ -350,12 +360,12 @@ async fn handle_request(
 /// A streaming body over the receive half of an HTTP/3 request stream, used
 /// when only a prefix of the request body was buffered for inspection.
 struct RequestBody {
-    recv: RequestStream<h3_quinn::RecvStream, Bytes>,
+    recv: RequestStream<BoundedRecv, Bytes>,
     done: bool,
 }
 
 impl RequestBody {
-    fn new(recv: RequestStream<h3_quinn::RecvStream, Bytes>) -> Self {
+    fn new(recv: RequestStream<BoundedRecv, Bytes>) -> Self {
         Self { recv, done: false }
     }
 }
@@ -395,7 +405,7 @@ impl Body for RequestBody {
 /// `limits.max_body_bytes` are rejected by strict mode or streamed by `stream`
 /// mode after the prefix is inspected.
 async fn read_prefix(
-    mut recv: RequestStream<h3_quinn::RecvStream, Bytes>,
+    mut recv: RequestStream<BoundedRecv, Bytes>,
     config: &CompiledConfig,
     source: crate::client_ip::ClientSource,
     mut inspection: InspectionGuard,
@@ -469,7 +479,7 @@ async fn read_prefix(
 }
 
 async fn send_response(
-    stream: &mut RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+    stream: &mut RequestStream<BoundedSend, Bytes>,
     response: Response<ProxyBody>,
     head_request: bool,
     idle: std::time::Duration,

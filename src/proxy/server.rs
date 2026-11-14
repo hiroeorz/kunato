@@ -60,11 +60,12 @@ const INSPECTION_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const SOURCE_INSPECTION_BUDGET_BYTES: usize = INSPECTION_BUDGET_BYTES / 3;
 const REQUEST_INSPECTION_FACTOR: usize = 8;
 const RESPONSE_INSPECTION_FACTOR: usize = 3;
-/// Requests start with this small baseline; the raw prefix grows it as body
-/// bytes arrive, and the decoded-form worst case is reserved only immediately
-/// before decoding and rule evaluation. A stalled body therefore holds its
-/// actual buffered bytes, not the whole decoding budget.
-const MIN_INSPECTION_RESERVATION: usize = 64 * 1024;
+/// A response with body rules reserves its whole prefix worst case up front,
+/// with this floor so a tiny configured limit still reserves a usable share.
+/// Requests do not use a floor: they reserve only the bytes actually buffered,
+/// because a stalled body would otherwise hold a fixed share of the budget for
+/// the whole `body_read` deadline.
+const MIN_RESPONSE_INSPECTION_RESERVATION: usize = 64 * 1024;
 
 /// CPU-bound upload inspection is moved to the blocking pool. Cap the number
 /// of concurrent jobs at the available parallelism so a burst of large
@@ -144,6 +145,9 @@ impl InspectionBudget {
     }
 
     fn add_source(&self, source: IpAddr, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
         let mut sources = self
             .per_source
             .lock()
@@ -277,7 +281,6 @@ fn request_inspection_bytes(config: &CompiledConfig, raw_bytes: usize) -> usize 
     raw_bytes
         .min(config.limits.max_body_bytes)
         .saturating_mul(REQUEST_INSPECTION_FACTOR)
-        .max(MIN_INSPECTION_RESERVATION)
 }
 
 fn grow_inspection_to(inspection: &mut InspectionGuard, target: usize) -> bool {
@@ -296,9 +299,7 @@ pub(crate) fn grow_request_inspection_raw(
     config: &CompiledConfig,
     observed_bytes: usize,
 ) -> bool {
-    let target = observed_bytes
-        .min(config.limits.max_body_bytes)
-        .max(MIN_INSPECTION_RESERVATION);
+    let target = observed_bytes.min(config.limits.max_body_bytes);
     grow_inspection_to(inspection, target)
 }
 
@@ -530,15 +531,13 @@ impl Context {
             .try_acquire_connection(ip, &config.protection)
     }
 
-    /// Reserve the small baseline share of memory for inspecting one request
-    /// body. The raw prefix and decoded forms grow it as needed, and the
-    /// reservation is charged to the resolved client source.
+    /// Start a request inspection reservation at zero bytes. The raw prefix
+    /// grows it as body bytes actually arrive, so a request that declares a
+    /// body and sends nothing holds no share of the shared budget.
     pub(crate) fn reserve_request_inspection(&self, source: IpAddr) -> Option<InspectionGuard> {
         let config = self.config();
-        self.inspection.reserve_for_key(
-            tracking_key(source, &config.protection),
-            MIN_INSPECTION_RESERVATION,
-        )
+        self.inspection
+            .reserve_for_key(tracking_key(source, &config.protection), 0)
     }
 
     /// Reserve the worst-case memory for inspecting one upstream response.
@@ -552,7 +551,7 @@ impl Context {
                 .limits
                 .max_response_body_bytes
                 .saturating_mul(RESPONSE_INSPECTION_FACTOR)
-                .max(MIN_INSPECTION_RESERVATION)
+                .max(MIN_RESPONSE_INSPECTION_RESERVATION)
         } else {
             0
         };
@@ -3441,7 +3440,7 @@ decoys:
             .expect("the body inspection baseline must fit");
         assert_eq!(
             server.context.inspection.reserved.load(Ordering::Relaxed),
-            crate::decoy::SCAN_BYTES + MIN_INSPECTION_RESERVATION
+            crate::decoy::SCAN_BYTES
         );
 
         drop(guard);
@@ -3450,6 +3449,104 @@ decoys:
             server.context.inspection.reserved.load(Ordering::Relaxed),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_request_bodies_do_not_exhaust_the_inspection_budget() {
+        let config = Arc::new(Snapshot::new(
+            crate::config::parse(
+                "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+categories: []
+",
+            )
+            .expect("config"),
+        ));
+        let server = Server::bind(
+            "127.0.0.1:0".parse().expect("listen"),
+            Arc::clone(&config),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("server");
+        let budget = server.context.inspection_budget();
+
+        // A request that declares a body and sends nothing buffers nothing, so
+        // it must reserve nothing. More stalled requests than the process-wide
+        // budget could ever hold at the old 64 KiB baseline (4096) therefore
+        // must not make the next reservation fail.
+        let mut guards = Vec::new();
+        for index in 0..5000u32 {
+            let source = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 | index));
+            let guard = server
+                .context
+                .reserve_request_inspection(source)
+                .expect("a stalled request must not reserve budget");
+            assert_eq!(guard.bytes(), 0, "a stalled request must hold no bytes");
+            guards.push(guard);
+        }
+        assert_eq!(
+            budget.reserved.load(Ordering::Relaxed),
+            0,
+            "stalled requests must not consume the shared budget"
+        );
+
+        // An unrelated clean request must still be admitted while they are open.
+        assert!(
+            server
+                .context
+                .reserve_request_inspection("203.0.113.9".parse().expect("source"))
+                .is_some(),
+            "a clean client must keep being admitted"
+        );
+
+        drop(guards);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn request_inspection_charges_only_buffered_bytes() {
+        let config = Arc::new(Snapshot::new(
+            crate::config::parse(
+                "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+categories: []
+",
+            )
+            .expect("config"),
+        ));
+        let server = Server::bind(
+            "127.0.0.1:0".parse().expect("listen"),
+            Arc::clone(&config),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("server");
+        let budget = server.context.inspection_budget();
+        let config = config.load();
+        let mut guard = server
+            .context
+            .reserve_request_inspection("203.0.113.7".parse().expect("source"))
+            .expect("reservation");
+
+        assert_eq!(guard.bytes(), 0);
+        assert!(grow_request_inspection_raw(&mut guard, &config, 0));
+        assert_eq!(guard.bytes(), 0, "an empty prefix holds no bytes");
+        assert!(grow_request_inspection_raw(&mut guard, &config, 1024));
+        assert_eq!(guard.bytes(), 1024);
+        assert!(grow_request_inspection_raw(&mut guard, &config, 8192));
+        assert_eq!(guard.bytes(), 8192);
+        assert!(
+            grow_request_inspection_raw(&mut guard, &config, 4096),
+            "growth is monotonic"
+        );
+        assert_eq!(guard.bytes(), 8192);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 8192);
+
+        drop(guard);
+        assert_eq!(budget.reserved.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -3481,7 +3578,7 @@ categories:
         let config = config.load();
         let budget = Arc::clone(&server.context.inspection);
         let _occupied = budget
-            .reserve(INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION)
+            .reserve(INSPECTION_BUDGET_BYTES - MIN_RESPONSE_INSPECTION_RESERVATION)
             .expect("leave response slot");
         let inspection = server
             .context
@@ -3505,13 +3602,13 @@ categories:
 
         assert_eq!(
             budget.reserved.load(Ordering::Relaxed),
-            INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION + 2,
+            INSPECTION_BUDGET_BYTES - MIN_RESPONSE_INSPECTION_RESERVATION + 2,
             "only the buffered prefix stays reserved after inspection"
         );
         drop(response);
         assert_eq!(
             budget.reserved.load(Ordering::Relaxed),
-            INSPECTION_BUDGET_BYTES - MIN_INSPECTION_RESERVATION
+            INSPECTION_BUDGET_BYTES - MIN_RESPONSE_INSPECTION_RESERVATION
         );
     }
 

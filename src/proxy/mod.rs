@@ -1,6 +1,7 @@
 pub mod body;
 pub mod client;
 pub mod forward;
+mod h3_limits;
 pub mod http3;
 pub mod response;
 pub mod server;

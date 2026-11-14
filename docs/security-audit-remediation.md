@@ -1,13 +1,19 @@
 # Security audit remediation plan
 
-This document records the remediation plan for the security audit in
-`/home/agent/security-audit-skill/kunato/run-1/` (target commit
-`9d91a4563b70544bf9b0ced5431d5f62dbeba36f`). The audit confirmed 11 findings
-(5 high, 6 medium, 0 critical) and left 8 source-grounded leads as
-needs-validation. This file is the working record: each item lists the source
+This document holds the remediation plan for every security audit of this
+repository. Each audit is one top-level section with its own scope, priority
+matrix, phases, verification gate and implementation status.
+
+- **First audit (2026-10-23, commit `9d91a45`)** — 11 findings, 8 leads. Its
+  section follows this introduction and is complete.
+- **Second audit (2026-11-14, commit `9cc7109`)** — 16 findings, 3 leads, and one
+  workflow-ordering defect. Its section is appended after the first audit and
+  starts at "Second audit: 2026-11-14".
+
+This document is the working record: each item lists the source
 boundary, the intended fix, the regression test, and the acceptance criteria.
 
-## Scope and policy
+## First audit (2026-10-23): scope and policy
 
 1. Add a regression test first: it must fail on the old behavior and pass after
    the fix.
@@ -294,3 +300,413 @@ validation in `NEEDS-VALIDATION.md` is still required for the deployment
 specifics of N-01 (non-consuming origin), N-03 (effective upstream overlap),
 N-05 (a migrated client), N-06 (a real PHP session), and N-08 (host-root
 installer behavior); the source-side defenses are in place.
+
+---
+
+# Second audit: 2026-11-14
+
+This section records the remediation plan for the security audit in
+`/home/hiroe/security-audit-skill/kunato/run-1/` (target commit
+`9cc7109655d5d41a5fadf7c9407738135b31f9c7`). The audit confirmed 16 findings
+(3 high, 10 medium, 3 low), left 3 source-grounded leads as needs-validation,
+and recorded one workflow-ordering defect discovered while validating the
+findings. Full evidence, traces and patch sketches live in that run's
+`REPORT.md`, `FINDINGS-DETAIL.md` and `findings.json`.
+
+## Second-audit scope and policy
+
+1. Add the regression test first: it must fail on the old behavior and pass
+   after the fix. Every item below names the test that proves it.
+2. Keep changes minimal and preserve the design invariants: fail closed, never
+   panic while handling a request, bound every resource, and never weaken
+   configuration reload safety.
+3. **Fix the rule-pipeline gates (S-12 to S-16) before repairing the
+   verify/signing ordering (W-01).** The ordering regression is currently the
+   only control that stops a weakened managed rule set from being signed; it is
+   an accident, not a defense, so it must be repaired last and deliberately.
+4. Separate engine fixes (a binary release) from CI, workflow and installer
+   fixes (effective on merge).
+5. Do not treat the three needs-validation leads (L-01 to L-03) as confirmed
+   vulnerabilities. Apply the cheap defensive fix and leave the
+   deployment-specific proof to the owner.
+6. Correct `docs/attack-coverage.md` wherever a fix changes a verdict (SAML
+   structural checks, request-target path inspection, HTTP/3 head and
+   connection bounds, GraphQL document sources, JWT body policy, WebSocket
+   hot-reload behavior) and `docs/release-signing.md` for W-01. The coverage
+   tracker must not claim more than the code enforces.
+
+## Second-audit priority matrix
+
+| ID | Severity | Area | Size | Delivery |
+|---|---|---|---|---|
+| S-01 | high | Process-wide inspection budget exhaustion (503 to every client) | M | next release |
+| S-02 | high | HTTP/3 idle close pins connection slots | S | next release |
+| S-03 | high | HTTP/3 HEADERS buffered before the field-section limit | M | next release (in-tree wrapper; remove after an h3 upgrade) |
+| S-04 | medium | Authority-form request target skips path rules (HTTP/1.1 and HTTP/3) | S | next release |
+| S-05 | medium | GraphQL envelope hides the executed document from complexity checks | S | next release |
+| S-06 | medium | Concatenated zstd frames after the first are forwarded uninspected | S | next release |
+| S-07 | medium | SAML guard skipped by an escaped field name | S | next release |
+| S-08 | medium | SAML assertion-placement check accepts a nested `Response` | S | next release |
+| S-09 | low | SAML message beyond the inspection prefix is forwarded uninspected | S | next release |
+| S-10 | low | Opt-in JWT body policy does not force body decoding | S | next release |
+| S-11 | low | WebSocket tunnels keep a stale content-route exemption after reload | S | next release |
+| S-12 | medium | ALLOW policy gate accepts non-canonical spellings | M | workflow |
+| S-13 | medium | Oversized rules validator erases the rollback floor | S | next release |
+| S-14 | medium | Black-box gate passes when the driver fails | S | workflow |
+| S-15 | medium | Black-box driver injects `Host`/`Content-Length` | S | workflow |
+| S-16 | medium | Append-only corpus guard treats a binary diff as zero deletions | S | workflow |
+| W-01 | high (process) | Verify job runs the committed-signature test against an unsigned candidate | S | workflow |
+| L-01 | lead | SSRF host canonicalization (IPv4/IDNA aliases) | S | next release + owner check |
+| L-02 | lead | Redirect/duplicate-parameter checks inspect one decode pass | S | next release + owner check |
+| L-03 | lead | `kunato init` follows a symlink in a privileged write | S | next release + owner check |
+
+## Phase A: availability (high)
+
+### S-01: process-wide inspection budget exhaustion
+
+- Surface: `src/proxy/server.rs` (`INSPECTION_BUDGET_BYTES`,
+  `MIN_INSPECTION_RESERVATION`, `reserve_request_inspection`,
+  `grow_request_inspection_raw`).
+- Change: stop reserving a fixed 64 KiB baseline before a body byte exists.
+  Reserve zero at admission and reserve exactly the bytes actually buffered as
+  frames arrive. Do not replace the floor with a smaller one: a one-byte body
+  must not reserve 64 KiB, and the read-path growth must be the only consumer of
+  the shared budget. A request that buffers nothing must not deny admission to
+  anyone.
+- Tests: `audit_many_sources_do_not_exhaust_the_process_inspection_budget`
+  (N sources with stalled bodies cannot make a clean client's reservation
+  fail), `inspection_guard_grows_and_releases_its_reservation` still passes, and
+  a request held to the `body_read` deadline releases its reservation.
+- Acceptance: with default limits, many source identities that each hold the
+  maximum number of stalled requests cannot push the shared budget to
+  exhaustion, and a clean bodyless GET keeps being admitted.
+
+### S-02: HTTP/3 idle close pins connection slots
+
+- Surface: `src/proxy/http3.rs` (`serve_h3` idle and shutdown close arms).
+- Change: bound both `connection.shutdown(0)` awaits with a short deadline
+  derived from `connection_idle` (for example `idle.min(Duration::from_secs(1))`),
+  and always fall through to `requests.abort_all()` and the unconditional guard
+  drop.
+- Tests: `http3_idle_close_can_hang_on_control_stream_credit` (advertise a
+  SETTINGS-sized uni-stream window, never read the server control stream, keep
+  the QUIC connection alive; a second source is admitted after
+  `header_read`/`connection_idle`), plus a control with a large window.
+- Acceptance: a peer cannot hold a `ConnectionGuard` past the documented idle
+  bound, and the close still completes promptly when the peer grants credit.
+
+### S-03: HTTP/3 HEADERS buffering before the field-section limit
+
+- Surface: `src/proxy/http3.rs` (h3 builder), dependency `h3 0.0.8`.
+- Change: reject a HEADERS frame whose declared length exceeds
+  `limits.max_header_bytes` before its payload is accumulated. Preferred: an
+  upstream h3 release (or a vendored patch) that enforces
+  `max_field_section_size` from the declared frame length, and the same guard
+  for trailer HEADERS. Fallback: a stream adapter that fails a request stream
+  once more than `max_header_bytes` bytes are read before the head resolves.
+- Tests: `http3_buffers_oversized_headers_frame_before_the_field_section_limit`
+  (declares 256 MiB and delivers 24 MiB with the default 10 s `header_read`;
+  server RSS must not grow by the delivered bytes and the stream must be
+  rejected), plus a conforming 32 KiB frame that still works.
+- Acceptance: an incomplete, over-limit HEADERS frame cannot retain more than
+  `max_header_bytes` per stream, and the documented 431 path still applies to
+  complete oversized heads.
+
+## Phase B: inspection bypasses
+
+### S-04: authority-form request target
+
+- Surface: `src/proxy/server.rs` (`request_head_error`).
+- Change: reject a request target that does not carry an absolute path before
+  policy evaluation: require `parts.uri.path_and_query()` and a `/`-prefixed
+  path, except `OPTIONS *`. The same check covers the HTTP/3 header block
+  without `:path`/`:scheme`, which produces the same empty path.
+- Tests: `authority_form_target_is_rejected_before_rule_evaluation` (HTTP/1.1
+  `GET host:port` -> 400), `http3_missing_path_pseudo_header_is_rejected`
+  (header block without `:path`/`:scheme` -> 400), and controls that
+  origin-form, absolute-form and `OPTIONS *` keep working.
+- Acceptance: every forwarded request is inspected on the path the upstream
+  routes on, on HTTP/1.1, HTTP/2 and HTTP/3.
+
+### S-05: GraphQL envelope hides the executed document
+
+- Surface: `src/graphql.rs` (`collect_json_body_queries`,
+  `collect_json_text_queries`).
+- Change: inspect the union of every document the transport may execute
+  (top-level `query`, `payload.query`, batch entries, multipart `operations`)
+  instead of selecting a branch from the attacker-supplied `type`. Keep
+  `Uninspectable` only for an operation envelope with no document at all.
+- Tests: `graphql_envelope_cannot_hide_a_top_level_query` (deep document and
+  introspection behind `{"type":"start","payload":{"query":"{a}"}}` -> 400/403),
+  plus the existing plain, batch, form and multipart cases.
+- Acceptance: the depth/field/introspection limits apply to every document the
+  upstream may execute, and the WebSocket envelope behavior is unchanged.
+
+### S-06: concatenated zstd frames
+
+- Surface: `src/decoding.rs` (`decode_body_for_inspection`, zstd branch;
+  `read_bounded`).
+- Change: decode every concatenated frame the way `MultiGzDecoder` handles gzip
+  members: reinitialize the decoder at each frame boundary with the remaining
+  input, return `Complete` only when the input is exhausted, `Truncated` when
+  the output limit is reached, and `Malformed` for trailing non-frame bytes.
+- Tests: `zstd_concatenated_frames_are_inspected` (empty first frame + payload
+  frame: decoded output must contain the second frame), a single-frame control,
+  an over-limit two-frame body -> 413, and a garbage-suffix body -> 400.
+- Acceptance: a request body is never forwarded with an encoded body that
+  could not be fully inspected, for gzip and zstd alike.
+
+### S-07: SAML guard skipped by an escaped field name
+
+- Surface: `src/saml.rs` (`messages`, `has_saml_marker`, `form_messages`,
+  `json_messages`).
+- Change: remove the raw-byte `has_saml_marker` early return (or replace it
+  with a prefilter that is a superset of the extractors' key decoding) and
+  attempt form/JSON extraction for every body of a SAML-capable media type; the
+  extractors already return `None` when no SAML field is present.
+- Tests: `saml_escaped_field_name_is_inspected` (`SAM%4CResponse`,
+  `S%41MLResponse`, `SAM%4cResponse`, `S\u0041MLResponse`,
+  `SAM\u004cResponse` -> 403 with the same payload that a literal field name
+  rejects), the `note=SAML` re-enable control, and a double-encoded negative.
+- Acceptance: every form/JSON representation the origin can decode to a
+  `SAMLResponse`/`SAMLRequest` reaches the structural checks.
+
+### S-08: SAML assertion placement
+
+- Surface: `src/saml.rs` (`Analyzer::element`).
+- Change: anchor the placement check to the message root: report
+  `AssertionOutsideResponse` unless the assertion's parent is the root element
+  and the root local name is `Response`; reject a root-level assertion as well.
+- Tests: `saml_assertion_outside_response_is_rejected` (nested
+  `<samlp:Extensions><samlp:Response>` wrapper and a root-level signed
+  assertion -> 403), the Extensions-direct control, and a legitimate direct
+  child that still passes.
+- Acceptance: strict mode rejects any plaintext assertion that is not a direct
+  child of the message `Response`.
+
+### S-09: SAML truncation fail-open
+
+- Surface: `src/proxy/server.rs` (`inspect_body`, strict over-limit gate) and
+  `src/saml.rs` (`inspect`).
+- Change: treat SAML as a body-completeness consumer: include `saml_body` in the
+  strict over-limit rejection and pass `body_truncated` into `saml::inspect`,
+  returning a blocking `TooLarge`/`Incomplete` finding for a SAML-capable body
+  that could not be read in full (mirror `graphql::Violation::Incomplete`).
+  Document the fail-closed trade-off for over-limit JSON bodies that carry no
+  SAML field, and apply the same rejection under `body_inspection: stream`.
+- Tests: `saml_truncated_json_body_is_rejected` (DTD payload after the
+  `max_body_bytes` cut -> 413), the under-limit control -> 403, the form carrier
+  -> 413, and a deployment with one `in: [body]` rule as the existing control.
+- Acceptance: a SAML message that cannot be read in full is never forwarded.
+
+### S-10: JWT body policy does not force decoding
+
+- Surface: `src/proxy/server.rs` (`inspect_body`).
+- Change: include an enabled `limits.jwt` in the body-inspection requirement so
+  `decode_body` decodes supported `Content-Encoding` values and the strict
+  over-limit rejection applies; reject unsupported encodings instead of
+  forwarding.
+- Tests: `jwt_body_policy_decodes_and_bounds_the_body` (plain HS256 -> 403
+  control; gzip JSON with `limits.saml.mode: off` -> 403; over-limit body with
+  `max_body_bytes: 64` -> 413; text/plain gzip under defaults -> 403).
+- Acceptance: with `limits.jwt` enabled, a body-borne token either reaches the
+  scan fully decoded or the request fails closed.
+
+### S-11: WebSocket content-route exemption after reload
+
+- Surface: `src/proxy/websocket.rs` (`forward_handshake`,
+  `pump_client_to_upstream`).
+- Change: recompute the content-route decision from the live configuration for
+  every message; remove the handshake-captured `body_rules_exempt` boolean and
+  its threading.
+- Tests: `websocket_content_route_removal_applies_to_open_tunnels` (open a
+  tunnel on a content route, reload without it, the next matching frame closes
+  with 1008; a fresh tunnel closes too).
+- Acceptance: established tunnels follow a hot reload exactly as fresh requests
+  do, as documented.
+
+## Phase C: rule-pipeline and signing integrity
+
+### S-12: ALLOW policy gate spellings
+
+- Surface: `scripts/check-rules-policy.py` and its self-test.
+- Change: replace the fixed-column scanner with a positive structural allowlist:
+  accept only `  - name: NAME` category entries, `      - name: NAME` rule
+  entries, and the canonical key columns; reject every other sequence entry,
+  key or indentation. This is the shape the generator emits, so a future schema
+  addition must extend the allowlist (fail-closed direction). Add regression
+  cases for all five demonstrated spellings (tab after the dash, uniformly
+  deeper block, bare dash, nested name scalar, `enabled:`-first entry).
+- Tests: `scripts/test_check_rules_policy.py` cases for each spelling plus the
+  canonical enabled-ALLOW control; the pristine `rules.example.yaml` and
+  `dist/rules.yaml` must still pass.
+- Acceptance: no YAML spelling the in-tree parser accepts can place an enabled
+  ALLOW category outside the gate's view.
+
+### S-13: rollback floor erased by response metadata
+
+- Surface: `src/rules_update.rs` (`MAX_STATE_BYTES`, `UpdateState::read`,
+  `fetch`, `update_candidate`).
+- Change: bound `ETag`/`Last-Modified` at capture (ignore values above a few
+  hundred bytes), persist `signature_timestamp` in a separate fixed-format
+  record that validators cannot resize, and fail the update closed when an
+  existing state/floor record is unreadable or oversized while a trusted key is
+  configured.
+- Tests: `oversized_etag_does_not_erase_the_rollback_floor` (a 20 KiB ETag
+  leaves the floor readable and the older candidate still refused), a
+  first-install control, and an unreadable-state fail-closed case.
+- Acceptance: a rules response cannot make the install accept a candidate older
+  than the installed signed timestamp.
+
+### S-14: black-box gate passes when the driver fails
+
+- Surface: `scripts/blackbox-test.sh`, `scripts/blackbox-report.py`.
+- Change: keep the driver's exit status and fail on a non-zero value; require
+  one parsed result per corpus line (or reconcile the driver's per-phase totals
+  with the corpus) before the report may print PASS.
+- Tests: a shell/report regression test with (a) a zero-byte log, (b) a
+  malformed corpus line that aborts the driver, (c) a partial log, and (d) a
+  clean run.
+- Acceptance: the gate fails when the corpus did not execute.
+
+### S-15: black-box driver injects `Host`/`Content-Length`
+
+- Surface: `blackbox/src/main.rs` (`send_http1`, `parse_request`).
+- Change: emit the driver `Host` only when the corpus supplies none (or add an
+  explicit authority attribute), and suppress the automatic framing header when
+  the corpus declares `Content-Length`/`Transfer-Encoding`. Add an optional
+  expected-status/expected-rule field so a generic parser 400 cannot stand in
+  for a rule block.
+- Tests: a unit test over the built request head for the 17 Host-carrying
+  corpus lines (exactly one Host), the `blocked.txt:960` framing line (one
+  `Content-Length`), and a gate run with the `malformed-host-header` rule
+  removed that must fail.
+- Acceptance: a blocked corpus line exercises the rule it names; removing that
+  rule fails the gate.
+
+### S-16: append-only corpus guard and binary diffs
+
+- Surface: `.github/workflows/daily-cve.yml` (append-only step).
+- Change: compare bytes against the committed blob (`git show HEAD:<path>` and
+  require the current file to start with those bytes) instead of summing
+  `git diff --numstat` deletions, so a NUL byte cannot zero the count.
+- Tests: a workflow regression fixture with (a) a NUL-containing deletion, (b) a
+  plain deletion, (c) a legitimate append, (d) no change.
+- Acceptance: no corpus edit other than a true prefix append is accepted,
+  regardless of the file's byte content.
+
+### W-01: verify/signing ordering (fix last)
+
+- Surface: `.github/workflows/daily-cve.yml` (verify and sign-and-push jobs),
+  `src/trust.rs` (`the_committed_rules_signature_is_valid`),
+  `docs/release-signing.md`.
+- Change: the verify job regenerates `dist/rules.yaml`, so it necessarily holds
+  an unsigned candidate. Do not run the committed-pair test against that
+  candidate in verify; run it on the post-signing artifact (or on `main` after
+  the signing job) and correct `docs/release-signing.md:121`. Keep the
+  sign-and-push job's own signature verification with the embedded rules key.
+- Tests: a workflow dry run on a fork where a categories change reaches the
+  black-box step and signs, and a control where an invalid signature is
+  rejected.
+- Acceptance: a legitimate rule-set change can be published, and a weakened one
+  cannot pass the repaired gates. **Sequence:** land S-12 to S-16 first.
+
+## Phase D: needs-validation leads
+
+These are not confirmed vulnerabilities. Apply the defensive fix and leave the
+deployment-specific proof to the owner.
+
+| ID | Action |
+|---|---|
+| L-01 | Normalize the SSRF host comparison through a shared canonicalizer (numeric IPv4 forms, UTS46/IDNA dots) so an alias cannot differ from the configured internal host. Owner: confirm the upstream fetcher canonicalizes the same forms. |
+| L-02 | Make `redirect_target` and `duplicate_parameter` consume every `query_forms` entry, not only the first raw form, matching `internal_host`. Owner: confirm whether the route decodes parameters a second time. |
+| L-03 | Replace `run_init`'s `exists()` + `std::fs::write` with the no-follow/atomic pattern already used by `write_starter_rules` and `rules_update::write_atomic` (create_new temp 0640, fsync, rename over the path). Owner: confirm no privileged init runs in a lower-trust-writable directory. |
+
+## Phase E: hardening backlog
+
+Cheap, non-blocking improvements recorded by the hunters; none is a finding.
+
+- Admin listener: reject a non-loopback `Origin`, reject duplicate `Host`
+  fields, validate the bracketed-`Host` port, and add
+  `Cache-Control: no-store`/`X-Content-Type-Options: nosniff` to admin responses.
+- Admin bind failure: make it fatal (or force `admin_access.default: close`) and
+  correct the "administrative functions stay closed" message.
+- HTTP/3: reject duplicate pseudo-fields, connection-specific fields and
+  `:protocol` on non-CONNECT methods at the h3 boundary; syntax-check
+  `Content-Length` on every transport.
+- TLS: DER-parse every certificate in the chain, cap chain count/size, and warn
+  when `tls.key_file` is group/other-readable.
+- `kunato log`: handle backslash escapes on `char` boundaries (panic at
+  `src/logs/parse.rs:350`).
+- Dependency gate: fail closed on a stale advisory DB instead of relying on
+  cargo-deny's 90-day default.
+- CI: run the build/test gate on ordinary pull requests, not only Dependabot;
+  set `persist-credentials: false` on the PR lab job; pin `python3`/`shellcheck`.
+- Upload inspection: make marker scans wide-encoding aware and inspect parts
+  whose `filename` is present but empty.
+- Legacy identity headers: extend the strip list to vendor scheme headers
+  (`Front-End-Https`, `X-Url-Scheme`, `X-Original-Host`).
+- ACME: require zero pad bits in padded base64, honor `Retry-After` in the
+  same-order retry, reject not-yet-valid certificates at load, and use a
+  per-directory account key.
+- CVE feed ingestion: `curl --max-filesize`, decompress through a byte-counted
+  cap, bound KEV/EPSS and the extraction record/output size, and cap the manual
+  `--since` backfill.
+- Daily-CVE allowlist: the policy gate parses only the categories block, so a
+  top-level config edit is unpublished-but-committed; either restrict the
+  allowlist to `rules.example.yaml` categories or validate the whole example
+  file before signing.
+- Continuous fuzzing for the hand-written decoders (YAML, SAML XML, DER,
+  multipart, HPACK) and the `kunato log` parser.
+
+## Second-audit verification gate
+
+Run, in order:
+
+```sh
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+./scripts/check-deny.sh
+cargo test
+cargo fmt --manifest-path blackbox/Cargo.toml
+cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
+./scripts/blackbox-test.sh
+./scripts/check-rules-compat.sh
+python3 scripts/test_check_rules_policy.py
+```
+
+Then re-run the bounded reproductions from the audit: the stalled-body
+inspection budget, the HTTP/3 idle and HEADERS cases, the authority-form and
+missing-`:path` targets, the GraphQL envelope, concatenated zstd, the escaped
+SAML field name, the nested-`Response` assertion, the truncated SAML body, the
+JWT-only body, the WebSocket content-route reload, the 20 KiB ETag rollback
+replay, and the four policy-gate spellings.
+
+## Second-audit implementation status
+
+S-01 to S-03 (the three high findings) are implemented and covered by
+regression tests. The rest of the plan is staged so the fail-closed gates land
+before the ordering repair.
+
+| ID | Status | Fix and regression evidence (to be filled in) |
+|---|---|---|
+| S-01 | fixed | Requests admit at zero bytes and grow only with buffered bytes (`reserve_request_inspection`, `grow_request_inspection_raw`); `stalled_request_bodies_do_not_exhaust_the_inspection_budget` and `request_inspection_charges_only_buffered_bytes` fail on the old baseline. |
+| S-02 | fixed | Both h3 close paths are bounded by `connection_idle.min(1s)`; `http3_idle_connection_releases_its_slot_without_control_credit` fails on the old code (the server refuses the second connection). |
+| S-03 | fixed | `src/proxy/h3_limits.rs` wraps `h3_quinn::Connection` and rejects a HEADERS frame from its declared length before h3 buffers it (five parser unit tests); `http3_rejects_an_oversized_headers_frame_before_buffering_it` fails when the guard is disabled. Remove the wrapper if a future h3 release enforces the declared frame length itself. |
+| S-04 | open | |
+| S-05 | open | |
+| S-06 | open | |
+| S-07 | open | |
+| S-08 | open | |
+| S-09 | open | |
+| S-10 | open | |
+| S-11 | open | |
+| S-12 | open | |
+| S-13 | open | |
+| S-14 | open | |
+| S-15 | open | |
+| S-16 | open | |
+| W-01 | open | blocked on S-12 to S-16 by design |
+| L-01 | open | defensive fix only; owner validation pending |
+| L-02 | open | defensive fix only; owner validation pending |
+| L-03 | open | defensive fix only; owner validation pending |

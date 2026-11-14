@@ -947,8 +947,10 @@ HTTP/3 uses the same `connection_idle` value for the QUIC idle timeout, applies
 and answers a QUIC Initial from an unvalidated address with a Retry before it
 takes a connection slot. The process-wide inspection budget (256 MiB, reserved
 from the configured body limits) bounds the total memory used by concurrent body
-buffering; requests reserve a baseline share and grow it as body bytes arrive,
-so a small request does not take a large body's share. A worst-case reservation
+buffering. A request reserves nothing at admission and grows the reservation as
+body bytes actually arrive, so a request that declares a body and sends nothing
+holds no share of the budget and a small request does not take a large body's
+share. A worst-case reservation
 made for decoding is shrunk back to the buffers actually kept as soon as the
 decoded forms are built, and follows buffered request/response bytes through
 replay, clones, and slices. Response-prefix reservations are likewise shrunk to
@@ -2142,7 +2144,12 @@ under normal deployments both share one port. TCP responses then carry an
 
 HTTP/3 requests pass through the same protection, limits, and rule evaluation
 as TCP requests. HEAD responses carry no content, including Kunato-generated
-block and error responses. QUIC active migration is disabled: client identity,
+block and error responses. An HTTP/3 HEADERS frame that declares more than
+`max_header_bytes` is rejected from its declared length before its payload is
+retained (the pinned `h3` release enforces the field-section limit only after it
+has buffered a complete frame). Both connection-close paths (idle watchdog and
+listener shutdown) are bounded by a short deadline, so a peer that never reads
+the server control stream cannot keep a connection slot past `connection_idle`. QUIC active migration is disabled: client identity,
 per-source limits, and source allowlists are keyed by the address the
 connection was admitted from, so a client that changes its path address must
 open a fresh connection. Settings are applied at startup (like TLS); changing or
