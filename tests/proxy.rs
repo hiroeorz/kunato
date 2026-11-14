@@ -2891,6 +2891,119 @@ async fn saml_signature_wrapping_is_rejected() {
 }
 
 #[tokio::test]
+async fn saml_escaped_field_name_is_still_inspected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    // A mid-name escape is a SAMLResponse for every form/JSON parser but not a
+    // literal `SAML` window for the old prefilter, which skipped the guard.
+    let xml = saml_response_xml(Some("#_other"));
+    let encoded = saml_base64(xml.as_bytes());
+    let json = format!("{{\"S\\u0041MLResponse\":\"{encoded}\",\"RelayState\":\"state\"}}");
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        json.into_bytes(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let form = format!(
+        "SAM%4CResponse={}&RelayState=state",
+        encoded
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D")
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        form.into_bytes(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 2"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_assertion_under_a_wrapped_response_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    // The assertion sits under an element named `Response`, so an immediate
+    // parent-name check accepted it; it is not a direct child of the message
+    // response, which is what the strict placement check requires.
+    let xml = "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+         xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_response\" \
+         Version=\"2.0\"><samlp:Extensions><samlp:Response>\
+         <saml:Assertion ID=\"_assertion\" Version=\"2.0\"><saml:Subject>\
+         <saml:NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">\
+         alice@example.com</saml:NameID></saml:Subject></saml:Assertion>\
+         </samlp:Response></samlp:Extensions></samlp:Response>";
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        saml_json(xml),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 1"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_message_past_the_inspection_prefix_is_rejected() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\nlimits: {{ max_body_bytes: 256 }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    // The SAML field sits after the 256-byte inspection prefix, so the prefix
+    // alone cannot be decoded; strict mode must not forward the body.
+    let encoded = saml_base64(b"<!DOCTYPE Response><samlp:Response/>");
+    let body = format!(
+        "{{\"padding\":\"{}\",\"SAMLResponse\":\"{encoded}\"}}",
+        "A".repeat(300)
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/callback",
+        body.into_bytes(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let metrics = running.metrics.render(0);
+    assert!(
+        metrics.contains("kunato_saml_rejected_total 1"),
+        "{metrics}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn saml_valid_response_is_forwarded() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");

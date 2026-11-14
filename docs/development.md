@@ -852,9 +852,19 @@ In `strict` mode the guard rejects:
 - duplicate element ID values across the message (`403`),
 - a `<Signature>` whose `<Reference URI="#...">` does not name the element that
   contains the signature, or a signature without a parent ID (`403`),
-- a plaintext `<Assertion>` that is not a direct child of `<Response>` (`403`),
+- a plaintext `<Assertion>` that is not a direct child of the message
+  `<Response>` (`403`), including an assertion nested under a wrapper element
+  named `Response` and a root-level assertion,
 - malformed base64, malformed DEFLATE, malformed XML, or an over-limit message
   (`400`/`413`), and an uninspectable encoding (`415`).
+
+A form or JSON body cut at `max_body_bytes` may carry the SAML field past the
+inspected prefix, and no prefix scan can prove it absent. While `limits.saml.mode`
+is `strict` (the default), every over-limit form or JSON body is therefore
+rejected with `413` even when it carries no SAML field; lower `mode` to `log` or
+`off`, or raise `max_body_bytes`, for endpoints that legitimately send larger
+JSON or form bodies. `log` mode records the truncation finding without
+rejecting.
 
 `log` mode records the same findings without rejecting. The
 `multi_assertion`/`unsigned` actions are independent: their engine default is

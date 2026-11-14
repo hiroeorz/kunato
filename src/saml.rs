@@ -111,7 +111,41 @@ struct Message {
 /// request does not carry a `SAMLResponse` or `SAMLRequest` field, so ordinary
 /// traffic pays only a media-type check.
 pub(crate) fn inspect(headers: &HeaderMap, body: &[u8], limits: &SamlLimits) -> Option<Inspection> {
-    if limits.mode == SamlInspection::Off || body.is_empty() || limits.max_decoded_bytes == 0 {
+    inspect_with(headers, body, false, limits)
+}
+
+/// Inspect a body that was cut at `limits.max_body_bytes`.
+///
+/// The message may sit past the inspected prefix, and no prefix scan can prove
+/// it absent, so a SAML-capable media type fails closed in strict mode. The
+/// trade-off is documented in `docs/development.md`: every over-limit form or
+/// JSON body is rejected while SAML strict mode is on.
+pub(crate) fn inspect_truncated(
+    headers: &HeaderMap,
+    body: &[u8],
+    limits: &SamlLimits,
+) -> Option<Inspection> {
+    inspect_with(headers, body, true, limits)
+}
+
+fn inspect_with(
+    headers: &HeaderMap,
+    body: &[u8],
+    truncated: bool,
+    limits: &SamlLimits,
+) -> Option<Inspection> {
+    if limits.mode == SamlInspection::Off || limits.max_decoded_bytes == 0 {
+        return None;
+    }
+    if truncated {
+        if !is_saml_content_type(headers) {
+            return None;
+        }
+        let findings = vec![Finding::TooLarge];
+        let blocking = (limits.mode == SamlInspection::Strict).then_some(Finding::TooLarge);
+        return Some(Inspection { findings, blocking });
+    }
+    if body.is_empty() {
         return None;
     }
     let messages = messages(headers, body)?;
@@ -140,7 +174,7 @@ pub(crate) fn inspect(headers: &HeaderMap, body: &[u8], limits: &SamlLimits) -> 
 
 fn messages(headers: &HeaderMap, body: &[u8]) -> Option<Vec<Message>> {
     let media_type = media_type(headers)?;
-    if !has_saml_marker(body) {
+    if !has_saml_hint(body) {
         return None;
     }
     if media_type == "application/x-www-form-urlencoded" {
@@ -167,31 +201,22 @@ pub(crate) fn is_saml_content_type(headers: &HeaderMap) -> bool {
     })
 }
 
-/// A cheap scan for a SAML field name before the body is parsed. It also
-/// recognizes the first character of the field name when it is percent-encoded
-/// or JSON-escaped, so a full decode is not needed for an ordinary JSON or form
-/// body that carries no SAML message.
-fn has_saml_marker(body: &[u8]) -> bool {
+/// A cheap prefilter before the body is parsed. It must be a **superset** of
+/// the field-name decoders used by `form_messages` and `json_messages`: a
+/// literal `SAMLResponse`/`SAMLRequest` contains `SAML`, and any escaped
+/// spelling of it contains a percent escape (form) or a backslash (JSON). If a
+/// decoder is added that can produce the field name without either byte, this
+/// prefilter must be removed rather than extended, because a spelling it does
+/// not recognize would skip the structural checks entirely.
+fn has_saml_hint(body: &[u8]) -> bool {
     let mut index = 0;
     while index < body.len() {
         match body[index] {
+            b'%' | b'\\' => return true,
             b'S' | b's'
                 if body
                     .get(index..index.saturating_add(4))
                     .is_some_and(|window| window.eq_ignore_ascii_case(b"SAML")) =>
-            {
-                return true;
-            }
-            b'%' if body
-                .get(index..index.saturating_add(3))
-                .is_some_and(|window| window == b"%53" || window == b"%73") =>
-            {
-                return true;
-            }
-            b'\\'
-                if body
-                    .get(index..index.saturating_add(6))
-                    .is_some_and(|window| window == b"\\u0053" || window == b"\\u0073") =>
             {
                 return true;
             }
@@ -673,9 +698,16 @@ impl<'a> Analyzer<'a> {
             self.signatures[signature].references.push(value.clone());
         }
         if local == "Assertion" {
-            if let Some(parent) = self.stack.last()
-                && local_name(&parent.name) != "Response"
-            {
+            // Only a direct child of the message `Response` is the assertion
+            // the signature is expected to cover. Comparing against the root
+            // (rather than any ancestor) rejects a wrapper element named
+            // `Response` and a root-level assertion.
+            let placed_directly = self.stack.len() == 1
+                && self
+                    .stack
+                    .first()
+                    .is_some_and(|parent| local_name(&parent.name) == "Response");
+            if !placed_directly {
                 self.findings.insert(Finding::AssertionOutsideResponse);
             }
             self.assertions.push(AssertionInfo { name_id: None });
@@ -975,6 +1007,38 @@ mod tests {
     }
 
     #[test]
+    fn assertion_under_a_wrapped_response_element_is_reported() {
+        // The wrapper is only named `Response`; the assertion is not a direct
+        // child of the message response, so a provider that resolves assertions
+        // by descendant search could be confused.
+        let xml = "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+             xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_response\" \
+             Version=\"2.0\"><samlp:Extensions><samlp:Response>\
+             <saml:Assertion ID=\"_assertion\" Version=\"2.0\"><saml:Subject>\
+             <saml:NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">\
+             alice@example.com</saml:NameID></saml:Subject></saml:Assertion>\
+             </samlp:Response></samlp:Extensions></samlp:Response>";
+        let findings = check(xml, true);
+        assert!(
+            findings.contains(&Finding::AssertionOutsideResponse),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn root_level_assertion_is_reported() {
+        let xml = "<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" \
+             ID=\"_assertion\" Version=\"2.0\"><saml:Subject>\
+             <saml:NameID Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\">\
+             alice@example.com</saml:NameID></saml:Subject></saml:Assertion>";
+        let findings = check(xml, true);
+        assert!(
+            findings.contains(&Finding::AssertionOutsideResponse),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn distinct_name_ids_are_reported() {
         let xml = response(
             &format!(
@@ -1148,6 +1212,83 @@ mod tests {
         )
         .expect("saml inspection");
         assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    }
+
+    #[test]
+    fn mid_name_form_escapes_are_inspected() {
+        let xml = "<!DOCTYPE Response><samlp:Response/>";
+        for name in ["SAM%4CResponse", "S%41MLResponse", "SAM%4cResponse"] {
+            let body = String::from_utf8(form_body(xml))
+                .expect("form body")
+                .replace("SAMLResponse=", &format!("{name}="))
+                .into_bytes();
+            let inspection = inspect(
+                &headers("application/x-www-form-urlencoded"),
+                &body,
+                &limits(SamlInspection::Strict, 1024 * 1024),
+            )
+            .unwrap_or_else(|| panic!("{name} must reach the extractor"));
+            assert!(
+                inspection.findings.contains(&Finding::Doctype),
+                "{name}: {:?}",
+                inspection.findings
+            );
+        }
+    }
+
+    #[test]
+    fn mid_name_json_escapes_are_inspected() {
+        let encoded = base64_encode(b"<!DOCTYPE Response><samlp:Response/>");
+        for name in ["S\\u0041MLResponse", "SAM\\u004cResponse"] {
+            let body = format!("{{\"{name}\":\"{encoded}\"}}").into_bytes();
+            let inspection = inspect(
+                &headers("application/json"),
+                &body,
+                &limits(SamlInspection::Strict, 1024 * 1024),
+            )
+            .unwrap_or_else(|| panic!("{name} must reach the extractor"));
+            assert!(
+                inspection.findings.contains(&Finding::Doctype),
+                "{name}: {:?}",
+                inspection.findings
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_saml_bodies_fail_closed_in_strict_mode() {
+        let inspection = inspect_truncated(
+            &headers("application/json"),
+            b"{\"padding\":\"",
+            &limits(SamlInspection::Strict, 1024 * 1024),
+        )
+        .expect("a truncated SAML-capable body must be inspected");
+        assert_eq!(inspection.findings, vec![Finding::TooLarge]);
+        assert_eq!(inspection.blocking, Some(Finding::TooLarge));
+    }
+
+    #[test]
+    fn truncated_saml_bodies_are_logged_in_log_mode() {
+        let inspection = inspect_truncated(
+            &headers("application/json"),
+            b"{\"padding\":\"",
+            &limits(SamlInspection::Log, 1024 * 1024),
+        )
+        .expect("a truncated SAML-capable body must be inspected");
+        assert_eq!(inspection.findings, vec![Finding::TooLarge]);
+        assert!(inspection.blocking.is_none());
+    }
+
+    #[test]
+    fn truncated_non_saml_content_types_are_ignored() {
+        assert!(
+            inspect_truncated(
+                &headers("text/plain"),
+                b"padding",
+                &limits(SamlInspection::Strict, 1024 * 1024)
+            )
+            .is_none()
+        );
     }
 
     #[test]

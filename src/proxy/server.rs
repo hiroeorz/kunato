@@ -2518,8 +2518,15 @@ async fn process_inner(
         ));
     }
     if saml_body
-        && let Some(inspection) =
+        && let Some(inspection) = if body_truncated {
+            crate::saml::inspect_truncated(
+                &parts.headers,
+                inspected_body.as_ref(),
+                &config.limits.saml,
+            )
+        } else {
             crate::saml::inspect(&parts.headers, inspected_body.as_ref(), &config.limits.saml)
+        }
     {
         if let Some(finding) = inspection.blocking {
             context
