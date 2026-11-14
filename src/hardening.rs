@@ -194,12 +194,79 @@ fn scheme_precedes(text: &str, scheme_end: usize) -> bool {
 }
 
 fn matches_host(host: &str, policy: &Hardening) -> bool {
-    policy.ssrf.internal_hosts.iter().any(|entry| entry == host)
-        || policy
-            .ssrf
-            .internal_suffixes
-            .iter()
-            .any(|suffix| host == suffix || host.ends_with(&format!(".{suffix}")))
+    policy
+        .ssrf
+        .internal_hosts
+        .iter()
+        .any(|entry| canonical_host(entry) == host)
+        || policy.ssrf.internal_suffixes.iter().any(|suffix| {
+            let suffix = canonical_host(suffix);
+            host == suffix || host.ends_with(&format!(".{suffix}"))
+        })
+}
+
+/// Canonicalize a host the way an origin's resolver may read it: Unicode dot
+/// lookalikes become `.`, and an inet_aton numeric form (decimal, octal, hex,
+/// mixed, or shortened) becomes the dotted quad it resolves to. Without this,
+/// `2852039166`, `0xA9FEA9FE`, and `0177.0.0.1` are different strings from the
+/// addresses they reach, so an SSRF or redirect policy comparison misses them.
+fn canonical_host(host: &str) -> String {
+    let normalized: String = host
+        .chars()
+        .map(|character| match character {
+            '\u{3002}' | '\u{ff0e}' | '\u{ff61}' => '.',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect();
+    match legacy_ipv4(&normalized) {
+        Some(address) => address.to_string(),
+        None => normalized,
+    }
+}
+
+/// Parse the address forms inet_aton accepts: 1-4 dot-separated parts, each
+/// decimal or (with a `0` prefix) octal or (`0x`) hexadecimal. The final part
+/// fills all remaining bytes, so `0x7f.1` is `127.0.0.1`.
+fn legacy_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut values = Vec::with_capacity(parts.len());
+    for part in parts {
+        let (digits, radix) =
+            if let Some(rest) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+                (rest, 16)
+            } else if part.len() > 1 && part.starts_with('0') {
+                (&part[1..], 8)
+            } else {
+                (part, 10)
+            };
+        if digits.is_empty() || !digits.chars().all(|digit| digit.is_digit(radix)) {
+            return None;
+        }
+        values.push(u32::from_str_radix(digits, radix).ok()?);
+    }
+    let last = values.pop()?;
+    let remaining = 4 - values.len();
+    if remaining == 4 {
+        return Some(std::net::Ipv4Addr::from(last));
+    }
+    if last >= (1u32 << (8 * remaining)) {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (index, value) in values.iter().enumerate() {
+        if *value > 255 {
+            return None;
+        }
+        octets[index] = *value as u8;
+    }
+    for index in 0..remaining {
+        let shift = 8 * (remaining - 1 - index);
+        octets[values.len() + index] = ((last >> shift) & 0xff) as u8;
+    }
+    Some(std::net::Ipv4Addr::from(octets))
 }
 
 /// Extracts the authority host from the first absolute or protocol-relative
@@ -252,8 +319,8 @@ fn authority_host(rest: &str) -> Option<String> {
     };
     let host = host
         .trim_matches(|character| character == '[' || character == ']')
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+        .trim_end_matches('.');
+    let host = canonical_host(host);
     (!host.is_empty()).then_some(host)
 }
 
@@ -283,10 +350,13 @@ fn json_body_is_uninspectable(view: &RequestView<'_>) -> bool {
 }
 
 fn duplicate_parameter(view: &RequestView<'_>, policy: &Hardening) -> Option<String> {
-    if let Some(raw) = view.query_forms.first()
-        && let Some(name) = duplicate_in_pairs(raw, &policy.duplicates.allow_parameters)
-    {
-        return Some(name);
+    // Every decoding pass is a query string the origin may parse, matching
+    // `internal_host`: a pair separator or name that is still encoded in the
+    // raw form only becomes a duplicate after a second pass.
+    for raw in &view.query_forms {
+        if let Some(name) = duplicate_in_pairs(raw, &policy.duplicates.allow_parameters) {
+            return Some(name);
+        }
     }
     let content_type_header = view
         .headers
@@ -436,10 +506,12 @@ fn redirect_host(value: &str, policy: &Hardening) -> Option<String> {
 }
 
 fn redirect_target(view: &RequestView<'_>, policy: &Hardening) -> Option<String> {
-    if let Some(raw) = view.query_forms.first()
-        && let Some(host) = redirect_in_pairs(raw, policy)
-    {
-        return Some(host);
+    // Every decoding pass is a query string the origin may parse (see
+    // `duplicate_parameter`).
+    for raw in &view.query_forms {
+        if let Some(host) = redirect_in_pairs(raw, policy) {
+            return Some(host);
+        }
     }
     let content_type_header = view
         .headers
@@ -835,6 +907,40 @@ mod tests {
     }
 
     #[test]
+    fn redirects_are_found_in_every_query_decoding_pass() {
+        let headers = HeaderMap::new();
+        for target in [
+            "/login?redirect_uri=https:/evil.example/",
+            "/login?redirect_uri%3Dhttps%3A%2F%2Fevil.example%2F",
+            "/login?redirect%255Furi=https%253A%252F%252Fevil.example%252F",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy()),
+                    Some(Violation::Redirect(_))
+                ),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicates_are_found_in_every_query_decoding_pass() {
+        let headers = HeaderMap::new();
+        for target in ["/?account=one&account=two", "/?account=one%26account%3Dtwo"] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy()),
+                    Some(Violation::DuplicateParameter(_))
+                ),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
     fn php_normalizes_dots_and_brackets_in_parameter_names() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1036,6 +1142,77 @@ mod tests {
             inspect(&view(&uri, &headers, body), &policy()),
             Some(Violation::Redirect(_))
         ));
+    }
+
+    #[test]
+    fn numeric_host_spellings_are_canonicalized() {
+        let headers = HeaderMap::new();
+        let mut policy = policy();
+        policy.ssrf.internal_hosts = vec!["169.254.169.254".to_owned()];
+        policy.ssrf.internal_suffixes.clear();
+        for host in [
+            "169.254.169.254",
+            "2852039166",
+            "0xA9FEA9FE",
+            "0251.0376.0251.0376",
+            "0xa9.0xfe.0xa9.0xfe",
+            "169.16689662",
+        ] {
+            let target = format!("/fetch?url=http%3A%2F%2F{host}%2F");
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy),
+                    Some(Violation::InternalHost(_))
+                ),
+                "{host}"
+            );
+        }
+
+        policy.ssrf.internal_hosts = vec!["127.0.0.1".to_owned()];
+        for host in ["127.0.0.1", "0x7f.1", "0177.0.0.1", "127.1", "2130706433"] {
+            let target = format!("/fetch?url=http%3A%2F%2F{host}%2F");
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy),
+                    Some(Violation::InternalHost(_))
+                ),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_dot_hosts_are_canonicalized() {
+        let headers = HeaderMap::new();
+        let mut policy = policy();
+        policy.ssrf.internal_hosts = vec!["metadata.internal".to_owned()];
+        policy.ssrf.internal_suffixes.clear();
+        for host in [
+            "metadata\u{3002}internal",
+            "metadata\u{ff0e}internal",
+            "metadata\u{ff61}internal",
+        ] {
+            let target = format!("/fetch?url=http%3A%2F%2F{host}%2F");
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                matches!(
+                    inspect(&view(&uri, &headers, b""), &policy),
+                    Some(Violation::InternalHost(_))
+                ),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_is_not_an_address_keeps_its_spelling() {
+        assert_eq!(canonical_host("vuln.corp"), "vuln.corp");
+        assert_eq!(canonical_host("cafe"), "cafe");
+        assert_eq!(canonical_host("1.2.3.4.5"), "1.2.3.4.5");
+        assert_eq!(canonical_host("300.1.2.3"), "300.1.2.3");
+        assert_eq!(canonical_host("0xA9FEA9FE"), "169.254.169.254");
     }
 
     #[test]

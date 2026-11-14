@@ -1063,7 +1063,11 @@ policy: an `ALLOW` rule (including `trusted-sources`) does not bypass it, it
 stays active with `protection.enabled: false`, and a reload swaps the list
 atomically. Rejections are counted in `kunato_host_rejected_total`.
 
-`kunato init` writes every `--acme-domain` value into `allowed_hosts` so a new
+`kunato init` writes the configuration through a `create_new` temporary file
+that is fsynced and renamed into place, and refuses a symlink or other
+non-regular file at the output path even with `--force`, so a link planted in a
+writable directory cannot redirect a privileged write. It writes every
+`--acme-domain` value into `allowed_hosts` so a new
 ACME install cannot lock itself out, and accepts `--allowed-host NAME` for
 additional names (the installer passes the flag through). When Kunato runs
 behind a TLS-terminating proxy, list the Host value that the proxy forwards, not
@@ -1457,7 +1461,10 @@ CR, and LF, treats `\` as `/`, and accepts the WHATWG special schemes (`http`,
 `https`, `ws`, `wss`, `ftp`, `file`) with zero, one, or two separators, so
 `http:/internal`, `http:\internal`, and `http:internal` reach the same host
 check as `http://internal`. A non-special `word:value` pair is not treated as a
-URL.
+URL. The host is canonicalized before comparison: Unicode dot variants
+(U+3002, U+FF0E, U+FF61) become `.`, and the `inet_aton` numeric forms are
+resolved, so `2852039166`, `0xA9FEA9FE`, `0251.0376.0251.0376`, `127.1`, and
+`0x7f.1` match the addresses they reach.
 `duplicate_parameters`
 rejects conflicting duplicate query, form, multipart, and JSON fields or keys
 (`+` decodes to a space in parameter names and values, matching form parsers);
@@ -1471,7 +1478,10 @@ decoded with form rules and the PHP dots/spaces-to-underscore mapping before
 comparison, so `redirect.uri`, `redirect+uri`, and `redirect%2Euri` cannot reach
 the same application parameter while skipping the configured `redirect_uri`.
 Control characters and surrounding whitespace are ignored and `\` is read as
-`/`, matching what a browser resolves.
+`/`, matching what a browser resolves. The duplicate and redirect checks run on
+every decoded query form (not only the raw one), so a pair separator or
+parameter name that only becomes visible after a second percent pass
+(`redirect_uri%3D...`, `account=one%26account%3Dtwo`) is still inspected.
 
 ### Response headers
 

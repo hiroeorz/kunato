@@ -213,12 +213,6 @@ fn admin_overlaps_upstream(upstream: &config::Upstream, admin: SocketAddr) -> bo
 }
 
 fn run_init(args: &InitArgs) -> Result<(), Error> {
-    if args.output.exists() && !args.force {
-        return Err(Error::Message(format!(
-            "`{}` already exists; pass --force to overwrite",
-            args.output.display()
-        )));
-    }
     let text = args.render()?;
     config::parse(&text)
         .map_err(|err| Error::Message(format!("generated configuration is invalid: {err}")))?;
@@ -227,7 +221,7 @@ fn run_init(args: &InitArgs) -> Result<(), Error> {
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&args.output, text)?;
+    write_config_atomic(&args.output, &text, args.force)?;
     println!("wrote {}", args.output.display());
     if args.allowed_hosts.is_empty() && args.acme_domains.is_empty() {
         println!(
@@ -250,6 +244,79 @@ fn run_init(args: &InitArgs) -> Result<(), Error> {
              # disabled_rules: [rule-name]\n",
         )?;
         println!("wrote {}", overrides_file.display());
+    }
+    Ok(())
+}
+
+/// Write the generated configuration without following a planted symlink.
+///
+/// `kunato init` may run as root in a directory the service user can write, so
+/// the output path is inspected with `symlink_metadata` (never `exists`+write,
+/// which follows a dangling link) and the contents go to a `create_new` temp
+/// file that is fsynced and renamed over the path.
+fn write_config_atomic(path: &std::path::Path, text: &str, force: bool) -> Result<(), Error> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(Error::Message(format!(
+                "refusing to replace non-regular file `{}`",
+                path.display()
+            )));
+        }
+        Ok(_) if !force => {
+            return Err(Error::Message(format!(
+                "`{}` already exists; pass --force to overwrite",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut created = None;
+    for attempt in 0..8u32 {
+        let candidate = parent.join(format!(".kunato-init-{}-{attempt}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o640)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                created = Some((candidate, file));
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let Some((temp, mut file)) = created else {
+        return Err(Error::Message(format!(
+            "could not create a temporary file next to `{}`",
+            path.display()
+        )));
+    };
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err.into());
+    }
+    if let Err(err) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err.into());
+    }
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
     }
     Ok(())
 }
@@ -378,6 +445,70 @@ mod tests {
                 .expect("metadata")
                 .file_type()
                 .is_symlink()
+        );
+    }
+
+    #[test]
+    fn init_refuses_to_follow_a_symlinked_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"victim").expect("seed victim");
+        let path = dir.path().join("config.yaml");
+        std::os::unix::fs::symlink(&victim, &path).expect("symlink");
+
+        assert!(write_config_atomic(&path, "listen: 127.0.0.1:0\n", true).is_err());
+        assert_eq!(std::fs::read(&victim).expect("victim read"), b"victim");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn init_refuses_a_dangling_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let missing = dir.path().join("missing");
+        std::os::unix::fs::symlink(&missing, &path).expect("symlink");
+
+        assert!(write_config_atomic(&path, "content", true).is_err());
+        assert!(!missing.exists(), "the link target must not be created");
+    }
+
+    #[test]
+    fn init_overwrites_a_regular_file_only_with_force() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, b"old").expect("seed");
+
+        assert!(write_config_atomic(&path, "new", false).is_err());
+        assert_eq!(std::fs::read(&path).expect("read"), b"old");
+
+        write_config_atomic(&path, "new", true).expect("replace");
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .expect("entries")
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "no temporary file is left behind"
+        );
+    }
+
+    #[test]
+    fn init_creates_a_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        write_config_atomic(&path, "content", false).expect("write");
+        assert_eq!(std::fs::read(&path).expect("read"), b"content");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type()
+                .is_file()
         );
     }
 

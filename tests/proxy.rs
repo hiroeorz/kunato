@@ -5769,6 +5769,81 @@ async fn http3_client_close_releases_the_connection_budget() {
 }
 
 #[tokio::test]
+async fn request_hardening_inspects_every_query_decoding_pass() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits:
+  hardening:
+    duplicate_parameters: {{ enabled: true }}
+    redirects: {{ enabled: true, allowed_hosts: [app.test], parameters: [redirect_uri] }}
+categories: []
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for path in [
+        "/login?redirect_uri%3Dhttps%3A%2F%2Fevil.test%2F",
+        "/login?redirect%255Furi=https%253A%252F%252Fevil.test%252F",
+    ] {
+        let (status, _) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+
+    // A duplicate parameter is rejected with 400 by the hardening policy.
+    let (status, _) = send(
+        running.addr,
+        Method::GET,
+        "/?account=one%26account%3Dtwo",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = send(running.addr, Method::GET, "/?account=one", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn request_hardening_canonicalizes_numeric_internal_hosts() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits:
+  hardening:
+    ssrf: {{ enabled: true, internal_hosts: [169.254.169.254] }}
+categories: []
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for path in [
+        "/fetch?url=http%3A%2F%2F169.254.169.254%2F",
+        "/fetch?url=http%3A%2F%2F2852039166%2F",
+        "/fetch?url=http%3A%2F%2F0xA9FEA9FE%2F",
+        "/fetch?url=http%3A%2F%2F0251.0376.0251.0376%2F",
+    ] {
+        let (status, _) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+
+    let (status, _) = send(
+        running.addr,
+        Method::GET,
+        "/fetch?url=http%3A%2F%2F203.0.113.10%2F",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn request_hardening_rejects_alternate_ssrf_and_redirect_spellings() {
     let upstream = spawn_upstream(StatusCode::OK, "ok").await;
     let yaml = format!(
