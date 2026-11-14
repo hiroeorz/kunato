@@ -118,15 +118,21 @@ The job installs `minisign`, writes the key to `$RUNNER_TEMP` with mode `0600`,
 pipes the passphrase on stdin (minisign falls back to stdin when there is no
 terminal), signs `dist/rules.yaml`, and shreds the key in an `EXIT` trap. It
 signs only when `dist/rules.yaml` changed; otherwise the committed signature is
-kept. `cargo test` then verifies the committed pair, so an unsigned or stale
-rule set fails the job before anything is pushed.
+kept. The job then verifies the signature it wrote against the embedded rules
+key, so an unsigned or stale rule set fails before anything is pushed. The
+`verify` job does not run `the_committed_rules_signature_is_valid`: it
+necessarily holds a regenerated, unsigned candidate, so that test would fail for
+every changed rule set before the policy and black-box gates run. The test still
+runs in normal CI on the committed pair.
 
 Build and test steps run in a separate read-only `verify` job. The signing job
 runs only the checkout, artifact download, regeneration, policy check, minisign,
 and the scoped commit; it has no cargo command, so a dependency build script
 cannot write a file that the `git add` would inherit. It stages only the rule
 artifact and corpus paths, fails on any other tracked or untracked change, and
-rejects deletions in `blocked.txt` or `allowed.txt`. The black-box suite runs
+accepts only a byte-prefix append to `blocked.txt` and `allowed.txt` (a byte
+comparison against `HEAD`, so a diff git classifies as binary cannot hide a
+deletion). The black-box suite runs
 against the exact `dist/rules.yaml` that is signed, and
 `scripts/check-rules-policy.py` rejects an enabled ALLOW category and every
 rule-level ALLOW; a disabled ALLOW category needs a reviewed entry in

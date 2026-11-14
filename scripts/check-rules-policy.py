@@ -37,12 +37,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ALLOWED_ACTIONS = {"BLOCK", "ALLOW", "LOG"}
-CATEGORY_RE = re.compile(r"^  - name:\s*(.+?)\s*$")
-RULE_RE = re.compile(r"^      - name:\s*(.+?)\s*$")
-CATEGORY_ENABLED_RE = re.compile(r"^    enabled\s*:\s*(.+?)\s*$")
-CATEGORY_ACTION_RE = re.compile(r"^    action\s*:\s*(.+?)\s*$")
-RULE_ACTION_RE = re.compile(r"^        action\s*:\s*(.+?)\s*$")
-UNEXPECTED_ACTION_RE = re.compile(r"^(?:-\s+)?action\s*:")
+
+# Positive structural allowlist over the `categories:` block. The gate accepts
+# exactly the canonical block style the managed rule set is generated in and
+# rejects every other line shape instead of skipping it. The config parser is
+# more permissive (tabs after the `-` indicator, deeper indentation, a bare `-`,
+# a nested name scalar, quoted keys, flow collections), so a line this scanner
+# does not positively recognise could otherwise carry an enabled ALLOW past the
+# gate. Extending the rule-file schema requires extending these patterns.
+CATEGORY_ENTRY_RE = re.compile(r"^  - name: (\S.*?)\s*$")
+RULE_ENTRY_RE = re.compile(r"^      - name: (\S.*?)\s*$")
+CATEGORY_KEY_RE = re.compile(
+    r"^    (enabled|action|phase|threshold|description|response): (\S.*?)\s*$"
+)
+CATEGORY_RULES_RE = re.compile(r"^    rules:\s*$")
+RULE_KEY_RE = re.compile(
+    r"^        (enabled|action|match|description|response|limit):(?: (\S.*?))?\s*$"
+)
+MATCH_MAP_RE = re.compile(r"^          (headers|cookies|response_headers):\s*$")
+MATCH_KEY_RE = re.compile(
+    r"^          (path|method|source_ip|in|regex|status|headers|cookies|response_headers): "
+    r"(\S.*?)\s*$"
+)
+HEADER_ENTRY_RE = re.compile(r"^            [A-Za-z0-9_][A-Za-z0-9_.-]*: (\S.*?)\s*$")
 
 
 @dataclass
@@ -88,36 +105,21 @@ def scalar(value: str) -> str:
     return value
 
 
-def reject_noncanonical_key(path: Path, number: int, stripped: str) -> None:
-    """Reject key spellings the line scanner would skip.
-
-    The config parser also understands explicit ``?`` keys and quoted keys.
-    This scanner does not, so accepting either would let a category or rule
-    action hide in a spelling the gate never inspects. Fail closed instead.
-    """
-    if stripped.startswith("?"):
-        raise ValueError(
-            f"{path}:{number}: explicit mapping keys are not supported; use plain block keys"
-        )
-    candidate = stripped[2:].lstrip(" ") if stripped.startswith("- ") else stripped
-    if not candidate.startswith(("'", '"')):
-        return
-    quote = candidate[0]
-    end = candidate.find(quote, 1)
-    if end == -1:
-        raise ValueError(
-            f"{path}:{number}: multi-line quoted keys are not supported; use plain block keys"
-        )
-    if candidate[end + 1 :].lstrip(" ").startswith(":"):
-        raise ValueError(
-            f"{path}:{number}: quoted mapping keys are not supported; use plain block keys"
-        )
+def reject_shape(path: Path, number: int, stripped: str) -> None:
+    raise ValueError(
+        f"{path}:{number}: unrecognised rule-file structure {stripped!r}; "
+        "the gate accepts only `  - name: NAME` category entries, "
+        "`      - name: NAME` rule entries, and plain block keys at the "
+        "canonical columns"
+    )
 
 
 def parse(path: Path) -> list[Category]:
+    """Read the categories block through the structural allowlist."""
     categories: list[Category] = []
     current_category: Category | None = None
     current_rule: Rule | None = None
+    in_match_map = False
     in_categories = False
     saw_categories = False
 
@@ -131,82 +133,91 @@ def parse(path: Path) -> list[Category]:
         stripped = line.lstrip(" ")
         indent = len(line) - len(stripped)
 
-        if stripped == "categories:":
-            if saw_categories:
-                raise ValueError(f"{path}:{number}: duplicate categories block")
-            saw_categories = True
-            in_categories = True
-            continue
         if not in_categories:
+            if stripped.rstrip() == "categories:":
+                if saw_categories:
+                    raise ValueError(f"{path}:{number}: duplicate categories block")
+                saw_categories = True
+                in_categories = True
             continue
-        if indent == 0 and stripped.startswith("-"):
-            raise ValueError(
-                f"{path}:{number}: indentless sequence entries are not supported; "
-                "indent category entries by two spaces"
-            )
-        reject_noncanonical_key(path, number, stripped)
         if indent == 0:
+            if stripped.startswith("-"):
+                raise ValueError(
+                    f"{path}:{number}: indentless sequence entries are not supported; "
+                    "indent category entries by two spaces"
+                )
             # A top-level key after the categories block ends it.
             break
 
-        if stripped.startswith("- {") or stripped.startswith("- ["):
-            raise ValueError(
-                f"{path}:{number}: use block style for category and rule entries"
-            )
-        if re.match(r"^(action|enabled)\s*:\s*$", stripped):
-            raise ValueError(
-                f"{path}:{number}: action and enabled must be single-line scalars"
-            )
-        if "action:" in stripped and stripped.lstrip("- ").startswith("{"):
-            raise ValueError(f"{path}:{number}: use block style for action fields")
-
-        category_match = CATEGORY_RE.match(line)
-        if category_match:
-            current_category = Category(name=scalar(category_match.group(1)))
+        if indent == 2:
+            match = CATEGORY_ENTRY_RE.match(line)
+            if not match:
+                reject_shape(path, number, stripped)
+            current_category = Category(name=scalar(match.group(1)))
             categories.append(current_category)
             current_rule = None
+            in_match_map = False
             continue
-        rule_match = RULE_RE.match(line)
-        if rule_match:
-            if current_category is None:
-                raise ValueError(f"{path}:{number}: rule outside a category")
-            current_rule = Rule(name=scalar(rule_match.group(1)))
+
+        if indent == 4:
+            if CATEGORY_RULES_RE.match(line):
+                if current_category is None:
+                    reject_shape(path, number, stripped)
+                in_match_map = False
+                continue
+            match = CATEGORY_KEY_RE.match(line)
+            if not match or current_category is None:
+                reject_shape(path, number, stripped)
+            key, value = match.group(1), scalar(match.group(2))
+            if key == "enabled":
+                lowered = value.lower()
+                if lowered not in ("true", "false"):
+                    raise ValueError(f"{path}:{number}: invalid enabled value")
+                current_category.enabled = lowered == "true"
+            elif key == "action":
+                action = value.upper()
+                if action not in ALLOWED_ACTIONS:
+                    raise ValueError(f"{path}:{number}: unknown action {action}")
+                current_category.action = action
+            continue
+
+        if indent == 6:
+            match = RULE_ENTRY_RE.match(line)
+            if not match or current_category is None:
+                reject_shape(path, number, stripped)
+            current_rule = Rule(name=scalar(match.group(1)))
             current_category.rules.append(current_rule)
+            in_match_map = False
             continue
 
-        enabled_match = CATEGORY_ENABLED_RE.match(line)
-        if enabled_match:
-            if current_category is None:
-                raise ValueError(f"{path}:{number}: enabled outside a category")
-            value = scalar(enabled_match.group(1)).lower()
-            if value not in ("true", "false"):
-                raise ValueError(f"{path}:{number}: invalid enabled value")
-            current_category.enabled = value == "true"
-            continue
-        action_match = CATEGORY_ACTION_RE.match(line)
-        if action_match:
-            if current_category is None:
-                raise ValueError(f"{path}:{number}: action outside a category")
-            action = scalar(action_match.group(1)).upper()
-            if action not in ALLOWED_ACTIONS:
-                raise ValueError(f"{path}:{number}: unknown action {action}")
-            current_category.action = action
-            continue
-        rule_action_match = RULE_ACTION_RE.match(line)
-        if rule_action_match:
-            if current_rule is None:
-                raise ValueError(f"{path}:{number}: rule action outside a rule")
-            action = scalar(rule_action_match.group(1)).upper()
-            if action not in ALLOWED_ACTIONS:
-                raise ValueError(f"{path}:{number}: unknown action {action}")
-            current_rule.action = action
+        if indent == 8:
+            match = RULE_KEY_RE.match(line)
+            if not match or current_rule is None:
+                reject_shape(path, number, stripped)
+            key, value = match.group(1), match.group(2)
+            if key == "action" and value is not None:
+                action = scalar(value).upper()
+                if action not in ALLOWED_ACTIONS:
+                    raise ValueError(f"{path}:{number}: unknown action {action}")
+                current_rule.action = action
+            in_match_map = False
             continue
 
-        # An `action:` key at an unexpected indentation is not part of the
-        # documented rule schema. Reject it rather than risk a second
-        # interpretation.
-        if indent <= 8 and UNEXPECTED_ACTION_RE.match(stripped):
-            raise ValueError(f"{path}:{number}: unexpected action field")
+        if indent == 10:
+            if MATCH_MAP_RE.match(line):
+                in_match_map = True
+                continue
+            if not MATCH_KEY_RE.match(line):
+                reject_shape(path, number, stripped)
+            in_match_map = False
+            continue
+
+        if indent == 12:
+            if not in_match_map or not HEADER_ENTRY_RE.match(line):
+                reject_shape(path, number, stripped)
+            continue
+
+        reject_shape(path, number, stripped)
 
     if not saw_categories:
         raise ValueError(f"{path}: no categories block")

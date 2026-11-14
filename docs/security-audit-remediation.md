@@ -702,11 +702,11 @@ before the ordering repair.
 | S-09 | fixed | `saml::inspect_truncated` returns a blocking `TooLarge` finding for a SAML-capable body cut at `max_body_bytes` (log-mode finding only under `mode: log`), before rule evaluation so `ALLOW` cannot bypass it; the documented trade-off is that over-limit form/JSON bodies are rejected while SAML strict is on. `truncated_saml_bodies_fail_closed_in_strict_mode`, `truncated_saml_bodies_are_logged_in_log_mode`, `truncated_non_saml_content_types_are_ignored` and `saml_message_past_the_inspection_prefix_is_rejected` cover it (the integration test fails on the previous behavior). |
 | S-10 | fixed | an enabled `limits.jwt` now joins `inspect_body`, so supported content encodings are decoded and the strict over-limit rejection applies; `jwt_body_policy_forces_body_decoding` (gzip `text/plain` carrier, token not literal in the compressed bytes) fails on the previous behavior. |
 | S-11 | fixed | the tunnel no longer captures the handshake-time `body_rules_exempt`; every message computes the exemption from the live configuration, so removing a content route re-enables body rules on open tunnels. `websocket_content_route_removal_applies_to_open_tunnels` detects a stale exemption. |
-| S-12 | open | |
-| S-13 | open | |
-| S-14 | open | |
-| S-15 | open | |
-| S-16 | open | |
+| S-12 | fixed | `scripts/check-rules-policy.py` now validates the categories block through a positive structural allowlist (canonical entry and key shapes only), so a spelling it does not recognise fails closed instead of being skipped; `scripts/test_check_rules_policy.py` covers the tab, uniform-reindent, bare-dash, nested-name and enabled-first spellings plus block-style positives, and the pristine `rules.example.yaml`/`dist/rules.yaml` still pass. |
+| S-13 | fixed | `ETag`/`Last-Modified` are bounded to 512 bytes at capture, and `UpdateState::read_checked` fails closed on an oversized or unreadable state file when a trusted rules key is configured instead of treating it as a first install; `response_validators_beyond_the_state_bound_are_ignored`, `an_oversized_state_file_is_not_treated_as_a_first_install`, `an_unreadable_state_file_fails_closed` and `a_normal_state_preserves_the_signature_floor` cover it. |
+| S-14 | fixed | `scripts/blackbox-test.sh` keeps the driver exit status and fails on a non-zero value; `scripts/blackbox-report.py` reconciles the parsed results with the corpus and fails an incomplete run. `scripts/test_blackbox_gate.py` covers empty, partial, complete and leaked logs plus the runner and workflow assertions. |
+| S-15 | fixed | `blackbox/src/main.rs` emits its own `Host` only when the corpus supplies none and suppresses the generated framing header when the corpus declares `Content-Length`/`Transfer-Encoding`; unit tests assert exactly one of each on the affected corpus shapes. |
+| S-16 | fixed | the signing job's append-only guard compares the corpus bytes with `git show HEAD:<path>` and requires a true prefix append, so a binary-classified diff cannot hide deletions; `scripts/test_blackbox_gate.py` asserts the workflow uses the byte comparison. |
 | W-01 | open | blocked on S-12 to S-16 by design |
 | L-01 | open | defensive fix only; owner validation pending |
 | L-02 | open | defensive fix only; owner validation pending |

@@ -36,6 +36,10 @@ const MAX_CHECKSUM_BYTES: usize = 4096;
 /// Detached minisign signatures are a few hundred bytes.
 const MAX_SIGNATURE_BYTES: usize = 8 * 1024;
 const MAX_STATE_BYTES: u64 = 16 * 1024;
+/// Bound on a captured `ETag`/`Last-Modified`. They are persisted in the update
+/// state next to the rollback floor, so an unbounded response header could make
+/// the state file unreadable and silently erase that floor.
+const MAX_VALIDATOR_BYTES: usize = 512;
 
 type RulesClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -196,7 +200,11 @@ async fn update_candidate(
         ));
     };
 
-    let state = UpdateState::read(state_file);
+    let state = if crate::trust::RULES_KEYS.is_empty() {
+        UpdateState::read(state_file)
+    } else {
+        UpdateState::read_checked(state_file)?
+    };
     let installed_signature_timestamp = state.signature_timestamp;
     let client = build_client()?;
     let fetched = fetch(&client, url, settings.max_bytes, &state, "rules update").await?;
@@ -396,8 +404,8 @@ async fn fetch(
 
         match response.status() {
             StatusCode::OK => {
-                let etag = header_string(response.headers(), ETAG);
-                let last_modified = header_string(response.headers(), LAST_MODIFIED);
+                let etag = validator_string(response.headers(), ETAG);
+                let last_modified = validator_string(response.headers(), LAST_MODIFIED);
                 let body = tokio::time::timeout(
                     REQUEST_TIMEOUT,
                     read_body(response.into_body(), max_bytes, what),
@@ -507,6 +515,12 @@ fn host_is_loopback(host: &str) -> bool {
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+}
+
+/// A response validator bounded to a value that cannot make the state file
+/// unreadable. A longer value is ignored (the next update simply refetches).
+fn validator_string(headers: &http::HeaderMap, name: http::header::HeaderName) -> Option<String> {
+    header_string(headers, name).filter(|value| value.len() <= MAX_VALIDATOR_BYTES)
 }
 
 fn header_string(headers: &http::HeaderMap, name: http::header::HeaderName) -> Option<String> {
@@ -864,6 +878,34 @@ impl UpdateState {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
+        Self::parse(&text)
+    }
+
+    /// Read the state for an update, failing closed when a state file exists but
+    /// cannot be used. With a trusted rules key configured, the signed-timestamp
+    /// floor is the only replay guard, so an unreadable or oversized file must
+    /// not be treated as a first install.
+    fn read_checked(path: &Path) -> Result<Self, Error> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(Error::Message(format!(
+                    "rules update state is unreadable: {err}"
+                )));
+            }
+        };
+        if metadata.len() > MAX_STATE_BYTES {
+            return Err(Error::Message(
+                "rules update state is too large; refusing a rollback-unsafe update".to_owned(),
+            ));
+        }
+        let text = std::fs::read_to_string(path)
+            .map_err(|err| Error::Message(format!("rules update state is unreadable: {err}")))?;
+        Ok(Self::parse(&text))
+    }
+
+    fn parse(text: &str) -> Self {
         let mut state = Self::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -1179,6 +1221,63 @@ mod tests {
         assert_eq!(
             read.last_modified.as_deref(),
             Some("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
+    }
+
+    #[test]
+    fn a_normal_state_preserves_the_signature_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state");
+        UpdateState {
+            signature_timestamp: Some(1_700_000_000),
+            ..UpdateState::default()
+        }
+        .write(&path)
+        .expect("write state");
+        let read = UpdateState::read_checked(&path).expect("readable state");
+        assert_eq!(read.signature_timestamp, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn an_oversized_state_file_is_not_treated_as_a_first_install() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state");
+        let text = format!(
+            "signature_timestamp=1700000000\netag=\"{}\"\n",
+            "a".repeat(MAX_STATE_BYTES as usize)
+        );
+        std::fs::write(&path, text).expect("write state");
+        assert!(std::fs::metadata(&path).expect("metadata").len() > MAX_STATE_BYTES);
+        // The lenient reader used for scheduling drops the whole state; an
+        // update must fail closed instead of accepting an older signed set.
+        assert!(UpdateState::read(&path).signature_timestamp.is_none());
+        assert!(UpdateState::read_checked(&path).is_err());
+        assert!(
+            UpdateState::read_checked(&dir.path().join("missing")).is_ok(),
+            "a missing state file is a first install"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_state_file_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state");
+        std::fs::create_dir(&path).expect("directory at the state path");
+        assert!(UpdateState::read_checked(&path).is_err());
+    }
+
+    #[test]
+    fn response_validators_beyond_the_state_bound_are_ignored() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            ETAG,
+            HeaderValue::from_str(&format!("\"{}\"", "a".repeat(1024))).expect("etag"),
+        );
+        assert_eq!(validator_string(&headers, ETAG), None);
+        headers.insert(ETAG, HeaderValue::from_static("\"short\""));
+        assert_eq!(
+            validator_string(&headers, ETAG).as_deref(),
+            Some("\"short\"")
         );
     }
 

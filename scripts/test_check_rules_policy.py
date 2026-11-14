@@ -65,7 +65,7 @@ def main() -> int:
         ),
         "flow-style entries are rejected": (
             "categories:\n  - { name: trusted-sources, enabled: false, action: ALLOW }\n",
-            "use block style",
+            "unrecognised rule-file structure",
         ),
         "an indentless ALLOW category is rejected": (
             "categories:\n"
@@ -79,25 +79,59 @@ def main() -> int:
         ),
         "a quoted category action is rejected": (
             BASE.replace("    action: ALLOW", '    "action": ALLOW'),
-            "quoted mapping keys",
+            "unrecognised rule-file structure",
         ),
         "a quoted rule action is rejected": (
             BASE.replace(
                 "      - name: internal\n",
                 '      - name: internal\n        "action": ALLOW\n',
             ),
-            "quoted mapping keys",
+            "unrecognised rule-file structure",
         ),
         "an explicit category action is rejected": (
             BASE.replace("    action: ALLOW", "    ? action\n    : ALLOW"),
-            "explicit mapping keys",
+            "unrecognised rule-file structure",
         ),
         "a non-canonical category indent is rejected": (
             "categories:\n"
             "   - name: trusted-sources\n"
             "     enabled: true\n"
             "     action: ALLOW\n",
-            "unexpected action field",
+            "unrecognised rule-file structure",
+        ),
+        "a tab after the sequence indicator is rejected": (
+            BASE.replace("  - name: trusted-sources", "  -\tname: trusted-sources"),
+            "unrecognised rule-file structure",
+        ),
+        "a bare sequence indicator is rejected": (
+            "categories:\n"
+            "  -\n"
+            "    name: trusted-sources\n"
+            "    enabled: true\n"
+            "    action: ALLOW\n",
+            "unrecognised rule-file structure",
+        ),
+        "a nested category name scalar is rejected": (
+            "categories:\n"
+            "  - name:\n"
+            "      trusted-sources\n"
+            "    enabled: true\n"
+            "    action: ALLOW\n",
+            "unrecognised rule-file structure",
+        ),
+        "an enabled-first category entry is rejected": (
+            "categories:\n"
+            "  - enabled: true\n"
+            "    name: trusted-sources\n"
+            "    action: ALLOW\n",
+            "unrecognised rule-file structure",
+        ),
+        "a uniformly deeper categories block is rejected": (
+            "categories:\n"
+            "       - name: trusted-sources\n"
+            "         enabled: true\n"
+            "         action: ALLOW\n",
+            "unrecognised rule-file structure",
         ),
     }
     for label, (text, expected) in cases.items():
@@ -133,6 +167,14 @@ def main() -> int:
         "a flow mapping with a quoted header name passes": BASE.replace(
             "match: { source_ip: 127.0.0.1/32 }",
             'match: { headers: { "X-Probe": allow } }',
+        ),
+        "a block match mapping passes": BASE.replace(
+            "        match: { source_ip: 127.0.0.1/32 }",
+            "        match:\n          source_ip: 127.0.0.1/32",
+        ),
+        "a block header map passes": BASE.replace(
+            "        match: { source_ip: 127.0.0.1/32 }",
+            "        match:\n          headers:\n            X-Probe: allow",
         ),
     }
     for label, text in positives.items():

@@ -159,6 +159,22 @@ def main():
                 else:
                     blocked_pass += 1
 
+    # Reconcile the parsed results with the corpus: a driver that aborts part
+    # way (or a corpus line the driver could not load) must fail the gate even
+    # when every line that did run passed.
+    parsed_blocked = blocked_pass + blocked_fail + blocked_no_response
+    parsed_allowed = allowed_pass + allowed_fail + allowed_errors
+    incomplete = (
+        parsed_blocked != len(blocked_requests)
+        or parsed_allowed != len(allowed_requests)
+    )
+    if incomplete:
+        print(
+            "incomplete run: "
+            f"blocked {parsed_blocked}/{len(blocked_requests)}, "
+            f"allowed {parsed_allowed}/{len(allowed_requests)}"
+        )
+
     expected_upstream = allowed_pass + blocked_fail
     upstream_ok = True
     upstream_count = None
@@ -170,7 +186,13 @@ def main():
                     upstream_count += 1
         upstream_ok = upstream_count == expected_upstream
 
-    failed = allowed_fail > 0 or blocked_fail > 0 or allowed_errors > 0 or not upstream_ok
+    failed = (
+        allowed_fail > 0
+        or blocked_fail > 0
+        or allowed_errors > 0
+        or not upstream_ok
+        or incomplete
+    )
 
     line = "\u2500" * 60
     print(style.bold("Kunato black-box report"))

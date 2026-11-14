@@ -196,17 +196,31 @@ fn send(addr: SocketAddr, request: &RequestSpec) -> Result<String, String> {
     }
 }
 
-fn send_http1(
-    stream: &mut TcpStream,
-    addr: SocketAddr,
-    request: &RequestSpec,
-) -> Result<String, String> {
+/// Build the HTTP/1.1 head exactly as the corpus describes it.
+///
+/// The driver only adds a `Host` when the corpus does not supply one, and only
+/// adds a framing header when the corpus does not: a corpus line that carries
+/// its own `Host` or `Content-Length` used to be sent with duplicates, which
+/// the WAF rejected with `400` before the rule the line was written for ran,
+/// while the report still counted that `400` as a correct block.
+fn http1_message_head(addr: SocketAddr, request: &RequestSpec) -> String {
+    let has_host = request
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"));
+    let has_framing = request.headers.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+    });
+
     let mut message = String::new();
     message.push_str(&format!(
         "{} {} HTTP/1.1\r\n",
         request.method, request.target
     ));
-    message.push_str(&format!("Host: {addr}\r\n"));
+    if !has_host {
+        message.push_str(&format!("Host: {addr}\r\n"));
+    }
     message.push_str("Connection: close\r\n");
 
     let mut has_user_agent = false;
@@ -224,13 +238,23 @@ fn send_http1(
     }
 
     let body = request.body.as_deref().unwrap_or(&[]);
-    if !request.chunked && !body.is_empty() {
+    if !request.chunked && !body.is_empty() && !has_framing {
         message.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
-    if request.chunked {
+    if request.chunked && !has_framing {
         message.push_str("Transfer-Encoding: chunked\r\n");
     }
     message.push_str("\r\n");
+    message
+}
+
+fn send_http1(
+    stream: &mut TcpStream,
+    addr: SocketAddr,
+    request: &RequestSpec,
+) -> Result<String, String> {
+    let message = http1_message_head(addr, request);
+    let body = request.body.as_deref().unwrap_or(&[]);
 
     stream
         .write_all(message.as_bytes())
@@ -571,6 +595,42 @@ fn split_tokens(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn head_for(line: &str) -> String {
+        let request = parse_request(line, Path::new(".")).expect("parses");
+        http1_message_head("127.0.0.1:8080".parse().expect("addr"), &request)
+    }
+
+    fn header_count(head: &str, name: &str) -> usize {
+        head.lines()
+            .filter(|line| {
+                line.split_once(':')
+                    .is_some_and(|(field, _)| field.eq_ignore_ascii_case(name))
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_corpus_host_header_is_the_only_host() {
+        let head = head_for("GET /admin header=\"Host: example.com/health?x=\"");
+        assert_eq!(header_count(&head, "host"), 1, "{head}");
+        assert!(head.contains("Host: example.com/health?x=\r\n"), "{head}");
+    }
+
+    #[test]
+    fn a_corpus_content_length_suppresses_the_generated_one() {
+        let head = head_for("POST /api/items body=x header=\"Content-Length: 0\"");
+        assert_eq!(header_count(&head, "content-length"), 1, "{head}");
+        assert!(head.contains("Content-Length: 0\r\n"), "{head}");
+    }
+
+    #[test]
+    fn a_request_without_corpus_framing_gets_the_generated_headers() {
+        let head = head_for("POST /submit body=hello");
+        assert_eq!(header_count(&head, "host"), 1, "{head}");
+        assert_eq!(header_count(&head, "content-length"), 1, "{head}");
+        assert!(head.contains("Content-Length: 5\r\n"), "{head}");
+    }
 
     #[test]
     fn parses_text_body() {

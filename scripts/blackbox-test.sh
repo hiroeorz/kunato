@@ -191,8 +191,14 @@ fi
 blackbox_pid=$!
 set +e
 wait "$blackbox_pid"
+driver_status=$?
 set -e
 blackbox_pid=
+if [ "$driver_status" -ne 0 ]; then
+    echo "the black-box driver failed (exit $driver_status); see $blackbox_log" >&2
+    tail -n 20 "$blackbox_log" >&2 || true
+    exit 1
+fi
 
 set +e
 python3 "$script_dir/blackbox-report.py" "$blackbox_log" \

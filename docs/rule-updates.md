@@ -75,7 +75,7 @@ and detect.
 - Before signing, the workflow runs the black-box suite against the exact
   `dist/rules.yaml` that is published, rejects any enabled ALLOW category and
   every rule-level ALLOW (a disabled ALLOW category needs a reviewed allowlist
-  entry), and refuses a corpus that was not append-only. The signing job runs no
+  entry), and accepts only a byte-prefix append to the request corpus. The signing job runs no
   cargo or third-party build code, so a build script cannot add a file to the
   signed commit.
 - Adding a field, match target, action, or phase to the engine is a **release
