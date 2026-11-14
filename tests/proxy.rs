@@ -1025,6 +1025,10 @@ fn gzip(data: &[u8]) -> Vec<u8> {
     encoder.finish().expect("gzip finish")
 }
 
+fn zstd(data: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
 fn zlib(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
 
@@ -4464,6 +4468,29 @@ async fn multi_member_gzip_request_body_is_rule_evaluated() {
         "/",
         body,
         &[("content-encoding", "gzip")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn multi_frame_zstd_request_body_is_rule_evaluated() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories:\n  - name: sqli\n    action: BLOCK\n    rules:\n      - name: union-select\n        match: {{ regex: '(?i)union\\s+select', in: [body] }}\n"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let mut body = zstd(b"benign first frame");
+    body.extend_from_slice(&zstd(b" union select password"));
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/",
+        body,
+        &[("content-encoding", "zstd")],
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);

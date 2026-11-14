@@ -428,6 +428,36 @@ fn content_type_params(content_type: &str, target: &str) -> Vec<String> {
     matches
 }
 
+/// Decode every concatenated zstd frame, mirroring `MultiGzDecoder` for gzip.
+///
+/// ruzstd's `StreamingDecoder` decodes one frame and then reports EOF, so a
+/// multi-frame body would otherwise look completely decoded while the frames
+/// after the first are forwarded uninspected. Reinitialize the decoder on the
+/// remaining input and report `Complete` only when the whole input was consumed.
+fn decode_zstd_all(input: &[u8], limit: usize) -> (Vec<u8>, ReadStatus) {
+    let mut output: Vec<u8> = Vec::new();
+    let mut remaining = input;
+    loop {
+        if remaining.is_empty() {
+            return (output, ReadStatus::Complete);
+        }
+        let Ok(mut decoder) =
+            ZstdDecoder::new_with_max_window_size(remaining, MAX_ZSTD_WINDOW_BYTES)
+        else {
+            return (output, ReadStatus::Malformed);
+        };
+        let room = limit.saturating_sub(output.len());
+        let (frame, status) = read_bounded(&mut decoder, room);
+        output.extend_from_slice(&frame);
+        match status {
+            ReadStatus::Malformed => return (output, ReadStatus::Malformed),
+            ReadStatus::Truncated => return (output, ReadStatus::Truncated),
+            ReadStatus::Complete => {}
+        }
+        remaining = decoder.into_inner();
+    }
+}
+
 pub fn decode_body_for_inspection(body: &[u8], headers: &HeaderMap, limit: usize) -> DecodeOutcome {
     if body.is_empty() {
         return DecodeOutcome::NotEncoded;
@@ -453,10 +483,7 @@ pub fn decode_body_for_inspection(body: &[u8], headers: &HeaderMap, limit: usize
             "gzip" | "x-gzip" => read_bounded(MultiGzDecoder::new(input), limit),
             "deflate" => decode_deflate(input, limit),
             "br" => read_bounded(BrotliDecoder::new(input, DECODE_BUFFER_BYTES), limit),
-            "zstd" => match ZstdDecoder::new_with_max_window_size(input, MAX_ZSTD_WINDOW_BYTES) {
-                Ok(decoder) => read_bounded(decoder, limit),
-                Err(_) => return DecodeOutcome::Malformed,
-            },
+            "zstd" => decode_zstd_all(input, limit),
             _ => return DecodeOutcome::Unsupported,
         };
         match status {
@@ -1857,6 +1884,41 @@ mod tests {
         .expect("decoded");
         assert_eq!(decoded.body, payload);
         assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn concatenated_zstd_frames_are_decoded() {
+        let mut encoded = zstd(b"benign first frame");
+        encoded.extend_from_slice(&zstd(b" union select password"));
+
+        let decoded =
+            decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "zstd"), 1024 * 1024)
+                .expect("decoded");
+        assert_eq!(
+            decoded.body,
+            b"benign first frame union select password".as_slice()
+        );
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn concatenated_zstd_frames_are_bounded() {
+        let mut encoded = zstd(&vec![b'a'; 1024]);
+        encoded.extend_from_slice(&zstd(&vec![b'b'; 1024]));
+
+        let decoded = decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "zstd"), 1500)
+            .expect("decoded");
+        assert_eq!(decoded.body.len(), 1500);
+        assert!(decoded.truncated);
+    }
+
+    #[test]
+    fn trailing_garbage_after_a_zstd_frame_is_malformed() {
+        let mut encoded = zstd(b"payload");
+        encoded.extend_from_slice(&[0xff; 16]);
+        assert!(
+            decode_content_encoding(&encoded, &headers(CONTENT_ENCODING, "zstd"), 1024).is_none()
+        );
     }
 
     #[test]

@@ -624,9 +624,10 @@ that declares several boundaries is flattened once per boundary (up to four),
 because parsers disagree on which one wins (Rack takes the last); messages that
 exceed that fall back to the percent passes on the raw body. Bodies are
 decompressed first when
-`Content-Encoding` is `gzip`, `deflate`, `br`, or `zstd`: all gzip members are
-decoded, repeated `Content-Encoding` fields are combined in order, and stacked
-encodings are decoded in reverse order (up to three layers).
+`Content-Encoding` is `gzip`, `deflate`, `br`, or `zstd`: all gzip members and
+all concatenated zstd frames are decoded, repeated `Content-Encoding` fields are
+combined in order, and stacked encodings are decoded in reverse order (up to
+three layers).
 When a body rule exists, a body whose declared encoding cannot be decoded
 completely within `max_body_bytes` is rejected instead of forwarded: an
 over-limit decoded body returns `413`, an unsupported or over-layered encoding
@@ -679,8 +680,9 @@ Response-phase rules may combine request conditions (`path`, `method`, `source_i
 can require a path and a response body signature. `status`, `response_headers`, and
 the `response_body` target are rejected in request-phase categories. Response
 bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are decompressed
-for matching (all gzip members, stacked encodings in reverse order up to three
-layers), and only the first `limits.max_response_body_bytes` are inspected (the
+for matching (all gzip members and concatenated zstd frames, stacked encodings
+in reverse order up to three layers), and only the first
+`limits.max_response_body_bytes` are inspected (the
 decoded output is bounded by the same limit). Unknown or deeper encodings are
 inspected as received and counted in `kunato_response_decode_skipped_total`; a
 response body whose charset cannot be inspected is rejected with `502` and

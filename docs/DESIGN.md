@@ -272,6 +272,7 @@ budget, so decompression cannot stall the asynchronous request workers.
   back to raw inspection.
 - Bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are
   decompressed for inspection only; forwarded bytes are never modified. All gzip
+  members and concatenated zstd frames are decoded;
   members are decoded and stacked encodings are decoded in reverse order, up to
   three layers. When a body rule exists, unknown or deeper encodings are
   rejected (`415`), malformed streams are rejected (`400`), and decoded output
