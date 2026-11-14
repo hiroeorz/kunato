@@ -421,9 +421,10 @@ findings. Full evidence, traces and patch sketches live in that run's
   policy evaluation: require `parts.uri.path_and_query()` and a `/`-prefixed
   path, except `OPTIONS *`. The same check covers the HTTP/3 header block
   without `:path`/`:scheme`, which produces the same empty path.
-- Tests: `authority_form_target_is_rejected_before_rule_evaluation` (HTTP/1.1
-  `GET host:port` -> 400), `http3_missing_path_pseudo_header_is_rejected`
-  (header block without `:path`/`:scheme` -> 400), and controls that
+- Tests: `authority_form_request_targets_are_rejected` (unit, both
+  authority-form spellings), `authority_form_request_target_is_rejected_before_forwarding`
+  (HTTP/1.1 `GET host:port` -> 400), `http3_header_block_without_path_is_rejected_before_forwarding`
+  (raw QPACK block without `:path`/`:scheme` -> not forwarded), and controls that
   origin-form, absolute-form and `OPTIONS *` keep working.
 - Acceptance: every forwarded request is inspected on the path the upstream
   routes on, on HTTP/1.1, HTTP/2 and HTTP/3.
@@ -693,7 +694,7 @@ before the ordering repair.
 | S-01 | fixed | Requests admit at zero bytes and grow only with buffered bytes (`reserve_request_inspection`, `grow_request_inspection_raw`); `stalled_request_bodies_do_not_exhaust_the_inspection_budget` and `request_inspection_charges_only_buffered_bytes` fail on the old baseline. |
 | S-02 | fixed | Both h3 close paths are bounded by `connection_idle.min(1s)`; `http3_idle_connection_releases_its_slot_without_control_credit` fails on the old code (the server refuses the second connection). |
 | S-03 | fixed | `src/proxy/h3_limits.rs` wraps `h3_quinn::Connection` and rejects a HEADERS frame from its declared length before h3 buffers it (five parser unit tests); `http3_rejects_an_oversized_headers_frame_before_buffering_it` fails when the guard is disabled. Remove the wrapper if a future h3 release enforces the declared frame length itself. |
-| S-04 | open | |
+| S-04 | fixed | `request_head_error` rejects an empty or non-`/` request target (asterisk-form only for `OPTIONS`), which covers the HTTP/1.1 authority-form target and the HTTP/3 head without `:path`/`:scheme`; `authority_form_request_targets_are_rejected`, `origin_and_absolute_form_targets_pass_head_validation`, `asterisk_form_is_allowed_only_for_options`, `authority_form_request_target_is_rejected_before_forwarding` and `http3_header_block_without_path_is_rejected_before_forwarding` fail on the previous behavior. |
 | S-05 | open | |
 | S-06 | open | |
 | S-07 | open | |

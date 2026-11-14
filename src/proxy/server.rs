@@ -1567,6 +1567,34 @@ pub(crate) fn request_head_error(
             "CONNECT is not supported",
         ));
     }
+    // Reject a request target that carries no absolute path. The `http` crate
+    // parses an authority-form target (`host:port`, which RFC 9112 permits only
+    // for CONNECT, already refused) and an HTTP/3 header block without
+    // `:path`/`:scheme` into a URI with an empty path. `forward_request`
+    // substitutes `/` for the missing target, so the origin would serve a path
+    // that no path condition ever saw, while the rule engine, the admin gate and
+    // the decoy router all evaluate the empty form.
+    let path = parts.uri.path();
+    if path.is_empty() {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "request target has no path",
+        ));
+    }
+    if path == "*" {
+        // Asterisk-form is defined only for OPTIONS (RFC 9112 section 3.2.4).
+        if parts.method != http::Method::OPTIONS {
+            return Some(HttpError::new(
+                StatusCode::BAD_REQUEST,
+                "asterisk-form request target requires OPTIONS",
+            ));
+        }
+    } else if !path.starts_with('/') {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported request-target form",
+        ));
+    }
 
     if let Some(err) = authority_mismatch_error(parts) {
         return Some(err);
@@ -2972,6 +3000,75 @@ mod tests {
     #[test]
     fn upload_inspection_concurrency_is_bounded() {
         assert!((1..=32).contains(&upload_inspection_concurrency()));
+    }
+
+    fn head_config() -> CompiledConfig {
+        crate::config::parse(
+            "listen: 127.0.0.1:0
+upstream: http://127.0.0.1:1
+categories: []
+",
+        )
+        .expect("config")
+    }
+
+    fn head_parts(method: http::Method, uri: &str) -> http::request::Parts {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(())
+            .expect("request")
+            .into_parts()
+            .0
+    }
+
+    #[test]
+    fn authority_form_request_targets_are_rejected() {
+        let config = head_config();
+        // What hyper's HTTP/1 parser and h3 (without :path/:scheme) produce: an
+        // authority with no path. Forwarding would substitute `/`, so the
+        // origin would serve a path no path condition inspected.
+        for target in ["example.test:80", "127.0.0.1:8080"] {
+            let parts = head_parts(http::Method::GET, target);
+            assert!(
+                parts.uri.path().is_empty() || !parts.uri.path().starts_with('/'),
+                "the parsed form of {target} must be non-origin-form"
+            );
+            let err = request_head_error(&config, &parts)
+                .unwrap_or_else(|| panic!("{target} must be rejected"));
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "{target}");
+        }
+    }
+
+    #[test]
+    fn origin_and_absolute_form_targets_pass_head_validation() {
+        let config = head_config();
+        for target in [
+            "/",
+            "/admin?x=1",
+            "http://example.test/",
+            "http://example.test",
+        ] {
+            let parts = head_parts(http::Method::GET, target);
+            assert!(
+                request_head_error(&config, &parts).is_none(),
+                "{target} must pass head validation"
+            );
+        }
+    }
+
+    #[test]
+    fn asterisk_form_is_allowed_only_for_options() {
+        let config = head_config();
+        let options = head_parts(http::Method::OPTIONS, "*");
+        assert_eq!(options.uri.path(), "*");
+        assert!(request_head_error(&config, &options).is_none());
+        for method in [http::Method::GET, http::Method::POST, http::Method::HEAD] {
+            let parts = head_parts(method.clone(), "*");
+            let err = request_head_error(&config, &parts)
+                .unwrap_or_else(|| panic!("{method} * must be rejected"));
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        }
     }
 
     struct PendingBody;

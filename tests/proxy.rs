@@ -1526,6 +1526,131 @@ async fn connect_raw_quic(
     Ok((endpoint, connection))
 }
 
+/// Append a QPACK prefix integer (RFC 9204 section 4.1.1) with `prefix_bits`.
+fn qpack_prefix(block: &mut Vec<u8>, base: u8, prefix_bits: u8, mut value: usize) {
+    let max = (1usize << prefix_bits) - 1;
+    if value < max {
+        block.push(base | value as u8);
+        return;
+    }
+    block.push(base | max as u8);
+    value -= max;
+    while value >= 128 {
+        block.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    block.push(value as u8);
+}
+
+/// Encode one QPACK literal field line with a literal name (no indexing).
+fn qpack_literal_field(block: &mut Vec<u8>, name: &str, value: &str) {
+    // 001 N H + three-bit name length, then name, then a seven-bit value length.
+    qpack_prefix(block, 0x20, 3, name.len());
+    block.extend_from_slice(name.as_bytes());
+    qpack_prefix(block, 0x00, 7, value.len());
+    block.extend_from_slice(value.as_bytes());
+}
+
+/// Send one HTTP/3 request header block with an explicit field list and keep
+/// the client control stream alive.
+async fn send_raw_h3_headers(
+    connection: &quinn::Connection,
+    fields: &[(&str, &str)],
+) -> quinn::SendStream {
+    let mut control = connection.open_uni().await.expect("control stream");
+    control
+        .write_all(&[0x00, 0x04, 0x00])
+        .await
+        .expect("client settings");
+    let (mut send, _recv) = connection.open_bi().await.expect("request stream");
+    let mut block = vec![0x00, 0x00];
+    for (name, value) in fields {
+        qpack_literal_field(&mut block, name, value);
+    }
+    let mut frame = vec![0x01, block.len() as u8];
+    frame.extend_from_slice(&block);
+    send.write_all(&frame).await.expect("request head");
+    control
+}
+
+#[tokio::test]
+async fn http3_header_block_without_path_is_rejected_before_forwarding() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream = upstream_listener.local_addr().expect("upstream address");
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream_hits = Arc::clone(&hits);
+    let upstream_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = upstream_listener.accept().await else {
+                break;
+            };
+            let hits = Arc::clone(&upstream_hits);
+            tokio::spawn(async move {
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    hits.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"origin"))))
+                    }
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, certificate) = write_test_certificate(&dir);
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+tls:
+  cert_file: {}
+  key_file: {}
+http3: {{ enabled: true }}
+categories: []
+",
+        cert_path.display(),
+        key_path.display()
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (endpoint, connection) = connect_raw_quic(
+        running.addr,
+        certificate.clone(),
+        "127.0.0.6:0".parse().expect("client source"),
+        None,
+    )
+    .await
+    .expect("client connection");
+    // :method and :authority only: no :scheme and no :path, which h3 accepts.
+    let control = send_raw_h3_headers(
+        &connection,
+        &[(":method", "GET"), (":authority", "example.test")],
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        0,
+        "a header block without :path must not be forwarded as /"
+    );
+
+    // A well-formed head on the same listener still reaches the origin.
+    let (status, _, _) = send_h3(running.addr, certificate, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(hits.load(Ordering::Relaxed) >= 1);
+
+    drop(control);
+    drop(connection);
+    drop(endpoint);
+    running.stop().await;
+    upstream_task.abort();
+}
+
 #[tokio::test]
 async fn http3_rejects_an_oversized_headers_frame_before_buffering_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1659,6 +1784,34 @@ async fn http3_total_response_deadline_ends_a_dripping_stream() {
         .await,
         "the total response deadline must end a stalled HTTP/3 body"
     );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn authority_form_request_target_is_rejected_before_forwarding() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
+    ))
+    .await;
+
+    let control = send_raw_request(
+        running.addr,
+        "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(control, StatusCode::OK);
+
+    // RFC 9112 section 3.2.3 permits authority-form only for CONNECT. Without
+    // this check the request is forwarded as `GET /`, so a path-scoped rule
+    // never sees the target the origin serves.
+    let status = send_raw_request(
+        running.addr,
+        "GET example.test:80 HTTP/1.1\r\nHost: example.test:80\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     running.stop().await;
 }

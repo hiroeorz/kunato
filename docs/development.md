@@ -911,7 +911,12 @@ HTTP/3 response bodies also carry a total `response_body` deadline (default
 the request task and its connection slot alive indefinitely.
 
 `max_path_bytes` bounds the whole request target (path plus query string), not
-just the path. Request-target length, header size/count, and method-case checks
+just the path. A request target that is not origin-form or absolute-form is
+rejected with `400` before policy evaluation: an HTTP/1.1 authority-form target
+(only `CONNECT` may use it, and `CONNECT` is refused) and an HTTP/3 header block
+without `:path`/`:scheme` would otherwise be forwarded as `/` while path
+conditions saw an empty path. Asterisk-form is accepted only for `OPTIONS`.
+Request-target length, header size/count, and method-case checks
 run before inspection memory is reserved or the body is read on all transports,
 including WebSocket handshakes. An invalid head is rejected even if its declared
 body never arrives. `websocket_message_bytes` bounds each reassembled
