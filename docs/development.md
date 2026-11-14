@@ -1324,7 +1324,11 @@ contain a query string, fragment, or whitespace.
 
 The document is read from a GET `query` parameter, a form `query` field, a JSON
 object or batch array, an `application/graphql` body, or the `operations` field of
-a multipart upload. JSON bodies are parsed regardless of the declared content
+a multipart upload. Every document a request carries is inspected: a top-level
+`query` beside a `graphql-ws`-style `type`/`payload` envelope is analyzed too,
+because a GraphQL-over-HTTP endpoint executes it and ignores the envelope
+fields, so the envelope cannot hide a document from the depth and introspection
+checks. JSON bodies are parsed regardless of the declared content
 type (the usual labels are `application/json` and `+json`), so relabelling a
 query as `text/plain` does not hide it. GraphQL-over-WebSocket messages are
 inspected in the tunnel too: `start` (graphql-ws) and `subscribe`

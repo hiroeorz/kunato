@@ -1135,20 +1135,20 @@ impl<'de> Deserialize<'de> for PayloadDocuments {
 fn collect_json_body_queries(body: &[u8], candidates: &mut Vec<String>) -> Result<(), Violation> {
     match serde_json::from_slice::<QueryDocuments>(body) {
         Ok(documents) => {
-            if documents.operation.as_deref().is_some_and(is_operation) {
-                // The upstream reads the document from `payload.query`, so a
-                // top-level `query` must not make an empty payload look
-                // inspectable.
-                if documents.payload_queries.is_empty() {
-                    return Err(Violation::Uninspectable);
-                }
-                for query in documents.payload_queries {
-                    push_candidate(candidates, &query);
-                }
-            } else {
-                for query in documents.queries {
-                    push_candidate(candidates, &query);
-                }
+            // An operation envelope does not prove that the endpoint ignores a
+            // top-level `query`: a GraphQL-over-HTTP server executes that member
+            // and ignores the envelope fields, so every document the request
+            // carries is inspected, not just the branch an attacker selects.
+            let envelope = documents.operation.as_deref().is_some_and(is_operation);
+            if envelope && documents.payload_queries.is_empty() && documents.queries.is_empty() {
+                return Err(Violation::Uninspectable);
+            }
+            for query in documents
+                .queries
+                .into_iter()
+                .chain(documents.payload_queries)
+            {
+                push_candidate(candidates, &query);
             }
             Ok(())
         }
@@ -1168,12 +1168,13 @@ fn collect_json_text_queries(text: &str, candidates: &mut Vec<String>) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut deserializer = serde_json::Deserializer::from_str(text);
     if let Ok(documents) = QueryDocuments::deserialize(&mut deserializer) {
-        let queries = if documents.operation.as_deref().is_some_and(is_operation) {
-            documents.payload_queries
-        } else {
-            documents.queries
-        };
-        for query in queries {
+        // Inspect every document the request carries, including a top-level
+        // `query` beside an operation envelope (see `collect_json_body_queries`).
+        for query in documents
+            .queries
+            .into_iter()
+            .chain(documents.payload_queries)
+        {
             push_candidate(candidates, &query);
         }
     }
@@ -1341,6 +1342,50 @@ mod tests {
             matches!(violation, Some(Violation::TooDeep { .. })),
             "{violation:?}"
         );
+    }
+
+    #[test]
+    fn rejects_a_top_level_query_hidden_behind_an_envelope() {
+        let envelope = |query: &str| {
+            format!(
+                "{{\"type\":\"start\",\"payload\":{{\"query\":{}}}}}",
+                serde_json::to_string(query).expect("encode")
+            )
+        };
+        // The shallow payload alone is within the limits.
+        assert_eq!(
+            inspect_with(
+                None,
+                Some("application/json"),
+                envelope("{ a }").as_bytes(),
+                false
+            ),
+            None
+        );
+        // A GraphQL-over-HTTP endpoint executes the top-level `query` and
+        // ignores the envelope fields, so the deep document must be inspected.
+        let hidden = format!(
+            "{{\"query\":{},\"type\":\"start\",\"payload\":{{\"query\":{}}}}}",
+            serde_json::to_string(&nested(21)).expect("encode"),
+            serde_json::to_string("{ a }").expect("encode")
+        );
+        let violation = inspect_with(None, Some("application/json"), hidden.as_bytes(), false);
+        assert!(
+            matches!(violation, Some(Violation::TooDeep { .. })),
+            "{violation:?}"
+        );
+    }
+
+    #[test]
+    fn text_collection_inspects_envelope_and_top_level_documents() {
+        let text = format!(
+            "{{\"query\":{},\"type\":\"start\",\"payload\":{{\"query\":{}}}}}",
+            serde_json::to_string(&nested(21)).expect("encode"),
+            serde_json::to_string("{ a }").expect("encode")
+        );
+        let mut candidates = Vec::new();
+        collect_json_text_queries(&text, &mut candidates);
+        assert_eq!(candidates.len(), 2, "{candidates:?}");
     }
 
     #[test]

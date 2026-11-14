@@ -437,8 +437,8 @@ findings. Full evidence, traces and patch sketches live in that run's
   (top-level `query`, `payload.query`, batch entries, multipart `operations`)
   instead of selecting a branch from the attacker-supplied `type`. Keep
   `Uninspectable` only for an operation envelope with no document at all.
-- Tests: `graphql_envelope_cannot_hide_a_top_level_query` (deep document and
-  introspection behind `{"type":"start","payload":{"query":"{a}"}}` -> 400/403),
+- Tests: `graphql_envelope_cannot_hide_a_top_level_query` (deep document behind
+  `{"type":"start","payload":{"query":"{a}"}}` -> 400), the unit tests above,
   plus the existing plain, batch, form and multipart cases.
 - Acceptance: the depth/field/introspection limits apply to every document the
   upstream may execute, and the WebSocket envelope behavior is unchanged.
@@ -695,7 +695,7 @@ before the ordering repair.
 | S-02 | fixed | Both h3 close paths are bounded by `connection_idle.min(1s)`; `http3_idle_connection_releases_its_slot_without_control_credit` fails on the old code (the server refuses the second connection). |
 | S-03 | fixed | `src/proxy/h3_limits.rs` wraps `h3_quinn::Connection` and rejects a HEADERS frame from its declared length before h3 buffers it (five parser unit tests); `http3_rejects_an_oversized_headers_frame_before_buffering_it` fails when the guard is disabled. Remove the wrapper if a future h3 release enforces the declared frame length itself. |
 | S-04 | fixed | `request_head_error` rejects an empty or non-`/` request target (asterisk-form only for `OPTIONS`), which covers the HTTP/1.1 authority-form target and the HTTP/3 head without `:path`/`:scheme`; `authority_form_request_targets_are_rejected`, `origin_and_absolute_form_targets_pass_head_validation`, `asterisk_form_is_allowed_only_for_options`, `authority_form_request_target_is_rejected_before_forwarding` and `http3_header_block_without_path_is_rejected_before_forwarding` fail on the previous behavior. |
-| S-05 | open | |
+| S-05 | fixed | `collect_json_body_queries` and `collect_json_text_queries` inspect the union of top-level and `payload.query` documents instead of selecting a branch from the attacker-supplied `type`; `rejects_a_top_level_query_hidden_behind_an_envelope`, `text_collection_inspects_envelope_and_top_level_documents` and `graphql_envelope_cannot_hide_a_top_level_query` fail on the previous behavior. |
 | S-06 | open | |
 | S-07 | open | |
 | S-08 | open | |

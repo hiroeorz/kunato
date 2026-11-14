@@ -3502,6 +3502,59 @@ async fn graphql_depth_and_field_limits_reject_complex_queries() {
 }
 
 #[tokio::test]
+async fn graphql_envelope_cannot_hide_a_top_level_query() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let deep = nested_query(21);
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        json_query_body(&deep),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A GraphQL-over-HTTP endpoint executes the top-level `query` and ignores
+    // `type`/`payload`; the shallow payload must not hide the deep document.
+    let hidden = format!(
+        "{{\"query\":{},\"type\":\"start\",\"payload\":{{\"query\":{}}}}}",
+        serde_json::to_string(&deep).expect("encode"),
+        serde_json::to_string("{ viewer { name } }").expect("encode")
+    );
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        hidden.into_bytes(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The shallow payload alone is still accepted.
+    let envelope = format!(
+        "{{\"type\":\"start\",\"payload\":{{\"query\":{}}}}}",
+        serde_json::to_string("{ viewer { name } }").expect("encode")
+    );
+    let (status, body) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/graphql",
+        envelope.into_bytes(),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"hello");
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn graphql_parser_handles_the_maximum_configured_depth() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
