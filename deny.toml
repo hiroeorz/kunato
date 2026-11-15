@@ -39,6 +39,8 @@ allow-build-scripts = [
     "getrandom",
     "httparse",
     "libc",
+    # Reviewed: compile the packaged SQLite C source; no downloaded build inputs.
+    "libsqlite3-sys",
     "num-traits",
     "oid-registry",
     "proc-macro2",

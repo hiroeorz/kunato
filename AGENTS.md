@@ -58,6 +58,7 @@ src/
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
+  console/         # Unconnected console data contracts, SQLite store, and bounded writer
   rules/           # Category/rule model, matcher, and evaluation engine
   logs/            # `kunato log`: journalctl reader, parsing, filters, attack classes
   proxy/           # Listener, upstream client, forwarding, TLS termination, HTTP/3, WebSocket
@@ -85,6 +86,10 @@ docs/
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   engine-gaps.md      # Engine changes the daily CVE intake could not cover with a rule
   next-version-ai-defense.md # Next-version concept for defending home servers against AI-assisted attacks
+  monitoring-console.md # Optional console architecture, access, and implementation status
+  monitoring-console-requirements.md # Metrics, real-time, decoy, and UI interaction requirements
+  monitoring-console-storage.md # Proposed asynchronous persistence, aggregation, and retention
+  monitoring-console-phase1.md # Implemented persistence foundation and its verification contract
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
   release-signing.md  # Detached minisign signing: keys, signing, rotation, limits

@@ -9,6 +9,7 @@ pub mod cidr;
 pub mod cli;
 pub mod client_ip;
 pub mod config;
+pub mod console;
 pub mod decoding;
 pub mod decoy;
 pub mod error;
