@@ -6,7 +6,7 @@
 # after a systemd upgrade.
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 unit=${1:-"$script_dir/../packaging/kunato.service"}
 
 command -v systemd-analyze >/dev/null 2>&1 || {
