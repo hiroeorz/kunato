@@ -19,7 +19,7 @@ use super::model::{
 use super::{Error, validate_duration};
 
 const APPLICATION_ID: i64 = 0x4b55_4e43;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const PAGE_BYTES: u64 = 4096;
 const JOURNAL_RESERVE: u64 = 65_536;
 const SCHEMA: &str = "
@@ -200,7 +200,7 @@ impl Store {
             if application != APPLICATION_ID {
                 return Err(Error::ForeignDatabase);
             }
-            if version != SCHEMA_VERSION {
+            if version != 1 && version != SCHEMA_VERSION {
                 return Err(Error::UnsupportedSchema(version));
             }
         }
@@ -241,6 +241,11 @@ impl Store {
             .prepare("SELECT event_id, payload FROM events WHERE occurred_at >= ?1")?;
         self.connection
             .prepare("SELECT revision, payload FROM metric_buckets WHERE start_ms >= ?1")?;
+        if !fresh && version == 1 {
+            let transaction = self.connection.transaction()?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 

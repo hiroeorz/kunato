@@ -32,6 +32,7 @@ struct State {
     candidates: Vec<Cached>,
     incomplete: u8,
     contexts: u8,
+    request_minute: Option<u64>,
     evidence: Option<Evidence>,
     runtime: Arc<super::Runtime>,
     site: [u8; 16],
@@ -215,11 +216,38 @@ impl Drop for State {
         for index in 0..2 {
             if self.contexts & (1 << index) != 0 {
                 bump(&self.metrics.decoys.reuse[index]);
+                if let Some(minute) = self.request_minute {
+                    self.metrics.observations.count(
+                        minute,
+                        if index == 0 {
+                            crate::observations::Count::DecoyCredential
+                        } else {
+                            crate::observations::Count::DecoyOccurrence
+                        },
+                    );
+                }
             }
         }
         let Some(evidence) = &self.evidence else {
             return;
         };
+        self.metrics
+            .observations
+            .decoy_detail(crate::observations::DecoyDetail {
+                site: &self.name,
+                credential_id: &evidence.id,
+                context: if evidence.credential {
+                    crate::console::model::DecoyContext::Credential
+                } else {
+                    crate::console::model::DecoyContext::Occurrence
+                },
+                age_seconds: Some(evidence.age),
+                lure: None,
+                template: None,
+                source: self.source,
+                blocked: self.block && evidence.credential,
+                incomplete: self.incomplete != 0,
+            });
         if !self.runtime.log_quota(1) || !self.protection.decoy_reuse_log(self.source_key) {
             bump(&self.metrics.decoys.suppressed[1]);
             return;
@@ -274,6 +302,7 @@ impl Observation {
             candidates: Vec::with_capacity(MAX_CANDIDATES),
             incomplete: 0,
             contexts: 0,
+            request_minute: crate::observations::request_minute(),
             evidence: None,
             runtime: Arc::clone(&policy.runtime),
             site: site.id,

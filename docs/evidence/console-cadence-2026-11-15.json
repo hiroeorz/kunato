@@ -1,0 +1,147 @@
+{
+  "date": "2026-11-15",
+  "base_commit": "7f1c6c26b970f2fb8cc8405a3ad04735e20bf6df",
+  "input_sha256": {
+    "src/metrics.rs": "744c4f0198d17789646a66e4660960d19d5a4d4b98677bc7d65723c37fd908fc",
+    "src/decoy/metrics.rs": "d65fee422b0195f57789c10b7c0cdbb7605a3a28e332ab70e8b61e8615740356",
+    "ui/console-prototype/app.js": "5f971062f74164a0536d3273f513d837fca44017aecb88fb5cf4d1c1a6b417bb",
+    "ui/console-prototype/index.html": "b2f0e77b5a42423f0e3b941d2ff0b93dfe5a62a6f7efff62dd7bacfa17b0f746",
+    "ui/console-prototype/styles.css": "e2ba5e4816dd6a0ebc822abb2001dba947d62c729d726133f5c337704a7bbb75",
+    "scripts/bench-console-cadence.py": "dd2d7abcdf2925f6146d38079da35ef2311c2930cc9f7276017ccb6271f95367",
+    "scripts/bench-console-cadence.cjs": "8d2d0a68c185d0b4abbad63a9642ab93ef83e0b211039d6f7b8089b5dfd271c6"
+  },
+  "counter_bench": {
+    "method": "single-thread microbenchmark, seven warmed runs, nanoseconds per operation",
+    "limitations": "No HTTP, SSE transport, TLS, disk, minute ring, concurrent WAF load, or end-to-end latency measurement.",
+    "system": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "source_files": [
+      "src/metrics.rs",
+      "src/decoy/metrics.rs"
+    ],
+    "timings": {
+      "request_increment": {
+        "min_ns": 7.373,
+        "median_ns": 7.448,
+        "max_ns": 7.836
+      },
+      "request_rejection_reason_increments": {
+        "min_ns": 14.016,
+        "median_ns": 14.086,
+        "max_ns": 14.267
+      },
+      "existing_metrics_render": {
+        "min_ns": 3636.101,
+        "median_ns": 3684.902,
+        "max_ns": 3776.778
+      },
+      "illustrative_two_counter_sse": {
+        "min_ns": 29.818,
+        "median_ns": 30.353,
+        "max_ns": 32.288
+      }
+    },
+    "metrics_payload_bytes": 11288,
+    "illustrative_sse_bytes": 65
+  },
+  "browser_bench": {
+    "method": "100 synchronous prototype updates including forced layout, after five warmups",
+    "limitations": "No actual network collection, SSE, animation/presentation latency, production UI optimization, or concurrent WAF load. Timed inputs are synthetic browser-local arrivals.",
+    "chromium": "151.0.7922.34",
+    "desktop": {
+      "cards": {
+        "median_ms": 0.8000000044703484,
+        "p95_ms": 1.2000000029802322,
+        "max_ms": 1.7999999970197678
+      },
+      "full": {
+        "median_ms": 11.700000002980232,
+        "p95_ms": 19.600000001490116,
+        "max_ms": 47.899999998509884
+      },
+      "retained_events": 500,
+      "retained_samples": 900,
+      "rendered_rows": 35,
+      "viewport": [
+        1440,
+        1100
+      ]
+    },
+    "browser_local_cadence": [
+      {
+        "interval_ms": 5000,
+        "input_events": 137,
+        "published_events": 137,
+        "renders": 2,
+        "render_ms": 21.100000001490116,
+        "elapsed_ms": 10010.39999999851,
+        "latency_mean_ms": 2527.594160583278,
+        "latency_p95_ms": 4790.69999999553,
+        "latency_max_ms": 4997.5
+      },
+      {
+        "interval_ms": 1000,
+        "input_events": 137,
+        "published_events": 137,
+        "renders": 10,
+        "render_ms": 116.2000000178814,
+        "elapsed_ms": 10013.60000000149,
+        "latency_mean_ms": 514.3306569351549,
+        "latency_p95_ms": 967.6000000014901,
+        "latency_max_ms": 998.2000000029802
+      },
+      {
+        "interval_ms": 100,
+        "input_events": 137,
+        "published_events": 137,
+        "renders": 100,
+        "render_ms": 1090.300000011921,
+        "elapsed_ms": 10010.79999999702,
+        "latency_mean_ms": 59.49051094843741,
+        "latency_p95_ms": 97.90000000596046,
+        "latency_max_ms": 98.79999999701977
+      },
+      {
+        "interval_ms": 0,
+        "input_events": 137,
+        "published_events": 137,
+        "renders": 137,
+        "render_ms": 1499.4000001102686,
+        "elapsed_ms": 9999.5,
+        "latency_mean_ms": 10.952554745232536,
+        "latency_p95_ms": 11.899999998509884,
+        "latency_max_ms": 13.100000001490116
+      }
+    ]
+  },
+  "derived_model": {
+    "conditions": "One source export and one visible browser. Serialization/render component estimates only; no measured network/HTTP/SSE or complete WAF overhead.",
+    "at_10000_requests_per_second": {
+      "per_request_illustrative_two_counter_sse_messages_per_second": 10000,
+      "per_request_illustrative_two_counter_sse_payload_bytes_per_second": 650000
+    },
+    "periodic": [
+      {
+        "interval_ms": 5000,
+        "updates_per_second": 0.2,
+        "existing_metrics_payload_bytes_per_second": 2257.6,
+        "existing_metrics_render_ms_per_second": 0.0007369804000000001,
+        "measured_browser_update_time_fraction_percent": 0.21078078799541733
+      },
+      {
+        "interval_ms": 1000,
+        "updates_per_second": 1.0,
+        "existing_metrics_payload_bytes_per_second": 11288.0,
+        "existing_metrics_render_ms_per_second": 0.0036849020000000003,
+        "measured_browser_update_time_fraction_percent": 1.1604218264946085
+      },
+      {
+        "interval_ms": 100,
+        "updates_per_second": 10.0,
+        "existing_metrics_payload_bytes_per_second": 112880.0,
+        "existing_metrics_render_ms_per_second": 0.03684902,
+        "measured_browser_update_time_fraction_percent": 10.891237463661701
+      }
+    ]
+  }
+}

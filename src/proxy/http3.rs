@@ -308,38 +308,44 @@ async fn handle_request(
     let head_request = request.method() == Method::HEAD;
     let (mut parts, _) = request.into_parts();
     let (mut send, mut recv) = stream.split();
-    let resolved = server::resolve_source(&context, peer, &config, &parts);
-    let source = resolved
-        .as_ref()
-        .copied()
-        .unwrap_or_else(|_| ClientSource::direct(peer));
-    let mut response = if let Err(err) = resolved {
-        server::rejected(source, &err)
-    } else if let Some(err) = server::admission_error(&context, source, &parts, &config) {
-        server::rejected(source, &err)
-    } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, source) {
-        server::rejected(source, &err)
-    } else if let Some(err) = server::request_head_error(&config, &parts) {
-        server::rejected(source, &err)
-    } else if let Some(response) = server::maintenance_response(&context, &parts) {
-        response
-    } else if let Some(response) = server::admin_access_response(&context, &config, source, &parts)
-    {
-        response
-    } else if let Some(response) = server::decoy_head(&context, &config, source, &mut parts) {
-        recv.stop_sending(Code::H3_NO_ERROR);
-        response
-    } else if let Some(inspection) = server::request_inspection(&context, source, &parts) {
-        match read_prefix(recv, &config, source, inspection, &context).await {
-            Ok((payload, inspection)) => {
-                server::process_payload(parts, payload, source, &config, &context, inspection).await
+    let history = context.observations();
+    let mut response = crate::observations::observe(history, async {
+        let resolved = server::resolve_source(&context, peer, &config, &parts);
+        let source = resolved
+            .as_ref()
+            .copied()
+            .unwrap_or_else(|_| ClientSource::direct(peer));
+        if let Err(err) = resolved {
+            server::rejected(source, &err)
+        } else if let Some(err) = server::admission_error(&context, source, &parts, &config) {
+            server::rejected(source, &err)
+        } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, source) {
+            server::rejected(source, &err)
+        } else if let Some(err) = server::request_head_error(&config, &parts) {
+            server::rejected(source, &err)
+        } else if let Some(response) = server::maintenance_response(&context, &parts) {
+            response
+        } else if let Some(response) =
+            server::admin_access_response(&context, &config, source, &parts)
+        {
+            response
+        } else if let Some(response) = server::decoy_head(&context, &config, source, &mut parts) {
+            recv.stop_sending(Code::H3_NO_ERROR);
+            response
+        } else if let Some(inspection) = server::request_inspection(&context, source, &parts) {
+            match read_prefix(recv, &config, source, inspection, &context).await {
+                Ok((payload, inspection)) => {
+                    server::process_payload(parts, payload, source, &config, &context, inspection)
+                        .await
+                }
+                Err(err) => server::rejected(source, &err),
             }
-            Err(err) => server::rejected(source, &err),
+        } else {
+            context.record_overloaded();
+            server::rejected(source, &server::inspection_capacity_error())
         }
-    } else {
-        context.record_overloaded();
-        server::rejected(source, &server::inspection_capacity_error())
-    };
+    })
+    .await;
     config.response_headers.apply(response.headers_mut());
     crate::decoy::finalize(&mut response);
     let active = active.into_streaming();

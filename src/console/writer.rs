@@ -98,6 +98,13 @@ pub enum SubmitError {
 pub struct Receipt(oneshot::Receiver<Result<WriteReport, Error>>);
 
 impl Receipt {
+    pub fn try_result(&mut self) -> Option<Result<WriteReport, Error>> {
+        match self.0.try_recv() {
+            Ok(result) => Some(result),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => Some(Err(Error::WorkerStopped)),
+        }
+    }
     /// A timeout means the outcome is unknown; it does not cancel a commit.
     pub async fn wait(self, timeout: Duration) -> Result<WriteReport, Error> {
         validate_duration(timeout, Duration::from_secs(60))?;
@@ -121,6 +128,7 @@ struct Pending {
 }
 
 struct Queue {
+    force_flush: bool,
     pending: VecDeque<Pending>,
     in_flight: usize,
     in_flight_oldest: Option<Instant>,
@@ -214,6 +222,7 @@ impl Writer {
         };
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
+                force_flush: false,
                 pending: VecDeque::new(),
                 in_flight: 0,
                 in_flight_oldest: None,
@@ -319,6 +328,12 @@ impl Writer {
         self.shared.health()
     }
 
+    /// Expedite queued batches without waiting for their SQLite commit.
+    pub fn request_flush(&self) {
+        self.shared.lock().force_flush = true;
+        self.shared.wake.notify_one();
+    }
+
     pub async fn shutdown(mut self, timeout: Duration) -> Result<ShutdownReport, Error> {
         validate_duration(timeout, Duration::from_secs(30))?;
         self.shared.stop();
@@ -362,6 +377,7 @@ fn run(shared: &Shared, store: &mut Store) {
                     queue.health.state = WriterState::Stopping;
                 }
                 if queue.pending.is_empty() {
+                    queue.force_flush = false;
                     if stopping {
                         queue.health.state = WriterState::Stopped;
                         return;
@@ -396,7 +412,7 @@ fn run(shared: &Shared, store: &mut Store) {
                 let threshold = count < queue.pending.len()
                     || records >= shared.config.max_batch_records
                     || bytes >= shared.config.max_batch_bytes;
-                let mut deadline = if stopping || threshold {
+                let mut deadline = if stopping || threshold || queue.force_flush {
                     Instant::now()
                 } else {
                     due.unwrap_or_else(Instant::now)

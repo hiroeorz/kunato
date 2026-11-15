@@ -493,6 +493,9 @@ pub struct Context {
 }
 
 impl Context {
+    pub(crate) fn observations(&self) -> Arc<crate::observations::Observations> {
+        Arc::clone(&self.metrics.observations)
+    }
     pub fn config(&self) -> Arc<CompiledConfig> {
         self.config.load()
     }
@@ -1132,6 +1135,24 @@ async fn serve_io<I>(
 }
 
 async fn handle_request(
+    request: Request<Incoming>,
+    peer: SocketAddr,
+    context: Context,
+    shutdown: watch::Receiver<bool>,
+    guard_slot: Arc<std::sync::Mutex<Option<ConnectionGuard>>>,
+    active: Option<ActiveRequest>,
+) -> Result<Response<ProxyBody>, Infallible> {
+    let history = Arc::clone(&context.metrics.observations);
+    Ok(crate::observations::observe(history, async move {
+        match handle_request_inner(request, peer, context, shutdown, guard_slot, active).await {
+            Ok(response) => response,
+            Err(never) => match never {},
+        }
+    })
+    .await)
+}
+
+async fn handle_request_inner(
     mut request: Request<Incoming>,
     peer: SocketAddr,
     context: Context,
@@ -1287,10 +1308,20 @@ pub(crate) fn resolve_source(
     parts: &http::request::Parts,
 ) -> Result<ClientSource, HttpError> {
     context.metrics.requests.fetch_add(1, Ordering::Relaxed);
-    config
+    let result = config
         .client_ip
         .resolve(peer, &parts.headers)
-        .map_err(|reason| HttpError::new(StatusCode::BAD_REQUEST, reason))
+        .map_err(|reason| {
+            HttpError::new(StatusCode::BAD_REQUEST, reason)
+                .with_reason(crate::console::model::RejectionReason::ClientIdentity)
+        });
+    crate::observations::identity(
+        result
+            .as_ref()
+            .copied()
+            .unwrap_or_else(|_| ClientSource::direct(peer)),
+    );
+    result
 }
 
 /// Admission check that runs before a request body is ingested. It consumes
@@ -1311,6 +1342,7 @@ pub(crate) fn admission_error(
             .metrics
             .behavior_blocked
             .fetch_add(1, Ordering::Relaxed);
+        crate::observations::reject(crate::console::model::RejectionReason::Behavior);
         warn!(
             client = %source.client_ip, peer = %source.peer,
             path = %crate::decoy::log_path(parts.uri.path()),
@@ -1352,6 +1384,7 @@ pub(crate) fn host_policy_error(
         .metrics
         .host_rejected
         .fetch_add(1, Ordering::Relaxed);
+    crate::observations::reject(crate::console::model::RejectionReason::Host);
     if let Some(host) = violation.host() {
         debug!(
             client = %source.client_ip, peer = %source.peer,
@@ -1413,6 +1446,7 @@ pub(crate) fn admin_access_response(
             None
         }
         AdminAccessDecision::Denied(function) => {
+            crate::observations::reject(crate::console::model::RejectionReason::AdminAccess);
             context
                 .metrics
                 .admin_access_denied
@@ -1689,6 +1723,7 @@ pub(crate) fn request_head_error(
 /// Stable error for requests that could not reserve inspection memory. The
 /// client should retry after the current inspections release their budget.
 pub(crate) fn inspection_capacity_error() -> HttpError {
+    crate::observations::reject(crate::console::model::RejectionReason::Overload);
     HttpError::with_retry_after(
         StatusCode::SERVICE_UNAVAILABLE,
         "inspection capacity exhausted",
@@ -1773,6 +1808,7 @@ fn protection_http_error(context: &Context, decision: Decision) -> Option<HttpEr
     match decision {
         Decision::Allow => None,
         Decision::RateLimited { retry_after } => {
+            crate::observations::reject(crate::console::model::RejectionReason::RateLimit);
             context.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
             Some(HttpError::with_retry_after(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1781,6 +1817,7 @@ fn protection_http_error(context: &Context, decision: Decision) -> Option<HttpEr
             ))
         }
         Decision::Banned { retry_after } => {
+            crate::observations::reject(crate::console::model::RejectionReason::Ban);
             context.metrics.banned.fetch_add(1, Ordering::Relaxed);
             Some(HttpError::with_retry_after(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1789,6 +1826,7 @@ fn protection_http_error(context: &Context, decision: Decision) -> Option<HttpEr
             ))
         }
         Decision::Overloaded { retry_after } => {
+            crate::observations::reject(crate::console::model::RejectionReason::Overload);
             context.metrics.overloaded.fetch_add(1, Ordering::Relaxed);
             Some(HttpError::with_retry_after(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1919,6 +1957,7 @@ async fn read_body(
 }
 
 fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
+    crate::observations::reject(crate::console::model::RejectionReason::Graphql);
     match violation {
         crate::graphql::Violation::Incomplete => HttpError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1941,6 +1980,9 @@ fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
 }
 
 pub(crate) fn rejected(source: ClientSource, err: &HttpError) -> Response<ProxyBody> {
+    if let Some(reason) = err.rejection_reason {
+        crate::observations::reject(reason);
+    }
     // Rate limits and load shedding are expected under attack; logging every
     // one at warning level turns a flood into a disk-I/O amplifier. Metrics
     // still count them.
@@ -2237,6 +2279,12 @@ fn record_sequence_flag(
 }
 
 fn record_upstream_error(context: &Context, err: &HttpError) {
+    if matches!(
+        err.status,
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT
+    ) {
+        crate::observations::service_failure(err.status == StatusCode::GATEWAY_TIMEOUT);
+    }
     match err.status {
         StatusCode::GATEWAY_TIMEOUT => {
             context
@@ -2355,6 +2403,7 @@ async fn process_inner(
     let form_body = crate::form::is_form(&parts.headers);
     let inspect_form = form_body && (config.limits.form.enabled || php_profile);
     if php_profile && config.php.block_multipart && crate::upload::is_multipart(&parts.headers) {
+        crate::observations::reject(crate::console::model::RejectionReason::PhpRequest);
         context
             .metrics
             .php_request_rejected
@@ -2534,6 +2583,7 @@ async fn process_inner(
         }
     {
         if let Some(finding) = inspection.blocking {
+            crate::observations::reject(crate::console::model::RejectionReason::Saml);
             context
                 .metrics
                 .saml_rejected
@@ -2603,6 +2653,11 @@ async fn process_inner(
             disabled_fields,
         ) {
             use crate::form::Violation;
+            crate::observations::reject(if violation == Violation::DisabledField {
+                crate::console::model::RejectionReason::PhpRequest
+            } else {
+                crate::console::model::RejectionReason::Form
+            });
             let status = match violation {
                 Violation::Malformed => StatusCode::BAD_REQUEST,
                 Violation::DisabledField => StatusCode::FORBIDDEN,
@@ -2658,6 +2713,7 @@ async fn process_inner(
             }
         };
         if let Some(rejection) = rejection {
+            crate::observations::reject(crate::console::model::RejectionReason::Upload);
             context
                 .metrics
                 .upload_rejected
@@ -2683,6 +2739,7 @@ async fn process_inner(
             config.limits.upload_expansion,
         )
     {
+        crate::observations::reject(crate::console::model::RejectionReason::Upload);
         context
             .metrics
             .upload_rejected
@@ -2736,10 +2793,10 @@ async fn process_inner(
             reason = %reason,
             "jwt rejected by policy"
         );
-        return Err(HttpError::new(
-            StatusCode::FORBIDDEN,
-            "jwt policy violation",
-        ));
+        return Err(
+            HttpError::new(StatusCode::FORBIDDEN, "jwt policy violation")
+                .with_reason(crate::console::model::RejectionReason::Jwt),
+        );
     }
     let view = RequestView::with_body_decoding(
         &parts.method,
@@ -2752,6 +2809,7 @@ async fn process_inner(
     .with_body_truncated(body_truncated)
     .with_body_rules_exempt(body_rules_exempt);
     if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
+        crate::observations::reject(crate::console::model::RejectionReason::Hardening);
         debug!(
             client = %source.client_ip, peer = %source.peer,
             path = %crate::decoy::log_path(parts.uri.path()),
@@ -2773,11 +2831,20 @@ async fn process_inner(
     drop(decoy_observation);
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
 
+    if outcome.allowed.is_some() {
+        crate::observations::rule_match(crate::console::model::Phase::Request, false);
+    }
     if !outcome.logs.is_empty() {
         context.metrics.logged.fetch_add(1, Ordering::Relaxed);
     }
 
     for record in &outcome.logs {
+        crate::observations::rule_match(crate::console::model::Phase::Request, true);
+        crate::observations::rule_detail(
+            crate::console::model::Phase::Request,
+            &record.category,
+            &record.rule,
+        );
         info!(
             category = %record.category,
             rule = %record.rule,
@@ -2790,6 +2857,12 @@ async fn process_inner(
     }
 
     if let Some(blocked) = &outcome.blocked {
+        crate::observations::rule_match(crate::console::model::Phase::Request, false);
+        crate::observations::reject(if blocked.rate_limited {
+            crate::console::model::RejectionReason::RateLimit
+        } else {
+            crate::console::model::RejectionReason::Rule
+        });
         context.metrics.blocked.fetch_add(1, Ordering::Relaxed);
         if blocked.rate_limited {
             context.metrics.rule_limited.fetch_add(1, Ordering::Relaxed);

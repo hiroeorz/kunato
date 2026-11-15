@@ -21,6 +21,7 @@ pub mod logs;
 pub mod maintenance;
 pub mod metrics;
 mod metrics_table;
+pub mod observations;
 mod php;
 pub mod protection;
 pub mod proxy;

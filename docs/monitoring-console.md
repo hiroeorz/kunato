@@ -7,14 +7,19 @@ Status: The browser-only prototype is implemented and committed in `d9ba903`
 bottom-up Phase 1 implements the observation contracts, SQLite store, and
 bounded persistence worker as a library. See the
 [Phase 1 implementation contract](monitoring-console-phase1.md).
-Collection, console runtime, authentication, HTTPS, SSE, aggregation, and
-retention remain future work. The prototype still uses fictional data.
+[Phase 2](monitoring-console-phase2.md) adds in-memory WAF measurements, a
+loopback snapshot API, selected bounded evidence, and a separate development
+collector connected to persistence. Web delivery, authentication, HTTPS, SSE,
+hourly rollups, and retention remain future work. The prototype still uses
+fictional data.
 
 Related documents:
 
 - [Screen and interaction requirements](monitoring-console-requirements.md)
 - [Collection, persistence, aggregation, and retention](monitoring-console-storage.md)
 - [Bottom-up Phase 1 scope and verification](monitoring-console-phase1.md)
+- [Phase 2 counter-based statistics implementation](monitoring-console-phase2.md)
+- [Update-cadence evaluation and measurements](monitoring-console-cadence.md)
 - [Prototype source and launch instructions](../ui/console-prototype/README.md)
 - [Existing observability architecture](DESIGN.md#9-observability)
 - [Existing admin and metrics reference](development.md#admin-and-metrics)
@@ -47,7 +52,7 @@ The following distinctions apply throughout these documents:
 | Access | Loopback by default; explicit listener and source-IP/CIDR policy for remote access | Agreed direction; backend absent |
 | Remote transport | HTTPS and user authentication alongside the source allowlist | Design requirement; mechanisms remain open |
 | Certificates | Use the WAF's public-443 ACME acquisition path to supply a certificate usable by the private console listener | Agreed direction; material delivery and reload remain open |
-| History | Persist console history locally with embedded SQLite | Phase 1 library implemented; collection absent |
+| History | Persist console history locally with embedded SQLite | Phase 1 store and Phase 2 collector implemented; no user-facing integration |
 | Writes | Bounded buffering and batched writes, independent of request forwarding | Phase 1 library implemented; runtime integration absent |
 | Decoys | Treat credential-use attempts as a first-class signal in both views | Agreed; prototyped |
 | Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Agreed; prototyped |
@@ -58,15 +63,18 @@ The following distinctions apply throughout these documents:
 Keep request inspection, protective decisions, and forwarding in the WAF. Place
 collection, history storage, aggregation, queries, and web delivery in the
 console process. Both views share that console process and its stored data.
+The revised Phase 2 proposal keeps bounded source-time minute measurements
+beside the WAF counters; console aggregation coalesces these absolute buckets
+and later builds coarser history. Request totals do not depend on log records.
 
 ```mermaid
 flowchart LR
     Client[Client] --> WAF[Kunato WAF process]
     WAF --> Upstream[Upstream application]
-    WAF --> Counters[In-memory counters]
+    WAF --> Counters[Cumulative counters and proposed minute ring]
     WAF --> Journal[Structured events in systemd journal]
-    Counters -->|Loopback metrics snapshots| Console[Optional console process]
-    Journal -->|Bounded collection| Console
+    Counters -->|Bounded statistics snapshots| Console[Optional console process]
+    Journal -->|Selected investigation detail| Console
     Console --> Buffer[Bounded buffers and aggregates]
     Buffer --> Writer[Dedicated SQLite worker]
     Writer --> Database[Local SQLite storage]
@@ -76,7 +84,8 @@ flowchart LR
 
 The arrows describe the intended information flow, not implemented console
 endpoints. The journal and loopback metrics already exist. Console-side
-collection is absent; the storage library is implemented but has no runtime caller.
+counter-based collection is implemented in the library/development runner;
+web delivery remains absent.
 
 ### 2.1 Why a separate process
 
@@ -245,16 +254,17 @@ References: [Let's Encrypt challenges](https://letsencrypt.org/docs/challenge-ty
 
 | Source or capability | Current state | Console consequence |
 | --- | --- | --- |
-| WAF counters and gauges | In-memory `Metrics`, exposed by loopback `GET /metrics` | Suitable initial snapshot source; not a history database |
+| WAF counters and gauges | Existing `GET /metrics` plus version 2 loopback `/console/snapshot` | Cumulative statistics, bounded source minutes, sampled gauges, and selected evidence |
 | Structured security events | Journal output with normalized `kunato log` rendering | Suitable initial event source; permissions and journal retention apply |
 | Rate-limit and ban event details | Aggregated/suppressed logs while counters still count rejections | Log rows cannot substitute for total request counts |
 | Decoy evidence | Credential/occurrence counters and hashed-ID issuance/reuse logs | Supports basic counts and bounded correlation; complete trails are not guaranteed |
-| Historical collection and SSE | Absent | Future backend work |
-| SQLite store and persistence worker | Library only | Phase 1; not connected to the prototype or WAF |
-| Deduplicated overall rejection count | Existing rejection mechanisms have separate counters, including subsets | Define and instrument a consistent final-outcome count |
+| Counter-based historical collection | Implemented in development runner | Separate process; one-second collection and ten-second statistics coalescing |
+| SSE and browser delivery | Absent | Future backend work |
+| SQLite store and persistence worker | Phase 1 store with Phase 2 schema migration and collector | Connected to the collector; prototype remains fictional |
+| Deduplicated overall rejection count | Implemented in scoped request measurements | Separate total and fixed primary reasons; upstream refusals remain separate |
 | General host/rule time series | Not available as complete counters for the planned scope | Extend instrumentation or label recorded-event summaries honestly |
-| All-response HTTP status distribution and latency histogram | Not available as the planned general metrics | Add measurements before exposing these as real data |
-| Restart identity and observation completeness | No console collection protocol yet | Define source generations, cursors, reset handling, and gap metadata |
+| Client-visible HTTP status distribution and header-decision latency | Implemented as fixed distributions | Does not measure full-body delivery or separate upstream-only status history |
+| Restart identity and observation completeness | Process generation, source revisions, missed attribution, and gap metadata implemented | Bounded recovery; no promise of lossless history |
 
 Current logs do not record ALLOW rule matches, request query strings, headers,
 or bodies. Classification is category-based. Do not imply that the console can
@@ -294,6 +304,12 @@ bounded shutdown. Minute buckets are supplied by callers and tests; this phase
 does not calculate them from WAF counters.
 
 ### Later phases: collection, processing, and delivery
+
+The [implemented Phase 2 contract](monitoring-console-phase2.md) makes WAF
+in-memory measurements the source of statistical totals, retains bounded
+source-minute aggregates, and separates selected event evidence from those
+totals. The development runner exercises collection/persistence independently
+of the fictional browser prototype.
 
 1. Finalize the versioned collection contract, metric definitions, access and
    certificate boundaries, and proposed defaults.

@@ -3,7 +3,10 @@
 Date: 2026-11-15
 
 Status: Implemented as library foundations under `src/console/`, with integration
-tests in `tests/console_storage.rs`. There is no executable console runtime yet.
+tests in `tests/console_storage.rs`. This document records the initial phase.
+The [Phase 2 extension](monitoring-console-phase2.md) adds WAF source measurement,
+a development collector runner, and schema version 2. Its version-1 migration
+preserves saved rows; newly introduced fields remain unknown for old history.
 The browser prototype continues to show fictional data. This phase follows the
 user's decision to build from lower layers before making the console usable.
 
@@ -21,7 +24,7 @@ Related: [architecture](monitoring-console.md),
 | Background persistence | Dedicated OS thread, bounded FIFO admission, count/byte/time batching, bounded shutdown |
 | Health | Pending and in-flight items, retained bytes, admission/commit/replay/failure counts, oldest pending age, last successful persistence time, and bounded errors |
 
-Excluded: WAF instrumentation, real metrics/journal collectors, counter deltas,
+Excluded from Phase 1: WAF instrumentation, real metrics/journal collectors, counter deltas,
 minute-bucket calculation, hourly rollups, expiry/deletion, vacuum, live
 delivery, HTTP APIs, SSE, authentication, TLS, CLI commands, YAML fields,
 service units, installer changes, and UI integration. No WAF startup or request

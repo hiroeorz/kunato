@@ -159,6 +159,40 @@ async fn handle(
         return Ok(response);
     }
     let path = request.uri().path();
+    if request.method() == Method::GET && path == "/console/snapshot" {
+        if request.uri().query().is_some() {
+            return Ok(bad_request("query parameters are not accepted"));
+        }
+        let snapshot = context
+            .metrics
+            .observations
+            .snapshot(context.protection.active_connections());
+        let response = match snapshot.and_then(|snapshot| {
+            let json = serde_json::to_vec(&snapshot)
+                .map_err(|_| crate::console::Error::Invalid("snapshot encoding failed"))?;
+            if json.len() > crate::observations::MAX_SNAPSHOT_BYTES {
+                return Err(crate::console::Error::Capacity);
+            }
+            Ok(json)
+        }) {
+            Ok(json) => {
+                let mut response = Response::new(full_body(json));
+                response
+                    .headers_mut()
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                response.headers_mut().insert(
+                    http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+                response
+            }
+            Err(_) => text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "statistics snapshot temporarily unavailable\n",
+            ),
+        };
+        return Ok(response);
+    }
     if request.method() == Method::GET && path == "/metrics" {
         let body = context
             .metrics

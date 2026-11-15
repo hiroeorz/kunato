@@ -4,13 +4,19 @@ Date: 2026-11-15
 
 Status: Product and UI requirements with an implemented fictional-data
 prototype. The approved [bottom-up Phase 1](monitoring-console-phase1.md)
-implements persistence foundations only; collection and web delivery are absent.
+implements persistence foundations. Phase 2 adds counter-based source
+measurement and collection; web delivery remains absent.
 Requirement identifiers describe intended behavior, not evidence that the
 current binary supports it.
 
 See [design and implementation status](monitoring-console.md) and
 [storage and retention](monitoring-console-storage.md). The current review
 surface is [the console prototype](../ui/console-prototype/README.md).
+The [revised Phase 2 proposal](monitoring-console-phase2.md) makes bounded
+in-memory WAF measurements authoritative for statistics; normal-access logs
+and retained event rows are not prerequisites for counting requests.
+The [cadence evaluation](monitoring-console-cadence.md) recommends one-second
+coalesced live statistics updates with independent ten-second persistence.
 
 ## 1. Shared console requirements
 
@@ -95,6 +101,8 @@ distinguishable even when the HTTP status is similar.
 - Show attack-class, category, and rule breakdowns with BLOCK and LOG separated.
 - Initially show up to ten leading entries, with remaining entries grouped.
 - Label log-derived statistics as recorded detections/matches.
+- Prefer bounded source counters for configured category/rule statistics when
+  instrumented; disclose recorded-event-only or approximate breakdowns.
 - Preserve event phase and mechanism where needed to explain a count.
 - Make underlying totals and potential overlap understandable.
 
@@ -342,6 +350,8 @@ Logging/inspection limits can leave an incomplete trail. See the
 | COUNT-07 | Use counters for supported request totals and logs for recorded context. `suppressed` records and log line counts do not provide a complete per-request breakdown. |
 | COUNT-08 | Counter resets require a source generation; a decreasing value alone is not sufficient restart identification. Missing observations remain missing. |
 | COUNT-09 | Ratios, rates, averages, peaks, quantiles, and distinct counts require the aggregation rules in the storage design. Do not sum precomputed rates or average percentiles. |
+| COUNT-10 | Basic traffic/protection totals must continue with normal-access logging absent and detail logs suppressed, dropped, or expired. Count with WAF memory measurements and persist absolute minute aggregates. |
+| COUNT-11 | A sampled cumulative difference spanning a minute boundary does not prove exact minute placement. Source-minute measurements, provisional revisions, and coverage metadata must support any such precision claim. |
 
 ## 6. Review and acceptance checks
 

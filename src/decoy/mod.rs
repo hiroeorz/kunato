@@ -144,6 +144,24 @@ pub(crate) fn dispatch(
         };
         if !head {
             bump(&metrics.decoys.issued);
+            if let Some(minute) = crate::observations::request_minute() {
+                metrics
+                    .observations
+                    .count(minute, crate::observations::Count::DecoyIssued);
+            }
+            metrics
+                .observations
+                .decoy_detail(crate::observations::DecoyDetail {
+                    site: &site.name,
+                    credential_id: &token::id(token.as_bytes()),
+                    context: crate::console::model::DecoyContext::Issued,
+                    age_seconds: None,
+                    lure: Some(path),
+                    template: Some(template.name()),
+                    source,
+                    blocked: false,
+                    incomplete: false,
+                });
             if policy.runtime.log_quota(0) {
                 tracing::info!(site=%site.name,template=template.name(),path,client=%source.client_ip,peer=%source.peer,token_id=%token::id(token.as_bytes()),lifetime_seconds=policy.token_ttl.as_secs(),"decoy credential issued");
             } else {
@@ -165,6 +183,7 @@ pub(crate) fn dispatch(
         let blocked = credential && policy.on_reuse == Action::Block;
         if blocked {
             bump(&metrics.decoys.blocked);
+            crate::observations::reject(crate::console::model::RejectionReason::Decoy);
         }
         bump(&metrics.decoys.responses[1]);
         response::response(

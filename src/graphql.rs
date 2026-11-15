@@ -136,6 +136,12 @@ enum Selection {
     Inline { child: Vec<Selection> },
 }
 
+enum SelectionHead {
+    Complete(Selection),
+    FieldSet,
+    InlineSet,
+}
+
 #[derive(Debug, Default)]
 struct Document {
     operations: Vec<Vec<Selection>>,
@@ -503,21 +509,72 @@ impl<'a> Parser<'a> {
         if nesting > self.max_depth.saturating_add(MAX_INLINE_NESTING) {
             return Err(ParseError::TooComplex);
         }
+        enum Kind {
+            Root,
+            Field,
+            Inline,
+        }
+        struct Frame {
+            kind: Kind,
+            depth: usize,
+            nesting: usize,
+            selections: Vec<Selection>,
+        }
         self.expect_punct(b'{')?;
-        let mut selections = Vec::new();
+        let mut stack = vec![Frame {
+            kind: Kind::Root,
+            depth,
+            nesting,
+            selections: Vec::new(),
+        }];
         loop {
             self.skip_ignored();
             if self.eat_punct(b'}') {
-                return Ok(selections);
+                let frame = stack.pop().ok_or(ParseError::Syntax)?;
+                let Some(parent) = stack.last_mut() else {
+                    return Ok(frame.selections);
+                };
+                parent.selections.push(match frame.kind {
+                    Kind::Field => Selection::Field {
+                        child: Some(frame.selections),
+                    },
+                    Kind::Inline => Selection::Inline {
+                        child: frame.selections,
+                    },
+                    Kind::Root => return Err(ParseError::Syntax),
+                });
+                continue;
             }
             if self.at_end() {
                 return Err(ParseError::Syntax);
             }
-            selections.push(self.parse_selection(depth, nesting)?);
+            let parent = stack.last_mut().ok_or(ParseError::Syntax)?;
+            let (kind, child_depth) = match self.parse_selection_head()? {
+                SelectionHead::Complete(selection) => {
+                    parent.selections.push(selection);
+                    continue;
+                }
+                SelectionHead::FieldSet => (Kind::Field, parent.depth + 1),
+                SelectionHead::InlineSet => (Kind::Inline, parent.depth),
+            };
+            let child_nesting = parent.nesting + 1;
+            if child_depth > self.max_depth {
+                return Err(ParseError::TooDeep { depth: child_depth });
+            }
+            if child_nesting > self.max_depth.saturating_add(MAX_INLINE_NESTING) {
+                return Err(ParseError::TooComplex);
+            }
+            self.expect_punct(b'{')?;
+            stack.push(Frame {
+                kind,
+                depth: child_depth,
+                nesting: child_nesting,
+                selections: Vec::new(),
+            });
         }
     }
 
-    fn parse_selection(&mut self, depth: usize, nesting: usize) -> Result<Selection, ParseError> {
+    fn parse_selection_head(&mut self) -> Result<SelectionHead, ParseError> {
         self.bump_node()?;
         self.skip_ignored();
         if self.eat_punct(b'.') {
@@ -529,24 +586,18 @@ impl<'a> Parser<'a> {
                 self.skip_ignored();
                 self.take_name().ok_or(ParseError::Syntax)?;
                 self.skip_directives()?;
-                return Ok(Selection::Inline {
-                    child: self.parse_selection_set(depth, nesting + 1)?,
-                });
+                return Ok(SelectionHead::InlineSet);
             }
             if self.peek_byte() == Some(b'@') {
                 self.skip_directives()?;
-                return Ok(Selection::Inline {
-                    child: self.parse_selection_set(depth, nesting + 1)?,
-                });
+                return Ok(SelectionHead::InlineSet);
             }
             if self.peek_byte() == Some(b'{') {
-                return Ok(Selection::Inline {
-                    child: self.parse_selection_set(depth, nesting + 1)?,
-                });
+                return Ok(SelectionHead::InlineSet);
             }
             let name = self.take_name().ok_or(ParseError::Syntax)?.to_owned();
             self.skip_directives()?;
-            return Ok(Selection::Spread { name });
+            return Ok(SelectionHead::Complete(Selection::Spread { name }));
         }
 
         self.take_name().ok_or(ParseError::Syntax)?;
@@ -558,12 +609,11 @@ impl<'a> Parser<'a> {
         self.skip_arguments()?;
         self.skip_directives()?;
         self.skip_ignored();
-        let child = if self.peek_byte() == Some(b'{') {
-            Some(self.parse_selection_set(depth + 1, nesting + 1)?)
+        if self.peek_byte() == Some(b'{') {
+            Ok(SelectionHead::FieldSet)
         } else {
-            None
-        };
-        Ok(Selection::Field { child })
+            Ok(SelectionHead::Complete(Selection::Field { child: None }))
+        }
     }
 
     fn skip_arguments(&mut self) -> Result<(), ParseError> {

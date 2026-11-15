@@ -58,7 +58,8 @@ src/
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
-  console/         # Unconnected console data contracts, SQLite store, and bounded writer
+  console/         # Counter-based collector, SQLite store, and bounded persistence writer
+  observations.rs  # WAF cumulative/minute measurements and bounded selected detail
   rules/           # Category/rule model, matcher, and evaluation engine
   logs/            # `kunato log`: journalctl reader, parsing, filters, attack classes
   proxy/           # Listener, upstream client, forwarding, TLS termination, HTTP/3, WebSocket
@@ -90,6 +91,8 @@ docs/
   monitoring-console-requirements.md # Metrics, real-time, decoy, and UI interaction requirements
   monitoring-console-storage.md # Proposed asynchronous persistence, aggregation, and retention
   monitoring-console-phase1.md # Implemented persistence foundation and its verification contract
+  monitoring-console-phase2.md # Implemented counter-based source, minute history, and collector contracts
+  monitoring-console-cadence.md # Measured update costs and proposed one-second live publication
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
   release-signing.md  # Detached minisign signing: keys, signing, rotation, limits

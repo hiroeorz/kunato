@@ -28,6 +28,8 @@ use kunato::snapshot::Snapshot;
 
 #[path = "proxy/decoys.rs"]
 mod decoys;
+#[path = "proxy/observations.rs"]
+mod observations;
 
 struct PendingBody;
 
@@ -2345,6 +2347,13 @@ async fn allowed_hosts_forwards_a_listed_websocket_handshake() {
 async fn allowed_hosts_hot_reload_swaps_the_policy() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let running = start_kunato(&config_with_allowed_hosts(upstream, "[example.com]")).await;
+    let generation = running
+        .metrics
+        .observations
+        .snapshot(0)
+        .unwrap()
+        .source
+        .generation;
 
     let (status, _) =
         send_h1_with_host(running.addr, Method::GET, "/", "example.com", &[], "").await;
@@ -2362,6 +2371,26 @@ async fn allowed_hosts_hot_reload_swaps_the_policy() {
         send_h1_with_host(running.addr, Method::GET, "/", "other.example", &[], "").await;
     assert_eq!(status, StatusCode::OK);
 
+    assert_eq!(
+        running
+            .metrics
+            .observations
+            .snapshot(0)
+            .unwrap()
+            .source
+            .generation,
+        generation
+    );
+    assert_eq!(
+        running
+            .metrics
+            .observations
+            .snapshot(0)
+            .unwrap()
+            .counters
+            .requests,
+        Some(3)
+    );
     running.stop().await;
 }
 

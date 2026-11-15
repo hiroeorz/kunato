@@ -51,6 +51,7 @@ fn batch(sequence: u64) -> WriteBatch {
         },
         events: vec![event(sequence)],
         metrics: vec![MetricBucket {
+            outcomes: None,
             start_ms: 60_000,
             site: None,
             revision: sequence,
@@ -338,6 +339,50 @@ fn foreign_and_future_databases_are_rejected_without_erasing_them() {
         .unwrap();
     drop(connection);
     assert!(matches!(Store::open(config), Err(Error::ForeignDatabase)));
+}
+
+#[test]
+fn version_one_history_migrates_without_inventing_new_measurements() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = storage(&temp);
+    let mut store = Store::open(config.clone()).unwrap();
+    store.write_batch(&batch(1)).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(config.directory.join("history.sqlite3")).unwrap();
+    let payload: String = connection
+        .query_row("SELECT payload FROM metric_buckets", [], |row| row.get(0))
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    value.as_object_mut().unwrap().remove("outcomes");
+    for key in [
+        "decoy_issued",
+        "response_log_requests",
+        "aborted_requests",
+        "rejection_reasons",
+    ] {
+        value["counters"].as_object_mut().unwrap().remove(key);
+    }
+    connection
+        .execute(
+            "UPDATE metric_buckets SET payload=?1",
+            [serde_json::to_string(&value).unwrap()],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+    let mut store = Store::open(config.clone()).unwrap();
+    let rows = store.metrics(&source(), window()).unwrap();
+    assert_eq!(rows[0].counters.requests, Some(10));
+    assert!(rows[0].counters.rejection_reasons.is_none());
+    assert!(rows[0].outcomes.is_none());
+    drop(store);
+    let connection = rusqlite::Connection::open(config.directory.join("history.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
 }
 
 #[cfg(unix)]

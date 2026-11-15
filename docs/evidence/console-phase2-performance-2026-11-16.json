@@ -1,0 +1,269 @@
+{
+  "cases": [
+    {
+      "attack": false,
+      "clients": 8,
+      "enabled": false,
+      "exports_error": 3,
+      "exports_ok": 0,
+      "missed_minute_updates": null,
+      "p50_us": 80,
+      "p95_us": 161,
+      "p99_us": 229,
+      "poll_interval_seconds": 1,
+      "requests": 175481,
+      "requests_per_second": 87689.37726843126,
+      "seconds": 2.001165996
+    },
+    {
+      "attack": false,
+      "clients": 8,
+      "enabled": true,
+      "exports_error": 0,
+      "exports_ok": 3,
+      "missed_minute_updates": 0,
+      "p50_us": 81,
+      "p95_us": 156,
+      "p99_us": 218,
+      "poll_interval_seconds": 1,
+      "requests": 176628,
+      "requests_per_second": 88263.44309697955,
+      "seconds": 2.001145591
+    },
+    {
+      "attack": true,
+      "clients": 8,
+      "enabled": false,
+      "exports_error": 3,
+      "exports_ok": 0,
+      "missed_minute_updates": null,
+      "p50_us": 35,
+      "p95_us": 68,
+      "p99_us": 97,
+      "poll_interval_seconds": 1,
+      "requests": 400044,
+      "requests_per_second": 199748.6732039011,
+      "seconds": 2.002736707
+    },
+    {
+      "attack": true,
+      "clients": 8,
+      "enabled": true,
+      "exports_error": 0,
+      "exports_ok": 3,
+      "missed_minute_updates": 0,
+      "p50_us": 38,
+      "p95_us": 84,
+      "p99_us": 118,
+      "poll_interval_seconds": 1,
+      "requests": 361510,
+      "requests_per_second": 180616.6157934695,
+      "seconds": 2.001532353
+    },
+    {
+      "attack": false,
+      "clients": 8,
+      "enabled": true,
+      "exports_error": 0,
+      "exports_ok": 3,
+      "missed_minute_updates": 0,
+      "p50_us": 79,
+      "p95_us": 152,
+      "p99_us": 217,
+      "poll_interval_seconds": 1,
+      "requests": 181073,
+      "requests_per_second": 90526.42920633008,
+      "seconds": 2.000222494
+    },
+    {
+      "attack": false,
+      "clients": 8,
+      "enabled": false,
+      "exports_error": 2,
+      "exports_ok": 0,
+      "missed_minute_updates": null,
+      "p50_us": 75,
+      "p95_us": 129,
+      "p99_us": 177,
+      "poll_interval_seconds": 1,
+      "requests": 195744,
+      "requests_per_second": 97860.69483895012,
+      "seconds": 2.000231046
+    },
+    {
+      "attack": true,
+      "clients": 8,
+      "enabled": true,
+      "exports_error": 0,
+      "exports_ok": 3,
+      "missed_minute_updates": 0,
+      "p50_us": 36,
+      "p95_us": 69,
+      "p99_us": 101,
+      "poll_interval_seconds": 1,
+      "requests": 396780,
+      "requests_per_second": 197934.11695422634,
+      "seconds": 2.004606412
+    },
+    {
+      "attack": true,
+      "clients": 8,
+      "enabled": false,
+      "exports_error": 3,
+      "exports_ok": 0,
+      "missed_minute_updates": null,
+      "p50_us": 36,
+      "p95_us": 78,
+      "p99_us": 114,
+      "poll_interval_seconds": 1,
+      "requests": 387730,
+      "requests_per_second": 193823.74529419723,
+      "seconds": 2.000425693
+    },
+    {
+      "attack": false,
+      "clients": 8,
+      "enabled": false,
+      "exports_error": 2,
+      "exports_ok": 0,
+      "missed_minute_updates": null,
+      "p50_us": 75,
+      "p95_us": 128,
+      "p99_us": 180,
+      "poll_interval_seconds": 1,
+      "requests": 195434,
+      "requests_per_second": 97698.2246971215,
+      "seconds": 2.000384353
+    },
+    {
+      "attack": false,
+      "clients": 8,
+      "enabled": true,
+      "exports_error": 0,
+      "exports_ok": 2,
+      "missed_minute_updates": 0,
+      "p50_us": 75,
+      "p95_us": 128,
+      "p99_us": 178,
+      "poll_interval_seconds": 1,
+      "requests": 196863,
+      "requests_per_second": 98415.00603864795,
+      "seconds": 2.000335192
+    },
+    {
+      "attack": true,
+      "clients": 8,
+      "enabled": false,
+      "exports_error": 3,
+      "exports_ok": 0,
+      "missed_minute_updates": null,
+      "p50_us": 35,
+      "p95_us": 69,
+      "p99_us": 97,
+      "poll_interval_seconds": 1,
+      "requests": 408009,
+      "requests_per_second": 203950.72094822067,
+      "seconds": 2.000527373
+    },
+    {
+      "attack": true,
+      "clients": 8,
+      "enabled": true,
+      "exports_error": 0,
+      "exports_ok": 3,
+      "missed_minute_updates": 0,
+      "p50_us": 35,
+      "p95_us": 66,
+      "p99_us": 92,
+      "poll_interval_seconds": 1,
+      "requests": 411356,
+      "requests_per_second": 205635.02927047346,
+      "seconds": 2.000417932
+    }
+  ],
+  "method": "Three alternating paired trials per workload, two seconds per case, eight local HTTP/1 clients, security traffic hits a BLOCK rule; global protection disabled equally in both modes. Enabled source receives one-second export attempts. No SQLite or browser.",
+  "date": "2026-11-16",
+  "summary": [
+    {
+      "workload": "normal",
+      "disabled_median_rps": 97698,
+      "enabled_median_rps": 90526,
+      "paired_change_percent": [
+        0.65,
+        -7.49,
+        0.73
+      ],
+      "median_paired_change_percent": 0.65,
+      "enabled_p95_us": [
+        156,
+        152,
+        128
+      ],
+      "enabled_exports": [
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          2,
+          0
+        ]
+      ],
+      "missed_minute_updates": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "workload": "blocked",
+      "disabled_median_rps": 199749,
+      "enabled_median_rps": 197934,
+      "paired_change_percent": [
+        -9.58,
+        2.12,
+        0.83
+      ],
+      "median_paired_change_percent": 0.83,
+      "enabled_p95_us": [
+        84,
+        69,
+        66
+      ],
+      "enabled_exports": [
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          0
+        ]
+      ],
+      "missed_minute_updates": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "source_sha256": {
+    "src/observations.rs": "4dc767d1b98fc779e02931897faccb47841db2ea2218479682c1fc4554637407",
+    "src/console/collector.rs": "259c3de50a4bd85e5d02b0314aa1b904c40551cb5d3d026658c1e32c67b9c22f",
+    "src/console/model.rs": "f88642666c72119849230f293dcd7fd1fb53cbb933cea9084e6e7b3ffda63b3b",
+    "src/graphql.rs": "b98d160049a21c9e8afac17976252450c9069990dfb1834669be6c2142e35301",
+    "examples/observations_bench.rs": "83914203f0a5f14c75ca07d2fa3f32e30ebadb7d17ff870f42247db90011d9c6",
+    "src/proxy/server.rs": "15b997350b5702c3d2b96707bf846bd7c7675c607ca397da97acacfeff06c94d",
+    "src/proxy/http3.rs": "54c4d151ddd97c835c9676319efc1e4ce0588ae8c2b36b2875205f1eb59d95d0",
+    "src/proxy/response.rs": "1b4045192a11cfa1a041953747c261edaaf28d3efd441ef00dfd4affcd293022"
+  },
+  "cumulative_request_and_rejection_assertions": "passed in all enabled trials"
+}

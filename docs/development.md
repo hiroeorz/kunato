@@ -1576,6 +1576,19 @@ The listener also hosts the maintenance controls and the administrative access
 open/close endpoints; see [Maintenance mode](#maintenance-mode) and
 [Administrative access](#administrative-access).
 
+`GET /console/snapshot` exports version 2 JSON for the optional counter-based
+collector. It shares the existing loopback Host/forwarding-marker restrictions,
+rejects query parameters, and returns `Cache-Control: no-store`. It includes
+a process generation, cumulative statistics, ten bounded UTC minute slots,
+sampled connection data, and selected bounded event detail. Basic request and
+rejection measurements update in memory without access-log or database writes.
+The historical library uses schema version 2 and migrates application-owned
+version 1 history without fabricating the newly introduced measurements.
+See [Phase 2 implementation and development runner](monitoring-console-phase2.md)
+for field semantics, resource bounds, failure behavior, and the separate
+`console_collect` example. No console web server, SSE endpoint, or official
+console CLI/service is installed by this layer.
+
 `kunato metrics` renders the `GET /metrics` response as a bordered two-column
 table with a header row: one row per sample with the metric name first and its
 value second, the value column right-aligned, and the `# HELP` and `# TYPE`

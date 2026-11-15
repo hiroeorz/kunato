@@ -93,6 +93,7 @@ pub(crate) async fn inspect(
     inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
     if config.php.matches(request) && config.php.rejects_response(response.headers()) {
+        crate::observations::reject(crate::console::model::RejectionReason::PhpResponse);
         metrics
             .php_response_rejected
             .fetch_add(1, Ordering::Relaxed);
@@ -119,6 +120,7 @@ pub(crate) async fn inspect(
         {
             Err(_) => {
                 metrics.upstream_timeouts.fetch_add(1, Ordering::Relaxed);
+                crate::observations::service_failure(true);
                 debug!(
                     timeout = ?config.timeouts.upstream_response,
                     "timed out buffering upstream response for inspection"
@@ -129,6 +131,7 @@ pub(crate) async fn inspect(
                 ));
             }
             Ok(Err(err)) => {
+                crate::observations::service_failure(false);
                 debug!(error = %err, "failed to buffer upstream response for inspection");
                 return Err(HttpError::new(
                     StatusCode::BAD_GATEWAY,
@@ -195,6 +198,7 @@ pub(crate) async fn inspect(
             charset = %charset,
             "response body charset cannot be inspected; rejecting"
         );
+        crate::observations::reject(crate::console::model::RejectionReason::ResponseInspection);
         return Err(HttpError::new(
             StatusCode::BAD_GATEWAY,
             "upstream response charset cannot be inspected",
@@ -221,10 +225,19 @@ pub(crate) async fn inspect(
     );
     let outcome = eval::evaluate_response(config, &view, &response_view);
 
+    if outcome.allowed.is_some() {
+        crate::observations::rule_match(crate::console::model::Phase::Response, false);
+    }
     if !outcome.logs.is_empty() {
         metrics.response_logged.fetch_add(1, Ordering::Relaxed);
     }
     for record in &outcome.logs {
+        crate::observations::rule_match(crate::console::model::Phase::Response, true);
+        crate::observations::rule_detail(
+            crate::console::model::Phase::Response,
+            &record.category,
+            &record.rule,
+        );
         info!(
             phase = record.phase.as_str(),
             category = %record.category,
@@ -237,6 +250,8 @@ pub(crate) async fn inspect(
     }
 
     if let Some(blocked) = &outcome.blocked {
+        crate::observations::rule_match(crate::console::model::Phase::Response, false);
+        crate::observations::reject(crate::console::model::RejectionReason::ResponseRule);
         metrics.response_blocked.fetch_add(1, Ordering::Relaxed);
         info!(
             phase = blocked.phase.as_str(),

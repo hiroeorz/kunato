@@ -1,5 +1,6 @@
 //! Version-one observation contracts. Missing measurements remain `None`.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,87 @@ pub const MINUTE_MS: u64 = 60_000;
 pub const MAX_RECORD_BYTES: usize = 16 * 1024;
 pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
 pub const MAX_BATCH_RECORDS: usize = 256;
+pub const LATENCY_BOUNDS_US: [u64; 14] = [
+    1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000, 2500000, 5000000, 10000000,
+    30000000, 60000000,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(usize)]
+pub enum RejectionReason {
+    Rule,
+    ResponseRule,
+    RateLimit,
+    Ban,
+    Overload,
+    ClientIdentity,
+    Host,
+    AdminAccess,
+    Body,
+    Decode,
+    Form,
+    Upload,
+    Graphql,
+    Saml,
+    PhpRequest,
+    PhpResponse,
+    Hardening,
+    Jwt,
+    Decoy,
+    Behavior,
+    Protocol,
+    ResponseInspection,
+}
+
+impl RejectionReason {
+    pub const ALL: [Self; 22] = [
+        Self::Rule,
+        Self::ResponseRule,
+        Self::RateLimit,
+        Self::Ban,
+        Self::Overload,
+        Self::ClientIdentity,
+        Self::Host,
+        Self::AdminAccess,
+        Self::Body,
+        Self::Decode,
+        Self::Form,
+        Self::Upload,
+        Self::Graphql,
+        Self::Saml,
+        Self::PhpRequest,
+        Self::PhpResponse,
+        Self::Hardening,
+        Self::Jwt,
+        Self::Decoy,
+        Self::Behavior,
+        Self::Protocol,
+        Self::ResponseInspection,
+    ];
+    pub fn phase(self) -> Phase {
+        if matches!(
+            self,
+            Self::ResponseRule | Self::PhpResponse | Self::ResponseInspection
+        ) {
+            Phase::Response
+        } else {
+            Phase::Request
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Outcomes {
+    /// Exactly 500 client-visible status counters, indexed by status minus 100.
+    pub statuses: Vec<u64>,
+    pub latency_count: u64,
+    pub latency_sum_us: u64,
+    /// Exclusive bins with inclusive upper bounds in LATENCY_BOUNDS_US, then +Inf.
+    pub latency_bins: [u64; 15],
+    pub in_flight: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +123,10 @@ pub struct Counters {
     pub decoy_credential_use_requests: Option<u64>,
     pub decoy_occurrence_requests: Option<u64>,
     pub decoy_blocked_requests: Option<u64>,
+    pub decoy_issued: Option<u64>,
+    pub response_log_requests: Option<u64>,
+    pub aborted_requests: Option<u64>,
+    pub rejection_reasons: Option<BTreeMap<RejectionReason, u64>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +196,8 @@ pub struct MetricBucket {
     pub counters: Counters,
     pub connections: Option<ConnectionGauge>,
     pub coverage: Coverage,
+    #[serde(default)]
+    pub outcomes: Option<Outcomes>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +339,23 @@ impl MetricBucket {
         }
         if u64::from(self.coverage.observed_ms) > MINUTE_MS {
             return Err(Error::Invalid("coverage exceeds one minute"));
+        }
+        if let Some(outcomes) = &self.outcomes
+            && (outcomes.statuses.len() != 500
+                || outcomes
+                    .statuses
+                    .iter()
+                    .try_fold(0_u64, |sum, value| sum.checked_add(*value))
+                    != Some(outcomes.latency_count)
+                || outcomes
+                    .latency_bins
+                    .iter()
+                    .try_fold(0_u64, |sum, value| sum.checked_add(*value))
+                    != Some(outcomes.latency_count))
+        {
+            return Err(Error::Invalid(
+                "inconsistent status or latency distribution",
+            ));
         }
         if let Some(gauge) = &self.connections
             && (u64::from(gauge.observed_ms) > MINUTE_MS

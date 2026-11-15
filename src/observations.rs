@@ -1,0 +1,1142 @@
+//! Fixed-memory source measurements. Request updates never wait for export or storage.
+
+use std::array;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use ring::rand::{SecureRandom, SystemRandom};
+use serde::{Deserialize, Serialize};
+
+use crate::console::Error;
+use crate::console::model::{
+    ConnectionGauge, Counters, Coverage, EventRecord, LATENCY_BOUNDS_US, MINUTE_MS, MetricBucket,
+    Outcomes, Phase, RejectionReason, SourceIdentity,
+};
+
+pub const MINUTE_SLOTS: usize = 10;
+pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
+const EXCLUSIVE: u64 = 1 << 63;
+const EMPTY: u64 = u64::MAX;
+const REASONS: usize = 16;
+const STATUS: usize = REASONS + RejectionReason::ALL.len();
+const LATENCY: usize = STATUS + 500;
+const LATENCY_COUNT: usize = LATENCY + 15;
+const LATENCY_SUM: usize = LATENCY_COUNT + 1;
+const IN_FLIGHT: usize = LATENCY_SUM + 1;
+const CONNECTION_MS: usize = IN_FLIGHT + 1;
+const CONNECTION_COVERAGE: usize = CONNECTION_MS + 1;
+const CONNECTION_MAX: usize = CONNECTION_COVERAGE + 1;
+const CONNECTION_SAMPLES: usize = CONNECTION_MAX + 1;
+const FIELDS: usize = CONNECTION_SAMPLES + 1;
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum Count {
+    Requests,
+    Rejected,
+    Logged,
+    Matches,
+    ResponseBlocks,
+    RateLimited,
+    Banned,
+    Overloaded,
+    UpstreamFailures,
+    UpstreamTimeouts,
+    DecoyCredential,
+    DecoyOccurrence,
+    DecoyBlocked,
+    DecoyIssued,
+    ResponseLogged,
+    Aborted,
+}
+
+pub(crate) struct DecoyDetail<'a> {
+    pub site: &'a str,
+    pub credential_id: &'a str,
+    pub context: crate::console::model::DecoyContext,
+    pub age_seconds: Option<u64>,
+    pub lure: Option<&'a str>,
+    pub template: Option<&'a str>,
+    pub source: crate::client_ip::ClientSource,
+    pub blocked: bool,
+    pub incomplete: bool,
+}
+
+struct Slot {
+    gate: AtomicU64,
+    version: AtomicU64,
+    minute: AtomicU64,
+    values: [AtomicU64; FIELDS],
+}
+struct Pinned<'a>(&'a Slot);
+impl Drop for Pinned<'_> {
+    fn drop(&mut self) {
+        self.0.version.fetch_add(1, Ordering::Release);
+        self.0.gate.fetch_sub(1, Ordering::Release);
+    }
+}
+
+impl Slot {
+    fn new() -> Self {
+        Self {
+            gate: AtomicU64::new(0),
+            version: AtomicU64::new(0),
+            minute: AtomicU64::new(EMPTY),
+            values: array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+    fn pin(&self, minute: u64, initialize: bool) -> Option<Pinned<'_>> {
+        let previous = self.gate.fetch_add(1, Ordering::Acquire);
+        if previous & EXCLUSIVE == 0 {
+            let pinned = Pinned(self);
+            if self.minute.load(Ordering::Acquire) == minute {
+                return Some(pinned);
+            }
+            drop(pinned);
+        } else {
+            self.gate.fetch_sub(1, Ordering::Release);
+        }
+        if !initialize
+            || self
+                .gate
+                .compare_exchange(0, EXCLUSIVE, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+        {
+            return None;
+        }
+        let old = self.minute.load(Ordering::Relaxed);
+        if old == EMPTY || old < minute {
+            for value in &self.values {
+                value.store(0, Ordering::Relaxed);
+            }
+            self.minute.store(minute, Ordering::Release);
+        }
+        self.gate.fetch_sub(EXCLUSIVE, Ordering::Release);
+        let previous = self.gate.fetch_add(1, Ordering::Acquire);
+        if previous & EXCLUSIVE == 0 {
+            let pinned = Pinned(self);
+            if self.minute.load(Ordering::Acquire) == minute {
+                return Some(pinned);
+            }
+            drop(pinned);
+        } else {
+            self.gate.fetch_sub(1, Ordering::Release);
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatisticsSnapshot {
+    pub version: u32,
+    pub source: SourceIdentity,
+    pub sequence: u64,
+    pub observed_at_ms: u64,
+    pub started_at_ms: u64,
+    pub clock_discontinuity: bool,
+    pub counters: Counters,
+    pub active_connections: u64,
+    pub missed_updates: u64,
+    pub buckets: Vec<MetricBucket>,
+    pub events: Vec<EventRecord>,
+    pub events_omitted: u64,
+    pub event_sequence: u64,
+}
+
+impl StatisticsSnapshot {
+    pub fn validate(&self) -> Result<(), Error> {
+        self.source.validate()?;
+        if self.version != 2
+            || self.sequence == 0
+            || self.sequence > i64::MAX as u64
+            || self.started_at_ms > self.observed_at_ms
+            || self.buckets.is_empty()
+            || self.buckets.len() > MINUTE_SLOTS
+            || self.events.len() > 64
+        {
+            return Err(Error::Invalid("invalid statistics snapshot envelope"));
+        }
+        crate::console::model::timestamp(self.observed_at_ms)?;
+        let mut starts = std::collections::HashSet::new();
+        let current = minute(self.observed_at_ms);
+        for bucket in &self.buckets {
+            bucket.validate()?;
+            if bucket.site.is_some()
+                || bucket.start_ms > current
+                || current - bucket.start_ms >= MINUTE_SLOTS as u64 * MINUTE_MS
+                || bucket.revision > self.sequence
+                || !starts.insert(bucket.start_ms)
+            {
+                return Err(Error::Invalid("invalid source-minute range or revision"));
+            }
+        }
+        for event in &self.events {
+            event.validate()?;
+        }
+        if self.event_sequence > i64::MAX as u64
+            || self
+                .events
+                .windows(2)
+                .any(|events| events[0].sequence >= events[1].sequence)
+            || self
+                .events
+                .last()
+                .is_some_and(|event| event.sequence > self.event_sequence)
+        {
+            return Err(Error::Invalid("invalid event sequence window"));
+        }
+        Ok(())
+    }
+}
+
+struct Export {
+    sequence: u64,
+    previous: Vec<MetricBucket>,
+    gauge: Option<(u64, u64)>,
+    events: Vec<EventRecord>,
+    event_sequence: u64,
+}
+struct Detail {
+    events: VecDeque<EventRecord>,
+    bytes: usize,
+    second: u64,
+    emitted: usize,
+    ordinary_emitted: usize,
+}
+
+pub struct Observations {
+    enabled: bool,
+    source: SourceIdentity,
+    started: Instant,
+    epoch_ms: u64,
+    slots: Box<[Slot; MINUTE_SLOTS]>,
+    cumulative: [AtomicU64; STATUS],
+    newest: AtomicU64,
+    missed: AtomicU64,
+    first_missed: AtomicU64,
+    last_missed: AtomicU64,
+    export: Mutex<Export>,
+    detail: Mutex<Detail>,
+    detail_omitted: AtomicU64,
+    event_sequence: AtomicU64,
+}
+
+impl std::fmt::Debug for Observations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Observations")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Observations {
+    pub fn new() -> Self {
+        let mut nonce = [0_u8; 16];
+        let random = SystemRandom::new().fill(&mut nonce).is_ok();
+        let generation = if random {
+            nonce.iter().map(|byte| format!("{byte:02x}")).collect()
+        } else {
+            String::new()
+        };
+        let epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as u64;
+        Self {
+            enabled: true,
+            source: SourceIdentity {
+                instance: "waf".into(),
+                generation,
+            },
+            started: Instant::now(),
+            epoch_ms,
+            slots: Box::new(array::from_fn(|_| Slot::new())),
+            cumulative: array::from_fn(|_| AtomicU64::new(0)),
+            newest: AtomicU64::new(minute(epoch_ms)),
+            missed: AtomicU64::new(0),
+            first_missed: AtomicU64::new(EMPTY),
+            last_missed: AtomicU64::new(0),
+            export: Mutex::new(Export {
+                sequence: 0,
+                previous: Vec::new(),
+                gauge: None,
+                events: Vec::new(),
+                event_sequence: 0,
+            }),
+            detail: Mutex::new(Detail {
+                events: VecDeque::new(),
+                bytes: 0,
+                second: 0,
+                emitted: 0,
+                ordinary_emitted: 0,
+            }),
+            detail_omitted: AtomicU64::new(0),
+            event_sequence: AtomicU64::new(0),
+        }
+    }
+
+    pub fn now_ms(&self) -> u64 {
+        self.epoch_ms
+            .saturating_add(self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new()
+        }
+    }
+
+    fn lost(&self, start: u64) {
+        self.missed.fetch_add(1, Ordering::Relaxed);
+        self.first_missed.fetch_min(start, Ordering::Relaxed);
+        self.last_missed.fetch_max(start, Ordering::Relaxed);
+    }
+
+    fn update(&self, start: u64, field: usize, value: u64) {
+        self.update_many(start, &[(field, value)]);
+    }
+
+    fn update_many(&self, start: u64, updates: &[(usize, u64)]) {
+        for &(field, value) in updates {
+            if field < STATUS {
+                self.cumulative[field].fetch_add(value, Ordering::Relaxed);
+            }
+        }
+        let latest = self.newest.fetch_max(start, Ordering::Relaxed).max(start);
+        if latest.saturating_sub(start) >= MINUTE_SLOTS as u64 * MINUTE_MS {
+            self.lost(start);
+            return;
+        }
+        let slot = &self.slots[(start / MINUTE_MS) as usize % MINUTE_SLOTS];
+        if let Some(pinned) = slot.pin(start, true) {
+            for &(field, value) in updates {
+                pinned.0.values[field].fetch_add(value, Ordering::Relaxed);
+            }
+        } else {
+            self.lost(start);
+        }
+    }
+
+    pub fn count(&self, start: u64, count: Count) {
+        self.update(start, count as usize, 1);
+    }
+
+    pub fn record_event(&self, event: EventRecord) {
+        self.event_with(|_, _| event);
+    }
+
+    pub(crate) fn decoy_detail(&self, detail: DecoyDetail<'_>) {
+        use crate::console::model::{DecoyEvidence, Disposition, EventKind};
+        self.event_with_priority(true, |sequence, time| EventRecord {
+            id: format!("decoy-{sequence}"),
+            sequence,
+            occurred_at_ms: time,
+            kind: EventKind::Decoy,
+            disposition: if detail.blocked {
+                Disposition::Block
+            } else if detail.context == crate::console::model::DecoyContext::Issued {
+                Disposition::Observe
+            } else {
+                Disposition::Log
+            },
+            phase: Phase::Request,
+            site: (detail.site.len() <= 64).then(|| detail.site.into()),
+            client: Some(detail.source.client_ip),
+            peer: Some(detail.source.peer.ip()),
+            method: None,
+            path: None,
+            status: None,
+            category: None,
+            rule: None,
+            reason: None,
+            decoy: Some(DecoyEvidence {
+                credential_id: detail.credential_id.into(),
+                context: detail.context,
+                issued_at_ms: None,
+                age_seconds: detail.age_seconds,
+                lure: detail
+                    .lure
+                    .filter(|value| value.len() <= 2048)
+                    .map(str::to_owned),
+                template: detail
+                    .template
+                    .filter(|value| value.len() <= 64)
+                    .map(str::to_owned),
+            }),
+            gap: None,
+            incomplete: detail.incomplete,
+        });
+    }
+
+    pub fn event_with(&self, make: impl FnOnce(u64, u64) -> EventRecord) {
+        self.event_with_priority(false, make);
+    }
+
+    fn event_with_priority(&self, priority: bool, make: impl FnOnce(u64, u64) -> EventRecord) {
+        if !self.enabled {
+            return;
+        }
+        let sequence = self
+            .event_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let Ok(mut detail) = self.detail.try_lock() else {
+            self.detail_omitted.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let second = self.now_ms() / 1000;
+        if detail.second != second {
+            detail.second = second;
+            detail.emitted = 0;
+            detail.ordinary_emitted = 0;
+        }
+        if detail.emitted >= 16 || !priority && detail.ordinary_emitted >= 12 {
+            self.detail_omitted.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // Invalid metadata still consumes its admission slot before allocation/validation.
+        detail.emitted += 1;
+        if !priority {
+            detail.ordinary_emitted += 1;
+        }
+        let mut event = make(sequence, self.now_ms());
+        event.sequence = sequence;
+        if event.validate().is_err() {
+            self.detail_omitted.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let bytes = serde_json::to_vec(&event).map_or(usize::MAX, |json| json.len());
+        if bytes > 16 * 1024 {
+            self.detail_omitted.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        while detail.events.len() >= 64 || detail.bytes.saturating_add(bytes) > 64 * 1024 {
+            let replacement = detail
+                .events
+                .iter()
+                .position(|old| old.decoy.is_none())
+                .or_else(|| priority.then_some(0));
+            let Some(index) = replacement else {
+                self.detail_omitted.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            let Some(old) = detail.events.remove(index) else {
+                break;
+            };
+            detail.bytes = detail
+                .bytes
+                .saturating_sub(serde_json::to_vec(&old).map_or(0, |json| json.len()));
+            self.detail_omitted.fetch_add(1, Ordering::Relaxed);
+        }
+        detail.bytes += bytes;
+        detail.events.push_back(event);
+    }
+
+    pub fn snapshot(&self, active_connections: u64) -> Result<StatisticsSnapshot, Error> {
+        if !self.enabled {
+            return Err(Error::Invalid("statistics capture is disabled"));
+        }
+        let actual = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.snapshot_at(self.now_ms(), actual, active_connections)
+    }
+
+    fn snapshot_at(
+        &self,
+        now: u64,
+        actual: u64,
+        active_connections: u64,
+    ) -> Result<StatisticsSnapshot, Error> {
+        self.source.validate()?;
+        let mut export = self.export.try_lock().map_err(|_| Error::Busy)?;
+        let sequence = export
+            .sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= i64::MAX as u64)
+            .ok_or(Error::Invalid("source sequence exhausted"))?;
+        let current = minute(now);
+        self.newest.fetch_max(current, Ordering::Relaxed);
+        let start = minute(self.epoch_ms)
+            .max(current.saturating_sub((MINUTE_SLOTS as u64 - 1) * MINUTE_MS));
+        if let Some((previous, value)) = export.gauge
+            && now > previous
+            && now - previous <= 2000
+        {
+            let mut at = previous;
+            while at < now {
+                let bucket = minute(at);
+                let end = now.min(bucket.saturating_add(MINUTE_MS));
+                self.update(bucket, CONNECTION_MS, value.saturating_mul(end - at));
+                self.update(bucket, CONNECTION_COVERAGE, end - at);
+                let slot = &self.slots[(bucket / MINUTE_MS) as usize % MINUTE_SLOTS];
+                if let Some(pinned) = slot.pin(bucket, true) {
+                    pinned.0.values[CONNECTION_MAX].fetch_max(value, Ordering::Relaxed);
+                }
+                at = end;
+            }
+        }
+        export.gauge = Some((now, active_connections));
+        if let Some(pinned) =
+            self.slots[(current / MINUTE_MS) as usize % MINUTE_SLOTS].pin(current, true)
+        {
+            pinned.0.values[CONNECTION_MAX].fetch_max(active_connections, Ordering::Relaxed);
+            pinned.0.values[CONNECTION_SAMPLES].fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.lost(current);
+        }
+        let clock_discontinuity = now.abs_diff(actual) > 2000;
+        let mut buckets = Vec::with_capacity(MINUTE_SLOTS);
+        for i in 0..MINUTE_SLOTS {
+            let at = start + i as u64 * MINUTE_MS;
+            if at > current {
+                break;
+            }
+            let slot = &self.slots[(at / MINUTE_MS) as usize % MINUTE_SLOTS];
+            let mut captured = None;
+            for _ in 0..3 {
+                let Some(pinned) = slot.pin(at, true) else {
+                    continue;
+                };
+                let version = pinned.0.version.load(Ordering::Acquire);
+                let values: [u64; FIELDS] =
+                    array::from_fn(|index| pinned.0.values[index].load(Ordering::Acquire));
+                if pinned.0.gate.load(Ordering::Acquire) == 1
+                    && pinned.0.version.load(Ordering::Acquire) == version
+                {
+                    captured = Some(values);
+                    break;
+                }
+            }
+            let Some(values) = captured else {
+                let mut bucket = export
+                    .previous
+                    .iter()
+                    .find(|previous| previous.start_ms == at)
+                    .cloned()
+                    .unwrap_or(MetricBucket {
+                        start_ms: at,
+                        site: None,
+                        revision: sequence,
+                        counters: Counters::default(),
+                        connections: None,
+                        coverage: Coverage::default(),
+                        outcomes: None,
+                    });
+                if !bucket.coverage.incomplete {
+                    bucket.coverage.incomplete = true;
+                    bucket.revision = sequence;
+                }
+                buckets.push(bucket);
+                continue;
+            };
+            let observed = now
+                .min(at + MINUTE_MS)
+                .saturating_sub(at.max(self.epoch_ms)) as u32;
+            let omitted = at >= self.first_missed.load(Ordering::Relaxed)
+                && at <= self.last_missed.load(Ordering::Relaxed);
+            let mut bucket = MetricBucket {
+                start_ms: at,
+                site: None,
+                revision: sequence,
+                counters: counters(|index| values[index]),
+                connections: (values[CONNECTION_COVERAGE] != 0 || values[CONNECTION_SAMPLES] != 0)
+                    .then_some(ConnectionGauge {
+                        connection_milliseconds: values[CONNECTION_MS],
+                        observed_ms: values[CONNECTION_COVERAGE].min(MINUTE_MS) as u32,
+                        observed_max: values[CONNECTION_MAX],
+                    }),
+                coverage: Coverage {
+                    observed_ms: observed,
+                    incomplete: observed != MINUTE_MS as u32
+                        || values[IN_FLIGHT] != 0
+                        || omitted
+                        || clock_discontinuity,
+                    omitted_events: None,
+                },
+                outcomes: Some(Outcomes {
+                    statuses: values[STATUS..LATENCY].to_vec(),
+                    latency_count: values[LATENCY_COUNT],
+                    latency_sum_us: values[LATENCY_SUM],
+                    latency_bins: array::from_fn(|index| values[LATENCY + index]),
+                    in_flight: values[IN_FLIGHT],
+                }),
+            };
+            if let Some(previous) = export
+                .previous
+                .iter()
+                .find(|previous| previous.start_ms == at)
+            {
+                bucket.revision = previous.revision;
+                if bucket != *previous {
+                    bucket.revision = sequence;
+                }
+            }
+            buckets.push(bucket);
+        }
+        if let Ok(detail) = self.detail.try_lock() {
+            export.events = detail.events.iter().cloned().collect();
+            export.events.sort_by_key(|event| event.sequence);
+            export.event_sequence = self.event_sequence.load(Ordering::Acquire);
+        }
+        let events = export.events.clone();
+        let event_sequence = export.event_sequence;
+        let packet = StatisticsSnapshot {
+            version: 2,
+            source: self.source.clone(),
+            sequence,
+            observed_at_ms: now,
+            started_at_ms: self.epoch_ms,
+            clock_discontinuity,
+            counters: counters(|index| self.cumulative[index].load(Ordering::Acquire)),
+            active_connections,
+            missed_updates: self.missed.load(Ordering::Relaxed),
+            buckets,
+            events,
+            events_omitted: self.detail_omitted.load(Ordering::Relaxed),
+            event_sequence,
+        };
+        packet.validate()?;
+        export.sequence = sequence;
+        export.previous = packet.buckets.clone();
+        Ok(packet)
+    }
+}
+
+impl Default for Observations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn counters(load: impl Fn(usize) -> u64) -> Counters {
+    Counters {
+        requests: Some(load(Count::Requests as usize)),
+        rejected_requests: Some(load(Count::Rejected as usize)),
+        log_requests: Some(load(Count::Logged as usize)),
+        rule_matches: Some(load(Count::Matches as usize)),
+        response_blocks: Some(load(Count::ResponseBlocks as usize)),
+        rate_limited_requests: Some(load(Count::RateLimited as usize)),
+        banned_requests: Some(load(Count::Banned as usize)),
+        overloaded_requests: Some(load(Count::Overloaded as usize)),
+        upstream_connection_failures: Some(load(Count::UpstreamFailures as usize)),
+        upstream_timeouts: Some(load(Count::UpstreamTimeouts as usize)),
+        decoy_credential_use_requests: Some(load(Count::DecoyCredential as usize)),
+        decoy_occurrence_requests: Some(load(Count::DecoyOccurrence as usize)),
+        decoy_blocked_requests: Some(load(Count::DecoyBlocked as usize)),
+        decoy_issued: Some(load(Count::DecoyIssued as usize)),
+        response_log_requests: Some(load(Count::ResponseLogged as usize)),
+        aborted_requests: Some(load(Count::Aborted as usize)),
+        rejection_reasons: Some(
+            RejectionReason::ALL
+                .into_iter()
+                .map(|reason| (reason, load(REASONS + reason as usize)))
+                .collect::<BTreeMap<_, _>>(),
+        ),
+    }
+}
+
+fn minute(time: u64) -> u64 {
+    time / MINUTE_MS * MINUTE_MS
+}
+
+struct RequestMeasurement {
+    history: Arc<Observations>,
+    start: u64,
+    began: Instant,
+    rejected: bool,
+    logged: bool,
+    response_logged: bool,
+    finished: bool,
+    in_flight_counted: bool,
+    client: Option<std::net::IpAddr>,
+    peer: Option<std::net::IpAddr>,
+}
+impl RequestMeasurement {
+    fn new(history: Arc<Observations>) -> Self {
+        let start = minute(history.now_ms());
+        history.cumulative[Count::Requests as usize].fetch_add(1, Ordering::Relaxed);
+        history.newest.fetch_max(start, Ordering::Relaxed);
+        let in_flight_counted = {
+            let slot = &history.slots[(start / MINUTE_MS) as usize % MINUTE_SLOTS];
+            if let Some(pinned) = slot.pin(start, true) {
+                pinned.0.values[Count::Requests as usize].fetch_add(1, Ordering::Relaxed);
+                pinned.0.values[IN_FLIGHT].fetch_add(1, Ordering::Relaxed);
+                true
+            } else {
+                history.lost(start);
+                false
+            }
+        };
+        Self {
+            history,
+            start,
+            began: Instant::now(),
+            rejected: false,
+            logged: false,
+            response_logged: false,
+            finished: false,
+            in_flight_counted,
+            client: None,
+            peer: None,
+        }
+    }
+    fn finish(&mut self, status: u16) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if !(100..=599).contains(&status) {
+            self.history.lost(self.start);
+            return;
+        }
+        let micros = self.began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let bin = LATENCY_BOUNDS_US
+            .iter()
+            .position(|upper| micros <= *upper)
+            .unwrap_or(14);
+        self.history.update_many(
+            self.start,
+            &[
+                (STATUS + usize::from(status - 100), 1),
+                (LATENCY_COUNT, 1),
+                (LATENCY_SUM, micros),
+                (LATENCY + bin, 1),
+            ],
+        );
+    }
+}
+impl Drop for RequestMeasurement {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.history.count(self.start, Count::Aborted);
+        }
+        if self.in_flight_counted {
+            let slot = &self.history.slots[(self.start / MINUTE_MS) as usize % MINUTE_SLOTS];
+            if let Some(pinned) = slot.pin(self.start, false) {
+                pinned.0.values[IN_FLIGHT].fetch_sub(1, Ordering::Relaxed);
+            } else {
+                self.history.lost(self.start);
+            }
+        }
+    }
+}
+
+tokio::task_local! { static CURRENT: RefCell<RequestMeasurement>; }
+
+pub async fn observe<B>(
+    history: Arc<Observations>,
+    future: impl Future<Output = http::Response<B>>,
+) -> http::Response<B> {
+    if !history.enabled {
+        return future.await;
+    }
+    CURRENT
+        .scope(RefCell::new(RequestMeasurement::new(history)), async {
+            let response = future.await;
+            let _ = CURRENT.try_with(|measurement| {
+                if let Ok(mut value) = measurement.try_borrow_mut() {
+                    value.finish(response.status().as_u16());
+                }
+            });
+            response
+        })
+        .await
+}
+
+pub fn request_minute() -> Option<u64> {
+    CURRENT
+        .try_with(|value| value.try_borrow().ok().map(|value| value.start))
+        .ok()
+        .flatten()
+}
+
+pub fn identity(source: crate::client_ip::ClientSource) {
+    let _ = CURRENT.try_with(|value| {
+        if let Ok(mut value) = value.try_borrow_mut() {
+            value.client = Some(source.client_ip);
+            value.peer = Some(source.peer.ip());
+        }
+    });
+}
+
+pub fn reject(reason: RejectionReason) {
+    let _ = CURRENT.try_with(|value| {
+        if let Ok(mut value) = value.try_borrow_mut()
+            && !value.rejected
+        {
+            value.rejected = true;
+            value.history.count(value.start, Count::Rejected);
+            value
+                .history
+                .update(value.start, REASONS + reason as usize, 1);
+            let counter = match reason {
+                RejectionReason::ResponseRule => Some(Count::ResponseBlocks),
+                RejectionReason::RateLimit => Some(Count::RateLimited),
+                RejectionReason::Ban => Some(Count::Banned),
+                RejectionReason::Overload => Some(Count::Overloaded),
+                RejectionReason::Decoy => Some(Count::DecoyBlocked),
+                _ => None,
+            };
+            if let Some(counter) = counter {
+                value.history.count(value.start, counter);
+            }
+            value
+                .history
+                .event_with(|sequence, time| crate::console::model::EventRecord {
+                    id: format!("rejected-{sequence}"),
+                    sequence,
+                    occurred_at_ms: time,
+                    kind: crate::console::model::EventKind::Rejection,
+                    disposition: crate::console::model::Disposition::Reject,
+                    phase: reason.phase(),
+                    site: None,
+                    client: value.client,
+                    peer: value.peer,
+                    method: None,
+                    path: None,
+                    status: None,
+                    category: None,
+                    rule: None,
+                    reason: Some(format!("{reason:?}")),
+                    decoy: None,
+                    gap: None,
+                    incomplete: true,
+                });
+        }
+    });
+}
+
+pub fn rule_match(phase: Phase, logged: bool) {
+    let _ = CURRENT.try_with(|value| {
+        if let Ok(mut value) = value.try_borrow_mut() {
+            value.history.count(value.start, Count::Matches);
+            if logged && !value.logged {
+                value.logged = true;
+                value.history.count(value.start, Count::Logged);
+            }
+            if logged && phase == Phase::Response && !value.response_logged {
+                value.response_logged = true;
+                value.history.count(value.start, Count::ResponseLogged);
+            }
+        }
+    });
+}
+
+pub fn service_failure(timeout: bool) {
+    let _ = CURRENT.try_with(|value| {
+        if let Ok(value) = value.try_borrow() {
+            value.history.count(
+                value.start,
+                if timeout {
+                    Count::UpstreamTimeouts
+                } else {
+                    Count::UpstreamFailures
+                },
+            );
+            value.history.event_with(|sequence, time| EventRecord {
+                id: format!("upstream-{sequence}"),
+                sequence,
+                occurred_at_ms: time,
+                kind: crate::console::model::EventKind::UpstreamFailure,
+                disposition: crate::console::model::Disposition::Error,
+                phase: Phase::Service,
+                site: None,
+                client: value.client,
+                peer: value.peer,
+                method: None,
+                path: None,
+                status: Some(if timeout { 504 } else { 502 }),
+                category: None,
+                rule: None,
+                reason: Some(
+                    if timeout {
+                        "upstream timeout"
+                    } else {
+                        "upstream failure"
+                    }
+                    .into(),
+                ),
+                decoy: None,
+                gap: None,
+                incomplete: true,
+            });
+        }
+    });
+}
+
+pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
+    let _ = CURRENT.try_with(|value| {
+        if let Ok(value) = value.try_borrow() {
+            value.history.event_with(|sequence, time| EventRecord {
+                id: format!("rule-{sequence}"),
+                sequence,
+                occurred_at_ms: time,
+                kind: crate::console::model::EventKind::RuleMatch,
+                disposition: crate::console::model::Disposition::Log,
+                phase,
+                site: None,
+                client: value.client,
+                peer: value.peer,
+                method: None,
+                path: None,
+                status: None,
+                category: (category.len() <= 128).then(|| category.into()),
+                rule: (rule.len() <= 128).then(|| rule.into()),
+                reason: None,
+                decoy: None,
+                gap: None,
+                incomplete: true,
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::Response;
+
+    fn history() -> Arc<Observations> {
+        let mut history = Observations::new();
+        history.epoch_ms = 0;
+        history.newest.store(0, Ordering::Relaxed);
+        Arc::new(history)
+    }
+
+    #[tokio::test]
+    async fn rejection_and_log_counts_are_once_per_request_and_status_is_separate() {
+        let history = history();
+        observe(history.clone(), async {
+            rule_match(Phase::Request, true);
+            rule_match(Phase::Request, true);
+            reject(RejectionReason::Rule);
+            reject(RejectionReason::Protocol);
+            Response::builder().status(403).body(()).unwrap()
+        })
+        .await;
+        observe(history.clone(), async {
+            Response::builder().status(403).body(()).unwrap()
+        })
+        .await;
+        observe(history.clone(), async {
+            Response::builder().status(700).body(()).unwrap()
+        })
+        .await;
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.counters.requests, Some(3));
+        assert_eq!(snapshot.counters.rejected_requests, Some(1));
+        assert_eq!(snapshot.counters.log_requests, Some(1));
+        assert_eq!(snapshot.counters.rule_matches, Some(2));
+        let bucket = &snapshot.buckets[0];
+        let outcome = bucket.outcomes.as_ref().unwrap();
+        assert_eq!(outcome.statuses[303], 2);
+        assert_eq!(outcome.statuses[499], 0);
+        assert!(snapshot.missed_updates > 0);
+        assert_eq!(outcome.latency_count, 2);
+        assert_eq!(outcome.latency_bins.iter().sum::<u64>(), 2);
+        assert_eq!(outcome.in_flight, 0);
+        assert_eq!(
+            snapshot.counters.rejection_reasons.as_ref().unwrap()[&RejectionReason::Rule],
+            1
+        );
+        assert_eq!(snapshot.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn late_response_uses_arrival_minute_and_expired_slots_are_not_recreated() {
+        let history = history();
+        let measurement = RequestMeasurement::new(history.clone());
+        history.snapshot_at(61_000, 61_000, 0).unwrap();
+        let mut measurement = measurement;
+        measurement.finish(200);
+        drop(measurement);
+        let snapshot = history.snapshot_at(61_000, 61_000, 0).unwrap();
+        assert_eq!(
+            snapshot.buckets[0].outcomes.as_ref().unwrap().statuses[100],
+            1
+        );
+        assert!(!snapshot.buckets[0].coverage.incomplete);
+        assert_eq!(
+            snapshot.buckets[1].outcomes.as_ref().unwrap().statuses[100],
+            0
+        );
+
+        let mut old = RequestMeasurement::new(history.clone());
+        history.snapshot_at(660_000, 660_000, 0).unwrap();
+        old.finish(403);
+        drop(old);
+        let snapshot = history.snapshot_at(660_000, 660_000, 0).unwrap();
+        assert_eq!(snapshot.buckets.len(), MINUTE_SLOTS);
+        assert!(snapshot.buckets.iter().all(|bucket| bucket.start_ms > 0));
+        assert!(snapshot.missed_updates > 0);
+        assert_eq!(snapshot.counters.requests, Some(2));
+    }
+
+    #[test]
+    fn contention_does_not_wait_or_lose_cumulative_counts() {
+        let history = history();
+        let pinned = history.slots[0].pin(0, true).unwrap();
+        let before = Instant::now();
+        history.count(600_000, Count::Requests);
+        assert!(before.elapsed() < std::time::Duration::from_millis(50));
+        assert_eq!(history.cumulative[0].load(Ordering::Relaxed), 1);
+        assert_eq!(history.missed.load(Ordering::Relaxed), 1);
+        assert_eq!(pinned.0.minute.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn busy_minute_and_event_buffers_do_not_stop_live_cumulative_exports() {
+        let history = history();
+        history.count(0, Count::Requests);
+        let _pinned = history.slots[0].pin(0, true).unwrap();
+        let _detail = history.detail.lock().unwrap();
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.counters.requests, Some(1));
+        assert!(snapshot.buckets[0].counters.requests.is_none());
+        assert!(snapshot.buckets[0].coverage.incomplete);
+        assert!(snapshot.events.is_empty());
+        assert_eq!(snapshot.event_sequence, 0);
+    }
+
+    #[test]
+    fn concurrent_updates_and_multiple_readers_never_drain_counts() {
+        let history = history();
+        history.snapshot_at(0, 0, 0).unwrap();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let history = history.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        history.count(0, Count::Requests);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let first = history.snapshot_at(1000, 1000, 0).unwrap();
+        let second = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(first.counters.requests, Some(40_000));
+        assert_eq!(first.counters, second.counters);
+        assert_eq!(first.buckets[0].counters.requests, Some(40_000));
+        assert_eq!(second.missed_updates, 0);
+        assert!(second.sequence > first.sequence);
+    }
+
+    #[test]
+    fn quiet_minutes_zero_counts_clock_gaps_and_weighted_gauges_are_explicit() {
+        let history = history();
+        history.snapshot_at(0, 0, 5).unwrap();
+        let snapshot = history.snapshot_at(1000, 1000, 7).unwrap();
+        let gauge = snapshot.buckets[0].connections.as_ref().unwrap();
+        assert_eq!(gauge.connection_milliseconds, 5000);
+        assert_eq!(gauge.observed_ms, 1000);
+        assert_eq!(gauge.observed_max, 7);
+        let snapshot = history.snapshot_at(61_000, 70_000, 0).unwrap();
+        assert_eq!(snapshot.counters.requests, Some(0));
+        assert_eq!(snapshot.buckets.len(), 2);
+        assert!(snapshot.clock_discontinuity);
+        assert!(
+            snapshot
+                .buckets
+                .iter()
+                .all(|bucket| bucket.coverage.incomplete)
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_shedding_does_not_shed_request_statistics() {
+        let history = history();
+        for _ in 0..100 {
+            observe(history.clone(), async {
+                reject(RejectionReason::RateLimit);
+                Response::builder().status(429).body(()).unwrap()
+            })
+            .await;
+        }
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.counters.requests, Some(100));
+        assert_eq!(snapshot.counters.rejected_requests, Some(100));
+        assert_eq!(snapshot.counters.rate_limited_requests, Some(100));
+        assert_eq!(snapshot.events.len(), 12);
+        assert_eq!(snapshot.events_omitted, 88);
+        assert_eq!(snapshot.event_sequence, 100);
+        history.decoy_detail(DecoyDetail {
+            site: "site",
+            credential_id: "0123456789abcdef0123456789abcdef",
+            context: crate::console::model::DecoyContext::Credential,
+            age_seconds: Some(1),
+            lure: None,
+            template: None,
+            source: crate::client_ip::ClientSource::direct("127.0.0.1:1234".parse().unwrap()),
+            blocked: false,
+            incomplete: false,
+        });
+        assert!(
+            history
+                .snapshot_at(1000, 1000, 0)
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event.decoy.is_some())
+        );
+    }
+
+    #[test]
+    fn invalid_detail_metadata_cannot_bypass_the_allocation_admission_budget() {
+        let history = history();
+        let mut built = 0;
+        for _ in 0..100 {
+            history.event_with(|sequence, time| {
+                built += 1;
+                EventRecord {
+                    id: format!("invalid-{sequence}"),
+                    sequence,
+                    occurred_at_ms: time,
+                    kind: crate::console::model::EventKind::Service,
+                    disposition: crate::console::model::Disposition::Observe,
+                    phase: Phase::Service,
+                    site: None,
+                    client: None,
+                    peer: None,
+                    method: None,
+                    path: None,
+                    status: None,
+                    category: None,
+                    rule: None,
+                    reason: Some("kdt1.secret".into()),
+                    decoy: None,
+                    gap: None,
+                    incomplete: true,
+                }
+            });
+        }
+        assert_eq!(built, 12);
+        let packet = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert!(packet.events.is_empty());
+        assert_eq!(packet.events_omitted, 100);
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_releases_the_minute_inflight_marker() {
+        let history = history();
+        let future = observe(history.clone(), std::future::pending::<Response<()>>());
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(1), future).await;
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.counters.aborted_requests, Some(1));
+        assert_eq!(snapshot.buckets[0].outcomes.as_ref().unwrap().in_flight, 0);
+    }
+}

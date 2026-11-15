@@ -4,19 +4,25 @@ Date: 2026-11-15
 
 Status: The [bottom-up Phase 1 library](monitoring-console-phase1.md) implements
 version-one records, SQLite persistence, atomic checkpoints, and a bounded
-in-memory writer queue. Collection, bucket calculation, rollups, and retention
-are still proposed. The queue itself is not durable. Values in this document
-remain proposals unless explicitly adopted in the Phase 1 contract.
+in-memory writer queue. Phase 2 adds source minute measurement, bounded event
+reception, collection, and coalescing. Rollups and retention are still proposed.
+The queues themselves are not durable. Values in this document remain proposals
+unless explicitly adopted in the Phase 1 or Phase 2 contract.
 
 See the [console design](monitoring-console.md) and
 [screen requirements](monitoring-console-requirements.md). These requirements
 preserve Kunato's bounded-resource and forwarding-independence invariants.
+The [revised Phase 2 proposal](monitoring-console-phase2.md) specifies counters
+and bounded WAF minute measurements as the statistical source. That proposal
+is implemented in the library and development runner, without a web console.
+See the [cadence evaluation](monitoring-console-cadence.md) for the subsequent
+one-second live collection/publication recommendation and its measurement limits.
 
 ## 1. Ownership and persistence
 
 | Component | Owns | Persistence |
 | --- | --- | --- |
-| WAF process | Atomic request/protection counters and current runtime gauges | Existing in-memory behavior; counters reset on WAF restart |
+| WAF process | Atomic request/protection counters and current runtime gauges; proposed fixed-size minute ring | In memory only; counters and minute ring reset on WAF restart |
 | Optional console process | Collection positions, observed samples, time buckets, recorded events, and correlation summaries | Proposed embedded SQLite under a local console data directory |
 | Browser | Displayed subset, filters, chart data, and bounded live/replay state | Transient; reload must be able to query server-retained history |
 | systemd journal | Existing emitted WAF logs | Governed by the host's journal policy, separately from console retention |
@@ -43,11 +49,14 @@ WAF restart.
 
 ```mermaid
 flowchart LR
-    WAF[WAF counters and existing logs] --> Collector[Console collector]
+    WAF[WAF counters and proposed minute ring] --> Collector[Console statistics collector]
+    Logs[Selected security and decoy events] --> Detail[Independent bounded detail buffer]
     Collector --> Live[Bounded live delivery]
     Live --> SSE[SSE subscribers]
-    Collector --> Buffer[Bounded pending events and metric buckets]
+    Collector --> Buffer[Bounded minute aggregate memory]
+    Detail --> Live
     Buffer --> Worker[Dedicated SQLite writer]
+    Detail --> Worker
     Worker --> SQLite[Local history]
     SQLite --> History[History queries]
 ```
@@ -56,9 +65,13 @@ All waits for SQLite transactions belong to the console side. The WAF must not
 wait for storage acknowledgements, a database worker, or a full storage queue.
 Slow storage must not stall rule evaluation, protection, or forwarding.
 
-The intended initial collection path is periodic loopback metrics snapshots
-plus journal event collection. Mapping real observations onto the version-one
-storage contracts remains future work.
+The revised statistics path is periodic bounded snapshots of cumulative
+counters and source-minute aggregates, without a normal-access log stream.
+Selected journal events serve investigation and live context; their delivery
+or suppression does not change statistical totals. The existing loopback
+`/metrics` endpoint retains its original contract; `/console/snapshot` supplies
+the version 2 generation/revision envelope, retained minutes, and selected
+bounded events. Ordinary access rows are never required for these statistics.
 Any additional notification path from the WAF must also use bounded work and
 non-waiting admission when its consumer is full.
 
@@ -66,16 +79,19 @@ non-waiting admission when its consumer is full.
 
 | Item | Proposed initial value or behavior |
 | --- | --- |
-| Ordinary HTTP request | Update in-memory WAF counters; no per-request SQLite transaction or normal-access row |
-| Metrics collection | Every 5 seconds |
-| Metric bucket persistence | Batch pending updates approximately every 10 seconds |
-| Detailed-event buffering | Buffer recorded detection, protective-action, service, and decoy events in the console |
+| Ordinary HTTP request | Update WAF counters and proposed bounded minute measurements; no normal-access log or per-request database row |
+| Source minute retention | Proposed 10 fixed slots including the current minute; actual retained range is explicit |
+| Metrics collection / live publication | Every 1 second; shared collection of minute revisions and cumulative snapshots, coalesced aggregate publication |
+| Historical metrics view refresh | About every 5 seconds while visible; independent of continuous background collection |
+| Metric bucket persistence | Coalesce repeated revisions and submit approximately every 10 seconds; upsert minute totals rather than add snapshots |
+| Detailed-event buffering | Independently buffer selected detection, service, and decoy evidence; never reconstruct already measured traffic totals from it |
 | Event batch trigger | About 1 second elapsed or about 200 pending events, whichever occurs first, subject to write budgets |
 | Batch persistence | Multiple event rows and aggregate updates in one transaction |
 | Normal console shutdown | Attempt a bounded final flush; do not make WAF shutdown depend on it |
 
-An event can remain a separate database row even though many rows share a
-commit. This reduces transaction overhead without requiring one representative
+Only selected investigation events use detail rows. A retained event can remain
+a separate database row even though many rows share a commit. This reduces
+transaction overhead without requiring one representative
 row for every batch. High-volume repeated observations may additionally be
 grouped with counts and first/last times; that is a separate, disclosed policy.
 
@@ -150,8 +166,11 @@ cannot be reconstructed with exact timing from a later cumulative counter.
 
 ## 4. Aggregation rules
 
-Build minute aggregates during collection, while details are available. Build
-hour aggregates from ended minute intervals regularly, rather than waiting
+The revised proposal builds bounded minute measurements directly in the WAF
+without event-detail retention. The console coalesces absolute source-minute
+revisions and persists them. Cumulative snapshot differences alone cannot
+place requests precisely across a minute boundary or a long collection gap.
+Build hour aggregates from ended minute intervals regularly, rather than waiting
 until minute data is about to expire. Accept bounded correction of retained
 rollups when valid late observations arrive.
 

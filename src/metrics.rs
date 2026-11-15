@@ -4,6 +4,7 @@ use std::time::Instant;
 
 #[derive(Debug)]
 pub struct Metrics {
+    pub observations: std::sync::Arc<crate::observations::Observations>,
     pub decoys: crate::decoy::metrics::Metrics,
     started: Instant,
     pub requests: AtomicU64,
@@ -59,7 +60,17 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new() -> Self {
+        Self::with_observations(true)
+    }
+
+    /// Construct independent metrics for development comparisons; runtime capture is enabled by default.
+    pub fn with_observations(enabled: bool) -> Self {
         Self {
+            observations: std::sync::Arc::new(if enabled {
+                crate::observations::Observations::new()
+            } else {
+                crate::observations::Observations::disabled()
+            }),
             decoys: crate::decoy::metrics::Metrics::default(),
             started: Instant::now(),
             requests: AtomicU64::new(0),

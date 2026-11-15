@@ -720,16 +720,21 @@ An optional monitoring console is planned as a separate process within the
 Kunato distribution. Its Metrics and Real-time monitor views currently exist
 only as a browser-local prototype with fictional data. The bottom-up Phase 1
 library implements observation contracts, an embedded SQLite store, atomic
-checkpoints, and bounded background persistence. It has no runtime caller;
-console collection, authentication, HTTPS integration, SSE, rollups, and
+checkpoints, and bounded background persistence. Phase 2 connects bounded WAF
+minute measurements and selected evidence to a loopback snapshot API and a
+separate development collector. Web authentication, HTTPS, SSE, rollups, and
 retention are not implemented.
+The revised Phase 2 proposal uses WAF in-memory counters and a bounded minute
+ring as the source of statistical totals; selected event detail remains a
+separate investigation path. Statistical totals do not depend on log delivery.
 The existing loopback admin endpoints and current WAF persistence behavior are
 unchanged by this plan.
 
 See [console design and status](monitoring-console.md),
 [screen and interaction requirements](monitoring-console-requirements.md),
 [storage and retention](monitoring-console-storage.md), and
-[Phase 1 implementation contract](monitoring-console-phase1.md).
+[Phase 1 implementation contract](monitoring-console-phase1.md), and
+[revised Phase 2 proposal](monitoring-console-phase2.md).
 
 ## 10. CLI and Deployment
 

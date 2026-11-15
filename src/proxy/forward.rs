@@ -20,6 +20,7 @@ pub struct HttpError {
     pub status: StatusCode,
     pub message: &'static str,
     pub retry_after: Option<Duration>,
+    pub rejection_reason: Option<crate::console::model::RejectionReason>,
 }
 
 impl HttpError {
@@ -28,6 +29,17 @@ impl HttpError {
             status,
             message,
             retry_after: None,
+            rejection_reason: if status == StatusCode::PAYLOAD_TOO_LARGE {
+                Some(crate::console::model::RejectionReason::Body)
+            } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+                Some(crate::console::model::RejectionReason::Decode)
+            } else if status == StatusCode::SERVICE_UNAVAILABLE {
+                Some(crate::console::model::RejectionReason::Overload)
+            } else if status.is_server_error() {
+                None
+            } else {
+                Some(crate::console::model::RejectionReason::Protocol)
+            },
         }
     }
 
@@ -37,10 +49,14 @@ impl HttpError {
         retry_after: Duration,
     ) -> Self {
         Self {
-            status,
-            message,
             retry_after: Some(retry_after),
+            ..Self::new(status, message)
         }
+    }
+
+    pub fn with_reason(mut self, reason: crate::console::model::RejectionReason) -> Self {
+        self.rejection_reason = Some(reason);
+        self
     }
 }
 

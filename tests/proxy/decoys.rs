@@ -109,6 +109,69 @@ fn extract_token(body: &str) -> String {
 }
 
 #[tokio::test]
+async fn console_decoy_counts_survive_log_policy_and_detail_only_contains_hashes() {
+    use kunato::console::model::{DecoyContext, RejectionReason};
+    for block in [true, false] {
+        let (upstream, _) = receipts().await;
+        let config = if block {
+            decoy_config(upstream)
+        } else {
+            decoy_config(upstream).replace("on_reuse: BLOCK", "on_reuse: LOG")
+        };
+        let running = start_kunato(&config).await;
+        let (_, body, _) = request(running.addr, Method::GET, "/.env", &[], &[]).await;
+        let token = extract_token(&body);
+        let status = request(
+            running.addr,
+            Method::GET,
+            SINK,
+            &[("x-api-key", &token)],
+            &[],
+        )
+        .await
+        .0;
+        assert_eq!(
+            status,
+            if block {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::UNAUTHORIZED
+            }
+        );
+        request(
+            running.addr,
+            Method::GET,
+            "/ordinary",
+            &[("x-api-key", &token)],
+            &[],
+        )
+        .await;
+        let packet = running.metrics.observations.snapshot(0).unwrap();
+        assert_eq!(packet.counters.requests, Some(3));
+        assert_eq!(packet.counters.decoy_issued, Some(1));
+        assert_eq!(packet.counters.decoy_credential_use_requests, Some(1));
+        assert_eq!(packet.counters.decoy_occurrence_requests, Some(1));
+        assert_eq!(
+            packet.counters.decoy_blocked_requests,
+            Some(u64::from(block))
+        );
+        assert_eq!(packet.counters.rejected_requests, Some(u64::from(block)));
+        assert_eq!(
+            packet.counters.rejection_reasons.as_ref().unwrap()[&RejectionReason::Decoy],
+            u64::from(block)
+        );
+        assert!(packet.events.iter().any(|event| {
+            event
+                .decoy
+                .as_ref()
+                .is_some_and(|decoy| decoy.context == DecoyContext::Credential)
+        }));
+        assert!(!serde_json::to_string(&packet).unwrap().contains(&token));
+        running.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn decoy_without_host_allowlisting_keeps_other_sites_on_normal_routing() {
     let (upstream, count) = receipts().await;
     let config = decoy_config(upstream).replace(

@@ -1,5 +1,6 @@
-//! Console persistence foundations. No collector, listener, or WAF integration.
+//! Console collection and persistence foundations, independent of WAF forwarding.
 
+pub mod collector;
 pub mod model;
 pub mod storage;
 pub mod writer;
