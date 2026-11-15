@@ -95,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/instal
 
 `--acme-domain` で指定した名前は `allowed_hosts` にも書き込まれるため、それ以外の Host ヘッダを持つリクエストは `421` で拒否されます。ヘルスチェックなどで別のホスト名や IP アドレスから Kunato にアクセスする場合は、`--allowed-host` で追加するか `/etc/kunato/kunato.yaml` を編集してください（[Host allowlist](docs/development.md#host-allowlist) を参照）。
 
-サービスは自動的に起動します。初回起動時はバックグラウンドで証明書を発注するため、TLS が有効になるまで数秒待ってください。インストールまたは `kunato upgrade` が成功するとカラーのマスコットバナーが表示されます。インストーラの `--no-banner`（または `KUNATO_NO_BANNER`）で非表示にでき、`NO_COLOR` で色なし表示になります。
+サービスは自動的に起動します。初回起動時はバックグラウンドで証明書を発注するため、TLS が有効になるまで数秒待ってください。インストールまたは `kunato upgrade` が成功するとカラーのロゴバナーが表示されます。インストーラの `--no-banner`（または `KUNATO_NO_BANNER`）で非表示にでき、`NO_COLOR` で色なし表示になります。
 
 ### 2. ステータス・ログ・メトリクスの確認
 
@@ -105,7 +105,7 @@ curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/instal
 systemctl status kunato
 sudo kunato log -n 50
 kunato metrics                       # :9090 からメトリクス表を表示
-kunato banner                        # マスコットバナーを再表示
+kunato banner                        # ロゴバナーを再表示
 sudo kunato validate
 ```
 
@@ -230,7 +230,7 @@ sudo apt-get install -y minisign
 | `kunato admin-access status\|open\|close` | 宣言した管理機能へのアクセスを一覧・期間限定で開閉します。 |
 | `kunato update-rules` | 最新のマネージドルールセットのチェック・検証・適用を1回実行します。 |
 | `kunato upgrade` | 設定を保持したまま、インストール済みバイナリと systemd ユニットをアップグレードします。 |
-| `kunato banner` | カラーのマスコットバナーをターミナルに表示します。 |
+| `kunato banner` | カラーのロゴバナーをターミナルに表示します。 |
 
 <a id="managed-rules-and-automatic-updates"></a>
 ## マネージドルールと自動更新 (Managed Rules and Automatic Updates)

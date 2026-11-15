@@ -117,7 +117,7 @@ another name or an IP address (for example a health check), add it with
 
 The service starts automatically; the first start orders the certificate in
 the background, so allow a few seconds before TLS works. A successful install
-or `kunato upgrade` ends with a colored mascot banner; `--no-banner` on the
+or `kunato upgrade` ends with a colored logo banner; `--no-banner` on the
 installer (or `KUNATO_NO_BANNER`) suppresses it, and `NO_COLOR` prints it
 without colors.
 
@@ -130,7 +130,7 @@ configuration at any time:
 systemctl status kunato
 sudo kunato log -n 50
 kunato metrics                       # metric table from :9090
-kunato banner                        # print the mascot banner again
+kunato banner                        # print the logo banner again
 sudo kunato validate
 ```
 
@@ -298,7 +298,7 @@ and the remaining trust limits.
 | `kunato admin-access status\|open\|close` | List or toggle time-limited access to declared administrative functions. |
 | `kunato update-rules` | Check for, verify, validate, and apply the latest managed rule set once. |
 | `kunato upgrade` | Upgrade the installed binary and systemd unit while preserving configuration. |
-| `kunato banner` | Print the colored mascot banner to the terminal. |
+| `kunato banner` | Print the colored logo banner to the terminal. |
 
 ## Managed Rules and Automatic Updates
 

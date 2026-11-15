@@ -1187,8 +1187,8 @@ Options:
 
 fn banner_help() -> String {
     format!(
-        r#"Print the Kunato banner: the mascot drawn with terminal colors and the
-Kunato wordmark.
+        r#"Print the Kunato logo banner: the wordmark, tagline, and version in
+terminal colors.
 
 Usage: kunato banner [OPTIONS]
 

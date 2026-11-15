@@ -38,8 +38,7 @@ src/
   admin.rs         # Loopback admin listener: /metrics, /maintenance, /admin-access
   admin_access.rs  # Administrative function matching and open/close overrides
   admin_client.rs  # `kunato metrics`, `kunato maintenance`, `kunato admin-access`
-  banner.rs        # `kunato banner`: colored mascot and wordmark for install success
-  banner_art.rs    # Generated mascot payload embedded by banner.rs
+  banner.rs        # `kunato banner`: colored wordmark for install success
   allowed_hosts.rs # Host/authority allowlist enforced before rule evaluation
   client_ip.rs     # Bounded trusted-proxy client identity resolution
   cidr.rs          # IPv4/IPv6 CIDR parsing and matching
@@ -76,7 +75,7 @@ dist/
 examples/
   upstream.rs      # Manual test upstream with access logs
   h3probe.rs       # HTTP/3 lab probe built by prepare
-scripts/           # curl installer, banner art generation, dist-rules regeneration, NVD delta fetch, black-box and lab runners
+scripts/           # curl installer, dist-rules regeneration, NVD delta fetch, black-box and lab runners
 tests/             # Integration tests (mock upstream, reload scenarios, rules update)
 docs/
   DESIGN.md           # Overall design
