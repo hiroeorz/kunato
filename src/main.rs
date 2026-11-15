@@ -65,6 +65,17 @@ async fn run(cli: Cli) -> Result<(), Error> {
         return Ok(());
     }
 
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            warn!(
+                "running as root; the systemd unit runs kunato as the unprivileged `kunato` \
+                 user with service hardening"
+            );
+        }
+    }
+
     if cli.disable_protection {
         warn!("DoS/DDoS protection disabled by --disable-protection");
         initial.protection.enabled = false;

@@ -147,6 +147,33 @@ NAME`; installs that manage certificates manually can opt in the same way (see
 Running the installer again upgrades the binary and unit while keeping the
 existing configuration.
 
+### Service hardening
+
+The shipped unit runs Kunato as the unprivileged `kunato` user, keeps only
+`CAP_NET_BIND_SERVICE`, and enables systemd sandboxing. In addition to
+`ProtectSystem=strict`, `ProtectHome`, and `PrivateTmp`, it hides the process
+tree and non-process `/proc` entries, blocks device nodes, namespace creation,
+clock and kernel interfaces, hostname changes, SUID/SGID file creation, and
+writable executable mappings, restricts sockets to `AF_INET`, `AF_INET6`, and
+`AF_UNIX`, applies the `@system-service` syscall allowlist, and sets
+`UMask=0077` (the rule updater still writes its file with an explicit mode).
+
+The full set needs systemd 247 or later (`ProtectProc=` and `ProcSubset=`);
+older releases log a warning and ignore the unknown settings while keeping the
+rest. The rule updater calls `fchown`, which `@system-service` permits; adding
+`~@privileged` to the filter produces a warning on every rules update.
+
+The installer replaces the unit on every install and upgrade, so local edits
+do not survive. Running the binary directly bypasses the unit: the daemon logs
+a warning when it starts as root, and a TLS private key with permissions for
+users outside its owner and group also produces a startup warning.
+
+`scripts/check-unit-hardening.sh` runs `systemd-analyze security --offline`
+with a 20% exposure threshold and checks the required directives. The CI test
+job runs it. The lab starts the binary directly and does not apply the unit, so
+changing the syscall filter needs a run on a systemd host in addition to the
+protocol, agentic, load, rules-update, and ACME staging suites.
+
 New starter configurations also enable experimental decoys with `on_reuse:
 BLOCK`. The site origin uses the first ACME domain or allowed host; a wildcard
 host uses its `blog` subdomain. Without either input, edit the generated

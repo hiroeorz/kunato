@@ -9,6 +9,7 @@ use rustls::server::ResolvesServerCert;
 use crate::error::Error;
 
 pub fn load_server_config(cert_file: &Path, key_file: &Path) -> Result<Arc<ServerConfig>, Error> {
+    warn_private_key_permissions(key_file);
     let (certificates, private_key) = load_material(cert_file, key_file)?;
     build_server_config(
         certificates,
@@ -38,6 +39,36 @@ fn load_material(
     })?;
     Ok((certificates, private_key))
 }
+
+/// Warn when the TLS private key is accessible to users outside its owner and
+/// group. The installer copies the key with `0640 root:kunato`; a manual copy
+/// often leaves it world-readable.
+#[cfg(unix)]
+fn warn_private_key_permissions(key_file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    use tracing::warn;
+
+    let Ok(metadata) = std::fs::metadata(key_file) else {
+        return;
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    if private_key_is_world_accessible(mode) {
+        warn!(
+            path = %key_file.display(),
+            mode = %format!("{mode:04o}"),
+            "TLS private key has permissions for users outside its owner and group; \
+             install it with mode 0640 and the service user's group"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn private_key_is_world_accessible(mode: u32) -> bool {
+    mode & 0o007 != 0
+}
+
+#[cfg(not(unix))]
+fn warn_private_key_permissions(_key_file: &Path) {}
 
 fn build_server_config(
     certificates: Vec<CertificateDer<'static>>,
@@ -139,5 +170,14 @@ mod tests {
 
         let config = load_quic_server_config(&cert_file, &key_file).expect("valid config");
         assert_eq!(config.alpn_protocols, vec![b"h3".to_vec()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flags_world_accessible_private_key_modes() {
+        assert!(!private_key_is_world_accessible(0o600));
+        assert!(!private_key_is_world_accessible(0o640));
+        assert!(private_key_is_world_accessible(0o604));
+        assert!(private_key_is_world_accessible(0o644));
     }
 }

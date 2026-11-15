@@ -27,7 +27,8 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
       - run: cargo fmt --manifest-path blackbox/Cargo.toml --check
       - run: cargo clippy --manifest-path blackbox/Cargo.toml --all-targets --locked -- -D warnings
-      - run: shellcheck scripts/install.sh scripts/check-deny.sh scripts/release.sh scripts/update-dist-rules.sh scripts/fetch-cve-delta.sh scripts/check-rules-compat.sh
+      - run: shellcheck scripts/install.sh scripts/check-deny.sh scripts/release.sh scripts/update-dist-rules.sh scripts/fetch-cve-delta.sh scripts/check-rules-compat.sh scripts/check-unit-hardening.sh
+      - run: scripts/check-unit-hardening.sh
       - run: python3 scripts/test_check_rules_policy.py
       - run: cargo build --release --locked
       - run: cargo test --locked

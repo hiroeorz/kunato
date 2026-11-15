@@ -283,6 +283,7 @@ cargo test                       # Run all tests
 cargo fmt                        # Format code
 cargo clippy --all-targets -- -D warnings  # Lint; warnings are errors
 ./scripts/check-deny.sh          # Dependency, license, advisory, and source audit (read-only-safe)
+./scripts/check-unit-hardening.sh  # systemd unit hardening and exposure score
 cargo fmt --manifest-path blackbox/Cargo.toml
 cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/blackbox-test.sh       # End-to-end black-box test with colored report
