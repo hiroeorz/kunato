@@ -93,6 +93,8 @@ docs/
   security-testing.md # Local attack-tool lab design and verification process
 packaging/
   kunato.service   # systemd unit
+ui/
+  console-prototype/ # Browser-only monitoring UI with fictional data; no backend
 rules.example.yaml # Example configuration
 deny.toml          # Dependency, license, and advisory policy
 ```
