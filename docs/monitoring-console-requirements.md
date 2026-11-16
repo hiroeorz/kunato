@@ -2,18 +2,21 @@
 
 Date: 2026-11-16
 
-Status: Product and UI requirements with an implemented fictional-data
-prototype. The approved [bottom-up Phase 1](monitoring-console-phase1.md)
-implements persistence foundations. Phase 2 adds counter-based source
-measurement and collection. [Phase 3](monitoring-console-phase3.md) implements
-UTC reason-separated history, retention, and bounded query/maintenance workers;
-web delivery remains absent.
-Requirement identifiers describe intended behavior, not evidence that the
-current binary supports it.
+Status: Product and UI requirements. The fictional-data prototype implements
+the interaction design; Phases 1 through 4 implement persistence, collection,
+UTC history, retention, and supplementary measurements.
+[Phase 5](monitoring-console-phase5.md) delivers the read-only console process,
+HTTP/SSE APIs, and an embedded real-data UI.
+[Phase 6](monitoring-console-phase6.md) adds the source allowlist, Host
+validation, authentication, and TLS. Requirement identifiers describe intended
+behavior; a delivered endpoint does not imply that every requirement below is
+fully implemented.
 
-See [design and implementation status](monitoring-console.md) and
-[storage and retention](monitoring-console-storage.md). The current review
-surface is [the console prototype](../ui/console-prototype/README.md).
+See [design and implementation status](monitoring-console.md),
+[storage and retention](monitoring-console-storage.md), and
+[remaining work](monitoring-console-remaining.md). The interaction review
+surface remains [the console prototype](../ui/console-prototype/README.md);
+the delivered UI is the smaller read-only page served by the console binary.
 The [revised Phase 2 proposal](monitoring-console-phase2.md) makes bounded
 in-memory WAF measurements authoritative for statistics; normal-access logs
 and retained event rows are not prerequisites for counting requests.
@@ -36,9 +39,10 @@ coalesced live statistics updates with independent ten-second persistence.
 | UI-10 | Clearly identify fictional preview data and simulated connection state. Prototype controls must not imply a connection to the user's WAF. |
 
 The prototype uses English for repository-artifact consistency and offers JST
-and UTC display. The adopted backend/reporting policy uses UTC; the fictional
-prototype has not been updated to that policy. Final language-localization
-policy is not decided by this document.
+and UTC display. The delivered UI uses UTC, the adopted reporting policy, and
+offers 1 hour, 24 hours, 7 days, and 30 days; the fictional prototype still
+shows JST and the superseded 90-day/one-year options. Final
+language-localization policy is not decided by this document.
 
 ## 2. Metrics view
 

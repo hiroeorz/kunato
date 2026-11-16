@@ -6,6 +6,8 @@ pub mod history;
 mod history_store;
 pub mod measurements;
 pub mod model;
+pub mod runtime;
+pub mod server;
 pub mod storage;
 pub mod writer;
 
@@ -50,6 +52,12 @@ pub enum Error {
     ReceiptTimeout,
 }
 
+impl From<Error> for crate::error::Error {
+    fn from(error: Error) -> Self {
+        Self::Message(error.to_string())
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error.to_string())
@@ -75,4 +83,9 @@ pub(crate) fn validate_duration(value: Duration, max: Duration) -> Result<(), Er
         return Err(Error::Invalid("duration outside supported bounds"));
     }
     Ok(())
+}
+
+/// Validate a configured console history instance name.
+pub fn validate_instance(value: &str) -> Result<(), Error> {
+    model::identifier(value, 120)
 }

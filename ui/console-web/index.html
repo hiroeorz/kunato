@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kunato console</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="shell">
+      <aside class="sidebar" aria-label="Console views">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">K</span>
+          <span class="brand-text">Kunato console</span>
+        </div>
+        <nav class="nav" aria-label="Views">
+          <button id="nav-live" class="nav-item is-active" type="button" data-view="live">
+            Real-time monitor
+          </button>
+          <button id="nav-metrics" class="nav-item" type="button" data-view="metrics">
+            Metrics
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="status-line">
+            <span id="collection-dot" class="dot dot-unknown" aria-hidden="true"></span>
+            <span id="collection-text">Waiting for collection</span>
+          </div>
+          <button id="sign-out" class="link-button" type="button" hidden>Sign out</button>
+        </div>
+      </aside>
+
+      <main id="main" tabindex="-1">
+        <header class="page-header">
+          <div>
+            <h1 id="page-title">Real-time monitor</h1>
+            <p id="page-subtitle" class="muted">
+              Latest state from the WAF; UTC timestamps. Read-only.
+            </p>
+          </div>
+          <div class="header-meta">
+            <span id="source-generation" class="chip">generation unknown</span>
+            <span id="last-update" class="chip">no update yet</span>
+          </div>
+        </header>
+
+        <p id="banner" class="banner" role="status" hidden></p>
+
+        <section id="live-view" aria-label="Real-time monitoring">
+          <div class="cards" id="live-cards">
+            <article class="card">
+              <h2>Requests</h2>
+              <p class="value" id="live-requests">Unavailable</p>
+              <p class="detail" id="live-rate">rate unavailable</p>
+            </article>
+            <article class="card card-reject">
+              <h2>Rejected</h2>
+              <p class="value" id="live-rejected">Unavailable</p>
+              <p class="detail" id="live-rejected-rate">rate unavailable</p>
+            </article>
+            <article class="card">
+              <h2>LOG detections</h2>
+              <p class="value" id="live-logged">Unavailable</p>
+              <p class="detail">requests with at least one LOG match</p>
+            </article>
+            <article class="card">
+              <h2>Active connections</h2>
+              <p class="value" id="live-connections">Unavailable</p>
+              <p class="detail">latest sample</p>
+            </article>
+            <article class="card">
+              <h2>Upstream failures</h2>
+              <p class="value" id="live-upstream">Unavailable</p>
+              <p class="detail" id="live-upstream-detail">connection failures and timeouts</p>
+            </article>
+            <article class="card card-decoy">
+              <h2>Decoy credential use</h2>
+              <p class="value" id="live-decoy">Unavailable</p>
+              <p class="detail">verified presentations, not attacks</p>
+            </article>
+          </div>
+
+          <div class="panel-grid">
+            <section class="panel" aria-labelledby="live-health-title">
+              <h2 id="live-health-title">Collection health</h2>
+              <dl class="health" id="live-health">
+                <dt>state</dt><dd>waiting</dd>
+              </dl>
+            </section>
+
+            <section class="panel" aria-labelledby="live-events-title">
+              <h2 id="live-events-title">Recent detections and service events</h2>
+              <p class="muted small">
+                Selected evidence from the bounded source snapshot, newest first.
+                Not a complete request log.
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">UTC time</th>
+                      <th scope="col">Kind</th>
+                      <th scope="col">Disposition</th>
+                      <th scope="col">Reason / rule</th>
+                      <th scope="col">Method</th>
+                      <th scope="col">Path</th>
+                      <th scope="col">Site</th>
+                      <th scope="col">Client</th>
+                    </tr>
+                  </thead>
+                  <tbody id="live-events">
+                    <tr><td colspan="8" class="muted">No events received yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="metrics-view" aria-label="Historical metrics" hidden>
+          <div class="toolbar">
+            <label for="range">Reporting period</label>
+            <select id="range">
+              <option value="3600000">Last 1 hour</option>
+              <option value="86400000" selected>Last 24 hours</option>
+              <option value="604800000">Last 7 days</option>
+              <option value="2592000000">Last 30 days</option>
+            </select>
+            <button id="refresh" type="button">Refresh</button>
+            <span id="metrics-meta" class="muted small" role="status"></span>
+          </div>
+
+          <div class="cards" id="metrics-cards">
+            <article class="card">
+              <h2>Requests</h2>
+              <p class="value" id="metrics-requests">Unavailable</p>
+              <p class="detail" id="metrics-requests-detail"></p>
+            </article>
+            <article class="card card-reject">
+              <h2>Rejected</h2>
+              <p class="value" id="metrics-rejected">Unavailable</p>
+              <p class="detail" id="metrics-rejected-detail"></p>
+            </article>
+            <article class="card">
+              <h2>Rejection rate</h2>
+              <p class="value" id="metrics-rejection-rate">Unavailable</p>
+              <p class="detail">rejected divided by observed requests</p>
+            </article>
+            <article class="card">
+              <h2>LOG detections</h2>
+              <p class="value" id="metrics-logged">Unavailable</p>
+              <p class="detail">not disjoint from rejected requests</p>
+            </article>
+            <article class="card">
+              <h2>Upstream failures</h2>
+              <p class="value" id="metrics-upstream">Unavailable</p>
+              <p class="detail">connection failures and timeouts</p>
+            </article>
+            <article class="card card-decoy">
+              <h2>Decoy credential use</h2>
+              <p class="value" id="metrics-decoy">Unavailable</p>
+              <p class="detail">verified presentations</p>
+            </article>
+          </div>
+
+          <section class="panel" aria-labelledby="chart-title">
+            <h2 id="chart-title">Traffic and rejections per interval</h2>
+            <div id="chart" class="chart" role="img" aria-label="Traffic and rejection counts"></div>
+          </section>
+
+          <div class="panel-grid">
+            <section class="panel" aria-labelledby="reasons-title">
+              <h2 id="reasons-title">Rejection reasons</h2>
+              <p class="muted small">
+                A rejected request contributes once to one primary reason.
+                Incomplete intervals are excluded from shares.
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Reason</th>
+                      <th scope="col">Count</th>
+                      <th scope="col">Share of rejections</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reasons">
+                    <tr><td colspan="3" class="muted">No history loaded.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="correlations-title">
+              <h2 id="correlations-title">Decoy correlation</h2>
+              <p class="muted small">
+                Hashed identifiers from admitted evidence. Different addresses do
+                not prove the same person.
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Credential</th>
+                      <th scope="col">Site</th>
+                      <th scope="col">First seen</th>
+                      <th scope="col">Last evidence</th>
+                      <th scope="col">Uses</th>
+                      <th scope="col">Occurrences</th>
+                    </tr>
+                  </thead>
+                  <tbody id="correlations">
+                    <tr><td colspan="6" class="muted">No evidence retained.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

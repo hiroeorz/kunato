@@ -18,6 +18,36 @@ pub fn load_server_config(cert_file: &Path, key_file: &Path) -> Result<Arc<Serve
     )
 }
 
+/// Load a console TLS configuration.
+///
+/// The certificate chain comes from `cert_file`. Without `key_file`, the
+/// private key is read from the same file, which matches the combined
+/// key-and-chain bundle the ACME cache stores as `cert.pem`. The console
+/// serves HTTP/1.1 only, so that is the only advertised ALPN protocol.
+pub fn load_console_server_config(
+    cert_file: &Path,
+    key_file: Option<&Path>,
+) -> Result<Arc<ServerConfig>, Error> {
+    let (certificates, private_key) = match key_file {
+        Some(key_file) => {
+            warn_private_key_permissions(key_file);
+            load_material(cert_file, key_file)?
+        }
+        None => {
+            warn_private_key_permissions(cert_file);
+            let certificates = load_certificates(cert_file)?;
+            let private_key = PrivateKeyDer::from_pem_file(cert_file).map_err(|err| {
+                Error::Tls(format!(
+                    "failed to read private key from `{}`: {err}",
+                    cert_file.display()
+                ))
+            })?;
+            (certificates, private_key)
+        }
+    };
+    build_server_config(certificates, private_key, &[b"http/1.1".as_slice()])
+}
+
 pub(crate) fn certificate_expiry(cert_file: &Path) -> Option<u64> {
     let certificates = load_certificates(cert_file).ok()?;
     crate::acme::certificate_expiry(certificates.first()?.as_ref())

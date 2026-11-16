@@ -3,18 +3,16 @@
 Date: 2026-11-16
 
 Status: The browser-only prototype is implemented and committed in `d9ba903`
-(`Add interactive monitoring console prototype`). The subsequently approved
-bottom-up Phase 1 implements the observation contracts, SQLite store, and
-bounded persistence worker as a library. See the
-[Phase 1 implementation contract](monitoring-console-phase1.md).
-[Phase 2](monitoring-console-phase2.md) adds in-memory WAF measurements, a
-loopback snapshot API, selected bounded evidence, and a separate development
-collector connected to persistence. [Phase 3](monitoring-console-phase3.md)
-implements UTC aggregates, separate primary-reason rows, mixed-grain reads,
-and 30-day expiry. [Phase 4](monitoring-console-phase4.md) adds bounded site/rule
-measurements, upstream status and reason latency, rankings/unique estimates,
-operational state, and compact decoy evidence. Web delivery, authentication, HTTPS, SSE, and packaging
-remain future work. The prototype still uses fictional data.
+(`Add interactive monitoring console prototype`). Phases 1 through 4 implement
+the observation contracts, SQLite storage, counter-based collection, UTC
+aggregation, retention, supplementary measurements, and compact decoy evidence
+as libraries. [Phase 5](monitoring-console-phase5.md) adds the optional console
+process, a read-only HTTP/SSE API, and an embedded real-data UI.
+[Phase 6](monitoring-console-phase6.md) adds the source allowlist, Host
+validation, authentication, and TLS for remote access. Packaging, service
+units, historical event drill-down, CSV export, and comparison periods remain
+future work; the browser prototype is retained as a design reference and still
+uses fictional data.
 
 Related documents:
 
@@ -24,6 +22,9 @@ Related documents:
 - [Phase 2 counter-based statistics implementation](monitoring-console-phase2.md)
 - [Phase 3 UTC aggregates and retention](monitoring-console-phase3.md)
 - [Phase 4 additional source measurements](monitoring-console-phase4.md)
+- [Phase 5 local web delivery](monitoring-console-phase5.md)
+- [Phase 6 remote access](monitoring-console-phase6.md)
+- [Remaining work](monitoring-console-remaining.md)
 - [Update-cadence evaluation and measurements](monitoring-console-cadence.md)
 - [Prototype source and launch instructions](../ui/console-prototype/README.md)
 - [Existing observability architecture](DESIGN.md#9-observability)
@@ -50,20 +51,20 @@ The following distinctions apply throughout these documents:
 
 | Area | Direction | Status |
 | --- | --- | --- |
-| Navigation | One console with a left sidebar and two views: Metrics and Real-time monitor | Agreed; prototyped |
-| Runtime boundary | An optional console process separate from the WAF process | Agreed direction |
-| Distribution | Initially one repository and one executable with a separate console subcommand | Agreed direction; exact packaging remains open |
-| Live transport | SSE from the console to the browser; ordinary HTTP APIs for queries and operations | Agreed direction; simulated in the prototype |
-| Access | Loopback by default; explicit listener and source-IP/CIDR policy for remote access | Agreed direction; backend absent |
-| Remote transport | HTTPS and user authentication alongside the source allowlist | Design requirement; mechanisms remain open |
-| Certificates | Use the WAF's public-443 ACME acquisition path to supply a certificate usable by the private console listener | Agreed direction; material delivery and reload remain open |
-| History | Persist console history locally with embedded SQLite | Store, collector, and bounded mixed-grain reader implemented; no web integration |
+| Navigation | One console with a left sidebar and two views: Metrics and Real-time monitor | Implemented in the delivered UI (minimal read-only views) |
+| Runtime boundary | An optional console process separate from the WAF process | Implemented as `kunato console` |
+| Distribution | Initially one repository and one executable with a separate console subcommand | Implemented as a subcommand; packaging remains open |
+| Live transport | SSE from the console to the browser; ordinary HTTP APIs for queries and operations | Implemented with coalesced 1-second state and bounded subscribers |
+| Access | Loopback by default; explicit listener and source-IP/CIDR policy for remote access | Implemented; `allowed_clients` uses the transport peer |
+| Remote transport | HTTPS and user authentication alongside the source allowlist | Implemented with a token, server-side sessions, and TLS |
+| Certificates | Use the WAF's public-443 ACME acquisition path to supply a certificate usable by the private console listener | Implemented for a PEM chain or the combined ACME cache `cert.pem`; reload on change |
+| History | Persist console history locally with embedded SQLite | Implemented end to end, including HTTP history reads |
 | Statistics | UTC intervals, independent overall totals, and separate fixed primary-rejection-reason series | Phase 3 reason rows and aggregates implemented |
 | Retention | 1/5/10/20/60-minute precision tiers, hourly history through 30 days, then expiry | Phase 3 logical expiry and bounded cleanup implemented |
-| Writes | Bounded buffering and batched writes, independent of request forwarding | Library/development collector implemented; user-facing runtime absent |
-| Decoys | Treat credential-use attempts as a first-class signal in both views | Agreed; prototyped |
-| Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Agreed; prototyped |
-| Reading position | Preserve the same visible events during updates, including horizontal position | Agreed; prototyped |
+| Writes | Bounded buffering and batched writes, independent of request forwarding | Implemented in the console runtime; WAF request path unchanged |
+| Decoys | Treat credential-use attempts as a first-class signal in both views | Counted, persisted, correlated, and shown in the UI |
+| Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Prototype-only; the delivered UI does not replay backlog effects |
+| Reading position | Preserve the same visible events during updates, including horizontal position | Prototype-only; the delivered event list renders newest first |
 
 ## 2. Architecture and responsibility boundaries
 
@@ -89,10 +90,10 @@ flowchart LR
     Console -->|HTTPS queries and SSE| Browser[Browser]
 ```
 
-The arrows describe the intended information flow, not implemented console
-endpoints. The journal and loopback metrics already exist. Console-side
-counter-based collection is implemented in the library/development runner;
-web delivery remains absent.
+The arrows describe the implemented console information flow. Journal ingestion
+is still future work: selected events travel inside the loopback snapshot. The
+console process collects, persists, queries, and serves; the WAF request path
+never waits for it.
 
 ### 2.1 Why a separate process
 
@@ -173,29 +174,38 @@ remain open.
 - A console source allowlist is separate from the WAF's protective allowlist
   and its `allowed_hosts` policy.
 
-Illustrative future connection-policy fragment, **invalid in current releases**:
+A remote listener is accepted only with the full control set:
 
 ```yaml
 console:
   enabled: true
   listen: 0.0.0.0:9091
+  storage_dir: /var/lib/kunato/console
   allowed_clients:
     - 127.0.0.1/32
     - 192.168.1.20/32
     - 203.0.113.10/32
+  allowed_hosts:
+    - console.example.com
+  auth:
+    enabled: true
+  tls:
+    cert_file: /var/lib/kunato/acme/cert.pem
 ```
 
-This example covers IPv4 and illustrates connection policy only. It is not a
-complete secure remote configuration: authentication and TLS fields have not
-been designed or implemented. Do not copy it into `rules.example.yaml`, managed
-rules, or a deployed configuration before a compatible binary is released.
+IPv4 and IPv6 CIDRs are both accepted. This fragment omits `source`, which
+defaults to `admin.listen`, and `transport`, which is TLS with HTTP/1.1. See
+[Phase 6](monitoring-console-phase6.md) and
+[development.md](development.md#monitoring-console) for the field contract.
 
 ### 4.2 Authentication and administrative separation
 
 Remote access requires user authentication and encrypted transport in addition
-to IP filtering. Shared public IPs do not identify a single user. Initial
-credential generation should minimize setup work; the exact login, secret
-storage, session, and recovery mechanisms remain open.
+to IP filtering. Shared public IPs do not identify a single user. Phase 6 uses a
+256-bit operator token created with mode 0600 on first start, a server-side
+session in an `HttpOnly`, `SameSite=Strict` cookie, a 12-hour session lifetime,
+and a per-address login limit. A console restart ends sessions; rotating the
+token requires a restart.
 
 The existing loopback admin listener also exposes mutating maintenance and
 administrative access endpoints. Keep that listener loopback-only. The console
@@ -236,14 +246,17 @@ covered name to a private address; direct IP access must not rely on a
 certificate issued only for that DNS name.
 
 The existing ACME implementation requires public reachability on TCP 443 and
-does not implement HTTP-01 or DNS-01. Console-side certificate sharing and
-renewal reload are new work, not existing capabilities.
+does not implement HTTP-01 or DNS-01. Phase 6 reads the WAF ACME cache
+`cert.pem`, which is a combined private-key and certificate-chain bundle, and
+reloads changed material for new console connections. The console never reads
+`account.key` and never renews the cache itself.
 
-The ACME cache contains sensitive certificate and account-key material. Design
-certificate delivery without exposing the account key or weakening the
-existing cache permissions. Do not have both processes independently renew
-the same cache. Console certificate failure must remain independent of request
-forwarding; do not silently downgrade remote console traffic to plaintext.
+The ACME cache contains sensitive certificate and account-key material. The
+console must be able to read the certificate bundle; if it runs as a different
+account, the operator grants access by ownership or an installed copy, and the
+console does not widen the cache permissions. Console certificate failure stays
+independent of request forwarding and never downgrades remote console traffic to
+plaintext.
 
 ### 5.2 Other network arrangements
 
@@ -266,9 +279,9 @@ References: [Let's Encrypt challenges](https://letsencrypt.org/docs/challenge-ty
 | Structured security events | Journal output with normalized `kunato log` rendering | Suitable initial event source; permissions and journal retention apply |
 | Rate-limit and ban event details | Aggregated/suppressed logs while counters still count rejections | Log rows cannot substitute for total request counts |
 | Decoy evidence | Credential/occurrence counters and hashed-ID issuance/reuse logs | Supports basic counts and bounded correlation; complete trails are not guaranteed |
-| Counter-based historical collection | Implemented in development runner | Separate process; one-second collection and ten-second statistics coalescing |
-| SSE and browser delivery | Absent | Future backend work |
-| SQLite store and persistence worker | Phase 4 schema migration, reason aggregates, bounded query/maintenance workers | Connected to the collector; prototype remains fictional |
+| Counter-based historical collection | Implemented in the console runtime and development runner | Separate process; one-second collection and ten-second statistics coalescing |
+| SSE and browser delivery | Implemented in `kunato console` | Read-only API, coalesced live state, embedded real-data UI |
+| SQLite store and persistence worker | Phase 4 schema migration, reason aggregates, bounded query/maintenance workers | Connected to the collector in the console process |
 | Deduplicated overall rejection count | Implemented in scoped request measurements | Separate total and fixed primary reasons; upstream refusals remain separate |
 | Host/class/category/rule measurements | Implemented with quotas and omission metadata | Bounded match/request breakdowns; incomplete populations must be labeled |
 | Status distributions and header-decision latency | Client/upstream statuses, reason latency, and exact observed extrema implemented | Header decisions; full-body duration remains unavailable |
@@ -311,26 +324,28 @@ queries, nonblocking admission, batched background persistence, health, and
 bounded shutdown. Minute buckets are supplied by callers and tests; this phase
 does not calculate them from WAF counters.
 
-### Later phases: collection, processing, and delivery
+### Phase 5: local web delivery
 
-The [implemented Phase 2 contract](monitoring-console-phase2.md) makes WAF
-in-memory measurements the source of statistical totals, retains bounded
-source-minute aggregates, and separates selected event evidence from those
-totals. The development runner exercises collection/persistence independently
-of the fictional browser prototype.
+[Phase 5](monitoring-console-phase5.md) adds `kunato console`, the `console`
+configuration section, the collection runtime, read-only health/history/
+correlation APIs, bounded SSE delivery, and an embedded real-data UI. It runs on
+a loopback listener by default.
 
-1. Finalize web query/delivery contracts and access/certificate boundaries
-   around the implemented collection and history libraries.
-2. Build the optional console runtime and collectors around the storage library.
-3. Expose history queries over HTTP and add SSE, including resume/loss semantics.
-4. Add the missing WAF measurements without introducing storage waits on the
-   request path.
-5. Integrate optional installation, independent service management, and
-   migrations, then verify the requirements and failure cases.
+### Phase 6: remote access
 
-No changes to rule evaluation, protective verdicts, managed rule format, or
-decoy enforcement are implied by this plan. The documentation is not a release
-announcement or a production-readiness claim.
+[Phase 6](monitoring-console-phase6.md) adds the CIDR source allowlist, Host
+validation, token authentication with server-side sessions, and TLS, including
+the combined ACME cache certificate bundle. A non-loopback listener requires all
+four controls at configuration load time.
+
+### Remaining work
+
+[Remaining work](monitoring-console-remaining.md) tracks installation and
+service units, packaging, historical event drill-down, CSV export, comparison
+periods, complete journal ingestion, further measurement gaps, production
+tuning, and schema/backup work. No remaining item changes rule evaluation,
+protective verdicts, the managed rule format, decoy enforcement, or WAF
+forwarding.
 
 ## 8. Decisions still required
 

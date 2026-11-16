@@ -74,6 +74,9 @@ pub enum Command {
     /// Open, close, or list administrative access through the admin listener.
     AdminAccess(AdminAccessArgs),
 
+    /// Run the optional monitoring console process.
+    Console,
+
     /// Print the Kunato banner.
     Banner(BannerArgs),
 }

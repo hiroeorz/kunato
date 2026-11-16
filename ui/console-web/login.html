@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Kunato console sign in</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="login-body">
+    <main class="login-card">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">K</span>
+        <span class="brand-text">Kunato console</span>
+      </div>
+      <h1>Sign in</h1>
+      <p class="muted small">
+        Enter the console token. The token file path is configured by
+        <code>console.auth.token_file</code>; when it is missing, the console
+        creates one with mode 0600 in its storage directory.
+      </p>
+      <form id="login-form" autocomplete="off">
+        <label for="token">Console token</label>
+        <input
+          id="token"
+          name="token"
+          type="password"
+          autocomplete="current-password"
+          spellcheck="false"
+          required
+        />
+        <button type="submit">Sign in</button>
+      </form>
+      <p id="login-error" class="login-error" role="alert"></p>
+      <p id="auth-disabled" class="muted small" hidden>
+        Authentication is disabled for this console. Open the console directly.
+      </p>
+    </main>
+    <script src="/login.js"></script>
+  </body>
+</html>

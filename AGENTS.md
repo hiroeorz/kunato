@@ -58,7 +58,7 @@ src/
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
-  console/         # Counter-based collector, UTC history/retention, SQLite store, bounded workers
+  console/         # Collector, UTC history/store, console runtime, HTTP/SSE server, auth, TLS
   observations.rs  # WAF cumulative/minute measurements and bounded selected detail
   observations/    # Partitioned optional dimensions, rankings, sketches, and runtime state
   rules/           # Category/rule model, matcher, and evaluation engine
@@ -95,6 +95,9 @@ docs/
   monitoring-console-phase2.md # Implemented counter-based source, minute history, and collector contracts
   monitoring-console-phase3.md # UTC reason-separated aggregation and 30-day expiry
   monitoring-console-phase4.md # Additional source measurements and compact decoy correlation
+  monitoring-console-phase5.md # Console runtime, read-only HTTP/SSE delivery, and embedded UI
+  monitoring-console-phase6.md # Remote access: source allowlist, authentication, and TLS
+  monitoring-console-remaining.md # Remaining console, packaging, and measurement work
   monitoring-console-cadence.md # Measured update costs and proposed one-second live publication
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
@@ -106,6 +109,7 @@ packaging/
   kunato.service   # systemd unit
 ui/
   console-prototype/ # Browser-only monitoring UI with fictional data; no backend
+  console-web/       # Embedded read-only console UI served by `kunato console`
 rules.example.yaml # Example configuration
 deny.toml          # Dependency, license, and advisory policy
 ```

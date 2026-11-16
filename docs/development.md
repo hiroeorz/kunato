@@ -237,6 +237,8 @@ use a different file (for example `rules.example.yaml` when running from source)
   evaluated before every other rule source.
 - `rules_update` — daily refresh of `rules_file` (see
   [Managed Rules and Automatic Updates](../README.md#managed-rules-and-automatic-updates)).
+- `console` — optional read-only monitoring console process (see
+  [Monitoring console](#monitoring-console)).
 
 `listen` accepts IPv4 and IPv6 socket addresses; quote IPv6 literals in YAML
 (`listen: "[::]:443"`). On Linux, `[::]` is dual-stack and also serves IPv4
@@ -1576,18 +1578,17 @@ The listener also hosts the maintenance controls and the administrative access
 open/close endpoints; see [Maintenance mode](#maintenance-mode) and
 [Administrative access](#administrative-access).
 
-`GET /console/snapshot` exports version 2 JSON for the optional counter-based
-collector. It shares the existing loopback Host/forwarding-marker restrictions,
-rejects query parameters, and returns `Cache-Control: no-store`. It includes
-a process generation, cumulative statistics, ten bounded UTC minute slots,
-sampled connection data, and selected bounded event detail. Basic request and
-rejection measurements update in memory without access-log or database writes.
-The historical library uses schema version 2 and migrates application-owned
-version 1 history without fabricating the newly introduced measurements.
-See [Phase 2 implementation and development runner](monitoring-console-phase2.md)
-for field semantics, resource bounds, failure behavior, and the separate
-`console_collect` example. No console web server, SSE endpoint, or official
-console CLI/service is installed by this layer.
+`GET /console/snapshot` exports version 3 JSON for the optional counter-based
+collector and still accepts version 2 input. It shares the existing loopback
+Host/forwarding-marker restrictions, rejects query parameters, and returns
+`Cache-Control: no-store`. It includes a process generation, cumulative
+statistics, ten bounded UTC minute slots, sampled connection data, optional
+bounded site/rule/status/latency/ranking measurements, and selected bounded
+event detail. Basic request and rejection measurements update in memory without
+access-log or database writes. See
+[Phase 4 source measurements](monitoring-console-phase4.md) for field
+semantics and bounds. The console process that consumes this endpoint is
+described in [Monitoring console](#monitoring-console).
 
 `kunato metrics` renders the `GET /metrics` response as a bordered two-column
 table with a header row: one row per sample with the metric name first and its
@@ -1604,6 +1605,147 @@ kunato metrics --listen 127.0.0.1:9100 | grep kunato_blocked_total
 
 The command does not read the configuration file, so pass `--listen` when the
 `admin.listen` value differs from the default.
+
+### Monitoring console
+
+`kunato console --config <PATH>` runs the optional monitoring console as a
+separate, read-only process. It polls `GET /console/snapshot` on the loopback
+admin listener, persists UTC history in its own SQLite database, and serves a
+browser UI, a bounded JSON API, and a live SSE stream. Stopping the console does
+not stop WAF forwarding, and restarting it does not restart the WAF. It never
+edits rules, toggles maintenance, changes administrative access, or changes a
+protective verdict.
+
+The console is disabled by default, so an installation without a `console`
+block keeps one binary and one configuration file:
+
+```yaml
+console:
+  enabled: true
+  listen: 127.0.0.1:9091
+  source: 127.0.0.1:9090
+  instance: local-waf
+  storage_dir: /var/lib/kunato/console
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Start nothing unless `kunato console` is run with this set |
+| `listen` | `127.0.0.1:9091` | Console listener; port 0 is for development and tests |
+| `source` | `admin.listen` | Loopback admin listener serving `/console/snapshot`; must be loopback with a nonzero port |
+| `instance` | `local-waf` | History scope name, 1..120 bytes of `[A-Za-z0-9._:/-]`; changing it starts a new history scope |
+| `storage_dir` | `/var/lib/kunato/console` | Private SQLite directory; created 0700 on Unix |
+| `max_bytes` | `1073741824` | Database plus rollback journal budget, 256 KiB..1 TiB |
+| `event_retention` | `168h` | Selected detail retention, 1 ms..30 days; statistics use the fixed 30-day policy |
+| `allowed_clients` | empty | IPv4/IPv6 CIDRs; empty permits loopback peers only |
+| `allowed_hosts` | empty | Console `Host` allowlist; required for a non-loopback listener |
+| `auth` | disabled | Operator token authentication; required for a non-loopback listener |
+| `tls` | absent | Console HTTPS; required for a non-loopback listener |
+
+`console.enabled: true` requires an enabled admin listener, because the
+statistics snapshot lives there. The console's `allowed_clients` and
+`allowed_hosts` are separate from the WAF request policies.
+
+#### Loopback access
+
+With the default listener, open `http://127.0.0.1:9091/`. Authentication is
+optional on loopback. Use SSH forwarding for a remote browser without exposing
+the port:
+
+```sh
+ssh -N -L 127.0.0.1:9091:127.0.0.1:9091 user@server
+```
+
+#### Remote access
+
+A non-loopback listener fails configuration loading unless all four controls are
+set: authentication, TLS, `allowed_clients`, and `allowed_hosts`.
+
+```yaml
+console:
+  enabled: true
+  listen: 0.0.0.0:9091
+  source: 127.0.0.1:9090
+  storage_dir: /var/lib/kunato/console
+  allowed_clients:
+    - 192.168.1.20/32
+    - 2001:db8::/32
+  allowed_hosts:
+    - console.example.com
+  auth:
+    enabled: true
+    token_file: /var/lib/kunato/console/console-token
+  tls:
+    cert_file: /var/lib/kunato/acme/cert.pem
+```
+
+- `allowed_clients` is checked against the TCP peer for pages, assets, APIs,
+  login, and SSE. IPv4-mapped IPv6 peers are normalized to IPv4. A denied peer
+  gets `403`.
+- `allowed_hosts` validates the `Host` header; a missing or malformed Host gets
+  `400` and an unlisted one `421`.
+- With authentication enabled, the console reads the token from `token_file`
+  and creates it with mode 0600 when missing. The file contains 64 hex
+  characters; the token is never logged. Sign in at `/login`. Sessions are
+  server-side, `HttpOnly`, `SameSite=Strict`, and live in memory for 12 hours;
+  a restart ends them. Five failed attempts per address in 60 seconds return
+  `429`. Non-browser clients may send `Authorization: Bearer <token>`.
+- `cert_file` is a PEM chain. Omit `key_file` when the private key is in the
+  same file, as in the WAF ACME cache `cert.pem` (a key-and-chain bundle). The
+  console never reads the ACME account key. It reloads changed certificate
+  material for new connections; a failed reload keeps the previous material.
+- The console serves HTTP/1.1 over TLS 1.2/1.3 with ALPN `http/1.1`. There is no
+  plaintext fallback for a remote listener.
+
+The console must be able to read the certificate bundle. If it runs as a
+different account than the WAF, grant read access through ownership or install a
+copy; the console does not widen the ACME cache permissions.
+
+#### Delivered endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/` | Console UI |
+| GET | `/login`, `/login.js`, `/styles.css`, `/favicon.svg` | Public login and static assets |
+| GET | `/api/v1/health` | Collection, writer, and storage health |
+| GET | `/api/v1/history?from_ms=&until_ms=[&limit=][&site=][&revision=]` | Bounded UTC history page |
+| GET | `/api/v1/correlations?from_ms=&until_ms=[&limit=][&credential_id=]` | Compact decoy evidence |
+| GET | `/api/v1/live` | SSE stream of the latest state |
+| GET/POST/DELETE | `/api/v1/session` | Session status, login, logout |
+
+Every route rejects the WAF forwarding headers (`X-Forwarded-*`) so the console
+cannot be used as a confused deputy. APIs carry `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`; pages carry a `default-src 'self'` CSP and
+`X-Frame-Options: DENY`. A history page is capped at 128 buckets and 4 MiB; a
+correlation page at 128 records and 1 MiB. SSE coalesces updates, sends a
+heartbeat every 15 seconds, and bounds each subscriber to a small channel; a
+subscriber that stays more than 120 seconds behind is disconnected and
+reconnects with the latest state.
+
+The console UI shows measured data only. It labels unavailable values instead of
+rendering zero, shows the returned grain and effective bounds, and does not
+replay live arrival effects for backlog. Historical event drill-down, CSV
+export, comparison periods, and complete journal ingestion remain future work;
+see [remaining work](monitoring-console-remaining.md).
+
+#### First run and storage
+
+The console creates `<storage_dir>` with mode 0700 and `history.sqlite3` with
+mode 0600 on Unix. It owns the database; the WAF never opens it. Schema version 4
+is initialized or migrated from application-owned versions 1 through 3. Keep
+one console process per directory. The console reads the configuration once at
+startup: restart it to apply `console` changes. A bad `console` section also
+fails WAF reload validation, which keeps the previous WAF configuration.
+
+To try it from source, start the WAF with an admin listener and then the console:
+
+```sh
+cargo run -- --config rules.example.yaml
+cargo run -- console --config rules.example.yaml
+```
+
+`rules.example.yaml` does not enable the console; add the `console` block above
+with a temporary `storage_dir` first.
 
 ### Maintenance mode
 

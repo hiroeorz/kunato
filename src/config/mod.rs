@@ -365,6 +365,8 @@ pub struct ConfigSpec {
     #[serde(default)]
     pub admin: AdminSpec,
     #[serde(default)]
+    pub console: ConsoleSpec,
+    #[serde(default)]
     pub admin_access: AdminAccessSpec,
     #[serde(default)]
     pub tls: Option<TlsSpec>,
@@ -693,6 +695,82 @@ impl Default for AdminSpec {
 
 fn default_admin_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9090))
+}
+
+/// Optional monitoring console process.
+///
+/// The console collects the loopback statistics snapshot, persists UTC history,
+/// and serves a read-only web interface. It is a separate process and never
+/// changes protective verdicts. A non-loopback listener requires an explicit
+/// source allowlist, host list, authentication, and TLS.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsoleSpec {
+    pub enabled: bool,
+    pub listen: SocketAddr,
+    /// Loopback admin listener serving `GET /console/snapshot`; defaults to
+    /// `admin.listen` when the admin listener is enabled.
+    pub source: Option<SocketAddr>,
+    /// History scope name retained across restarts.
+    pub instance: String,
+    pub storage_dir: PathBuf,
+    /// Database plus rollback journal budget.
+    pub max_bytes: u64,
+    /// Selected event detail retention, independent of the 30-day statistics.
+    #[serde(deserialize_with = "de_duration")]
+    pub event_retention: Duration,
+    /// Externally permitted client sources. Empty permits loopback peers only.
+    pub allowed_clients: Vec<String>,
+    /// Host names and IP literals accepted in the console `Host` header.
+    pub allowed_hosts: Vec<String>,
+    pub auth: ConsoleAuthSpec,
+    pub tls: Option<ConsoleTlsSpec>,
+}
+
+impl Default for ConsoleSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: SocketAddr::from(([127, 0, 0, 1], 9091)),
+            source: None,
+            instance: "local-waf".to_owned(),
+            storage_dir: PathBuf::from("/var/lib/kunato/console"),
+            max_bytes: default_console_max_bytes(),
+            event_retention: default_console_event_retention(),
+            allowed_clients: Vec::new(),
+            allowed_hosts: Vec::new(),
+            auth: ConsoleAuthSpec::default(),
+            tls: None,
+        }
+    }
+}
+
+fn default_console_max_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
+fn default_console_event_retention() -> Duration {
+    Duration::from_secs(7 * 24 * 60 * 60)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsoleAuthSpec {
+    pub enabled: bool,
+    /// Token file; defaults to `<storage_dir>/console-token` when enabled.
+    pub token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleTlsSpec {
+    /// PEM certificate chain, or a combined key-and-chain bundle such as the
+    /// ACME cache `cert.pem`.
+    pub cert_file: PathBuf,
+    /// Optional separate PEM private key. When absent the key is read from
+    /// `cert_file`.
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
 }
 
 /// Time-limited open and close overrides for administrative application
@@ -1731,6 +1809,48 @@ impl From<&AdminSpec> for Admin {
     }
 }
 
+/// Compiled monitoring console configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Console {
+    pub enabled: bool,
+    pub listen: SocketAddr,
+    pub source: SocketAddr,
+    pub instance: String,
+    pub storage_dir: PathBuf,
+    pub max_bytes: u64,
+    pub event_retention: Duration,
+    pub allowed_clients: Vec<IpNet>,
+    pub allowed_hosts: Option<AllowedHosts>,
+    pub auth: Option<ConsoleAuth>,
+    pub tls: Option<ConsoleTls>,
+}
+
+impl Console {
+    /// Whether this console accepts connections from outside the host.
+    pub fn is_remote(&self) -> bool {
+        !self.listen.ip().is_loopback()
+    }
+
+    pub fn auth_enabled(&self) -> bool {
+        self.auth.is_some()
+    }
+
+    pub fn tls_enabled(&self) -> bool {
+        self.tls.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleAuth {
+    pub token_file: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleTls {
+    pub cert_file: PathBuf,
+    pub key_file: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Protection {
     pub enabled: bool,
@@ -1917,6 +2037,7 @@ pub struct CompiledConfig {
     pub limits: Limits,
     pub protection: Protection,
     pub admin: Admin,
+    pub console: Console,
     pub admin_access: AdminAccess,
     pub tls: Option<Tls>,
     pub http3: Http3,
@@ -2310,6 +2431,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     validate_timeouts(&spec.timeouts, &mut issues);
     let protection = compile_protection(&spec.protection, &mut issues);
     validate_admin(&spec.admin, &mut issues);
+    let console = compile_console(&spec.console, &spec.admin, &mut issues);
     validate_tls(&spec.tls, &mut issues);
     validate_http3(&spec.http3, &spec.tls, &mut issues);
     let allowed_hosts = compile_allowed_hosts(&spec.allowed_hosts, &mut issues);
@@ -2371,6 +2493,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         limits: Limits::from(&spec.limits),
         protection,
         admin: Admin::from(&spec.admin),
+        console,
         admin_access,
         tls: spec.tls.as_ref().map(Tls::from),
         http3: Http3::from(&spec.http3),
@@ -3491,6 +3614,135 @@ fn validate_admin(spec: &AdminSpec, issues: &mut Vec<String>) {
             "admin.listen must be a loopback address, got `{}`",
             spec.listen
         ));
+    }
+}
+
+const MAX_CONSOLE_CLIENTS: usize = 256;
+
+fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<String>) -> Console {
+    let source = spec.source.unwrap_or(admin.listen);
+    if spec.enabled && !admin.enabled {
+        issues.push(
+            "console.enabled requires an enabled admin listener for the statistics source"
+                .to_owned(),
+        );
+    }
+    // A disabled console inherits `admin.listen`, which may be an ephemeral
+    // test port. Only an explicit source, or an enabled console, is checked.
+    if spec.enabled || spec.source.is_some() {
+        if !source.ip().is_loopback() {
+            issues.push(format!(
+                "console.source must be a loopback address, got `{source}`"
+            ));
+        }
+        if source.port() == 0 {
+            issues.push("console.source must include a nonzero port".to_owned());
+        }
+    }
+    if crate::console::validate_instance(&spec.instance).is_err() {
+        issues.push("console.instance must be 1..=120 bytes of [A-Za-z0-9._:/-]".to_owned());
+    }
+    if spec.storage_dir.as_os_str().is_empty() {
+        issues.push("console.storage_dir must not be empty".to_owned());
+    }
+    if !(256 * 1024..=1024_u64.pow(4)).contains(&spec.max_bytes) {
+        issues.push("console.max_bytes must be between 256 KiB and 1 TiB".to_owned());
+    }
+    if spec.event_retention < Duration::from_millis(1)
+        || spec.event_retention > Duration::from_millis(crate::console::history::RETENTION_MS)
+    {
+        issues.push("console.event_retention must be between 1 ms and 30 days".to_owned());
+    }
+    if spec.allowed_clients.len() > MAX_CONSOLE_CLIENTS {
+        issues.push(format!(
+            "console.allowed_clients must not contain more than {MAX_CONSOLE_CLIENTS} entries"
+        ));
+    }
+    let mut allowed_clients =
+        compile_networks(&spec.allowed_clients, "console.allowed_clients", issues);
+    allowed_clients.sort_by_key(|network| (network.addr(), network.prefix_len()));
+    allowed_clients.dedup();
+
+    let allowed_hosts = if spec.allowed_hosts.is_empty() {
+        None
+    } else {
+        let mut host_issues = Vec::new();
+        let hosts = AllowedHosts::validate(&spec.allowed_hosts, &mut host_issues);
+        issues.extend(
+            host_issues
+                .into_iter()
+                .map(|issue| format!("console.{issue}")),
+        );
+        hosts
+    };
+
+    let auth = spec.auth.enabled.then(|| ConsoleAuth {
+        token_file: spec
+            .auth
+            .token_file
+            .clone()
+            .unwrap_or_else(|| spec.storage_dir.join("console-token")),
+    });
+    if auth
+        .as_ref()
+        .is_some_and(|auth| auth.token_file.as_os_str().is_empty())
+    {
+        issues.push("console.auth.token_file must not be empty".to_owned());
+    }
+
+    let tls = spec.tls.as_ref().and_then(|tls| {
+        if tls.cert_file.as_os_str().is_empty() {
+            issues.push("console.tls.cert_file must not be empty".to_owned());
+            return None;
+        }
+        if tls
+            .key_file
+            .as_ref()
+            .is_some_and(|key| key.as_os_str().is_empty())
+        {
+            issues.push("console.tls.key_file must not be empty".to_owned());
+            return None;
+        }
+        Some(ConsoleTls {
+            cert_file: tls.cert_file.clone(),
+            key_file: tls.key_file.clone(),
+        })
+    });
+
+    if spec.enabled && !spec.listen.ip().is_loopback() {
+        if auth.is_none() {
+            issues.push(
+                "console.auth.enabled is required when console.listen is not loopback".to_owned(),
+            );
+        }
+        if tls.is_none() {
+            issues.push("console.tls is required when console.listen is not loopback".to_owned());
+        }
+        if allowed_clients.is_empty() {
+            issues.push(
+                "console.allowed_clients must not be empty when console.listen is not loopback"
+                    .to_owned(),
+            );
+        }
+        if allowed_hosts.is_none() {
+            issues.push(
+                "console.allowed_hosts is required when console.listen is not loopback".to_owned(),
+            );
+        }
+    }
+
+    Console {
+        enabled: spec.enabled,
+        listen: spec.listen,
+        source,
+        instance: spec.instance.clone(),
+        storage_dir: spec.storage_dir.clone(),
+        max_bytes: spec.max_bytes,
+        event_retention: spec.event_retention,
+        allowed_clients,
+        allowed_hosts,
+        auth,
+        tls,
     }
 }
 
@@ -7279,5 +7531,155 @@ categories:
         assert!(config.php.enabled);
         assert_eq!(config.php.session_cookies, ["SID"]);
         assert_eq!(config.php.upload_progress_names, ["PROGRESS"]);
+    }
+
+    #[test]
+    fn console_defaults_are_disabled_and_loopback() {
+        let config = parse_with(BASE, "").expect("valid config");
+        assert!(!config.console.enabled);
+        assert_eq!(config.console.listen, "127.0.0.1:9091".parse().unwrap());
+        assert_eq!(config.console.source, "127.0.0.1:9090".parse().unwrap());
+        assert_eq!(config.console.instance, "local-waf");
+        assert_eq!(
+            config.console.storage_dir,
+            std::path::PathBuf::from("/var/lib/kunato/console")
+        );
+        assert_eq!(config.console.max_bytes, 1024 * 1024 * 1024);
+        assert_eq!(config.console.event_retention, Duration::from_secs(604_800));
+        assert!(config.console.allowed_clients.is_empty());
+        assert!(config.console.allowed_hosts.is_none());
+        assert!(config.console.auth.is_none());
+        assert!(config.console.tls.is_none());
+    }
+
+    #[test]
+    fn console_defaults_the_source_to_the_admin_listener() {
+        let config = parse_with(
+            BASE,
+            "admin: { listen: 127.0.0.1:9191 }
+console: { enabled: true }
+",
+        )
+        .expect("valid config");
+        assert_eq!(config.console.source, "127.0.0.1:9191".parse().unwrap());
+        assert!(config.console.auth.is_none());
+    }
+
+    #[test]
+    fn console_requires_an_enabled_admin_listener() {
+        let error = parse_with(
+            BASE,
+            "admin: { enabled: false }
+console: { enabled: true }
+",
+        )
+        .expect_err("disabled admin");
+        assert!(
+            error
+                .to_string()
+                .contains("requires an enabled admin listener"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn console_source_must_be_loopback_with_a_port() {
+        for source in ["192.0.2.1:9090", "127.0.0.1:0"] {
+            let error = parse_with(
+                BASE,
+                &format!("console: {{ enabled: true, source: {source} }}\n"),
+            )
+            .expect_err("invalid source");
+            let text = error.to_string();
+            assert!(text.contains("console.source"), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn console_rejects_invalid_clients_and_instances() {
+        let error = parse_with(
+            BASE,
+            "console: { enabled: true, allowed_clients: ['not-an-address'] }
+",
+        )
+        .expect_err("invalid client");
+        assert!(
+            error.to_string().contains("console.allowed_clients"),
+            "{error}"
+        );
+
+        let error = parse_with(
+            BASE,
+            "console: { enabled: true, instance: 'bad instance' }
+",
+        )
+        .expect_err("invalid instance");
+        assert!(error.to_string().contains("console.instance"), "{error}");
+    }
+
+    #[test]
+    fn remote_console_requires_every_access_control() {
+        let base = "console:
+  enabled: true
+  listen: 0.0.0.0:9091
+";
+        let error = parse_with(BASE, base).expect_err("remote without controls");
+        let text = error.to_string();
+        for expected in [
+            "console.auth.enabled is required",
+            "console.tls is required",
+            "console.allowed_clients must not be empty",
+            "console.allowed_hosts is required",
+        ] {
+            assert!(text.contains(expected), "{expected}: {error}");
+        }
+
+        let error = parse_with(
+            BASE,
+            &format!(
+                "{base}  allowed_clients: ['127.0.0.1/32']
+  allowed_hosts: ['console.example.com']
+  auth: {{ enabled: true, token_file: /tmp/token }}
+  tls: {{ cert_file: /tmp/cert.pem }}
+"
+            ),
+        );
+        assert!(error.is_ok(), "{:?}", error.err());
+    }
+
+    #[test]
+    fn console_tls_accepts_a_combined_bundle() {
+        let config = parse_with(
+            BASE,
+            "console:
+  enabled: true
+  tls:
+    cert_file: /etc/kunato/acme/cert.pem
+",
+        )
+        .expect("combined bundle");
+        let tls = config.console.tls.expect("tls");
+        assert_eq!(
+            tls.cert_file,
+            std::path::PathBuf::from("/etc/kunato/acme/cert.pem")
+        );
+        assert!(tls.key_file.is_none());
+    }
+
+    #[test]
+    fn console_auth_defaults_the_token_file_into_storage() {
+        let config = parse_with(
+            BASE,
+            "console:
+  enabled: true
+  storage_dir: /var/lib/kunato/console
+  auth: { enabled: true }
+",
+        )
+        .expect("auth");
+        assert_eq!(
+            config.console.auth.expect("auth").token_file,
+            std::path::PathBuf::from("/var/lib/kunato/console/console-token")
+        );
     }
 }

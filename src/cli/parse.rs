@@ -90,6 +90,7 @@ enum Kind {
     Metrics,
     Maintenance,
     AdminAccess,
+    Console,
     Banner,
 }
 
@@ -103,6 +104,7 @@ fn kind_from_name(name: &str) -> Option<Kind> {
         "metrics" => Some(Kind::Metrics),
         "maintenance" => Some(Kind::Maintenance),
         "admin-access" => Some(Kind::AdminAccess),
+        "console" => Some(Kind::Console),
         "banner" => Some(Kind::Banner),
         _ => None,
     }
@@ -305,7 +307,7 @@ impl Parser {
             Some(Kind::Maintenance) => self.parse_maintenance_long(name, inline),
             Some(Kind::AdminAccess) => self.parse_admin_access_long(name, inline),
             Some(Kind::Banner) => self.parse_banner_long(name, inline),
-            Some(Kind::Validate | Kind::UpdateRules) | None => {
+            Some(Kind::Console | Kind::Validate | Kind::UpdateRules) | None => {
                 Err(self.unexpected(format!("--{name}")))
             }
         }
@@ -750,6 +752,7 @@ impl Parser {
                     listen: state.listen.unwrap_or(DEFAULT_METRICS_LISTEN),
                 }))
             }
+            Some(Kind::Console) => Some(Command::Console),
             Some(Kind::Banner) => Some(Command::Banner(BannerArgs {
                 no_color: self.banner.no_color,
             })),
@@ -1008,6 +1011,7 @@ fn help_for(kind: Option<Kind>) -> String {
         Some(Kind::Metrics) => metrics_help(),
         Some(Kind::Maintenance) => maintenance_help(),
         Some(Kind::AdminAccess) => admin_access_help(),
+        Some(Kind::Console) => console_help(),
         Some(Kind::Banner) => banner_help(),
     }
 }
@@ -1027,6 +1031,7 @@ Commands:
   metrics       Print the Prometheus metrics served by the admin listener
   maintenance   Enter or leave maintenance mode through the admin listener
   admin-access  Open, close, or list administrative access through the admin listener
+  console       Run the optional monitoring console process
   banner        Print the Kunato banner
   help          Print this message or the help of the given subcommand(s)
 
@@ -1182,6 +1187,27 @@ Options:
 
 {}"#,
         DEFAULT_METRICS_LISTEN, GLOBAL_OPTIONS
+    )
+}
+
+fn console_help() -> String {
+    format!(
+        r#"Run the optional monitoring console process.
+
+The console collects the loopback statistics snapshot from the configured admin
+listener, persists UTC history in its own SQLite directory, and serves a
+read-only web interface. It is a separate process: stopping it does not stop
+WAF forwarding, and restarting it does not restart the WAF. It never edits
+rules, toggles maintenance, or changes administrative access.
+
+The `console` section of the configuration file selects the listener, the
+snapshot source, the storage directory, and the optional source allowlist,
+authentication, and TLS controls.
+
+Usage: kunato console [OPTIONS]
+
+{}"#,
+        GLOBAL_OPTIONS
     )
 }
 
@@ -1769,5 +1795,28 @@ mod tests {
         };
         assert_eq!(args.lines, Some(25));
         assert_eq!(args.format, LogOutputFormat::Json);
+    }
+
+    #[test]
+    fn console_subcommand_takes_only_global_options() {
+        let cli = parse(&["kunato", "--config", "console.yaml", "console"]).expect("parse");
+        assert!(matches!(cli.command, Some(Command::Console)));
+        assert_eq!(cli.config, PathBuf::from("console.yaml"));
+
+        assert!(parse(&["kunato", "console", "--listen", "127.0.0.1:9091"]).is_err());
+        assert!(parse(&["kunato", "console", "extra"]).is_err());
+    }
+
+    #[test]
+    fn console_help_documents_the_read_only_process() {
+        let error = parse(&["kunato", "help", "console"]).expect_err("help exits");
+        match error {
+            ParseError::Help(text) => {
+                assert!(text.contains("Usage: kunato console"), "{text}");
+                assert!(text.contains("read-only"), "{text}");
+                assert!(text.contains("separate process"), "{text}");
+            }
+            other => panic!("expected help, got {other:?}"),
+        }
     }
 }

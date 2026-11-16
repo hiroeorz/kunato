@@ -12,8 +12,10 @@ workers and version-three migration. [Phase 4](monitoring-console-phase4.md)
 extends source measurements, aggregate payloads, and compact correlation in
 schema version four. It
 supersedes the earlier 30-day minute / 365-day hour proposal. The queues
-themselves are not durable. Other candidate values remain proposals unless
-explicitly adopted here or in the Phase 1 or Phase 2 contract.
+themselves are not durable. [Phase 5](monitoring-console-phase5.md) delivers the
+console process and web reads; [Phase 6](monitoring-console-phase6.md) adds
+remote access. Other candidate values remain proposals unless explicitly
+adopted here or in the Phase 1 or Phase 2 contract.
 
 See the [console design](monitoring-console.md) and
 [screen requirements](monitoring-console-requirements.md). These requirements

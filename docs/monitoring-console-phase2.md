@@ -4,9 +4,10 @@ Date: 2026-11-16
 
 Status: The lower-layer Phase 2 implementation is present: WAF memory
 measurements, a loopback snapshot API, bounded selected events, console
-collection/coalescing, and Phase 1 persistence integration. The web prototype
-still uses fictional data. SSE, web authentication/TLS, packaging, rollups,
-and retention remain later phases.
+collection/coalescing, and Phase 1 persistence integration.
+[Phase 5](monitoring-console-phase5.md) adds the console process and web/SSE
+delivery; [Phase 6](monitoring-console-phase6.md) adds remote access.
+Packaging remains future work.
 The subsequent [Phase 3](monitoring-console-phase3.md) implements the adopted
 [UTC, reason-separated aggregation and 30-day retention policy](monitoring-console-storage.md#4-aggregation-rules).
 Phase 2 itself exports the 22 primary-reason counts inside minute buckets;

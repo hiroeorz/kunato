@@ -429,7 +429,7 @@ impl HistoryBucket {
         Ok(result)
     }
 
-    fn empty(start_ms: u64, grain: Grain) -> Self {
+    pub(crate) fn empty(start_ms: u64, grain: Grain) -> Self {
         Self {
             start_ms,
             grain,

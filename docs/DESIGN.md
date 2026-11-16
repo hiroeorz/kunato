@@ -714,27 +714,29 @@ invariant.
   `kunato_admin_access_allowed_total` count gate decisions. See
   [Administrative access](development.md#administrative-access).
 
-### Planned monitoring console
+### Monitoring console
 
-An optional monitoring console is planned as a separate process within the
-Kunato distribution. Its Metrics and Real-time monitor views currently exist
-only as a browser-local prototype with fictional data. The bottom-up Phase 1
-library implements observation contracts, an embedded SQLite store, atomic
-checkpoints, and bounded background persistence. Phase 2 connects bounded WAF
-minute measurements and selected evidence to a loopback snapshot API and a
-separate development collector. Web authentication, HTTPS, SSE, rollups, and
-retention are not implemented.
-The revised Phase 2 proposal uses WAF in-memory counters and a bounded minute
-ring as the source of statistical totals; selected event detail remains a
-separate investigation path. Statistical totals do not depend on log delivery.
-The existing loopback admin endpoints and current WAF persistence behavior are
-unchanged by this plan.
+An optional monitoring console runs as a separate process, `kunato console
+--config <path>`. It polls the loopback `/console/snapshot` endpoint, keeps
+bounded in-memory state, persists UTC history in embedded SQLite, and serves a
+read-only UI, a JSON API, and an SSE stream. It never edits rules, toggles
+maintenance, changes administrative access, or waits on the WAF request path.
+
+WAF in-memory counters and a bounded minute ring remain the source of
+statistical totals; selected event detail is a separate investigation path, so
+statistical totals do not depend on log delivery. History uses 1/5/10/20/60
+minute UTC tiers with a 30-day logical horizon. Remote access requires an
+explicit CIDR allowlist, Host validation, token authentication, and TLS; a
+non-loopback listener fails configuration loading without all four controls.
+Packaging, service units, historical event drill-down, CSV export, and complete
+journal ingestion remain future work.
 
 See [console design and status](monitoring-console.md),
 [screen and interaction requirements](monitoring-console-requirements.md),
-[storage and retention](monitoring-console-storage.md), and
-[Phase 1 implementation contract](monitoring-console-phase1.md), and
-[revised Phase 2 proposal](monitoring-console-phase2.md).
+[storage and retention](monitoring-console-storage.md),
+[Phase 5 local delivery](monitoring-console-phase5.md),
+[Phase 6 remote access](monitoring-console-phase6.md), and
+[remaining work](monitoring-console-remaining.md).
 
 ## 10. CLI and Deployment
 

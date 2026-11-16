@@ -4,10 +4,11 @@ Date: 2026-11-16
 
 Status: Implemented in the storage library, writer, collector reader, and
 development runner. This phase implements the adopted policy in
-[storage and retention](monitoring-console-storage.md). HTTP delivery, SSE,
-authentication, HTTPS, and installation remain later work. The subsequent
+[storage and retention](monitoring-console-storage.md). The subsequent
 [Phase 4](monitoring-console-phase4.md) extends measurements and implements
-bounded compact decoy evidence. The browser still uses fictional data.
+bounded compact decoy evidence. [Phase 5](monitoring-console-phase5.md) adds
+HTTP/SSE delivery and the console runtime; [Phase 6](monitoring-console-phase6.md)
+adds remote access. Installation remains future work.
 
 ## Implemented measurements
 

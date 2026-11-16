@@ -3,9 +3,10 @@
 Date: 2026-11-16
 
 Status: Implemented in WAF observations, the collector, and SQLite history.
-This extends [Phase 3](monitoring-console-phase3.md). The browser prototype
-still uses fictional data; HTTP delivery, SSE, authentication, console HTTPS,
-and distribution/service integration remain future work.
+This extends [Phase 3](monitoring-console-phase3.md).
+[Phase 5](monitoring-console-phase5.md) adds HTTP/SSE delivery and the console
+runtime; [Phase 6](monitoring-console-phase6.md) adds remote access.
+Distribution and service integration remain future work.
 
 ## Measurement contract
 
