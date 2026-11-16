@@ -1,6 +1,6 @@
 # Monitoring console design
 
-Date: 2026-11-15
+Date: 2026-11-16
 
 Status: The browser-only prototype is implemented and committed in `d9ba903`
 (`Add interactive monitoring console prototype`). The subsequently approved
@@ -9,9 +9,10 @@ bounded persistence worker as a library. See the
 [Phase 1 implementation contract](monitoring-console-phase1.md).
 [Phase 2](monitoring-console-phase2.md) adds in-memory WAF measurements, a
 loopback snapshot API, selected bounded evidence, and a separate development
-collector connected to persistence. Web delivery, authentication, HTTPS, SSE,
-hourly rollups, and retention remain future work. The prototype still uses
-fictional data.
+collector connected to persistence. [Phase 3](monitoring-console-phase3.md)
+implements UTC aggregates, separate primary-reason rows, mixed-grain reads,
+and 30-day expiry. Web delivery, authentication, HTTPS, SSE, and packaging
+remain future work. The prototype still uses fictional data.
 
 Related documents:
 
@@ -19,6 +20,7 @@ Related documents:
 - [Collection, persistence, aggregation, and retention](monitoring-console-storage.md)
 - [Bottom-up Phase 1 scope and verification](monitoring-console-phase1.md)
 - [Phase 2 counter-based statistics implementation](monitoring-console-phase2.md)
+- [Phase 3 UTC aggregates and retention](monitoring-console-phase3.md)
 - [Update-cadence evaluation and measurements](monitoring-console-cadence.md)
 - [Prototype source and launch instructions](../ui/console-prototype/README.md)
 - [Existing observability architecture](DESIGN.md#9-observability)
@@ -39,7 +41,7 @@ The following distinctions apply throughout these documents:
 | --- | --- |
 | Existing WAF | Available in the current Rust implementation independently of the console |
 | Implemented prototype | Available only with fictional browser-local data |
-| Agreed direction | Product or design direction established in the discussion; backend implementation still requires approval |
+| Agreed direction | Product or design direction established in the discussion; implementation status is recorded separately |
 | Proposed initial value | A candidate value or policy to validate before backend implementation; not a supported configuration default |
 | Open | A detail that still needs a concrete implementation decision |
 
@@ -52,8 +54,10 @@ The following distinctions apply throughout these documents:
 | Access | Loopback by default; explicit listener and source-IP/CIDR policy for remote access | Agreed direction; backend absent |
 | Remote transport | HTTPS and user authentication alongside the source allowlist | Design requirement; mechanisms remain open |
 | Certificates | Use the WAF's public-443 ACME acquisition path to supply a certificate usable by the private console listener | Agreed direction; material delivery and reload remain open |
-| History | Persist console history locally with embedded SQLite | Phase 1 store and Phase 2 collector implemented; no user-facing integration |
-| Writes | Bounded buffering and batched writes, independent of request forwarding | Phase 1 library implemented; runtime integration absent |
+| History | Persist console history locally with embedded SQLite | Store, collector, and bounded mixed-grain reader implemented; no web integration |
+| Statistics | UTC intervals, independent overall totals, and separate fixed primary-rejection-reason series | Phase 3 reason rows and aggregates implemented |
+| Retention | 1/5/10/20/60-minute precision tiers, hourly history through 30 days, then expiry | Phase 3 logical expiry and bounded cleanup implemented |
+| Writes | Bounded buffering and batched writes, independent of request forwarding | Library/development collector implemented; user-facing runtime absent |
 | Decoys | Treat credential-use attempts as a first-class signal in both views | Agreed; prototyped |
 | Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Agreed; prototyped |
 | Reading position | Preserve the same visible events during updates, including horizontal position | Agreed; prototyped |
@@ -63,15 +67,15 @@ The following distinctions apply throughout these documents:
 Keep request inspection, protective decisions, and forwarding in the WAF. Place
 collection, history storage, aggregation, queries, and web delivery in the
 console process. Both views share that console process and its stored data.
-The revised Phase 2 proposal keeps bounded source-time minute measurements
+Phase 2 keeps bounded source-time minute measurements
 beside the WAF counters; console aggregation coalesces these absolute buckets
-and later builds coarser history. Request totals do not depend on log records.
+and Phase 3 builds coarser history. Request totals do not depend on log records.
 
 ```mermaid
 flowchart LR
     Client[Client] --> WAF[Kunato WAF process]
     WAF --> Upstream[Upstream application]
-    WAF --> Counters[Cumulative counters and proposed minute ring]
+    WAF --> Counters[Cumulative counters and minute ring]
     WAF --> Journal[Structured events in systemd journal]
     Counters -->|Bounded statistics snapshots| Console[Optional console process]
     Journal -->|Selected investigation detail| Console
@@ -143,9 +147,10 @@ adds a library dependency rather than a separate database daemon. Phase 1 uses
 `rusqlite` with bundled SQLite; the dependency and build-script review are
 recorded in the [Phase 1 contract](monitoring-console-phase1.md#dependency-review).
 
-The installation/configuration experience must provide initial retention and
-capacity values and automate expiry. Exact installer flags, service units,
-credential generation, and upgrade/migration behavior remain open.
+The installation/configuration experience must apply the adopted 30-day
+statistics policy, provide capacity values, and automate expiry. Exact installer
+flags, service units, credential generation, and upgrade/migration behavior
+remain open.
 
 ## 4. Access policy
 
@@ -260,7 +265,7 @@ References: [Let's Encrypt challenges](https://letsencrypt.org/docs/challenge-ty
 | Decoy evidence | Credential/occurrence counters and hashed-ID issuance/reuse logs | Supports basic counts and bounded correlation; complete trails are not guaranteed |
 | Counter-based historical collection | Implemented in development runner | Separate process; one-second collection and ten-second statistics coalescing |
 | SSE and browser delivery | Absent | Future backend work |
-| SQLite store and persistence worker | Phase 1 store with Phase 2 schema migration and collector | Connected to the collector; prototype remains fictional |
+| SQLite store and persistence worker | Phase 3 schema migration, reason aggregates, bounded query/maintenance workers | Connected to the collector; prototype remains fictional |
 | Deduplicated overall rejection count | Implemented in scoped request measurements | Separate total and fixed primary reasons; upstream refusals remain separate |
 | General host/rule time series | Not available as complete counters for the planned scope | Extend instrumentation or label recorded-event summaries honestly |
 | Client-visible HTTP status distribution and header-decision latency | Implemented as fixed distributions | Does not measure full-body delivery or separate upstream-only status history |
@@ -311,10 +316,10 @@ source-minute aggregates, and separates selected event evidence from those
 totals. The development runner exercises collection/persistence independently
 of the fictional browser prototype.
 
-1. Finalize the versioned collection contract, metric definitions, access and
-   certificate boundaries, and proposed defaults.
+1. Finalize web query/delivery contracts and access/certificate boundaries
+   around the implemented collection and history libraries.
 2. Build the optional console runtime and collectors around the storage library.
-3. Implement real history queries and SSE, including resume and loss semantics.
+3. Expose history queries over HTTP and add SSE, including resume/loss semantics.
 4. Add the missing WAF measurements without introducing storage waits on the
    request path.
 5. Integrate optional installation, independent service management, and
@@ -329,9 +334,11 @@ announcement or a production-readiness claim.
 - Exact console subcommands, optional enablement workflow, and service units.
 - Authentication, session lifecycle, initial credentials, and recovery.
 - Certificate names, material delivery, service permissions, and reload policy.
-- Mapping actual WAF observations onto the version-one contracts.
-- General status, latency, rejection, host, and rule instrumentation.
+- Configured site/category/rule measurements, upstream-only status history,
+  and any additional exact latency/connection extrema.
 - Event cursor/replay handling and bounded pause/resume behavior.
-- Schema upgrades beyond version one and a supported backup workflow.
-- Production tuning of the Phase 1 storage/queue/query limits and proposed retention defaults.
-- Whether to adopt the additional 90-day compact decoy-correlation retention.
+- Future upgrades beyond schema version three and a supported online backup workflow.
+- Production tuning of storage/queue/query/maintenance limits for the adopted
+  UTC, reason-separated precision tiers and 30-day statistics horizon.
+- Detailed-event budgets and whether compact decoy-correlation summaries are
+  needed within the independent, at-most-30-day summary horizon.

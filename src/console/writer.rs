@@ -81,6 +81,8 @@ pub struct Health {
     pub oldest_pending_ms: Option<u64>,
     pub last_persisted_at_ms: Option<u64>,
     pub last_error: Option<Error>,
+    pub maintenance: Option<super::MaintenanceReport>,
+    pub maintenance_error: Option<Error>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -219,6 +221,8 @@ impl Writer {
             oldest_pending_ms: None,
             last_persisted_at_ms: None,
             last_error: None,
+            maintenance: None,
+            maintenance_error: None,
         };
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
@@ -363,6 +367,8 @@ impl Drop for Writer {
 
 fn run(shared: &Shared, store: &mut Store) {
     let mut last_attempt: Option<Instant> = None;
+    let mut maintenance_due = Instant::now();
+    let mut maintenance_pending = true;
     loop {
         let pending = {
             let mut queue = shared.lock();
@@ -376,16 +382,29 @@ fn run(shared: &Shared, store: &mut Store) {
                 if stopping {
                     queue.health.state = WriterState::Stopping;
                 }
+                if !stopping
+                    && maintenance_pending
+                    && Instant::now() >= maintenance_due
+                    && last_attempt
+                        .is_some_and(|last| last.elapsed() >= shared.config.min_commit_interval)
+                {
+                    break Vec::new();
+                }
                 if queue.pending.is_empty() {
                     queue.force_flush = false;
-                    if stopping {
+                    if stopping && !maintenance_pending {
                         queue.health.state = WriterState::Stopped;
                         return;
                     }
-                    queue = shared
+                    let now = Instant::now();
+                    if stopping || now >= maintenance_due {
+                        break Vec::new();
+                    }
+                    let (next, _) = shared
                         .wake
-                        .wait(queue)
+                        .wait_timeout(queue, maintenance_due - now)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    queue = next;
                     continue;
                 }
                 let mut records = 0_usize;
@@ -421,10 +440,13 @@ fn run(shared: &Shared, store: &mut Store) {
                     deadline = deadline.max(last + shared.config.min_commit_interval);
                 }
                 let now = Instant::now();
+                if !stopping && deadline > now && maintenance_due <= now {
+                    break Vec::new();
+                }
                 if deadline > now {
                     let (next, _) = shared
                         .wake
-                        .wait_timeout(queue, deadline - now)
+                        .wait_timeout(queue, deadline.min(maintenance_due) - now)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     queue = next;
                     continue;
@@ -435,13 +457,54 @@ fn run(shared: &Shared, store: &mut Store) {
                 break items;
             }
         };
+        if pending.is_empty() {
+            // Maintenance shares the owned writer thread, never its queue lock.
+            match store.maintain() {
+                Ok(report) => {
+                    maintenance_pending = report.more_work;
+                    maintenance_due = Instant::now()
+                        + if report.more_work {
+                            shared
+                                .config
+                                .min_commit_interval
+                                .max(Duration::from_millis(10))
+                        } else {
+                            Duration::from_secs(300)
+                        };
+                    let mut queue = shared.lock();
+                    queue.health.maintenance = Some(report);
+                    queue.health.maintenance_error = None;
+                }
+                Err(error @ (Error::Busy | Error::OperationTimeout)) => {
+                    maintenance_pending = true;
+                    maintenance_due = Instant::now() + Duration::from_secs(1);
+                    shared.lock().health.maintenance_error = Some(error);
+                }
+                Err(error) => {
+                    shared.fail(error);
+                    return;
+                }
+            }
+            continue;
+        }
         // All SQLite work happens after releasing the queue mutex.
         let (batches, completions): (Vec<_>, Vec<_>) = pending
             .into_iter()
             .map(|pending| (pending.batch, pending.completion))
             .unzip();
         last_attempt = Some(Instant::now());
-        let result = store.write_many(&batches);
+        let retry_deadline = Instant::now() + store.config.operation_timeout;
+        let mut result = store.write_many(&batches);
+        for _ in 0..3 {
+            if result != Err(Error::Busy)
+                || shared.cancel.load(Ordering::Acquire)
+                || Instant::now() >= retry_deadline
+                || Instant::now() + store.config.busy_timeout >= retry_deadline
+            {
+                break;
+            }
+            result = store.write_many(&batches);
+        }
         let mut queue = shared.lock();
         queue.in_flight = 0;
         queue.in_flight_oldest = None;
@@ -450,6 +513,8 @@ fn run(shared: &Shared, store: &mut Store) {
         }
         match result {
             Ok(reports) => {
+                maintenance_pending = true;
+                maintenance_due = Instant::now() + shared.config.min_commit_interval;
                 queue.health.last_persisted_at_ms = Some(
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)

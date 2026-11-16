@@ -7,6 +7,11 @@ measurements, a loopback snapshot API, bounded selected events, console
 collection/coalescing, and Phase 1 persistence integration. The web prototype
 still uses fictional data. SSE, web authentication/TLS, packaging, rollups,
 and retention remain later phases.
+The subsequent [Phase 3](monitoring-console-phase3.md) implements the adopted
+[UTC, reason-separated aggregation and 30-day retention policy](monitoring-console-storage.md#4-aggregation-rules).
+Phase 2 itself exports the 22 primary-reason counts inside minute buckets;
+separate reason rows, wider grains, and expiry belong to Phase 3. The rationale
+below describes this phase's source contract.
 The [update-cadence evaluation](monitoring-console-cadence.md) recommends
 one-second live statistics publication based on partial existing-code/browser
 measurements. Phase 2 adds real WAF/collector tests and the performance runner

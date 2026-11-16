@@ -434,7 +434,7 @@ impl EventRecord {
     }
 }
 
-fn identifier(value: &str, max: usize) -> Result<(), Error> {
+pub(super) fn identifier(value: &str, max: usize) -> Result<(), Error> {
     if value.is_empty()
         || value.len() > max
         || value.contains("kdt1")

@@ -1,13 +1,17 @@
 # Monitoring console storage and retention
 
-Date: 2026-11-15
+Date: 2026-11-16
 
 Status: The [bottom-up Phase 1 library](monitoring-console-phase1.md) implements
 version-one records, SQLite persistence, atomic checkpoints, and a bounded
 in-memory writer queue. Phase 2 adds source minute measurement, bounded event
-reception, collection, and coalescing. Rollups and retention are still proposed.
-The queues themselves are not durable. Values in this document remain proposals
-unless explicitly adopted in the Phase 1 or Phase 2 contract.
+reception, collection, and coalescing. The UTC, reason-separated statistics,
+aggregation, and 30-day retention policy in sections 4 and 5 is implemented in
+[Phase 3](monitoring-console-phase3.md), including bounded query/maintenance
+workers and version-three migration. It
+supersedes the earlier 30-day minute / 365-day hour proposal. The queues
+themselves are not durable. Other candidate values remain proposals unless
+explicitly adopted here or in the Phase 1 or Phase 2 contract.
 
 See the [console design](monitoring-console.md) and
 [screen requirements](monitoring-console-requirements.md). These requirements
@@ -22,14 +26,15 @@ one-second live collection/publication recommendation and its measurement limits
 
 | Component | Owns | Persistence |
 | --- | --- | --- |
-| WAF process | Atomic request/protection counters and current runtime gauges; proposed fixed-size minute ring | In memory only; counters and minute ring reset on WAF restart |
-| Optional console process | Collection positions, observed samples, time buckets, recorded events, and correlation summaries | Proposed embedded SQLite under a local console data directory |
+| WAF process | Atomic request/protection counters, current runtime gauges, and a fixed-size minute ring | In memory only; counters and minute ring reset on WAF restart |
+| Optional console process | Collection positions, observed samples, time buckets, recorded events, and correlation summaries | Embedded SQLite; collection works in the development runner, deployment remains future work |
 | Browser | Displayed subset, filters, chart data, and bounded live/replay state | Transient; reload must be able to query server-retained history |
 | systemd journal | Existing emitted WAF logs | Governed by the host's journal policy, separately from console retention |
 
 The proposed deployed console storage directory is `/var/lib/kunato/console/`;
 deployment and ownership setup are not implemented. The Phase 1 library accepts
-an explicit private directory and initializes schema version 1. The console owns its database;
+an explicit private directory; Phase 3 initializes schema version 3 and migrates
+application-owned versions 1 and 2. The console owns its database;
 the WAF does not open it or write SQL for individual requests. Existing WAF
 configuration, managed rules, and certificate caches retain their own behavior.
 
@@ -49,7 +54,7 @@ WAF restart.
 
 ```mermaid
 flowchart LR
-    WAF[WAF counters and proposed minute ring] --> Collector[Console statistics collector]
+    WAF[WAF counters and minute ring] --> Collector[Console statistics collector]
     Logs[Selected security and decoy events] --> Detail[Independent bounded detail buffer]
     Collector --> Live[Bounded live delivery]
     Live --> SSE[SSE subscribers]
@@ -79,8 +84,8 @@ non-waiting admission when its consumer is full.
 
 | Item | Proposed initial value or behavior |
 | --- | --- |
-| Ordinary HTTP request | Update WAF counters and proposed bounded minute measurements; no normal-access log or per-request database row |
-| Source minute retention | Proposed 10 fixed slots including the current minute; actual retained range is explicit |
+| Ordinary HTTP request | Update WAF counters and bounded minute measurements; no normal-access log or per-request database row |
+| Source minute retention | 10 fixed slots including the current minute; actual retained range is explicit |
 | Metrics collection / live publication | Every 1 second; shared collection of minute revisions and cumulative snapshots, coalesced aggregate publication |
 | Historical metrics view refresh | About every 5 seconds while visible; independent of continuous background collection |
 | Metric bucket persistence | Coalesce repeated revisions and submit approximately every 10 seconds; upsert minute totals rather than add snapshots |
@@ -120,7 +125,8 @@ SQLite documents the benefit of grouping operations in a transaction in its
   durable persistence.
 - Phase 1 adopts initial queue, record, transaction, and write-rate limits in
   its implementation contract. Production tuning and priority/coalescing
-  policies remain future work; the current worker stops admission on failure.
+  policies remain future work; the current worker stops admission on failure
+  after bounded handling of transient database contention.
 
 ### 2.3 Loss and durability contract
 
@@ -155,8 +161,8 @@ cannot be reconstructed with exact timing from a later cumulative counter.
 - Keep global counter-derived totals separate from recorded-event summaries.
   Replaying logs must not add those requests to a total already derived from
   counters.
-- Store time buckets in UTC and align their boundaries consistently. Convert
-  to the selected display time zone when querying/rendering.
+- Store, aggregate, expire, query, and initially display time in UTC. Display
+  formatting must never change bucket identities or retention cutoffs.
 - Track observed coverage, gaps, source changes, and known omission counts
   with the same history horizon as their associated aggregates.
 - Late observations may update retained buckets when provenance supports
@@ -166,13 +172,14 @@ cannot be reconstructed with exact timing from a later cumulative counter.
 
 ## 4. Aggregation rules
 
-The revised proposal builds bounded minute measurements directly in the WAF
+Phase 2 builds bounded minute measurements directly in the WAF
 without event-detail retention. The console coalesces absolute source-minute
 revisions and persists them. Cumulative snapshot differences alone cannot
 place requests precisely across a minute boundary or a long collection gap.
-Build hour aggregates from ended minute intervals regularly, rather than waiting
-until minute data is about to expire. Accept bounded correction of retained
-rollups when valid late observations arrive.
+Build the selected 5-, 10-, 20-, and 60-minute aggregates from ended intervals
+regularly. Accept bounded correction of retained rollups when valid late
+observations arrive. Every rollup preserves the source coverage and provenance
+needed to distinguish missing data from measured zero.
 
 An ended interval can still have incomplete observation. A successfully saved
 rollup means its available input and coverage metadata were processed; it does
@@ -192,6 +199,89 @@ expiry forever or be silently converted to zero.
 | Source/path rankings | Bound retained dimensions and disclose whether results are complete recorded counts or approximations |
 | Missing/suppressed observations | Retain coverage and known-loss metadata alongside the value |
 
+### 4.1 Rejection reasons and independent totals
+
+Persist rejection statistics as separate logical rows for each fixed terminal
+reason in the same SQLite database. Each logical aggregate is identified by
+instance, scope, reason, grain, and UTC interval start. Keep source generation,
+input revisions, and processing checkpoints as provenance for idempotent
+replacement. Phase 3 records pending materialization durably and commits
+coarser replacement together with child deletion.
+Do not create a database per reason or a row per rejected request.
+
+The current `RejectionReason` model supplies 22 stable reason identifiers:
+
+- `rule`, `response_rule`, `rate_limit`, `ban`, `overload`.
+- `client_identity`, `host`, `admin_access`, `body`, `decode`.
+- `form`, `upload`, `graphql`, `saml`, `php_request`, `php_response`.
+- `hardening`, `jwt`, `decoy`, `behavior`, `protocol`, `response_inspection`.
+
+These are terminal mechanisms, not attack classes or arbitrary YAML rule names.
+For example, SQL injection and XSS can both terminate as `rule`; a separate
+attack-class/category/rule breakdown requires its own bounded instrumentation.
+The initial scope is global because Phase 2 does not export site dimensions.
+Do not infer a site from selected event detail.
+Version the reason definitions with the aggregate contract. A renamed, added,
+or unsupported reason must not reinterpret old rows or turn unknown history
+into measured zero.
+
+One rejected request contributes once to one primary terminal reason, including
+a response-phase replacement. Preserve request/response phase semantics from
+the reason model. LOG matches, upstream application 403 responses, maintenance
+pages, and ordinary decoy lure responses do not create rejection-reason counts.
+Existing overlapping diagnostic counters are not additional primary reasons.
+
+Keep overall request and rejection totals independently. For a complete, stable
+interval, the sum of the 22 reason counts must equal its overall rejection
+count. A provisional/non-atomic snapshot can differ transiently; missing
+attribution can also make a minute incomplete. Preserve that state, suppress
+unsupported ratios, and never force equality by changing measured values.
+
+Each reason uses the same interval coverage. A supported zero count remains
+zero; unavailable old-schema fields or missing intervals remain unknown.
+Selecting a reason filters the numerator. Its rejection rate uses all measured
+requests in the matching scope; its share of rejections uses the matching
+overall rejection count. Label these two percentages separately. Never add
+the request denominator once for every reason.
+
+This dimension applies to rejection counts and their statistics. Connection
+gauges and response-status/latency distributions remain overall measurements;
+the current source cannot reconstruct reason-specific latency from counters
+or selected events.
+
+### 4.2 Extrema, averages, and merge inputs
+
+For overall and reason-specific count series, retain total count, valid
+observation duration, and supported minimum/maximum **one-minute counts**.
+Use complete UTC source minutes as the common extrema population at every
+storage grain. Preserve the number of eligible base minutes, completeness,
+and the inputs needed for a population-consistent mean. Partial or missing
+minutes are not zero-valued extrema samples. Keep known partial totals with
+their incomplete flag; do not manufacture a full-interval mean from them.
+
+An average rate is count divided by a compatible observed duration. Derive
+one-minute-average RPS extrema by dividing the retained minute-count extrema
+by 60. A one-minute peak is not a one-second or instantaneous peak. Graphs
+comparing different storage grains use compatible rates or clearly labeled
+interval totals, so larger buckets do not appear to be increased traffic.
+
+Merge sums by addition and extrema by min/max over the same base population;
+recompute averages from their numerators and denominators. Never average
+already computed averages. A cached mean may be stored, but its merge inputs
+remain authoritative. Compute overall extrema from overall base-minute
+totals; summing reason-specific maxima or minima is incorrect because they
+can occur in different minutes. When generations share a UTC minute, combine
+their deduplicated count contributions before calculating cross-generation
+minute extrema. Unknown overlap or downtime preserves incomplete coverage.
+
+Connection averages retain connection-time integrals and observed duration.
+Retain compatible latency count/sum and histogram bins for approximate
+quantiles. The current source has an observed connection maximum, but no
+connection minimum or exact per-request latency extrema; additional source
+instrumentation is required before those extrema can be claimed. Histogram
+bin edges are not exact latency minima/maxima. Do not duplicate these overall
+distributions across all reason rows.
+
 If required histogram or distinct-count evidence is unavailable, show the
 measurement as unavailable for that period. Do not fabricate historical p95
 or unique-source totals after the supporting data expires.
@@ -200,30 +290,81 @@ Prefer bounded category/rule/mechanism dimensions for long-term statistics.
 Do not retain an unlimited IP/path/token-ID time series. The schema and any
 approximation algorithm remain open; adding a dependency requires justification.
 
-## 5. Proposed retention tiers
+## 5. Adopted statistics retention policy
 
-| Tier | Proposed retention | Expiry prerequisite and result |
-| --- | --- | --- |
-| Detailed recorded events | 7 days | Persist their supported event summaries first; delete detail while coarse counts remain |
-| One-minute metrics and supported summaries | 30 days | Confirm committed hourly rollups, including coverage, before deleting minute input |
-| One-hour metrics and supported summaries | 365 days | Delete fully expired intervals from oldest first |
-| Compact decoy-reuse correlation summaries | 90 days, additional proposal | Delete the summary on expiry; retained hourly credential-use counts remain |
+Age is elapsed time from the current UTC instant, not a number of local calendar
+dates. The first column describes the requested historical resolution; section
+5.1 defines the bounded transition behavior for aligned intervals.
 
-These are design candidates, not current binary defaults. The prototype's
-retention labels are fictional. In particular, the 90-day decoy-summary tier is
-an additional proposal motivated by the requirement to investigate follow-up
-use of issued information.
+| Age | Stored statistics grain |
+| --- | --- |
+| Less than 1 hour | 1 minute |
+| 1 hour to less than 3 hours 30 minutes | 5 minutes |
+| 3 hours 30 minutes to less than 6 hours | 10 minutes |
+| 6 hours to less than 12 hours | 20 minutes |
+| 12 hours to less than 30 days | 1 hour |
+| 30 days or older | Expired |
 
-Retention is based on event/bucket time, not extended indefinitely whenever a
-row is reimported or its aggregate is updated. Only fully expired buckets are
-deleted; protect the current in-progress intervals.
+Apply this profile to overall statistics and each supported primary rejection
+reason. Keep hourly resolution after the first day to preserve the time of
+past attack activity. Daily charts aggregate the retained hours at UTC midnight
+boundaries; no additional daily-only retention tier is needed.
 
-Minute and hour tiers overlap for recent time. A query selects one appropriate
-grain for each interval and must not add both copies of the same traffic.
-Long-range graphs disclose their coarser grain. IP/path details and arbitrary
-historical event drill-down expire independently of the coarse counts.
+These requirements are implemented by the Phase 3 library and development
+collector; no user-facing console command is added. The prototype
+continues to show fictional retention and period controls. The previous
+365-day statistics and 90-day compact-summary proposals are superseded.
 
-### 5.1 Compact decoy-correlation proposal
+### 5.1 UTC boundaries and the oldest interval
+
+Every interval is half-open `[start, end)` and aligned to a fixed UTC boundary:
+minutes, multiples of 5/10/20 minutes within the hour, and full hours. Query
+ranges use inclusive start and exclusive end. Do not recenter stored intervals
+on every query or every moving age threshold.
+
+Coarsen a parent only after its entire interval is old enough for the new grain.
+For example, promote five one-minute children after the five-minute parent's
+end is at least one hour old. Preserve finer input across a threshold until
+that parent is eligible; this can retain a bounded extra interval of finer
+detail. The query planner selects disjoint inputs and never counts both a
+parent and its children. Preserve incomplete parents rather than waiting
+forever for unavailable children.
+
+The logical expiry cutoff is `now_utc - 30 * 24 hours`. Do not serve aggregates
+whose start precedes that cutoff, and expire them as whole rows. This deliberately
+discards the oldest straddling hour rather than retaining observations older
+than 30 days or pretending its count can be prorated. The available oldest
+boundary can consequently be less than one hour newer than the cutoff; return
+that boundary explicitly. Never invent partial-hour totals after finer input
+has expired. True retention expiry does not require another retained rollup.
+
+Bounded physical cleanup follows the maintenance schedule and can lag logical
+expiry; report cleanup lag, especially after downtime. This policy does not
+promise secure erasure or immediate removal from backups or SQLite free pages.
+Reimport or revision time must not extend retention, and replay must not
+recreate expired rows. A display time change must not shift any boundary.
+Persist a nondecreasing expiry watermark and use it with the current cutoff
+for reads and cleanup. A backward clock adjustment must not revive logically
+expired history. Expose clock discontinuities and test them independently
+from the source minute-ring clock policy.
+
+For a continuous single-scope series, the profile has approximately 831
+intervals: 60 + 30 + 15 + 18 + 708, excluding transition edges. Twenty-two
+reason series plus one overall series would therefore have approximately
+19,113 aggregate rows. This is an arithmetic estimate, not a database size or
+hard memory bound: pending inputs, checkpoints, generations, indexes, optional
+dimensions, and event detail require separate budgets.
+
+### 5.2 Independent event and decoy retention
+
+Detailed event retention remains independent of statistics. Phase 3 defaults
+selected-event retention to seven days, configurable within the 30-day cap,
+with existing count/byte budgets; it does not extend statistical resolution.
+If compact decoy summaries
+are added, their retention is at most 30 days with independent count/byte
+limits. Compact-summary implementation and enablement remain future work;
+selected-detail expiry is implemented. Neither tier restores expired request
+detail or modifies token validity.
 
 The compact record may retain:
 
@@ -247,13 +388,18 @@ still be incomplete when the source did not record the relevant observation.
 1. Run console maintenance approximately every five minutes, subject to its
    work budget. On startup, catch up incrementally rather than in a large
    blocking purge.
-2. Select fully expired intervals using consistent UTC cutoffs.
-3. Confirm that the required retained rollup and processing progress have been
-   committed. Preserve their completeness/gap metadata.
+2. Select eligible precision transitions and expired rows with UTC cutoffs.
+   Read APIs enforce logical expiry even before physical cleanup catches up.
+3. For a precision transition, commit replacement overall/reason aggregates,
+   coverage, and processing progress before deleting required input. Bounded
+   chunks must not mark a whole interval complete until all required rows are
+   committed. Same-interval corrections replace prior revisions.
 4. Delete eligible input in bounded transactions, initially around 1,000 rows
    per batch. Yield between batches so ingestion and live/query work can run.
-5. Expire compact correlation and hourly data independently according to their
-   policies. Apply the same count/time bounds to these jobs.
+   At true retention expiry, delete without requiring a new rollup; prevent
+   subsequent replay from recreating the expired history.
+5. Expire recorded detail and optional compact correlation independently with
+   their own time/count/byte bounds. Retain gap metadata for retained statistics.
 6. Resume safely after interruption. Never delete required input because an
    aggregation job was merely started or because its uncommitted result was
    sent to a browser.
@@ -273,7 +419,8 @@ When approaching the effective budget:
 
 1. Remove expired data first.
 2. Shorten oldest ordinary event detail ahead of its nominal retention period.
-3. Remove older minute detail after committed hourly aggregation.
+3. Remove eligible finer statistics after their selected coarser aggregates
+   and processing progress have committed.
 4. Prefer retaining bounded decoy-correlation summaries and coarse history
    over ordinary detail, subject to their own limits.
 5. If space still cannot be recovered safely, restrict new persistence and
@@ -307,7 +454,8 @@ filesystem space as distinct measurements. See
 Relevant SQLite behavior is documented in
 [WAL operation and checkpoints](https://www.sqlite.org/wal.html) and
 [synchronization policies](https://www.sqlite.org/pragma.html#pragma_synchronous).
-The exact journal and synchronization settings are not yet chosen.
+Phase 1/2 currently use DELETE rollback journaling and EXTRA synchronization;
+WAL would require a separate reviewed lifecycle change.
 
 ## 9. Operational behavior and validation
 
@@ -324,6 +472,15 @@ Before release, validate:
 - Requests with overlapping rule/LOG/response outcomes and distinct decoy
   contexts.
 - Correct ratios, weighted gauges, peaks, histograms, and unique-count limits.
+- Reason-separated replay, all 22 stable identifiers, supported zero versus
+  unknown, and the primary-reason sum invariant on complete stable intervals.
+- Overall extrema versus reason extrema with peaks in different minutes, and
+  a source restart within one base minute before rollup.
+- UTC alignment and transitions at 1 hour, 3 hours 30 minutes, 6 hours,
+  12 hours, and the 30-day cutoff, including the oldest straddling hour.
+- Nondecreasing expiry across clock rollback, source replay, and collector restart.
+- Mixed-grain queries without overlap, eligible-zero extrema, partial-minute
+  exclusion from extrema, and preservation of incomplete coverage after expiry.
 - Crash between aggregation and deletion, and interrupted expiry recovery.
 - Shortened retention, capacity pressure, full storage, stalled writer,
   bounded retries, and final-flush timeouts.
@@ -332,5 +489,8 @@ Before release, validate:
 - Preservation of WAF forwarding and protective behavior throughout these
   console failures.
 
-Final schema, migration/backup policy, replay bounds, resource limits, and the
-proposed numerical defaults must be resolved before backend implementation.
+The UTC/reason/precision/30-day policy, schema migration, correction boundaries,
+and bounded query/maintenance workers are implemented in Phase 3. A supported
+online backup procedure, optional compact correlation, web delivery, and
+deployment-specific resource tuning remain later work. Wider buckets use a
+separate version-three history model rather than reinterpreting source minutes.

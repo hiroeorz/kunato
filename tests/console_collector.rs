@@ -44,6 +44,46 @@ fn window(packet: &StatisticsSnapshot) -> ReadWindow {
     }
 }
 
+#[tokio::test]
+async fn bounded_history_reader_serves_committed_reasons_without_taking_a_write_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut storage = StorageConfig::new(temp.path().join("history"));
+    storage.clock = || 0;
+    let mut collector =
+        Collector::start(storage.clone(), fast_writer(), CollectorConfig::default())
+            .await
+            .unwrap();
+    let reader = collector.history_reader();
+    let history = Arc::new(Observations::new());
+    requests(&history, 10, true).await;
+    let packet = history.snapshot(0).unwrap();
+    collector.receive(packet.clone()).await.unwrap();
+    let stopped = collector.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert!(!stopped.timed_out);
+    let connection = rusqlite::Connection::open(storage.directory.join("history.sqlite3")).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let page = reader
+        .history(kunato::console::HistoryQuery {
+            instance: "local-waf".into(),
+            site: None,
+            from_ms: packet.buckets[0].start_ms,
+            until_ms: packet.observed_at_ms + 60_000,
+            limit: 128,
+            revision: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.pending_minutes, 0);
+    assert_eq!(
+        page.buckets
+            .iter()
+            .map(|bucket| bucket.reasons[&RejectionReason::Rule].sum)
+            .sum::<u64>(),
+        10
+    );
+    connection.execute_batch("ROLLBACK").unwrap();
+}
+
 async fn committed(collector: &mut Collector) {
     let until = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -140,6 +180,11 @@ async fn generation_reset_and_late_old_packets_keep_histories_separate() {
     collector.receive(a.clone()).await.unwrap();
     committed(&mut collector).await;
     collector.receive(b.clone()).await.unwrap();
+    assert!(
+        collector.health().storage_error.is_none(),
+        "{:?}",
+        collector.health()
+    );
     assert!(collector.health().last_committed_at_ms.is_none());
     collector.receive(first.snapshot(0).unwrap()).await.unwrap();
     assert_eq!(
@@ -152,7 +197,13 @@ async fn generation_reset_and_late_old_packets_keep_histories_separate() {
             .generation,
         b.source.generation
     );
-    collector.shutdown(Duration::from_secs(2)).await.unwrap();
+    let shutdown = collector.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert!(!shutdown.timed_out, "{:?}", shutdown.health);
+    assert!(
+        shutdown.health.last_error.is_none(),
+        "{:?}",
+        shutdown.health
+    );
     let mut store = Store::open(storage).unwrap();
     assert_eq!(
         store

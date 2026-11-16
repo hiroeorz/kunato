@@ -58,7 +58,7 @@ src/
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
-  console/         # Counter-based collector, SQLite store, and bounded persistence writer
+  console/         # Counter-based collector, UTC history/retention, SQLite store, bounded workers
   observations.rs  # WAF cumulative/minute measurements and bounded selected detail
   rules/           # Category/rule model, matcher, and evaluation engine
   logs/            # `kunato log`: journalctl reader, parsing, filters, attack classes
@@ -89,9 +89,10 @@ docs/
   next-version-ai-defense.md # Next-version concept for defending home servers against AI-assisted attacks
   monitoring-console.md # Optional console architecture, access, and implementation status
   monitoring-console-requirements.md # Metrics, real-time, decoy, and UI interaction requirements
-  monitoring-console-storage.md # Proposed asynchronous persistence, aggregation, and retention
+  monitoring-console-storage.md # Adopted asynchronous persistence, aggregation, and retention
   monitoring-console-phase1.md # Implemented persistence foundation and its verification contract
   monitoring-console-phase2.md # Implemented counter-based source, minute history, and collector contracts
+  monitoring-console-phase3.md # Implemented UTC aggregates, reason-separated history, and retention
   monitoring-console-cadence.md # Measured update costs and proposed one-second live publication
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility

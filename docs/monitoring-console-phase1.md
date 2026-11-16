@@ -7,6 +7,8 @@ tests in `tests/console_storage.rs`. This document records the initial phase.
 The [Phase 2 extension](monitoring-console-phase2.md) adds WAF source measurement,
 a development collector runner, and schema version 2. Its version-1 migration
 preserves saved rows; newly introduced fields remain unknown for old history.
+The subsequent [Phase 3](monitoring-console-phase3.md) adds schema version 3,
+UTC aggregates, separate reason rows, bounded history reads, and expiry.
 The browser prototype continues to show fictional data. This phase follows the
 user's decision to build from lower layers before making the console usable.
 

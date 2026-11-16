@@ -195,5 +195,32 @@ async fn loopback_export_collects_live_then_persists_and_reopens_real_waf_counts
             .sum::<u64>(),
         2
     );
+    let history = store
+        .history(&kunato::console::HistoryQuery {
+            instance: "local-waf".into(),
+            site: None,
+            from_ms: packet.buckets[0].start_ms,
+            until_ms: packet.observed_at_ms + 60_000,
+            limit: 128,
+            revision: None,
+        })
+        .unwrap();
+    assert_eq!(history.pending_minutes, 0);
+    assert_eq!(
+        history
+            .buckets
+            .iter()
+            .map(|bucket| bucket.reasons[&RejectionReason::Rule].sum)
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(
+        history
+            .buckets
+            .iter()
+            .map(|bucket| bucket.counters[&kunato::console::history::CountMetric::Requests].sum)
+            .sum::<u64>(),
+        2
+    );
     running.stop().await;
 }

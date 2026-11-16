@@ -1,11 +1,13 @@
 # Monitoring console requirements
 
-Date: 2026-11-15
+Date: 2026-11-16
 
 Status: Product and UI requirements with an implemented fictional-data
 prototype. The approved [bottom-up Phase 1](monitoring-console-phase1.md)
 implements persistence foundations. Phase 2 adds counter-based source
-measurement and collection; web delivery remains absent.
+measurement and collection. [Phase 3](monitoring-console-phase3.md) implements
+UTC reason-separated history, retention, and bounded query/maintenance workers;
+web delivery remains absent.
 Requirement identifiers describe intended behavior, not evidence that the
 current binary supports it.
 
@@ -24,7 +26,7 @@ coalesced live statistics updates with independent ten-second persistence.
 | --- | --- |
 | UI-01 | Use one application shell with a left sidebar switching between Metrics and Real-time monitor. Both views belong to the same optional console. |
 | UI-02 | Show WAF state, collection/connection state, and the latest data-update time separately. A disconnected collector must not look like zero traffic or prove the WAF has stopped. |
-| UI-03 | State the selected site, time range, time zone, and aggregation grain. Make the scope of event-only filters distinct from whole-view request totals. |
+| UI-03 | Use UTC for initial reporting and show UTC, the selected site, effective time range, and aggregation grain. Make the scope of event-only filters distinct from whole-view request totals. |
 | UI-04 | Keep browser navigation and display pause independent of server collection, storage, aggregation, and expiry. |
 | UI-05 | Support desktop and mobile layouts. On narrow screens, use accessible navigation and contain wide-table scrolling within the table. |
 | UI-06 | Support keyboard navigation, readable event details, clear focus, and reduced-motion preferences. Color must have labels or other supporting context. |
@@ -34,7 +36,9 @@ coalesced live statistics updates with independent ten-second persistence.
 | UI-10 | Clearly identify fictional preview data and simulated connection state. Prototype controls must not imply a connection to the user's WAF. |
 
 The prototype uses English for repository-artifact consistency and offers JST
-and UTC display. Final localization policy is not decided by this document.
+and UTC display. The adopted backend/reporting policy uses UTC; the fictional
+prototype has not been updated to that policy. Final language-localization
+policy is not decided by this document.
 
 ## 2. Metrics view
 
@@ -45,12 +49,21 @@ quality information.
 
 ### MET-01: Reporting period and comparison
 
-- Offer 24 hours, 7 days, 30 days, 90 days, one year, and a custom date range.
+- Offer 24 hours, 7 days, 30 days, and a custom date range within retained data.
+  The prototype's 90-day and one-year options are superseded for real data.
 - Default to the last 24 hours.
 - Reject invalid or reversed custom ranges and disclose retained-range limits.
 - Select an appropriate aggregation grain and show it to the operator.
-- Support comparison with the immediately preceding equal-duration period.
-- Show the time zone and mark incomplete comparison periods.
+- Preserve the adopted 1/5/10/20/60-minute precision tiers in the
+  [storage policy](monitoring-console-storage.md#5-adopted-statistics-retention-policy).
+  Daily charts derive from retained UTC hours. Show changes of grain and do
+  not prorate coarse bucket counts into unsupported subintervals; disclose any
+  snapped effective bounds and the available oldest boundary.
+- Support comparison with the immediately preceding equal-duration period
+  when its scope, boundaries, coverage, and retained input support it. A
+  30-day selection has no retained preceding 30-day comparison; show it as
+  unavailable rather than zero or a synthetic estimate.
+- Show UTC and mark incomplete comparison periods.
 - When site attribution is supported, allow all sites or a selected site.
   Do not present synthetic host statistics as measured data.
 
@@ -96,6 +109,19 @@ Track response-phase replacement separately from request-phase rejection.
 Keep configured policy denial, service overload, and attack classification
 distinguishable even when the HTTP status is similar.
 
+Persist a separate statistics series per supported primary terminal reason,
+using the 22 fixed identifiers defined in `RejectionReason`. Each rejected
+request contributes once to one reason. Preserve independently measured
+overall totals and the same UTC precision/expiry policy for every reason.
+Show reason rejection rate against all matching requests separately from
+reason share among matching rejected requests. Missing reason measurements
+remain unavailable, including old history without the field.
+
+Show count-series extrema on a common complete-one-minute basis and average
+rates from compatible count/duration inputs. Do not add reason maxima/minima
+to obtain overall extrema. These reason series are mechanism breakdowns;
+attack-class/category/rule breakdowns still have separate prerequisites.
+
 ### MET-05: Detection breakdowns and rankings
 
 - Show attack-class, category, and rule breakdowns with BLOCK and LOG separated.
@@ -125,8 +151,11 @@ distinguishable even when the HTTP status is similar.
 - Show median, p95, and p99 latency only after suitable measurements exist.
 - State what the latency measures and what requests contribute to it.
 
-General status distributions and latency histograms need additional WAF
-instrumentation. Their presence in the prototype is a visual demonstration.
+Phase 2 supplies overall client-visible statuses and header-decision latency
+histograms. Upstream-only status history and reason-specific latency need
+additional instrumentation. Exact latency minima/maxima are unavailable in
+the current source; histogram bin edges are not exact extrema. The prototype
+still demonstrates fictional values.
 
 ### MET-08: Protection and maintenance
 
@@ -148,6 +177,9 @@ instrumentation. Their presence in the prototype is a visual demonstration.
   documented persistence and retention limits.
 - Explain available detail and aggregation periods for the selected range.
 - Display observation coverage alongside rates affected by missing samples.
+- Enforce the 30-day logical statistics horizon independently of bounded
+  physical cleanup. Show retention/cleanup lag and the oldest available
+  aligned interval; detailed event retention is a separate policy.
 
 ### MET-10: Export and drill-down
 
@@ -352,6 +384,9 @@ Logging/inspection limits can leave an incomplete trail. See the
 | COUNT-09 | Ratios, rates, averages, peaks, quantiles, and distinct counts require the aggregation rules in the storage design. Do not sum precomputed rates or average percentiles. |
 | COUNT-10 | Basic traffic/protection totals must continue with normal-access logging absent and detail logs suppressed, dropped, or expired. Count with WAF memory measurements and persist absolute minute aggregates. |
 | COUNT-11 | A sampled cumulative difference spanning a minute boundary does not prove exact minute placement. Source-minute measurements, provisional revisions, and coverage metadata must support any such precision claim. |
+| COUNT-12 | Primary rejection reasons partition complete stable rejected-request counts. Do not add overlapping diagnostic subsets or multiply shared request denominators by the number of reasons. |
+| COUNT-13 | Retain count/duration and supported base-minute extrema inputs for repeated aggregation. Preserve missing/partial populations; never average precomputed averages or sum reason extrema as overall extrema. |
+| COUNT-14 | Use UTC interval identities and the adopted precision/30-day policy. Deduplicate source revisions, merge supported generation contributions, and select disjoint grains; replay and source restarts must not extend expiry. |
 
 ## 6. Review and acceptance checks
 

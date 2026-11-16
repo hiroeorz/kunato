@@ -83,7 +83,9 @@ fn window() -> ReadWindow {
 }
 
 fn storage(temp: &tempfile::TempDir) -> StorageConfig {
-    StorageConfig::new(temp.path().join("history"))
+    let mut config = StorageConfig::new(temp.path().join("history"));
+    config.clock = || 120_000;
+    config
 }
 
 fn slow_writer() -> WriterConfig {
@@ -369,19 +371,39 @@ fn version_one_history_migrates_without_inventing_new_measurements() {
         )
         .unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
+    connection.execute_batch("DROP TABLE rejection_buckets; DROP TABLE history_buckets; DROP TABLE history_dirty; DROP TABLE history_state; DROP TABLE history_sources; DROP INDEX metric_scope_time; DROP INDEX metric_expiry; DROP INDEX events_expiry;").unwrap();
     drop(connection);
     let mut store = Store::open(config.clone()).unwrap();
     let rows = store.metrics(&source(), window()).unwrap();
     assert_eq!(rows[0].counters.requests, Some(10));
     assert!(rows[0].counters.rejection_reasons.is_none());
     assert!(rows[0].outcomes.is_none());
+    while store.maintain().unwrap().more_work {}
+    let history = store
+        .history(&kunato::console::HistoryQuery {
+            instance: source().instance,
+            site: None,
+            from_ms: 60_000,
+            until_ms: 120_000,
+            limit: 128,
+            revision: None,
+        })
+        .unwrap();
+    assert_eq!(
+        history.buckets[0].counters[&kunato::console::history::CountMetric::Requests].total(),
+        Some(10)
+    );
+    assert_eq!(
+        history.buckets[0].reasons[&RejectionReason::Rule].total(),
+        None
+    );
     drop(store);
     let connection = rusqlite::Connection::open(config.directory.join("history.sqlite3")).unwrap();
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 
@@ -413,7 +435,7 @@ fn data_files_are_private_and_symlinks_are_refused() {
 fn capacity_failure_preserves_committed_history_and_stays_within_budget() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = storage(&temp);
-    config.max_bytes = 256 * 1024;
+    config.max_bytes = 512 * 1024;
     let mut store = Store::open(config.clone()).unwrap();
     let mut committed = 0;
     for sequence in 1..2000 {
@@ -638,7 +660,7 @@ async fn disk_lock_keeps_inflight_work_bounded_and_shutdown_has_a_deadline() {
 async fn writer_stops_admission_at_capacity_and_keeps_its_last_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = storage(&temp);
-    config.max_bytes = 256 * 1024;
+    config.max_bytes = 512 * 1024;
     let options = WriterConfig {
         max_batch_records: 3,
         min_commit_interval: Duration::from_millis(1),

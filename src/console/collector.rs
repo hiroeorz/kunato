@@ -90,15 +90,23 @@ pub struct CollectorHealth {
     pub source_error: Option<Error>,
 }
 
-struct ReadRequest {
-    source: SourceIdentity,
-    reply: oneshot::Sender<Result<Option<Checkpoint>, Error>>,
+enum ReadRequest {
+    Checkpoint {
+        source: SourceIdentity,
+        reply: oneshot::Sender<Result<Option<Checkpoint>, Error>>,
+    },
+    History {
+        query: super::HistoryQuery,
+        reply: oneshot::Sender<Result<super::HistoryPage, Error>>,
+    },
 }
-struct CheckpointReader {
+
+#[derive(Clone)]
+pub struct HistoryReader {
     requests: mpsc::SyncSender<ReadRequest>,
 }
 
-impl CheckpointReader {
+impl HistoryReader {
     fn start(config: StorageConfig) -> Result<Self, Error> {
         let (requests, incoming) = mpsc::sync_channel::<ReadRequest>(4);
         std::thread::Builder::new()
@@ -106,20 +114,59 @@ impl CheckpointReader {
             .spawn(move || {
                 let mut store = Store::open(config);
                 while let Ok(request) = incoming.recv() {
-                    let result = match &mut store {
-                        Ok(store) => store.checkpoint(&request.source),
-                        Err(error) => Err(error.clone()),
-                    };
-                    let _ = request.reply.send(result);
+                    match request {
+                        ReadRequest::Checkpoint { source, reply } => {
+                            let result = match &mut store {
+                                Ok(store) => store.checkpoint(&source),
+                                Err(error) => Err(error.clone()),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        ReadRequest::History { query, reply } => {
+                            let result = match &mut store {
+                                Ok(store) => store.history(&query),
+                                Err(error) => Err(error.clone()),
+                            };
+                            let _ = reply.send(result);
+                        }
+                    }
                 }
             })?;
         Ok(Self { requests })
     }
     async fn checkpoint(&self, source: SourceIdentity) -> Result<Option<Checkpoint>, Error> {
+        tokio::time::timeout(Duration::from_millis(750), async {
+            for attempt in 0..8 {
+                let (reply, result) = oneshot::channel();
+                let value = match self.requests.try_send(ReadRequest::Checkpoint {
+                    source: source.clone(),
+                    reply,
+                }) {
+                    Ok(()) => result.await.map_err(|_| Error::WorkerStopped)?,
+                    Err(mpsc::TrySendError::Full(_)) => Err(Error::Busy),
+                    Err(mpsc::TrySendError::Disconnected(_)) => Err(Error::WorkerStopped),
+                };
+                if !matches!(value, Err(Error::Busy | Error::OperationTimeout)) || attempt == 7 {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(Error::Busy)
+        })
+        .await
+        .map_err(|_| Error::OperationTimeout)?
+    }
+
+    /// Queue a bounded history read on the owned database thread, not the async executor.
+    pub async fn history(&self, query: super::HistoryQuery) -> Result<super::HistoryPage, Error> {
+        query.validate()?;
         let (reply, result) = oneshot::channel();
         self.requests
-            .try_send(ReadRequest { source, reply })
-            .map_err(|_| Error::Busy)?;
+            .try_send(ReadRequest::History { query, reply })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => Error::Busy,
+                mpsc::TrySendError::Disconnected(_) => Error::WorkerStopped,
+            })?;
         tokio::time::timeout(Duration::from_millis(750), result)
             .await
             .map_err(|_| Error::OperationTimeout)?
@@ -153,7 +200,7 @@ struct State {
 
 pub struct Collector {
     config: CollectorConfig,
-    reader: CheckpointReader,
+    reader: HistoryReader,
     writer: Option<Writer>,
     states: Vec<State>,
     live: watch::Sender<Option<Arc<StatisticsSnapshot>>>,
@@ -181,7 +228,7 @@ impl Collector {
             ));
         }
         // Open the migration-capable reader before opening the writer connection.
-        let reader = CheckpointReader::start(storage.clone())?;
+        let reader = HistoryReader::start(storage.clone())?;
         reader
             .checkpoint(SourceIdentity {
                 instance: config.instance.clone(),
@@ -202,6 +249,10 @@ impl Collector {
 
     pub fn subscribe(&self) -> watch::Receiver<Option<Arc<StatisticsSnapshot>>> {
         self.live.subscribe()
+    }
+
+    pub fn history_reader(&self) -> HistoryReader {
+        self.reader.clone()
     }
 
     pub fn health(&self) -> CollectorHealth {

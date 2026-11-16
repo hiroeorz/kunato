@@ -1,12 +1,16 @@
 //! Console collection and persistence foundations, independent of WAF forwarding.
 
 pub mod collector;
+pub mod history;
+mod history_store;
 pub mod model;
 pub mod storage;
 pub mod writer;
 
 use std::time::Duration;
 
+pub use collector::HistoryReader;
+pub use history::{HistoryBucket, HistoryPage, HistoryQuery, MaintenanceReport};
 pub use storage::{ReadWindow, StorageConfig, Store, WriteReport};
 pub use writer::{Health, Receipt, ShutdownReport, SubmitError, Writer, WriterConfig, WriterState};
 
@@ -32,6 +36,10 @@ pub enum Error {
     OperationTimeout,
     #[error("conflicting console source position or record identity")]
     Conflict,
+    #[error("minute input was already compacted; its discarded provenance cannot be corrected")]
+    CompactedInput,
+    #[error("history changed; restart the paginated read")]
+    HistoryChanged,
     #[error("console persistence worker stopped")]
     WorkerStopped,
     #[error("console persistence initialization timed out")]
