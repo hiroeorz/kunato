@@ -18,6 +18,11 @@ pub fn load_server_config(cert_file: &Path, key_file: &Path) -> Result<Arc<Serve
     )
 }
 
+pub(crate) fn certificate_expiry(cert_file: &Path) -> Option<u64> {
+    let certificates = load_certificates(cert_file).ok()?;
+    crate::acme::certificate_expiry(certificates.first()?.as_ref())
+}
+
 pub fn load_quic_server_config(
     cert_file: &Path,
     key_file: &Path,

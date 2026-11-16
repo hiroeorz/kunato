@@ -155,6 +155,8 @@ pub struct ConnectionStatistics {
     pub connection_milliseconds: u64,
     pub observed_ms: u64,
     pub observed_max: Option<u64>,
+    #[serde(default)]
+    pub observed_min: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +172,8 @@ pub struct HistoryBucket {
     pub connections: ConnectionStatistics,
     pub outcomes: Option<Outcomes>,
     pub outcome_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional: Option<Box<super::measurements::AdditionalMeasurements>>,
 }
 
 impl HistoryBucket {
@@ -290,6 +294,14 @@ impl HistoryBucket {
                 value.coverage.omitted_events,
             )?;
             if let Some(gauge) = &value.connections {
+                let unknown = (result.connections.observed_max.is_some()
+                    && result.connections.observed_min.is_none())
+                    || gauge.observed_min.is_none();
+                result.connections.observed_min = if unknown {
+                    None
+                } else {
+                    option_min(result.connections.observed_min, gauge.observed_min)
+                };
                 result.connections.connection_milliseconds = add(
                     result.connections.connection_milliseconds,
                     gauge.connection_milliseconds,
@@ -300,6 +312,14 @@ impl HistoryBucket {
                     option_max(result.connections.observed_max, Some(gauge.observed_max));
             }
             result.merge_outcomes(value.outcomes.as_ref())?;
+            if let Some(additional) = &value.additional {
+                result
+                    .additional
+                    .get_or_insert_with(|| {
+                        Box::new(super::measurements::AdditionalMeasurements::measured())
+                    })
+                    .merge(additional)?;
+            }
         }
         // Multiple generations contribute to one base minute, not several minutes.
         for statistics in result
@@ -310,6 +330,10 @@ impl HistoryBucket {
             statistics.known_minutes = u32::from(statistics.known_minutes != 0);
         }
         result.outcome_minutes = u32::from(result.outcome_minutes != 0);
+        if let Some(additional) = &mut result.additional {
+            additional.incomplete |=
+                !complete || values.iter().any(|value| value.additional.is_none());
+        }
         Ok(result)
     }
 
@@ -367,16 +391,40 @@ impl HistoryBucket {
                 result.connections.observed_ms,
                 child.connections.observed_ms,
             )?;
+            let unknown = (result.connections.observed_max.is_some()
+                && result.connections.observed_min.is_none())
+                || (child.connections.observed_max.is_some()
+                    && child.connections.observed_min.is_none());
             result.connections.observed_max = option_max(
                 result.connections.observed_max,
                 child.connections.observed_max,
             );
+            result.connections.observed_min = if unknown {
+                None
+            } else {
+                option_min(
+                    result.connections.observed_min,
+                    child.connections.observed_min,
+                )
+            };
             result.merge_outcomes(child.outcomes.as_ref())?;
+            if let Some(additional) = &child.additional {
+                result
+                    .additional
+                    .get_or_insert_with(|| {
+                        Box::new(super::measurements::AdditionalMeasurements::measured())
+                    })
+                    .merge(additional)?;
+            }
             result.outcome_minutes += child
                 .outcome_minutes
                 .saturating_sub(u32::from(child.outcomes.is_some()));
         }
         result.coverage.incomplete |= result.coverage.complete_minutes != result.expected_minutes();
+        if let Some(additional) = &mut result.additional {
+            additional.incomplete |= result.coverage.incomplete
+                || children.iter().any(|child| child.additional.is_none());
+        }
         result.validate()?;
         Ok(result)
     }
@@ -397,6 +445,7 @@ impl HistoryBucket {
             connections: ConnectionStatistics::default(),
             outcomes: None,
             outcome_minutes: 0,
+            additional: None,
         }
     }
 
@@ -411,7 +460,23 @@ impl HistoryBucket {
             latency_sum_us: 0,
             latency_bins: [0; 15],
             in_flight: 0,
+            latency_min_us: None,
+            latency_max_us: None,
         });
+        let min_unknown = (current.latency_count > 0 && current.latency_min_us.is_none())
+            || (value.latency_count > 0 && value.latency_min_us.is_none());
+        let max_unknown = (current.latency_count > 0 && current.latency_max_us.is_none())
+            || (value.latency_count > 0 && value.latency_max_us.is_none());
+        current.latency_min_us = if min_unknown {
+            None
+        } else {
+            option_min(current.latency_min_us, value.latency_min_us)
+        };
+        current.latency_max_us = if max_unknown {
+            None
+        } else {
+            option_max(current.latency_max_us, value.latency_max_us)
+        };
         if value.statuses.len() != 500 {
             return Err(Error::Invalid("invalid history status distribution"));
         }
@@ -428,6 +493,9 @@ impl HistoryBucket {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        if let Some(additional) = &self.additional {
+            additional.validate()?;
+        }
         let width = self.grain.milliseconds();
         if !self.start_ms.is_multiple_of(width)
             || self.start_ms > i64::MAX as u64 - width

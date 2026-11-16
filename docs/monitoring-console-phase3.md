@@ -5,8 +5,9 @@ Date: 2026-11-16
 Status: Implemented in the storage library, writer, collector reader, and
 development runner. This phase implements the adopted policy in
 [storage and retention](monitoring-console-storage.md). HTTP delivery, SSE,
-authentication, HTTPS, installation, and optional compact decoy summaries remain
-later work. The browser still uses fictional data.
+authentication, HTTPS, and installation remain later work. The subsequent
+[Phase 4](monitoring-console-phase4.md) extends measurements and implements
+bounded compact decoy evidence. The browser still uses fictional data.
 
 ## Implemented measurements
 
@@ -41,7 +42,8 @@ minutes only. Full-interval rates and reason percentages require compatible
 complete populations. Missing/partial minutes are excluded from extrema;
 measured zero remains eligible. Overall extrema are computed independently.
 Latency count/sum/histograms and connection-time numerators survive coarsening.
-Exact latency minima/maxima and connection minima remain unavailable at source.
+This phase did not measure exact latency minima/maxima or connection minima;
+Phase 4 adds those fields without inventing values for older history.
 
 ## Schema and recovery
 

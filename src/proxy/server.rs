@@ -612,6 +612,7 @@ impl Server {
             })?;
         let local_addr = listener.local_addr()?;
         let snapshot = config.load();
+        metrics.observations.configure(&snapshot);
         let connect_timeout = snapshot.timeouts.upstream_connect;
         let (tls, scheme) = match acme {
             Some(service) => (
@@ -627,6 +628,9 @@ impl Server {
                         ));
                     };
                     let server_config = tls::load_server_config(cert_file, key_file)?;
+                    if let Some(expires) = tls::certificate_expiry(cert_file) {
+                        metrics.observations.certificate(expires);
+                    }
                     (
                         TlsMode::Static(tokio_rustls::TlsAcceptor::from(server_config)),
                         "https",
@@ -1308,6 +1312,7 @@ pub(crate) fn resolve_source(
     parts: &http::request::Parts,
 ) -> Result<ClientSource, HttpError> {
     context.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    crate::observations::request_head(config, parts);
     let result = config
         .client_ip
         .resolve(peer, &parts.headers)
@@ -2831,8 +2836,14 @@ async fn process_inner(
     drop(decoy_observation);
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
 
-    if outcome.allowed.is_some() {
+    if let Some(allowed) = &outcome.allowed {
         crate::observations::rule_match(crate::console::model::Phase::Request, false);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Request,
+            &allowed.category,
+            &allowed.rule,
+            crate::config::Action::Allow,
+        );
     }
     if !outcome.logs.is_empty() {
         context.metrics.logged.fetch_add(1, Ordering::Relaxed);
@@ -2840,6 +2851,12 @@ async fn process_inner(
 
     for record in &outcome.logs {
         crate::observations::rule_match(crate::console::model::Phase::Request, true);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Request,
+            &record.category,
+            &record.rule,
+            crate::config::Action::Log,
+        );
         crate::observations::rule_detail(
             crate::console::model::Phase::Request,
             &record.category,
@@ -2858,6 +2875,12 @@ async fn process_inner(
 
     if let Some(blocked) = &outcome.blocked {
         crate::observations::rule_match(crate::console::model::Phase::Request, false);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Request,
+            &blocked.category,
+            &blocked.rule,
+            crate::config::Action::Block,
+        );
         crate::observations::reject(if blocked.rate_limited {
             crate::console::model::RejectionReason::RateLimit
         } else {
@@ -3047,6 +3070,7 @@ async fn process_inner(
         record_upstream_error(context, err);
     }
     let response = result?;
+    crate::observations::upstream_status(response.status().as_u16());
     record_behavior(context, source, &parts, response.status(), config);
 
     if !config.has_response_rules() && !php_profile {

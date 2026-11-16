@@ -132,6 +132,23 @@ impl AllowedHosts {
         self.matches_parsed(&host)
     }
 
+    pub(crate) fn observation_site(&self, raw: &str) -> Option<String> {
+        let host = RequestHost::parse(raw).ok()?;
+        let entry = self
+            .entries
+            .iter()
+            .filter(|entry| entry.matches(&host))
+            .max_by_key(|entry| (!entry.wildcard, entry.host.len(), entry.port.is_some()))?;
+        Some(format!(
+            "{}{}{}",
+            if entry.wildcard { "*." } else { "" },
+            entry.host,
+            entry
+                .port
+                .map_or_else(String::new, |port| format!(":{port}"))
+        ))
+    }
+
     /// Check the Host header and the URI authority of a request. Every source
     /// that is present must match; a duplicate Host header is malformed.
     pub fn check(&self, parts: &Parts) -> Result<(), HostViolation> {

@@ -103,6 +103,11 @@ impl State {
     }
 
     fn evidence(&mut self, raw: &[u8], age: u64, location: &'static str, credential: bool) {
+        if credential {
+            self.metrics
+                .observations
+                .credential_id(self.request_minute, &token::id(raw));
+        }
         self.contexts |= if credential { 1 } else { 2 };
         if self.evidence.is_none()
             || credential && self.evidence.as_ref().is_some_and(|e| !e.credential)

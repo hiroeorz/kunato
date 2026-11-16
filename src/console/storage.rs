@@ -19,7 +19,7 @@ use super::model::{
 use super::{Error, validate_duration};
 
 const APPLICATION_ID: i64 = 0x4b55_4e43;
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const PAGE_BYTES: u64 = 4096;
 const JOURNAL_RESERVE: u64 = 65_536;
 const SCHEMA: &str = "
@@ -249,6 +249,7 @@ impl Store {
             let transaction = self.connection.transaction()?;
             transaction.execute_batch(SCHEMA)?;
             transaction.execute_batch(super::history_store::HISTORY_SCHEMA)?;
+            transaction.execute_batch(super::correlations::SCHEMA)?;
             transaction.execute_batch("CREATE INDEX metric_scope_time ON metric_buckets(source,site,start_ms,generation); CREATE INDEX metric_expiry ON metric_buckets(start_ms); CREATE INDEX events_expiry ON events(occurred_at); CREATE INDEX history_expiry ON history_buckets(start_ms);")?;
             transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -262,12 +263,15 @@ impl Store {
             .prepare("SELECT revision, payload FROM metric_buckets WHERE start_ms >= ?1")?;
         if !fresh && version < SCHEMA_VERSION {
             let transaction = self.connection.transaction()?;
-            transaction.execute_batch(super::history_store::HISTORY_SCHEMA)?;
-            transaction.execute_batch("CREATE INDEX metric_scope_time ON metric_buckets(source,site,start_ms,generation); CREATE INDEX metric_expiry ON metric_buckets(start_ms); CREATE INDEX events_expiry ON events(occurred_at); CREATE INDEX history_expiry ON history_buckets(start_ms);")?;
-            transaction.execute(
-                "INSERT INTO history_sources SELECT source,generation,?1 FROM checkpoints",
-                [(self.config.clock)() as i64],
-            )?;
+            if version < 3 {
+                transaction.execute_batch(super::history_store::HISTORY_SCHEMA)?;
+                transaction.execute_batch("CREATE INDEX metric_scope_time ON metric_buckets(source,site,start_ms,generation); CREATE INDEX metric_expiry ON metric_buckets(start_ms); CREATE INDEX events_expiry ON events(occurred_at); CREATE INDEX history_expiry ON history_buckets(start_ms);")?;
+                transaction.execute(
+                    "INSERT INTO history_sources SELECT source,generation,?1 FROM checkpoints",
+                    [(self.config.clock)() as i64],
+                )?;
+            }
+            transaction.execute_batch(super::correlations::SCHEMA)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -276,6 +280,10 @@ impl Store {
         )?;
         self.connection
             .prepare("SELECT reason,payload FROM rejection_buckets WHERE source=?1")?;
+        self.connection
+            .prepare("SELECT payload FROM decoy_correlations WHERE source=?1 AND first_seen>=?2")?;
+        self.connection
+            .prepare("SELECT evictions FROM correlation_state WHERE singleton=1")?;
         Ok(())
     }
 
@@ -321,6 +329,7 @@ impl Store {
                     transaction.execute("INSERT INTO events(source,generation,sequence,event_id,occurred_at,payload) VALUES (?1,?2,?3,?4,?5,?6)",
                         params![source.instance, source.generation, event.sequence as i64, event.id, event.occurred_at_ms as i64, bounded_json(event)?])?;
                     report.events_inserted += 1;
+                    super::correlations::record(&transaction, source, event, expiry)?;
                 }
                 for metric in &batch.metrics {
                     if metric.revision as i64 <= old_sequence { continue; }

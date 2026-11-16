@@ -3,6 +3,10 @@ mod filter;
 mod output;
 mod parse;
 
+pub(crate) fn observation_attack_name(category: &str) -> &'static str {
+    attack::attack_name(category)
+}
+
 use std::io::{self, IsTerminal, Write};
 use std::process::Stdio;
 

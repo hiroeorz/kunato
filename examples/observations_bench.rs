@@ -225,7 +225,7 @@ async fn case(
     };
     let quantile = |fraction: f64| timings[((timings.len() - 1) as f64 * fraction) as usize];
     Ok(
-        serde_json::json!({"enabled":enabled,"attack":attack,"requests":count,"seconds":elapsed,"requests_per_second":count as f64 / elapsed,"p50_us":quantile(0.5),"p95_us":quantile(0.95),"p99_us":quantile(0.99),"clients":8,"poll_interval_seconds":1,"exports_ok":export_ok.load(Ordering::Relaxed),"exports_error":export_error.load(Ordering::Relaxed),"missed_minute_updates":final_snapshot.as_ref().map(|snapshot| snapshot.missed_updates)}),
+        serde_json::json!({"enabled":enabled,"attack":attack,"requests":count,"seconds":elapsed,"requests_per_second":count as f64 / elapsed,"p50_us":quantile(0.5),"p95_us":quantile(0.95),"p99_us":quantile(0.99),"clients":8,"poll_interval_seconds":1,"exports_ok":export_ok.load(Ordering::Relaxed),"exports_error":export_error.load(Ordering::Relaxed),"missed_minute_updates":final_snapshot.as_ref().map(|snapshot| snapshot.missed_updates),"missed_additional_updates":final_snapshot.as_ref().and_then(|snapshot| snapshot.additional_missed_updates),"additional_export_omissions":final_snapshot.as_ref().map(|snapshot| snapshot.buckets.iter().filter_map(|bucket|bucket.additional.as_ref()).map(|value|value.export_omissions).sum::<u64>())}),
     )
 }
 

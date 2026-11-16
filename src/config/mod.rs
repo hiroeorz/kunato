@@ -1905,6 +1905,7 @@ impl ContentRoute {
 
 #[derive(Debug)]
 pub struct CompiledConfig {
+    pub observation_id: String,
     pub listen: SocketAddr,
     pub upstream: Upstream,
     pub allowed_hosts: Option<AllowedHosts>,
@@ -2355,7 +2356,10 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         return Err(vec!["invalid PHP profile".to_owned()]);
     };
 
+    let observation_id =
+        crate::console::measurements::identity(&format!("{allowed_hosts:?}:{categories:?}"));
     Ok(CompiledConfig {
+        observation_id,
         listen: spec.listen,
         upstream,
         allowed_hosts,

@@ -8,7 +8,9 @@ in-memory writer queue. Phase 2 adds source minute measurement, bounded event
 reception, collection, and coalescing. The UTC, reason-separated statistics,
 aggregation, and 30-day retention policy in sections 4 and 5 is implemented in
 [Phase 3](monitoring-console-phase3.md), including bounded query/maintenance
-workers and version-three migration. It
+workers and version-three migration. [Phase 4](monitoring-console-phase4.md)
+extends source measurements, aggregate payloads, and compact correlation in
+schema version four. It
 supersedes the earlier 30-day minute / 365-day hour proposal. The queues
 themselves are not durable. Other candidate values remain proposals unless
 explicitly adopted here or in the Phase 1 or Phase 2 contract.
@@ -33,8 +35,8 @@ one-second live collection/publication recommendation and its measurement limits
 
 The proposed deployed console storage directory is `/var/lib/kunato/console/`;
 deployment and ownership setup are not implemented. The Phase 1 library accepts
-an explicit private directory; Phase 3 initializes schema version 3 and migrates
-application-owned versions 1 and 2. The console owns its database;
+an explicit private directory; Phase 4 initializes schema version 4 and migrates
+application-owned versions 1, 2, and 3. The console owns its database;
 the WAF does not open it or write SQL for individual requests. Existing WAF
 configuration, managed rules, and certificate caches retain their own behavior.
 
@@ -219,8 +221,10 @@ The current `RejectionReason` model supplies 22 stable reason identifiers:
 These are terminal mechanisms, not attack classes or arbitrary YAML rule names.
 For example, SQL injection and XSS can both terminate as `rule`; a separate
 attack-class/category/rule breakdown requires its own bounded instrumentation.
-The initial scope is global because Phase 2 does not export site dimensions.
-Do not infer a site from selected event detail.
+The primary history scope remains global. Phase 4 carries quota-bounded
+host-policy site measurements inside supplementary payloads; these are not
+complete per-site primary-reason series. Do not infer a site from selected
+event detail.
 Version the reason definitions with the aggregate contract. A renamed, added,
 or unsupported reason must not reinterpret old rows or turn unknown history
 into measured zero.
@@ -245,9 +249,9 @@ overall rejection count. Label these two percentages separately. Never add
 the request denominator once for every reason.
 
 This dimension applies to rejection counts and their statistics. Connection
-gauges and response-status/latency distributions remain overall measurements;
-the current source cannot reconstruct reason-specific latency from counters
-or selected events.
+gauges and response-status distributions remain overall measurements. Phase 4
+measures reason-specific header-decision latency independently at source; it
+is not reconstructed from selected events.
 
 ### 4.2 Extrema, averages, and merge inputs
 
@@ -276,10 +280,9 @@ minute extrema. Unknown overlap or downtime preserves incomplete coverage.
 
 Connection averages retain connection-time integrals and observed duration.
 Retain compatible latency count/sum and histogram bins for approximate
-quantiles. The current source has an observed connection maximum, but no
-connection minimum or exact per-request latency extrema; additional source
-instrumentation is required before those extrema can be claimed. Histogram
-bin edges are not exact latency minima/maxima. Do not duplicate these overall
+quantiles. Phase 4 adds sampled connection minima and exact captured request
+latency extrema. Older nonempty inputs without these fields keep merged extrema
+unknown. Histogram bin edges are not exact latency minima/maxima. Do not duplicate these overall
 distributions across all reason rows.
 
 If required histogram or distinct-count evidence is unavailable, show the
@@ -360,11 +363,10 @@ dimensions, and event detail require separate budgets.
 Detailed event retention remains independent of statistics. Phase 3 defaults
 selected-event retention to seven days, configurable within the 30-day cap,
 with existing count/byte budgets; it does not extend statistical resolution.
-If compact decoy summaries
-are added, their retention is at most 30 days with independent count/byte
-limits. Compact-summary implementation and enablement remain future work;
-selected-detail expiry is implemented. Neither tier restores expired request
-detail or modifies token validity.
+Phase 4 implements compact decoy summaries with at-most-30-day retention,
+a 4,096-record / 4 MiB payload bound, and explicit capacity evictions. They
+retain admitted selected evidence and do not provide complete traffic counts.
+Neither tier restores expired request detail or modifies token validity.
 
 The compact record may retain:
 
@@ -491,6 +493,7 @@ Before release, validate:
 
 The UTC/reason/precision/30-day policy, schema migration, correction boundaries,
 and bounded query/maintenance workers are implemented in Phase 3. A supported
-online backup procedure, optional compact correlation, web delivery, and
-deployment-specific resource tuning remain later work. Wider buckets use a
-separate version-three history model rather than reinterpreting source minutes.
+online backup procedure, web delivery, and deployment-specific resource tuning
+remain later work. Phase 4 adds optional measurements and compact correlation
+in schema version four. Wider buckets keep a separate history model rather
+than reinterpreting source minutes.

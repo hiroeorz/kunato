@@ -38,6 +38,7 @@ fn minute(start_ms: u64, requests: u64, reason: RejectionReason, rejected: u64) 
     statuses[100] = requests - rejected;
     statuses[303] = rejected;
     MetricBucket {
+        additional: None,
         start_ms,
         site: None,
         revision: 1,
@@ -51,6 +52,7 @@ fn minute(start_ms: u64, requests: u64, reason: RejectionReason, rejected: u64) 
             connection_milliseconds: 2 * MINUTE_MS,
             observed_ms: MINUTE_MS as u32,
             observed_max: 3,
+            observed_min: Some(1),
         }),
         outcomes: Some(Outcomes {
             statuses,
@@ -62,6 +64,8 @@ fn minute(start_ms: u64, requests: u64, reason: RejectionReason, rejected: u64) 
                 bins
             },
             in_flight: 0,
+            latency_min_us: (requests > 0).then_some(1000),
+            latency_max_us: (requests > 0).then_some(1000),
         }),
         coverage: Coverage {
             observed_ms: MINUTE_MS as u32,
@@ -110,6 +114,130 @@ fn drain(store: &mut Store, at: u64) {
         }
     }
     panic!("bounded maintenance did not converge");
+}
+
+#[test]
+fn supplementary_history_survives_coarsening_reopen_and_missing_old_measurements() {
+    use kunato::console::measurements::*;
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(&temp, early);
+    let mut store = Store::open(config.clone()).unwrap();
+    let mut minutes = Vec::new();
+    for index in 0..5 {
+        let requests = index + 1;
+        let mut metric = minute(BASE + index * MINUTE_MS, requests, RejectionReason::Rule, 0);
+        let mut additional = AdditionalMeasurements::measured();
+        additional.completed_requests = requests;
+        additional.upstream_statuses.insert(200, requests);
+        additional.unique_sources.insert("source", b"192.0.2.1");
+        additional.sources.record("192.0.2.1", false, false);
+        additional.operations.insert(Operation::RulesUnchanged, 1);
+        let mut latency = LatencyMeasurements::default();
+        for _ in 0..requests {
+            latency.record(1000);
+        }
+        additional
+            .dimension(DimensionMeasurements {
+                kind: DimensionKind::Site,
+                id: identity("blog"),
+                label: "blog".into(),
+                phase: Phase::Request,
+                counts: DimensionCounts {
+                    requests,
+                    latency,
+                    ..DimensionCounts::default()
+                },
+            })
+            .unwrap();
+        metric.additional = Some(Box::new(additional));
+        minutes.push(metric);
+    }
+    store.write_batch(&batch("a", 1, minutes.clone())).unwrap();
+    drain(&mut store, early());
+    drop(store);
+    let mut store = Store::open(config.clone()).unwrap();
+    let page = store.history(&query(BASE, BASE + 5 * MINUTE_MS)).unwrap();
+    let bucket = &page.buckets[0];
+    assert_eq!(bucket.grain, Grain::FiveMinutes);
+    let value = bucket.additional.as_ref().unwrap();
+    assert_eq!(value.completed_requests, 15);
+    assert_eq!(value.upstream_statuses[&200], 15);
+    assert_eq!(value.operations[&Operation::RulesUnchanged], 5);
+    assert_eq!(value.dimensions[0].counts.latency.mean_us(), Some(1000.0));
+    assert!(value.unique_sources.estimate().unwrap() < 1.1);
+    assert!(!value.incomplete);
+    assert_eq!(bucket.outcomes.as_ref().unwrap().latency_min_us, Some(1000));
+    assert_eq!(bucket.connections.observed_min, Some(1));
+    // A historical producer did not measure supplementary fields or exact extrema.
+    drop(store);
+    let other = tempfile::tempdir().unwrap();
+    let mut store = Store::open(self::config(&other, early)).unwrap();
+    minutes[0].additional = None;
+    minutes[0].outcomes.as_mut().unwrap().latency_min_us = None;
+    minutes[0].outcomes.as_mut().unwrap().latency_max_us = None;
+    minutes[0].connections.as_mut().unwrap().observed_min = None;
+    store.write_batch(&batch("a", 1, minutes)).unwrap();
+    drain(&mut store, early());
+    let page = store.history(&query(BASE, BASE + 5 * MINUTE_MS)).unwrap();
+    let bucket = &page.buckets[0];
+    assert_eq!(bucket.additional.as_ref().unwrap().completed_requests, 14);
+    assert!(bucket.additional.as_ref().unwrap().incomplete);
+    assert_eq!(bucket.outcomes.as_ref().unwrap().latency_min_us, None);
+    assert_eq!(bucket.outcomes.as_ref().unwrap().latency_max_us, None);
+    assert_eq!(bucket.connections.observed_min, None);
+}
+
+#[test]
+fn version_three_migration_preserves_checkpoints_and_unknown_extrema() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(&temp, early);
+    let mut store = Store::open(config.clone()).unwrap();
+    let value = batch("a", 1, vec![minute(BASE, 5, RejectionReason::Rule, 2)]);
+    store.write_batch(&value).unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(config.directory.join("history.sqlite3")).unwrap();
+    let raw: String = connection
+        .query_row("SELECT payload FROM metric_buckets", [], |row| row.get(0))
+        .unwrap();
+    let mut payload: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    payload.as_object_mut().unwrap().remove("additional");
+    payload["outcomes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("latency_min_us");
+    payload["outcomes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("latency_max_us");
+    payload["connections"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observed_min");
+    connection
+        .execute(
+            "UPDATE metric_buckets SET payload=?1",
+            [payload.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE decoy_correlations; DROP TABLE correlation_state; PRAGMA user_version=3;",
+        )
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(config.clone()).unwrap();
+    assert_eq!(
+        store.checkpoint(&value.checkpoint.source).unwrap(),
+        Some(value.checkpoint)
+    );
+    drain(&mut store, early());
+    let page = store.history(&query(BASE, BASE + 5 * MINUTE_MS)).unwrap();
+    assert!(page.buckets[0].additional.is_none());
+    assert_eq!(
+        page.buckets[0].outcomes.as_ref().unwrap().latency_min_us,
+        None
+    );
+    assert_eq!(sql_count(&config, "PRAGMA user_version"), 4);
 }
 
 fn sql_count(config: &StorageConfig, sql: &str) -> u64 {
@@ -596,7 +724,7 @@ fn version_two_migration_backfills_without_losing_raw_rows_or_checkpoints() {
     store.write_batch(&value).unwrap();
     drop(store);
     let connection = rusqlite::Connection::open(config.directory.join("history.sqlite3")).unwrap();
-    connection.execute_batch("DROP TABLE rejection_buckets; DROP TABLE history_buckets; DROP TABLE history_dirty; DROP TABLE history_state; DROP TABLE history_sources; DROP INDEX metric_scope_time; DROP INDEX metric_expiry; DROP INDEX events_expiry; PRAGMA user_version=2;").unwrap();
+    connection.execute_batch("DROP TABLE decoy_correlations; DROP TABLE correlation_state; DROP TABLE rejection_buckets; DROP TABLE history_buckets; DROP TABLE history_dirty; DROP TABLE history_state; DROP TABLE history_sources; DROP INDEX metric_scope_time; DROP INDEX metric_expiry; DROP INDEX events_expiry; PRAGMA user_version=2;").unwrap();
     connection
         .execute_batch("CREATE TABLE history_dirty(unexpected INTEGER);")
         .unwrap();
@@ -635,7 +763,7 @@ fn version_two_migration_backfills_without_losing_raw_rows_or_checkpoints() {
         page.buckets[0].reasons[&RejectionReason::Rule].total(),
         Some(2)
     );
-    assert_eq!(sql_count(&config, "PRAGMA user_version"), 3);
+    assert_eq!(sql_count(&config, "PRAGMA user_version"), 4);
 }
 
 #[test]

@@ -120,7 +120,8 @@ remain unavailable, including old history without the field.
 Show count-series extrema on a common complete-one-minute basis and average
 rates from compatible count/duration inputs. Do not add reason maxima/minima
 to obtain overall extrema. These reason series are mechanism breakdowns;
-attack-class/category/rule breakdowns still have separate prerequisites.
+Phase 4 adds bounded attack-class/category/rule measurements with independent
+match populations and explicit omissions.
 
 ### MET-05: Detection breakdowns and rankings
 
@@ -152,10 +153,11 @@ attack-class/category/rule breakdowns still have separate prerequisites.
 - State what the latency measures and what requests contribute to it.
 
 Phase 2 supplies overall client-visible statuses and header-decision latency
-histograms. Upstream-only status history and reason-specific latency need
-additional instrumentation. Exact latency minima/maxima are unavailable in
-the current source; histogram bin edges are not exact extrema. The prototype
-still demonstrates fictional values.
+histograms. [Phase 4](monitoring-console-phase4.md) adds upstream-only status
+history, reason-specific latency, and exact observed latency extrema with
+incomplete-coverage metadata. Historical missing fields remain unavailable;
+histogram bin edges are not exact extrema. The prototype still demonstrates
+fictional values.
 
 ### MET-08: Protection and maintenance
 

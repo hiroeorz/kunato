@@ -5983,6 +5983,16 @@ async fn websocket_upgrade_is_tunneled() {
         handshake.starts_with("HTTP/1.1 101"),
         "unexpected handshake: {handshake}"
     );
+    let packet = running.metrics.observations.snapshot(0).unwrap();
+    assert_eq!(
+        packet
+            .buckets
+            .iter()
+            .filter_map(|bucket| bucket.additional.as_ref())
+            .filter_map(|value| value.upstream_statuses.get(&101))
+            .sum::<u64>(),
+        1
+    );
 
     let frame = client_ws_frame(0x1, b"ping", true);
     let expected = server_ws_frame(0x1, b"ping", true);

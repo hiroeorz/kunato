@@ -91,6 +91,10 @@ pub struct Outcomes {
     /// Exclusive bins with inclusive upper bounds in LATENCY_BOUNDS_US, then +Inf.
     pub latency_bins: [u64; 15],
     pub in_flight: u64,
+    #[serde(default)]
+    pub latency_min_us: Option<u64>,
+    #[serde(default)]
+    pub latency_max_us: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +188,8 @@ pub struct ConnectionGauge {
     pub connection_milliseconds: u64,
     pub observed_ms: u32,
     pub observed_max: u64,
+    #[serde(default)]
+    pub observed_min: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +204,8 @@ pub struct MetricBucket {
     pub coverage: Coverage,
     #[serde(default)]
     pub outcomes: Option<Outcomes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional: Option<Box<super::measurements::AdditionalMeasurements>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +335,9 @@ impl WriteBatch {
 
 impl MetricBucket {
     pub fn validate(&self) -> Result<(), Error> {
+        if let Some(additional) = &self.additional {
+            additional.validate()?;
+        }
         timestamp(self.start_ms)?;
         position(self.revision)?;
         if !self.start_ms.is_multiple_of(MINUTE_MS) || self.start_ms > i64::MAX as u64 - MINUTE_MS {
@@ -342,6 +353,18 @@ impl MetricBucket {
         }
         if let Some(outcomes) = &self.outcomes
             && (outcomes.statuses.len() != 500
+                || outcomes.latency_min_us.is_some() != outcomes.latency_max_us.is_some()
+                || outcomes.latency_min_us > outcomes.latency_max_us
+                || (outcomes.latency_count == 0
+                    && (outcomes.latency_min_us.is_some() || outcomes.latency_sum_us != 0))
+                || outcomes.latency_min_us.is_some_and(|min| {
+                    u128::from(min) * u128::from(outcomes.latency_count)
+                        > u128::from(outcomes.latency_sum_us)
+                })
+                || outcomes.latency_max_us.is_some_and(|max| {
+                    u128::from(max) * u128::from(outcomes.latency_count)
+                        < u128::from(outcomes.latency_sum_us)
+                })
                 || outcomes
                     .statuses
                     .iter()
@@ -359,6 +382,9 @@ impl MetricBucket {
         }
         if let Some(gauge) = &self.connections
             && (u64::from(gauge.observed_ms) > MINUTE_MS
+                || gauge
+                    .observed_min
+                    .is_some_and(|min| min > gauge.observed_max)
                 || gauge.observed_ms == 0 && gauge.connection_milliseconds != 0)
         {
             return Err(Error::Invalid("invalid connection gauge coverage"));
@@ -462,7 +488,7 @@ fn text(value: &str, max: usize) -> Result<(), Error> {
     Ok(())
 }
 
-fn redacted_path(value: &str) -> Result<(), Error> {
+pub(super) fn redacted_path(value: &str) -> Result<(), Error> {
     text(value, 2048)?;
     if value != "[redacted]"
         && (!value.starts_with('/')

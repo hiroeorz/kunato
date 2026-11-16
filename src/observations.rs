@@ -18,6 +18,7 @@ use crate::console::model::{
     ConnectionGauge, Counters, Coverage, EventRecord, LATENCY_BOUNDS_US, MINUTE_MS, MetricBucket,
     Outcomes, Phase, RejectionReason, SourceIdentity,
 };
+mod additional;
 
 pub const MINUTE_SLOTS: usize = 10;
 pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
@@ -33,7 +34,10 @@ const CONNECTION_MS: usize = IN_FLIGHT + 1;
 const CONNECTION_COVERAGE: usize = CONNECTION_MS + 1;
 const CONNECTION_MAX: usize = CONNECTION_COVERAGE + 1;
 const CONNECTION_SAMPLES: usize = CONNECTION_MAX + 1;
-const FIELDS: usize = CONNECTION_SAMPLES + 1;
+const LATENCY_MIN: usize = CONNECTION_SAMPLES + 1;
+const LATENCY_MAX: usize = LATENCY_MIN + 1;
+const CONNECTION_MIN: usize = LATENCY_MAX + 1;
+const FIELDS: usize = CONNECTION_MIN + 1;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -88,7 +92,13 @@ impl Slot {
             gate: AtomicU64::new(0),
             version: AtomicU64::new(0),
             minute: AtomicU64::new(EMPTY),
-            values: array::from_fn(|_| AtomicU64::new(0)),
+            values: array::from_fn(|index| {
+                AtomicU64::new(if index == LATENCY_MIN || index == CONNECTION_MIN {
+                    u64::MAX
+                } else {
+                    0
+                })
+            }),
         }
     }
     fn pin(&self, minute: u64, initialize: bool) -> Option<Pinned<'_>> {
@@ -112,8 +122,15 @@ impl Slot {
         }
         let old = self.minute.load(Ordering::Relaxed);
         if old == EMPTY || old < minute {
-            for value in &self.values {
-                value.store(0, Ordering::Relaxed);
+            for (index, value) in self.values.iter().enumerate() {
+                value.store(
+                    if index == LATENCY_MIN || index == CONNECTION_MIN {
+                        u64::MAX
+                    } else {
+                        0
+                    },
+                    Ordering::Relaxed,
+                );
             }
             self.minute.store(minute, Ordering::Release);
         }
@@ -148,12 +165,14 @@ pub struct StatisticsSnapshot {
     pub events: Vec<EventRecord>,
     pub events_omitted: u64,
     pub event_sequence: u64,
+    #[serde(default)]
+    pub additional_missed_updates: Option<u64>,
 }
 
 impl StatisticsSnapshot {
     pub fn validate(&self) -> Result<(), Error> {
         self.source.validate()?;
-        if self.version != 2
+        if !matches!(self.version, 2 | 3)
             || self.sequence == 0
             || self.sequence > i64::MAX as u64
             || self.started_at_ms > self.observed_at_ms
@@ -212,6 +231,7 @@ struct Detail {
 }
 
 pub struct Observations {
+    additional: additional::Recorder,
     enabled: bool,
     source: SourceIdentity,
     started: Instant,
@@ -251,6 +271,7 @@ impl Observations {
             .as_millis()
             .min(i64::MAX as u128) as u64;
         Self {
+            additional: additional::Recorder::new(&generation),
             enabled: true,
             source: SourceIdentity {
                 instance: "waf".into(),
@@ -311,6 +332,14 @@ impl Observations {
                 self.cumulative[field].fetch_add(value, Ordering::Relaxed);
             }
         }
+        self.update_slot(start, |slot| {
+            for &(field, value) in updates {
+                slot.values[field].fetch_add(value, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn update_slot(&self, start: u64, update: impl FnOnce(&Slot)) {
         let latest = self.newest.fetch_max(start, Ordering::Relaxed).max(start);
         if latest.saturating_sub(start) >= MINUTE_SLOTS as u64 * MINUTE_MS {
             self.lost(start);
@@ -318,9 +347,7 @@ impl Observations {
         }
         let slot = &self.slots[(start / MINUTE_MS) as usize % MINUTE_SLOTS];
         if let Some(pinned) = slot.pin(start, true) {
-            for &(field, value) in updates {
-                pinned.0.values[field].fetch_add(value, Ordering::Relaxed);
-            }
+            update(pinned.0);
         } else {
             self.lost(start);
         }
@@ -328,6 +355,30 @@ impl Observations {
 
     pub fn count(&self, start: u64, count: Count) {
         self.update(start, count as usize, 1);
+    }
+
+    pub fn configure(&self, config: &crate::config::CompiledConfig) {
+        self.additional.configure(self.now_ms(), config);
+    }
+    pub fn operation(&self, kind: crate::console::measurements::Operation) {
+        self.additional.operation(self.now_ms(), kind);
+    }
+    pub fn certificate(&self, expires: u64) {
+        self.additional.certificate(self.now_ms(), expires);
+    }
+    pub fn rules_success(&self) {
+        self.additional.rules_success(self.now_ms());
+    }
+    pub fn credential_id(&self, at: Option<u64>, id: &str) {
+        if self.enabled {
+            let partition = CURRENT
+                .try_with(|cell| cell.try_borrow().ok().map(|value| value.partition))
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            self.additional
+                .credential(at.unwrap_or_else(|| minute(self.now_ms())), partition, id);
+        }
     }
 
     pub fn record_event(&self, event: EventRecord) {
@@ -483,6 +534,7 @@ impl Observations {
                 let slot = &self.slots[(bucket / MINUTE_MS) as usize % MINUTE_SLOTS];
                 if let Some(pinned) = slot.pin(bucket, true) {
                     pinned.0.values[CONNECTION_MAX].fetch_max(value, Ordering::Relaxed);
+                    pinned.0.values[CONNECTION_MIN].fetch_min(value, Ordering::Relaxed);
                 }
                 at = end;
             }
@@ -492,6 +544,7 @@ impl Observations {
             self.slots[(current / MINUTE_MS) as usize % MINUTE_SLOTS].pin(current, true)
         {
             pinned.0.values[CONNECTION_MAX].fetch_max(active_connections, Ordering::Relaxed);
+            pinned.0.values[CONNECTION_MIN].fetch_min(active_connections, Ordering::Relaxed);
             pinned.0.values[CONNECTION_SAMPLES].fetch_add(1, Ordering::Relaxed);
         } else {
             self.lost(current);
@@ -533,10 +586,14 @@ impl Observations {
                         connections: None,
                         coverage: Coverage::default(),
                         outcomes: None,
+                        additional: None,
                     });
                 if !bucket.coverage.incomplete {
                     bucket.coverage.incomplete = true;
                     bucket.revision = sequence;
+                }
+                if let Some(additional) = &mut bucket.additional {
+                    additional.incomplete = true;
                 }
                 buckets.push(bucket);
                 continue;
@@ -556,6 +613,7 @@ impl Observations {
                         connection_milliseconds: values[CONNECTION_MS],
                         observed_ms: values[CONNECTION_COVERAGE].min(MINUTE_MS) as u32,
                         observed_max: values[CONNECTION_MAX],
+                        observed_min: Some(values[CONNECTION_MIN]),
                     }),
                 coverage: Coverage {
                     observed_ms: observed,
@@ -571,8 +629,27 @@ impl Observations {
                     latency_sum_us: values[LATENCY_SUM],
                     latency_bins: array::from_fn(|index| values[LATENCY + index]),
                     in_flight: values[IN_FLIGHT],
+                    latency_min_us: (values[LATENCY_COUNT] > 0).then_some(values[LATENCY_MIN]),
+                    latency_max_us: (values[LATENCY_COUNT] > 0).then_some(values[LATENCY_MAX]),
                 }),
+                additional: self.additional.capture(at),
             };
+            if let Some(additional) = &mut bucket.additional {
+                additional.incomplete |= bucket.coverage.incomplete
+                    || additional.completed_requests != values[Count::Requests as usize];
+            }
+            while serde_json::to_vec(&bucket).map_or(usize::MAX, |value| value.len())
+                > crate::console::model::MAX_RECORD_BYTES
+            {
+                if !bucket
+                    .additional
+                    .as_mut()
+                    .is_some_and(|value| value.shrink())
+                {
+                    bucket.additional = None;
+                    break;
+                }
+            }
             if let Some(previous) = export
                 .previous
                 .iter()
@@ -593,7 +670,7 @@ impl Observations {
         let events = export.events.clone();
         let event_sequence = export.event_sequence;
         let packet = StatisticsSnapshot {
-            version: 2,
+            version: 3,
             source: self.source.clone(),
             sequence,
             observed_at_ms: now,
@@ -606,6 +683,7 @@ impl Observations {
             events,
             events_omitted: self.detail_omitted.load(Ordering::Relaxed),
             event_sequence,
+            additional_missed_updates: Some(self.additional.missed()),
         };
         packet.validate()?;
         export.sequence = sequence;
@@ -652,6 +730,7 @@ fn minute(time: u64) -> u64 {
 }
 
 struct RequestMeasurement {
+    partition: usize,
     history: Arc<Observations>,
     start: u64,
     began: Instant,
@@ -662,10 +741,18 @@ struct RequestMeasurement {
     in_flight_counted: bool,
     client: Option<std::net::IpAddr>,
     peer: Option<std::net::IpAddr>,
+    reason: Option<RejectionReason>,
+    site: String,
+    configuration: String,
+    path: Option<String>,
+    path_hash: Option<[u8; 32]>,
+    upstream_failure: bool,
+    upstream_timeout: bool,
 }
 impl RequestMeasurement {
     fn new(history: Arc<Observations>) -> Self {
         let start = minute(history.now_ms());
+        let partition = history.additional.next_partition();
         history.cumulative[Count::Requests as usize].fetch_add(1, Ordering::Relaxed);
         history.newest.fetch_max(start, Ordering::Relaxed);
         let in_flight_counted = {
@@ -681,6 +768,7 @@ impl RequestMeasurement {
         };
         Self {
             history,
+            partition,
             start,
             began: Instant::now(),
             rejected: false,
@@ -690,6 +778,13 @@ impl RequestMeasurement {
             in_flight_counted,
             client: None,
             peer: None,
+            reason: None,
+            site: "unattributed".into(),
+            configuration: String::new(),
+            path: None,
+            path_hash: None,
+            upstream_failure: false,
+            upstream_timeout: false,
         }
     }
     fn finish(&mut self, status: u16) {
@@ -706,14 +801,36 @@ impl RequestMeasurement {
             .iter()
             .position(|upper| micros <= *upper)
             .unwrap_or(14);
-        self.history.update_many(
-            self.start,
-            &[
+        self.history.update_slot(self.start, |slot| {
+            for (field, value) in [
                 (STATUS + usize::from(status - 100), 1),
                 (LATENCY_COUNT, 1),
                 (LATENCY_SUM, micros),
                 (LATENCY + bin, 1),
-            ],
+            ] {
+                slot.values[field].fetch_add(value, Ordering::Relaxed);
+            }
+            slot.values[LATENCY_MIN].fetch_min(micros, Ordering::Relaxed);
+            slot.values[LATENCY_MAX].fetch_max(micros, Ordering::Relaxed);
+        });
+        self.record_additional(Some(micros));
+    }
+
+    fn record_additional(&self, micros: Option<u64>) {
+        self.history.additional.request(
+            self.start,
+            additional::Request {
+                partition: self.partition,
+                site: &self.site,
+                source: self.client,
+                path: self.path.as_deref(),
+                path_hash: self.path_hash.as_ref(),
+                rejected: self.reason,
+                logged: self.logged,
+                micros,
+                upstream_failure: self.upstream_failure,
+                upstream_timeout: self.upstream_timeout,
+            },
         );
     }
 }
@@ -721,6 +838,7 @@ impl Drop for RequestMeasurement {
     fn drop(&mut self) {
         if !self.finished {
             self.history.count(self.start, Count::Aborted);
+            self.record_additional(None);
         }
         if self.in_flight_counted {
             let slot = &self.history.slots[(self.start / MINUTE_MS) as usize % MINUTE_SLOTS];
@@ -771,12 +889,71 @@ pub fn identity(source: crate::client_ip::ClientSource) {
     });
 }
 
+pub fn request_head(config: &crate::config::CompiledConfig, parts: &http::request::Parts) {
+    let _ = CURRENT.try_with(|cell| {
+        if let Ok(mut value) = cell.try_borrow_mut() {
+            value.configuration = config.observation_id.clone();
+            value.path = Some(additional::path(parts.uri.path()));
+            let hash = ring::digest::digest(&ring::digest::SHA256, parts.uri.path().as_bytes());
+            let mut bytes = [0; 32];
+            bytes.copy_from_slice(hash.as_ref());
+            value.path_hash = Some(bytes);
+            value.site = match &config.allowed_hosts {
+                None => "default".into(),
+                Some(allowed) if allowed.check(parts).is_ok() => parts
+                    .uri
+                    .authority()
+                    .map(|value| value.as_str())
+                    .or_else(|| {
+                        parts
+                            .headers
+                            .get(http::header::HOST)
+                            .and_then(|value| value.to_str().ok())
+                    })
+                    .and_then(|host| allowed.observation_site(host))
+                    .unwrap_or_else(|| "unattributed".into()),
+                Some(_) => "unattributed".into(),
+            };
+        }
+    });
+}
+
+pub fn upstream_status(status: u16) {
+    let _ = CURRENT.try_with(|cell| {
+        if let Ok(value) = cell.try_borrow() {
+            value
+                .history
+                .additional
+                .upstream(value.start, value.partition, status);
+        }
+    });
+}
+
+pub fn dimension_match(phase: Phase, category: &str, rule: &str, action: crate::config::Action) {
+    let _ = CURRENT.try_with(|cell| {
+        if let Ok(value) = cell.try_borrow() {
+            value.history.additional.rule(
+                value.start,
+                value.partition,
+                additional::RuleMatch {
+                    configuration: &value.configuration,
+                    phase,
+                    category,
+                    rule,
+                    action,
+                },
+            );
+        }
+    });
+}
+
 pub fn reject(reason: RejectionReason) {
     let _ = CURRENT.try_with(|value| {
         if let Ok(mut value) = value.try_borrow_mut()
             && !value.rejected
         {
             value.rejected = true;
+            value.reason = Some(reason);
             value.history.count(value.start, Count::Rejected);
             value
                 .history
@@ -836,7 +1013,9 @@ pub fn rule_match(phase: Phase, logged: bool) {
 
 pub fn service_failure(timeout: bool) {
     let _ = CURRENT.try_with(|value| {
-        if let Ok(value) = value.try_borrow() {
+        if let Ok(mut value) = value.try_borrow_mut() {
+            value.upstream_failure |= !timeout;
+            value.upstream_timeout |= timeout;
             value.history.count(
                 value.start,
                 if timeout {
@@ -916,6 +1095,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supplementary_counts_keep_sites_match_multiplicity_status_origin_and_exact_latency() {
+        use crate::console::measurements::DimensionKind;
+        let history = history();
+        let config=crate::config::parse("listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\nallowed_hosts: [a.example,b.example,'*.other.example']\ncategories: []\n").unwrap();
+        history.configure(&config);
+        for (host, ip, rejected) in [
+            ("a.example", "192.0.2.1", true),
+            ("b.example", "192.0.2.2", false),
+        ] {
+            observe(history.clone(), async {
+                let (parts, _) = http::Request::builder()
+                    .uri("/token/private-value?secret=hidden")
+                    .header("host", host)
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                request_head(&config, &parts);
+                CURRENT.with(|value| value.borrow_mut().client = Some(ip.parse().unwrap()));
+                rule_match(Phase::Request, true);
+                rule_match(Phase::Request, true);
+                dimension_match(
+                    Phase::Request,
+                    "sql-injection",
+                    "first",
+                    crate::config::Action::Log,
+                );
+                dimension_match(
+                    Phase::Request,
+                    "sql-injection",
+                    "second",
+                    crate::config::Action::Log,
+                );
+                upstream_status(200);
+                if rejected {
+                    reject(RejectionReason::ResponseRule);
+                }
+                Response::builder()
+                    .status(if rejected { 403 } else { 200 })
+                    .body(())
+                    .unwrap()
+            })
+            .await;
+        }
+        let packet = history.snapshot_at(60_000, 60_000, 0).unwrap();
+        let bucket = &packet.buckets[0];
+        let values = bucket.additional.as_ref().unwrap();
+        let outcomes = bucket.outcomes.as_ref().unwrap();
+        assert_eq!(values.completed_requests, 2);
+        assert_eq!(values.upstream_statuses.get(&200), Some(&2));
+        assert!(!values.upstream_statuses.contains_key(&403));
+        assert_eq!(
+            values
+                .dimensions
+                .iter()
+                .filter(|value| value.kind == DimensionKind::Site)
+                .map(|value| value.counts.requests)
+                .sum::<u64>(),
+            2
+        );
+        assert_eq!(
+            values
+                .dimensions
+                .iter()
+                .filter(|value| value.kind == DimensionKind::Category)
+                .map(|value| value.counts.log_matches)
+                .sum::<u64>(),
+            4
+        );
+        let sites: Vec<_> = values
+            .dimensions
+            .iter()
+            .filter(|value| value.kind == DimensionKind::Site)
+            .collect();
+        assert_eq!(sites.len(), 2);
+        assert_eq!(
+            sites
+                .iter()
+                .map(|value| value.counts.latency.sum_us)
+                .sum::<u64>(),
+            outcomes.latency_sum_us
+        );
+        assert_eq!(
+            sites
+                .iter()
+                .filter_map(|value| value.counts.latency.min_us)
+                .min(),
+            outcomes.latency_min_us
+        );
+        assert_eq!(
+            sites
+                .iter()
+                .filter_map(|value| value.counts.latency.max_us)
+                .max(),
+            outcomes.latency_max_us
+        );
+        assert_eq!(
+            values.reason_latency[&RejectionReason::ResponseRule].count,
+            1
+        );
+        assert_eq!(values.paths.entries.len(), 1);
+        assert_eq!(values.paths.entries[0].key, "/token/[redacted]");
+        assert!(
+            !serde_json::to_string(values)
+                .unwrap()
+                .contains("private-value")
+        );
+        assert!(!values.incomplete);
+        assert_eq!(values.sources.entries.len(), 2);
+    }
+
+    #[tokio::test]
     async fn rejection_and_log_counts_are_once_per_request_and_status_is_separate() {
         let history = history();
         observe(history.clone(), async {
@@ -952,6 +1242,50 @@ mod tests {
             1
         );
         assert_eq!(snapshot.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn high_cardinality_exports_fit_the_record_budget_and_disclose_trimming() {
+        let history = history();
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\ncategories: []\n",
+        )
+        .unwrap();
+        history.configure(&config);
+        for index in 0..200 {
+            observe(history.clone(), async {
+                let (parts, _) = http::Request::builder()
+                    .uri(format!("/path-{index}"))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                request_head(&config, &parts);
+                CURRENT.with(|value| {
+                    value.borrow_mut().client = Some(format!("192.0.2.{index}").parse().unwrap())
+                });
+                dimension_match(
+                    Phase::Request,
+                    &format!("category-{}", index % 40),
+                    &format!("rule-{index}-{}", "x".repeat(80)),
+                    crate::config::Action::Log,
+                );
+                upstream_status(100 + index as u16);
+                Response::new(())
+            })
+            .await;
+        }
+        let packet = history.snapshot_at(60_000, 60_000, 0).unwrap();
+        packet.validate().unwrap();
+        let bucket = &packet.buckets[0];
+        assert_eq!(bucket.counters.requests, Some(200));
+        let values = bucket.additional.as_ref().unwrap();
+        assert!(values.incomplete);
+        assert!(values.export_omissions > 0);
+        assert!(values.dimension_overflow > 0);
+        assert!(
+            serde_json::to_vec(bucket).unwrap().len() <= crate::console::model::MAX_RECORD_BYTES
+        );
+        assert_eq!(packet.additional_missed_updates, Some(0));
     }
 
     #[tokio::test]

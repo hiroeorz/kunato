@@ -1,8 +1,10 @@
 //! Console collection and persistence foundations, independent of WAF forwarding.
 
 pub mod collector;
+pub mod correlations;
 pub mod history;
 mod history_store;
+pub mod measurements;
 pub mod model;
 pub mod storage;
 pub mod writer;

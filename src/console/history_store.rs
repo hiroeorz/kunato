@@ -118,6 +118,7 @@ impl Store {
                 "DELETE FROM history_buckets WHERE rowid IN (SELECT rowid FROM history_buckets WHERE start_ms<?1 ORDER BY start_ms LIMIT 8)",
                 "DELETE FROM metric_buckets WHERE rowid IN (SELECT rowid FROM metric_buckets WHERE start_ms<?1 ORDER BY start_ms LIMIT 64)",
                 "DELETE FROM history_dirty WHERE rowid IN (SELECT rowid FROM history_dirty WHERE start_ms<?1 ORDER BY start_ms LIMIT 64)",
+                "DELETE FROM decoy_correlations WHERE rowid IN (SELECT rowid FROM decoy_correlations WHERE first_seen<?1 ORDER BY first_seen LIMIT 16)",
             ] { report.deleted_rows += transaction.execute(sql, [expiry as i64])? as u64; }
             report.deleted_rows += transaction.execute("DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE occurred_at<?1 ORDER BY occurred_at LIMIT 64)", [event_expiry as i64])? as u64;
             let old_sources: Vec<(String,String)> = {
@@ -306,6 +307,18 @@ fn save_bucket(
     bucket.validate()?;
     let mut stored = bucket.clone();
     stored.reasons.clear();
+    // Leave room for SQL row keys under the connection's 64 KiB length limit.
+    while serde_json::to_vec(&stored).map_or(usize::MAX, |value| value.len())
+        > MAX_HISTORY_BYTES - 1024
+    {
+        if !stored
+            .additional
+            .as_mut()
+            .is_some_and(|value| value.shrink())
+        {
+            return Err(Error::Invalid("history record exceeds byte limit"));
+        }
+    }
     connection.execute("INSERT INTO history_buckets(source,site,start_ms,grain_ms,payload) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(source,site,start_ms) DO UPDATE SET grain_ms=excluded.grain_ms,payload=excluded.payload",params![source,site,bucket.start_ms as i64,bucket.grain.milliseconds() as i64,encode(&stored)?])?;
     for reason in RejectionReason::ALL {
         let name =

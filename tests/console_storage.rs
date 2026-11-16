@@ -51,6 +51,7 @@ fn batch(sequence: u64) -> WriteBatch {
         },
         events: vec![event(sequence)],
         metrics: vec![MetricBucket {
+            additional: None,
             outcomes: None,
             start_ms: 60_000,
             site: None,
@@ -64,6 +65,7 @@ fn batch(sequence: u64) -> WriteBatch {
                 connection_milliseconds: 5000,
                 observed_ms: 1000,
                 observed_max: 6,
+                observed_min: Some(1),
             }),
             coverage: Coverage {
                 observed_ms: 1000,
@@ -86,6 +88,118 @@ fn storage(temp: &tempfile::TempDir) -> StorageConfig {
     let mut config = StorageConfig::new(temp.path().join("history"));
     config.clock = || 120_000;
     config
+}
+
+#[test]
+fn compact_decoy_evidence_is_idempotent_bounded_and_expires_without_extending_its_lifetime() {
+    use kunato::console::correlations::CorrelationQuery;
+    let temp = tempfile::tempdir().unwrap();
+    let config = storage(&temp);
+    let mut store = Store::open(config.clone()).unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut value = batch(7);
+    value.metrics.clear();
+    value.events = (1..=7)
+        .map(|sequence| {
+            let mut record = event(sequence);
+            record.kind = EventKind::Decoy;
+            record.client = Some(format!("192.0.2.{sequence}").parse().unwrap());
+            record.decoy = Some(DecoyEvidence {
+                credential_id: id.into(),
+                context: if sequence == 1 {
+                    DecoyContext::Issued
+                } else {
+                    DecoyContext::Credential
+                },
+                issued_at_ms: Some(60_001),
+                age_seconds: Some(0),
+                lure: Some("/.env".into()),
+                template: Some("dotenv".into()),
+            });
+            record
+        })
+        .collect();
+    store.write_batch(&value).unwrap();
+    assert!(store.write_batch(&value).unwrap().replayed);
+    drop(store);
+    let mut store = Store::open(config.clone()).unwrap();
+    let query = CorrelationQuery {
+        source: source().instance,
+        credential_id: Some(id.to_uppercase()),
+        from_ms: 0,
+        until_ms: 120_000,
+        limit: 128,
+    };
+    let page = store.correlations(&query).unwrap();
+    assert_eq!(page.records.len(), 1);
+    let record = &page.records[0];
+    assert_eq!(record.issued_at_ms, Some(60_001));
+    assert_eq!(record.credential_evidence_count, 6);
+    assert_eq!(record.blocked_evidence_count, 6);
+    assert_eq!(record.reuse_clients.len(), 4);
+    assert!(record.addresses_incomplete);
+    assert_eq!(record.issuance_clients.len(), 1);
+    let mut reuse = batch(8);
+    reuse.metrics.clear();
+    reuse.events[0].kind = EventKind::Decoy;
+    reuse.events[0].decoy = value.events[1].decoy.clone();
+    store.write_batch(&reuse).unwrap();
+    assert_eq!(
+        store.correlations(&query).unwrap().records[0].first_seen_ms,
+        60_001
+    );
+    assert_eq!(
+        store.correlations(&query).unwrap().records[0].credential_evidence_count,
+        7
+    );
+    store
+        .maintain_at(kunato::console::history::RETENTION_MS + 3_600_000)
+        .unwrap();
+    assert!(store.correlations(&query).unwrap().records.is_empty());
+    let connection = rusqlite::Connection::open(config.directory.join("history.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM decoy_correlations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn compact_evidence_without_issuance_does_not_invent_an_issuance_trail() {
+    use kunato::console::correlations::CorrelationQuery;
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(storage(&temp)).unwrap();
+    let mut value = batch(1);
+    value.events[0].kind = EventKind::Decoy;
+    value.events[0].decoy = Some(DecoyEvidence {
+        credential_id: "0123456789abcdef0123456789abcdef".into(),
+        context: DecoyContext::Credential,
+        issued_at_ms: Some(59_000),
+        age_seconds: Some(1),
+        lure: None,
+        template: None,
+    });
+    store.write_batch(&value).unwrap();
+    let page = store
+        .correlations(&CorrelationQuery {
+            source: source().instance,
+            credential_id: None,
+            from_ms: 0,
+            until_ms: 120_000,
+            limit: 128,
+        })
+        .unwrap();
+    assert_eq!(page.records[0].issued_at_ms, None);
+    assert!(page.records[0].issuance_clients.is_empty());
+    assert_eq!(page.records[0].credential_evidence_count, 1);
+    assert_eq!(
+        store.metrics(&source(), window()).unwrap()[0]
+            .counters
+            .requests,
+        Some(10)
+    );
 }
 
 fn slow_writer() -> WriterConfig {
@@ -371,7 +485,7 @@ fn version_one_history_migrates_without_inventing_new_measurements() {
         )
         .unwrap();
     connection.pragma_update(None, "user_version", 1).unwrap();
-    connection.execute_batch("DROP TABLE rejection_buckets; DROP TABLE history_buckets; DROP TABLE history_dirty; DROP TABLE history_state; DROP TABLE history_sources; DROP INDEX metric_scope_time; DROP INDEX metric_expiry; DROP INDEX events_expiry;").unwrap();
+    connection.execute_batch("DROP TABLE decoy_correlations; DROP TABLE correlation_state; DROP TABLE rejection_buckets; DROP TABLE history_buckets; DROP TABLE history_dirty; DROP TABLE history_state; DROP TABLE history_sources; DROP INDEX metric_scope_time; DROP INDEX metric_expiry; DROP INDEX events_expiry;").unwrap();
     drop(connection);
     let mut store = Store::open(config.clone()).unwrap();
     let rows = store.metrics(&source(), window()).unwrap();
@@ -403,7 +517,7 @@ fn version_one_history_migrates_without_inventing_new_measurements() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
 }
 

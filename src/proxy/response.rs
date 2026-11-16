@@ -225,14 +225,26 @@ pub(crate) async fn inspect(
     );
     let outcome = eval::evaluate_response(config, &view, &response_view);
 
-    if outcome.allowed.is_some() {
+    if let Some(allowed) = &outcome.allowed {
         crate::observations::rule_match(crate::console::model::Phase::Response, false);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Response,
+            &allowed.category,
+            &allowed.rule,
+            crate::config::Action::Allow,
+        );
     }
     if !outcome.logs.is_empty() {
         metrics.response_logged.fetch_add(1, Ordering::Relaxed);
     }
     for record in &outcome.logs {
         crate::observations::rule_match(crate::console::model::Phase::Response, true);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Response,
+            &record.category,
+            &record.rule,
+            crate::config::Action::Log,
+        );
         crate::observations::rule_detail(
             crate::console::model::Phase::Response,
             &record.category,
@@ -251,6 +263,12 @@ pub(crate) async fn inspect(
 
     if let Some(blocked) = &outcome.blocked {
         crate::observations::rule_match(crate::console::model::Phase::Response, false);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Response,
+            &blocked.category,
+            &blocked.rule,
+            crate::config::Action::Block,
+        );
         crate::observations::reject(crate::console::model::RejectionReason::ResponseRule);
         metrics.response_blocked.fetch_add(1, Ordering::Relaxed);
         info!(

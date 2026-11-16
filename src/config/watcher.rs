@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::watch;
@@ -192,7 +191,7 @@ pub fn reload(
             )
         }
         Err(err) => {
-            metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
+            metrics.record_operation(crate::console::measurements::Operation::ReloadFailure);
             error!(error = %err, "configuration reload failed; keeping previous configuration");
             None
         }
@@ -248,7 +247,7 @@ fn install_with_stamps(
             .decoys
             .adopt_runtime(&current.decoys, new_config.protection.enabled)
         {
-            metrics.reload_failure.fetch_add(1, Ordering::Relaxed);
+            metrics.record_operation(crate::console::measurements::Operation::ReloadFailure);
             error!(
                 reason,
                 "cannot prepare decoy runtime; keeping previous configuration"
@@ -295,8 +294,9 @@ fn install_with_stamps(
     let admin_access_warning = new_config.admin_access_warning();
     let decoy_warnings = new_config.decoy_warnings();
     let decoy_routes = new_config.decoy_routes();
+    metrics.observations.configure(&new_config);
     config.store(Arc::new(new_config));
-    metrics.reload_success.fetch_add(1, Ordering::Relaxed);
+    metrics.record_operation(crate::console::measurements::Operation::ReloadSuccess);
     // The snapshot is live: remember the stamps of the sources that were read
     // to build it so the watcher does not compile the same files again, while
     // any concurrent edit made during compilation still triggers a reload.
@@ -330,6 +330,33 @@ mod tests {
 
     fn write(path: &Path, contents: &str) {
         std::fs::write(path, contents).expect("write config");
+    }
+
+    #[test]
+    fn supplementary_reload_state_retains_the_active_catalog_after_failure() {
+        use crate::console::measurements::{AdditionalMeasurements, Operation};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kunato.yaml");
+        write(
+            &path,
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\ncategories: []\n",
+        );
+        let config = Snapshot::new(config::load(&path).unwrap());
+        let metrics = Metrics::new();
+        assert!(reload(&path, &config, &metrics, false).is_some());
+        let id = config.load().observation_id.clone();
+        write(&path, "invalid: [");
+        assert!(reload(&path, &config, &metrics, false).is_none());
+        let packet = metrics.observations.snapshot(0).unwrap();
+        let mut values = AdditionalMeasurements::measured();
+        for bucket in &packet.buckets {
+            values.merge(bucket.additional.as_ref().unwrap()).unwrap();
+        }
+        assert_eq!(values.operations[&Operation::ReloadSuccess], 1);
+        assert_eq!(values.operations[&Operation::ReloadFailure], 1);
+        let state = values.state.unwrap();
+        assert_eq!(state.configuration_id, id);
+        assert_eq!(state.rules, Some(0));
     }
 
     #[test]

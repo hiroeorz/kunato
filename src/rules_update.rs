@@ -79,6 +79,7 @@ pub async fn run(
             continue;
         }
 
+        metrics.record_operation(crate::console::measurements::Operation::RulesCheckStarted);
         let outcome = tokio::select! {
             result = update_candidate(
                 &main_config,
@@ -99,7 +100,7 @@ pub async fn run(
 
         let succeeded = match outcome {
             Ok(true) => {
-                metrics.rules_update_success.fetch_add(1, Ordering::Relaxed);
+                metrics.record_operation(crate::console::measurements::Operation::RulesApplied);
                 metrics
                     .rules_last_success
                     .store(unix_now(), Ordering::Relaxed);
@@ -107,9 +108,7 @@ pub async fn run(
                 true
             }
             Ok(false) => {
-                metrics
-                    .rules_update_not_modified
-                    .fetch_add(1, Ordering::Relaxed);
+                metrics.record_operation(crate::console::measurements::Operation::RulesUnchanged);
                 metrics
                     .rules_last_success
                     .store(unix_now(), Ordering::Relaxed);
@@ -117,16 +116,16 @@ pub async fn run(
                 true
             }
             Err(err) => {
-                metrics.rules_update_failure.fetch_add(1, Ordering::Relaxed);
+                metrics.record_operation(crate::console::measurements::Operation::RulesFailure);
                 if matches!(err, Error::Signature(_)) {
-                    metrics
-                        .rules_signature_failure
-                        .fetch_add(1, Ordering::Relaxed);
+                    metrics.record_operation(
+                        crate::console::measurements::Operation::RulesSignatureFailure,
+                    );
                 }
                 if matches!(err, Error::RulesNeedNewerBuild(_)) {
-                    metrics
-                        .rules_update_incompatible
-                        .fetch_add(1, Ordering::Relaxed);
+                    metrics.record_operation(
+                        crate::console::measurements::Operation::RulesIncompatible,
+                    );
                     error!(
                         error = %err,
                         "the published rule set needs a newer Kunato build; keeping the current rules"

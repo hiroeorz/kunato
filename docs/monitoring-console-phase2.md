@@ -152,8 +152,11 @@ tests establish the implemented resource and accounting contracts.
 The remaining sections retain the design rationale. Configured site/category/
 rule time-series dimensions, upstream-only status distributions, distinct
 counts, arbitrary path rankings, complete journal ingestion, and web delivery
-remain future work. Global counters, fixed rejection reasons, client statuses,
-and latency distributions are implemented in this phase.
+were future work at this phase. [Phase 4](monitoring-console-phase4.md) now
+adds bounded dimensions, upstream statuses, rankings, distinct estimates, and
+operational state. Complete journal ingestion and web delivery remain future
+work. Global counters, fixed rejection reasons, client statuses, and latency
+distributions are implemented in this phase.
 
 ## Decision
 

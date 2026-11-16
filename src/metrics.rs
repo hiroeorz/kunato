@@ -47,6 +47,7 @@ pub struct Metrics {
     pub reload_success: AtomicU64,
     pub reload_failure: AtomicU64,
     pub rules_update_success: AtomicU64,
+    pub rules_update_checks: AtomicU64,
     pub rules_update_failure: AtomicU64,
     pub rules_update_incompatible: AtomicU64,
     pub rules_signature_failure: AtomicU64,
@@ -59,6 +60,28 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    pub fn record_operation(&self, kind: crate::console::measurements::Operation) {
+        use crate::console::measurements::Operation;
+        let counter = match kind {
+            Operation::ReloadSuccess => &self.reload_success,
+            Operation::ReloadFailure => &self.reload_failure,
+            Operation::RulesApplied => &self.rules_update_success,
+            Operation::RulesUnchanged => &self.rules_update_not_modified,
+            Operation::RulesFailure => &self.rules_update_failure,
+            Operation::RulesIncompatible => &self.rules_update_incompatible,
+            Operation::RulesSignatureFailure => &self.rules_signature_failure,
+            Operation::CertificateIssued => &self.acme_issued,
+            Operation::CertificateCached => &self.acme_cached,
+            Operation::CertificateFailure => &self.acme_errors,
+            Operation::RulesCheckStarted => &self.rules_update_checks,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.observations.operation(kind);
+        if matches!(kind, Operation::RulesApplied | Operation::RulesUnchanged) {
+            self.observations.rules_success();
+        }
+    }
+
     pub fn new() -> Self {
         Self::with_observations(true)
     }
@@ -113,6 +136,7 @@ impl Metrics {
             reload_success: AtomicU64::new(0),
             reload_failure: AtomicU64::new(0),
             rules_update_success: AtomicU64::new(0),
+            rules_update_checks: AtomicU64::new(0),
             rules_update_failure: AtomicU64::new(0),
             rules_update_incompatible: AtomicU64::new(0),
             rules_signature_failure: AtomicU64::new(0),
@@ -127,6 +151,12 @@ impl Metrics {
 
     pub fn render(&self, active_connections: u64) -> String {
         let mut out = String::with_capacity(1024);
+        counter(
+            &mut out,
+            "kunato_rules_update_checks_total",
+            "Runtime rule update checks started.",
+            self.rules_update_checks.load(Ordering::Relaxed),
+        );
         self.decoys.render(&mut out);
         for (name, help, count) in [
             (
@@ -462,6 +492,48 @@ fn gauge(out: &mut String, name: &str, help: &str, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operational_measurements_distinguish_checks_results_and_certificate_state() {
+        use crate::console::measurements::{AdditionalMeasurements, Operation};
+        let metrics = Metrics::new();
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\ncategories: []\n",
+        )
+        .unwrap();
+        metrics.observations.configure(&config);
+        for kind in [
+            Operation::RulesCheckStarted,
+            Operation::RulesUnchanged,
+            Operation::RulesCheckStarted,
+            Operation::RulesApplied,
+            Operation::RulesFailure,
+            Operation::RulesIncompatible,
+            Operation::RulesSignatureFailure,
+            Operation::CertificateIssued,
+            Operation::CertificateCached,
+            Operation::CertificateFailure,
+        ] {
+            metrics.record_operation(kind);
+        }
+        metrics.observations.certificate(2_000_000_000);
+        let packet = metrics.observations.snapshot(0).unwrap();
+        let mut values = AdditionalMeasurements::measured();
+        for bucket in &packet.buckets {
+            values.merge(bucket.additional.as_ref().unwrap()).unwrap();
+        }
+        assert_eq!(values.operations[&Operation::RulesCheckStarted], 2);
+        assert_eq!(values.operations[&Operation::RulesApplied], 1);
+        assert_eq!(values.operations[&Operation::RulesUnchanged], 1);
+        assert_eq!(metrics.rules_update_checks.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.rules_update_success.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.rules_update_not_modified.load(Ordering::Relaxed), 1);
+        let state = values.state.unwrap();
+        assert_eq!(state.certificate_expires_at_ms, Some(2_000_000_000_000));
+        assert!(state.rules_last_success_ms.is_some());
+        assert!(state.certificate_last_success_ms.is_some());
+        assert_eq!(state.operation_totals[&Operation::CertificateFailure], 1);
+    }
 
     #[test]
     fn renders_prometheus_text() {

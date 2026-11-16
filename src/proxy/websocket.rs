@@ -161,6 +161,7 @@ pub(crate) async fn forward_handshake(
         Ok(Ok(response)) => response,
     };
 
+    crate::observations::upstream_status(response.status().as_u16());
     if response.status() != StatusCode::SWITCHING_PROTOCOLS
         || (config.php.matches(parts) && config.php.rejects_response(response.headers()))
     {

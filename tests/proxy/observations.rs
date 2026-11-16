@@ -1,5 +1,14 @@
 use super::*;
+use kunato::console::measurements::{AdditionalMeasurements, DimensionKind};
 use kunato::console::model::RejectionReason;
+
+fn additional(packet: &kunato::observations::StatisticsSnapshot) -> AdditionalMeasurements {
+    let mut values = AdditionalMeasurements::measured();
+    for bucket in &packet.buckets {
+        values.merge(bucket.additional.as_ref().unwrap()).unwrap();
+    }
+    values
+}
 
 const RULES: &str = "categories:
   - name: observations
@@ -43,6 +52,36 @@ async fn http1_and_http2_account_actual_denials_without_log_emission() {
     assert_eq!(snapshot.counters.rejected_requests, Some(1));
     assert_eq!(snapshot.counters.log_requests, Some(2));
     assert_eq!(snapshot.counters.rule_matches, Some(6));
+    let values = additional(&snapshot);
+    assert_eq!(values.upstream_statuses.get(&403), Some(&1));
+    assert_eq!(values.reason_latency[&RejectionReason::Rule].count, 1);
+    assert_eq!(
+        values
+            .dimensions
+            .iter()
+            .filter(|value| value.kind == DimensionKind::Rule)
+            .map(|value| value.counts.log_matches)
+            .sum::<u64>(),
+        4
+    );
+    assert_eq!(
+        values
+            .dimensions
+            .iter()
+            .filter(|value| value.kind == DimensionKind::Rule)
+            .map(|value| value.counts.allow_matches)
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(
+        values
+            .dimensions
+            .iter()
+            .filter(|value| value.kind == DimensionKind::Rule)
+            .map(|value| value.counts.block_matches)
+            .sum::<u64>(),
+        1
+    );
     assert_eq!(
         snapshot.counters.rejection_reasons.as_ref().unwrap()[&RejectionReason::Rule],
         1
@@ -87,6 +126,10 @@ async fn http3_uses_the_same_once_per_request_measurements() {
     assert_eq!(snapshot.counters.rejected_requests, Some(1));
     assert_eq!(snapshot.counters.log_requests, Some(2));
     assert_eq!(snapshot.counters.rule_matches, Some(6));
+    let values = additional(&snapshot);
+    assert_eq!(values.upstream_statuses.get(&200), Some(&1));
+    assert_eq!(values.reason_latency[&RejectionReason::Rule].count, 1);
+    assert!(values.state.unwrap().certificate_expires_at_ms.is_some());
     running.stop().await;
 }
 
@@ -118,6 +161,17 @@ async fn early_host_rejection_and_response_rule_replacement_have_distinct_reason
     assert_eq!(packet.counters.requests, Some(2));
     assert_eq!(packet.counters.rejected_requests, Some(2));
     assert_eq!(packet.counters.response_blocks, Some(1));
+    let values = additional(&packet);
+    assert_eq!(values.upstream_statuses.get(&200), Some(&1));
+    assert!(!values.upstream_statuses.contains_key(&403));
+    assert_eq!(values.reason_latency[&RejectionReason::Host].count, 1);
+    assert_eq!(
+        values.reason_latency[&RejectionReason::ResponseRule].count,
+        1
+    );
+    assert!(values.dimensions.iter().any(|value| value.phase
+        == kunato::console::model::Phase::Response
+        && value.counts.block_matches == 1));
     let reasons = packet.counters.rejection_reasons.unwrap();
     assert_eq!(reasons[&RejectionReason::Host], 1);
     assert_eq!(reasons[&RejectionReason::ResponseRule], 1);

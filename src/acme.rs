@@ -33,6 +33,12 @@ mod jose;
 mod pem;
 mod resolver;
 
+pub(crate) fn certificate_expiry(certificate: &[u8]) -> Option<u64> {
+    der::certificate_validity(certificate)
+        .ok()
+        .map(|value| value.not_after)
+}
+
 use client::{AcmeClient, Auth, AuthStatus, Order, OrderStatus, bounded_text};
 use der::Validity;
 use jose::AccountKey;
@@ -162,7 +168,8 @@ impl AcmeService {
             }
             Ok(None) => true,
             Err(err) => {
-                metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .record_operation(crate::console::measurements::Operation::CertificateFailure);
                 warn!(error = %err, "failed to read cached ACME certificate metadata");
                 false
             }
@@ -182,21 +189,28 @@ impl AcmeService {
                         } else if cached.validity.not_after <= now {
                             warn!("cached ACME certificate has expired");
                         } else {
+                            metrics.observations.certificate(cached.validity.not_after);
                             resolver.set_current(Arc::new(cached.certified));
                             renew_at.store(renewal_time(cached.validity), Ordering::Relaxed);
-                            metrics.acme_cached.fetch_add(1, Ordering::Relaxed);
+                            metrics.record_operation(
+                                crate::console::measurements::Operation::CertificateCached,
+                            );
                             mark_last_success(&metrics);
                             info!("ACME certificate loaded from cache");
                         }
                     }
                     Err(err) => {
-                        metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                        metrics.record_operation(
+                            crate::console::measurements::Operation::CertificateFailure,
+                        );
                         warn!(error = %err, "cached ACME certificate could not be used");
                     }
                 },
                 Ok(None) => {}
                 Err(err) => {
-                    metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                    metrics.record_operation(
+                        crate::console::measurements::Operation::CertificateFailure,
+                    );
                     warn!(error = %err, "failed to read the ACME certificate cache");
                 }
             }
@@ -309,13 +323,14 @@ async fn load_account_key(cache_dir: &Path, metrics: &Metrics) -> Result<Arc<Acc
         Ok(Some(bytes)) => match AccountKey::from_pkcs8(&bytes) {
             Ok(key) => return Ok(Arc::new(key)),
             Err(err) => {
-                metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .record_operation(crate::console::measurements::Operation::CertificateFailure);
                 warn!(error = %err, "cached ACME account key is invalid; generating a new one");
             }
         },
         Ok(None) => {}
         Err(err) => {
-            metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+            metrics.record_operation(crate::console::measurements::Operation::CertificateFailure);
             warn!(error = %err, "failed to read the ACME account key cache");
         }
     }
@@ -323,7 +338,7 @@ async fn load_account_key(cache_dir: &Path, metrics: &Metrics) -> Result<Arc<Acc
     let (key, pkcs8) = AccountKey::generate()
         .map_err(|err| Error::Message(format!("failed to generate an ACME account key: {err}")))?;
     if let Err(err) = cache::store_account(cache_dir, &pkcs8).await {
-        metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+        metrics.record_operation(crate::console::measurements::Operation::CertificateFailure);
         warn!(error = %err, "failed to cache the ACME account key");
     }
     Ok(Arc::new(key))
@@ -379,67 +394,79 @@ async fn run_driver(
         resolver.clear_challenges();
         let mut failed = false;
         match result {
-            Ok(blob) => match parse_certificate_cache(&blob) {
-                Ok(cached) => {
-                    let issued_at = der::unix_now();
-                    if !domains_cover(&cached.domains, &settings.domains) {
-                        metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                        warn!(
-                            issued = ?cached.domains,
-                            configured = ?settings.domains,
-                            "ACME certificate does not cover the configured domains"
-                        );
-                        failed = true;
-                    } else {
-                        match deployment_renewal(cached.validity, issued_at) {
-                            Ok(renew) => {
-                                resolver.set_current(Arc::new(cached.certified));
-                                renew_at.store(renew, Ordering::Relaxed);
-                                metrics.acme_issued.fetch_add(1, Ordering::Relaxed);
-                                mark_last_success(&metrics);
-                                info!("ACME certificate issued and deployed");
-                                if let Err(err) =
-                                    cache::store_cert(&settings.cache_dir, &blob).await
-                                {
-                                    metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                                    warn!(error = %err, "failed to cache the ACME certificate");
-                                }
-                                let metadata = CacheMetadata {
-                                    directory: settings.directory.clone(),
-                                    domains: settings.domains.clone(),
-                                };
-                                match serde_json::to_vec(&metadata) {
-                                    Ok(bytes) => {
-                                        if let Err(err) =
-                                            cache::store_meta(&settings.cache_dir, &bytes).await
-                                        {
-                                            metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                                            warn!(error = %err, "failed to cache ACME certificate metadata");
+            Ok(blob) => {
+                match parse_certificate_cache(&blob) {
+                    Ok(cached) => {
+                        let issued_at = der::unix_now();
+                        if !domains_cover(&cached.domains, &settings.domains) {
+                            metrics.record_operation(
+                                crate::console::measurements::Operation::CertificateFailure,
+                            );
+                            warn!(
+                                issued = ?cached.domains,
+                                configured = ?settings.domains,
+                                "ACME certificate does not cover the configured domains"
+                            );
+                            failed = true;
+                        } else {
+                            match deployment_renewal(cached.validity, issued_at) {
+                                Ok(renew) => {
+                                    metrics.observations.certificate(cached.validity.not_after);
+                                    resolver.set_current(Arc::new(cached.certified));
+                                    renew_at.store(renew, Ordering::Relaxed);
+                                    metrics.record_operation(
+                                        crate::console::measurements::Operation::CertificateIssued,
+                                    );
+                                    mark_last_success(&metrics);
+                                    info!("ACME certificate issued and deployed");
+                                    if let Err(err) =
+                                        cache::store_cert(&settings.cache_dir, &blob).await
+                                    {
+                                        metrics.record_operation(crate::console::measurements::Operation::CertificateFailure);
+                                        warn!(error = %err, "failed to cache the ACME certificate");
+                                    }
+                                    let metadata = CacheMetadata {
+                                        directory: settings.directory.clone(),
+                                        domains: settings.domains.clone(),
+                                    };
+                                    match serde_json::to_vec(&metadata) {
+                                        Ok(bytes) => {
+                                            if let Err(err) =
+                                                cache::store_meta(&settings.cache_dir, &bytes).await
+                                            {
+                                                metrics.record_operation(crate::console::measurements::Operation::CertificateFailure);
+                                                warn!(error = %err, "failed to cache ACME certificate metadata");
+                                            }
+                                        }
+                                        Err(err) => {
+                                            metrics.record_operation(crate::console::measurements::Operation::CertificateFailure);
+                                            warn!(error = %err, "failed to encode ACME certificate metadata");
                                         }
                                     }
-                                    Err(err) => {
-                                        metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                                        warn!(error = %err, "failed to encode ACME certificate metadata");
-                                    }
+                                    backoff = BACKOFF_INITIAL;
                                 }
-                                backoff = BACKOFF_INITIAL;
-                            }
-                            Err(err) => {
-                                metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                                warn!(error = %err, "ACME certificate is not deployable");
-                                failed = true;
+                                Err(err) => {
+                                    metrics.record_operation(
+                                        crate::console::measurements::Operation::CertificateFailure,
+                                    );
+                                    warn!(error = %err, "ACME certificate is not deployable");
+                                    failed = true;
+                                }
                             }
                         }
                     }
+                    Err(err) => {
+                        metrics.record_operation(
+                            crate::console::measurements::Operation::CertificateFailure,
+                        );
+                        warn!(error = %err, "ACME certificate response could not be parsed");
+                        failed = true;
+                    }
                 }
-                Err(err) => {
-                    metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
-                    warn!(error = %err, "ACME certificate response could not be parsed");
-                    failed = true;
-                }
-            },
+            }
             Err(err) => {
-                metrics.acme_errors.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .record_operation(crate::console::measurements::Operation::CertificateFailure);
                 warn!(error = %err, "ACME certificate error");
                 if let Some(delay) = err.retry_after() {
                     backoff = backoff.max(delay.min(BACKOFF_MAX));

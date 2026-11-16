@@ -11,7 +11,9 @@ bounded persistence worker as a library. See the
 loopback snapshot API, selected bounded evidence, and a separate development
 collector connected to persistence. [Phase 3](monitoring-console-phase3.md)
 implements UTC aggregates, separate primary-reason rows, mixed-grain reads,
-and 30-day expiry. Web delivery, authentication, HTTPS, SSE, and packaging
+and 30-day expiry. [Phase 4](monitoring-console-phase4.md) adds bounded site/rule
+measurements, upstream status and reason latency, rankings/unique estimates,
+operational state, and compact decoy evidence. Web delivery, authentication, HTTPS, SSE, and packaging
 remain future work. The prototype still uses fictional data.
 
 Related documents:
@@ -21,6 +23,7 @@ Related documents:
 - [Bottom-up Phase 1 scope and verification](monitoring-console-phase1.md)
 - [Phase 2 counter-based statistics implementation](monitoring-console-phase2.md)
 - [Phase 3 UTC aggregates and retention](monitoring-console-phase3.md)
+- [Phase 4 additional source measurements](monitoring-console-phase4.md)
 - [Update-cadence evaluation and measurements](monitoring-console-cadence.md)
 - [Prototype source and launch instructions](../ui/console-prototype/README.md)
 - [Existing observability architecture](DESIGN.md#9-observability)
@@ -259,16 +262,16 @@ References: [Let's Encrypt challenges](https://letsencrypt.org/docs/challenge-ty
 
 | Source or capability | Current state | Console consequence |
 | --- | --- | --- |
-| WAF counters and gauges | Existing `GET /metrics` plus version 2 loopback `/console/snapshot` | Cumulative statistics, bounded source minutes, sampled gauges, and selected evidence |
+| WAF counters and gauges | Existing `GET /metrics` plus version 3 loopback `/console/snapshot` | Cumulative statistics, bounded source minutes, sampled gauges, and selected evidence |
 | Structured security events | Journal output with normalized `kunato log` rendering | Suitable initial event source; permissions and journal retention apply |
 | Rate-limit and ban event details | Aggregated/suppressed logs while counters still count rejections | Log rows cannot substitute for total request counts |
 | Decoy evidence | Credential/occurrence counters and hashed-ID issuance/reuse logs | Supports basic counts and bounded correlation; complete trails are not guaranteed |
 | Counter-based historical collection | Implemented in development runner | Separate process; one-second collection and ten-second statistics coalescing |
 | SSE and browser delivery | Absent | Future backend work |
-| SQLite store and persistence worker | Phase 3 schema migration, reason aggregates, bounded query/maintenance workers | Connected to the collector; prototype remains fictional |
+| SQLite store and persistence worker | Phase 4 schema migration, reason aggregates, bounded query/maintenance workers | Connected to the collector; prototype remains fictional |
 | Deduplicated overall rejection count | Implemented in scoped request measurements | Separate total and fixed primary reasons; upstream refusals remain separate |
-| General host/rule time series | Not available as complete counters for the planned scope | Extend instrumentation or label recorded-event summaries honestly |
-| Client-visible HTTP status distribution and header-decision latency | Implemented as fixed distributions | Does not measure full-body delivery or separate upstream-only status history |
+| Host/class/category/rule measurements | Implemented with quotas and omission metadata | Bounded match/request breakdowns; incomplete populations must be labeled |
+| Status distributions and header-decision latency | Client/upstream statuses, reason latency, and exact observed extrema implemented | Header decisions; full-body duration remains unavailable |
 | Restart identity and observation completeness | Process generation, source revisions, missed attribution, and gap metadata implemented | Bounded recovery; no promise of lossless history |
 
 Current logs do not record ALLOW rule matches, request query strings, headers,
@@ -334,11 +337,8 @@ announcement or a production-readiness claim.
 - Exact console subcommands, optional enablement workflow, and service units.
 - Authentication, session lifecycle, initial credentials, and recovery.
 - Certificate names, material delivery, service permissions, and reload policy.
-- Configured site/category/rule measurements, upstream-only status history,
-  and any additional exact latency/connection extrema.
 - Event cursor/replay handling and bounded pause/resume behavior.
-- Future upgrades beyond schema version three and a supported online backup workflow.
+- Future upgrades beyond schema version four and a supported online backup workflow.
 - Production tuning of storage/queue/query/maintenance limits for the adopted
   UTC, reason-separated precision tiers and 30-day statistics horizon.
-- Detailed-event budgets and whether compact decoy-correlation summaries are
-  needed within the independent, at-most-30-day summary horizon.
+- Production tuning of detailed-event and implemented compact-correlation budgets.

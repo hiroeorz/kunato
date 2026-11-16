@@ -84,6 +84,7 @@ pub struct CollectorHealth {
     pub omitted_metric_minutes: u64,
     pub omitted_events: u64,
     pub source_missed_updates: u64,
+    pub source_additional_missed_updates: Option<u64>,
     pub source_omitted_events: u64,
     pub source_gap: Option<(u64, u64)>,
     pub storage_error: Option<Error>,
@@ -98,6 +99,10 @@ enum ReadRequest {
     History {
         query: super::HistoryQuery,
         reply: oneshot::Sender<Result<super::HistoryPage, Error>>,
+    },
+    Correlations {
+        query: super::correlations::CorrelationQuery,
+        reply: oneshot::Sender<Result<super::correlations::CorrelationPage, Error>>,
     },
 }
 
@@ -125,6 +130,13 @@ impl HistoryReader {
                         ReadRequest::History { query, reply } => {
                             let result = match &mut store {
                                 Ok(store) => store.history(&query),
+                                Err(error) => Err(error.clone()),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        ReadRequest::Correlations { query, reply } => {
+                            let result = match &mut store {
+                                Ok(store) => store.correlations(&query),
                                 Err(error) => Err(error.clone()),
                             };
                             let _ = reply.send(result);
@@ -163,6 +175,25 @@ impl HistoryReader {
         let (reply, result) = oneshot::channel();
         self.requests
             .try_send(ReadRequest::History { query, reply })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => Error::Busy,
+                mpsc::TrySendError::Disconnected(_) => Error::WorkerStopped,
+            })?;
+        tokio::time::timeout(Duration::from_millis(750), result)
+            .await
+            .map_err(|_| Error::OperationTimeout)?
+            .map_err(|_| Error::WorkerStopped)?
+    }
+
+    /// Read compact selected evidence on the same bounded database worker.
+    pub async fn correlations(
+        &self,
+        query: super::correlations::CorrelationQuery,
+    ) -> Result<super::correlations::CorrelationPage, Error> {
+        query.validate()?;
+        let (reply, result) = oneshot::channel();
+        self.requests
+            .try_send(ReadRequest::Correlations { query, reply })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => Error::Busy,
                 mpsc::TrySendError::Disconnected(_) => Error::WorkerStopped,
@@ -476,6 +507,7 @@ impl Collector {
         self.health.received_snapshots = self.health.received_snapshots.saturating_add(1);
         self.health.last_observed_at_ms = Some(packet.observed_at_ms);
         self.health.source_missed_updates = packet.missed_updates;
+        self.health.source_additional_missed_updates = packet.additional_missed_updates;
         self.health.source_omitted_events = packet.events_omitted;
         self.live.send_replace(Some(Arc::new(packet)));
         self.tick(false);
