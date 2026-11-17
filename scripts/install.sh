@@ -459,8 +459,24 @@ initialize_configuration() {
     # through the next `sudo kunato upgrade`.
     [ ! -L "$STATE_DIR" ] || die "$STATE_DIR must not be a symbolic link"
     find "$STATE_DIR" -xdev -exec chown -h kunato:kunato {} + 2>/dev/null || true
-    find "$STATE_DIR" -xdev -type d -exec chmod 0750 {} + 2>/dev/null || true
-    find "$STATE_DIR" -xdev -type f -exec chmod 0640 {} + 2>/dev/null || true
+    # The console database and the ACME cache hold private material. The
+    # console requires 0700 directories and 0600 files under its storage dir,
+    # and the ACME cache is created the same way. Leave those subtrees alone
+    # and repair modes that an earlier installer may have loosened.
+    find "$STATE_DIR" -xdev \
+        \( -path "$STATE_DIR/console" -o -path "$STATE_DIR/console/*" \
+        -o -path "$STATE_DIR/acme" -o -path "$STATE_DIR/acme/*" \) -prune \
+        -o -type d -exec chmod 0750 {} + 2>/dev/null || true
+    find "$STATE_DIR" -xdev \
+        \( -path "$STATE_DIR/console" -o -path "$STATE_DIR/console/*" \
+        -o -path "$STATE_DIR/acme" -o -path "$STATE_DIR/acme/*" \) -prune \
+        -o -type f -exec chmod 0640 {} + 2>/dev/null || true
+    for private_dir in console acme; do
+        path="$STATE_DIR/$private_dir"
+        [ -d "$path" ] && [ ! -L "$path" ] || continue
+        find "$path" -xdev -type d -exec chmod 0700 {} + 2>/dev/null || true
+        find "$path" -xdev -type f -exec chmod 0600 {} + 2>/dev/null || true
+    done
 
     "$BIN_PATH" validate --config "$CONFIG_PATH"
 }
