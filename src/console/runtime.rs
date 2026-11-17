@@ -172,10 +172,18 @@ pub async fn run(config_path: &Path) -> Result<(), Error> {
     let loaded = config::load_settings(config_path)?;
     let console = loaded.console.clone();
     if !console.enabled {
-        return Err(Error::Message(format!(
-            "`{}` does not set `console.enabled: true`",
-            config_path.display()
-        )));
+        info!(
+            config = %config_path.display(),
+            "console is disabled by configuration; nothing to do"
+        );
+        return Ok(());
+    }
+    if !loaded.admin.enabled {
+        warn!(
+            config = %config_path.display(),
+            "console needs the loopback admin listener but admin.enabled is false; nothing to do"
+        );
+        return Ok(());
     }
     let runtime = ConsoleRuntime::start(console).await?;
     info!(
@@ -203,4 +211,43 @@ async fn wait_for_signal() -> Result<(), Error> {
         tokio::signal::ctrl_c().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &Path, text: &str) -> std::path::PathBuf {
+        let path = dir.join("kunato.yaml");
+        std::fs::write(&path, text).expect("write config");
+        path
+    }
+
+    #[tokio::test]
+    async fn a_disabled_console_exits_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(
+            dir.path(),
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+",
+        );
+        run(&path)
+            .await
+            .expect("a disabled console is not an error");
+    }
+
+    #[tokio::test]
+    async fn a_console_without_an_admin_listener_exits_cleanly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(
+            dir.path(),
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+admin: { enabled: false }
+console: { enabled: true }
+",
+        );
+        run(&path).await.expect("an inert console is not an error");
+    }
 }

@@ -726,9 +726,10 @@ WAF in-memory counters and a bounded minute ring remain the source of
 statistical totals; selected event detail is a separate investigation path, so
 statistical totals do not depend on log delivery. History uses 1/5/10/20/60
 minute UTC tiers with a 30-day logical horizon. Remote access requires an
-explicit CIDR allowlist, Host validation, token authentication, and TLS; a
+exported CIDR allowlist, Host validation, token authentication, and TLS; a
 non-loopback listener fails configuration loading without all four controls.
-Packaging, service units, historical event drill-down, CSV export, and complete
+The release ships `kunato-console.service` disabled; enabling it also requires
+`console.enabled: true`. Historical event drill-down, CSV export, and complete
 journal ingestion remain future work.
 
 See [console design and status](monitoring-console.md),

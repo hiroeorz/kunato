@@ -99,10 +99,11 @@ console:
 
 Compile-time validation:
 
-- `console.enabled: true` requires an enabled loopback admin listener, because
-  the snapshot source lives there.
-- `source` must be loopback; the collector's `HttpSource` rejects other
-  addresses at startup as well.
+- An explicit `source` must be loopback with a nonzero port; an inherited
+  `admin.listen` is validated by the admin listener itself, and the collector's
+  `HttpSource` still rejects an unusable address at startup.
+- `console.enabled: true` with `admin.enabled: false` loads with a warning; the
+  console then logs the reason and exits successfully instead of failing.
 - `allowed_clients` entries must parse as IPv4/IPv6 CIDRs; at most 256 entries.
 - `allowed_hosts` uses the console's own host list, not the WAF request
   `allowed_hosts`; invalid entries fail loading.
@@ -113,8 +114,10 @@ Compile-time validation:
 - Disabled consoles still reject malformed values so a typo is found before
   enablement.
 
-The example is illustrative for Phase 6; the shipped `rules.example.yaml` keeps
-`console` absent so the default deployment remains one WAF binary and one file.
+The example is illustrative for Phase 6. The console is disabled by default for
+both new installations and upgrades: `rules.example.yaml` and `kunato init`
+ship the block commented out, and the release archive ships the
+`kunato-console.service` unit disabled.
 
 ## 4. Command
 

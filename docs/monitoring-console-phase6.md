@@ -7,8 +7,9 @@ Status: Implemented on top of [Phase 5](monitoring-console-phase5.md).
 `src/console/server/mod.rs` enforces the source allowlist, Host validation,
 TLS, and security headers; `src/proxy/tls.rs` loads the console certificate,
 including a combined key-and-chain bundle. It does not expose any
-administrative write operation. Installation, service units, and the service
-account/certificate permission procedure remain future work.
+administrative write operation. The packaged `kunato-console.service` and
+installer enablement are implemented; the service account/certificate
+permission procedure remains future work.
 
 ## 1. Scope
 
@@ -242,6 +243,7 @@ proxy-fronted deployments.
 
 ## 10. Remaining after Phase 6
 
-systemd unit, installer enablement, service identity and certificate
-permissions, supported online backup and schema upgrades, packaging, and the
-deferred items in [remaining work](monitoring-console-remaining.md).
+Service identity and certificate permissions for a separate service account,
+supported online backup and schema upgrades, and the deferred items in
+[remaining work](monitoring-console-remaining.md). The systemd unit and
+installer enablement are implemented.

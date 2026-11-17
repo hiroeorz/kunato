@@ -54,7 +54,8 @@ Traditional WAF setups often require either paid cloud services or a complex sta
 ### Operations & Reliability
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule file are detected at runtime and reloaded on the fly without restarting the process or dropping connections.
 - **High fault tolerance** — Keeps serving with the last known good configuration, isolates failures, and avoids disrupting traffic during reloads.
-- **Guided install** — One `curl | sudo sh` command installs the static binary, the systemd service, the configuration, and the initial rule set on a Linux server.
+- **Optional monitoring console** — `kunato console` runs as a separate read-only service with a browser UI, live SSE updates, and 30-day UTC history in embedded SQLite. It is disabled by default and cannot change rules, maintenance, or access state.
+- **Guided install** — One `curl | sudo sh` command installs the static binary, the systemd units, the configuration, and the initial rule set on a Linux server.
 - **Simple deployment** — One binary and one YAML configuration file. No database, no external services, no complex setup.
 - **Rust implementation** — Memory safety and predictable performance in a single static binary with no runtime dependencies.
 
@@ -83,7 +84,7 @@ Client ──────►  ┌───────────────�
 ### 1. Install on a Linux Server
 
 Kunato ships as a single static binary for Linux. On a server with systemd, one
-command installs the binary, the service, the configuration, and the initial
+command installs the binary, the units, the configuration, and the initial
 rule set, and terminates TLS with an automatically obtained Let's Encrypt
 certificate:
 
@@ -296,6 +297,7 @@ and the remaining trust limits.
 | `kunato metrics` | Display Prometheus metrics from the loopback admin listener (`127.0.0.1:9090`). |
 | `kunato maintenance on\|off` | Serve the maintenance page without forwarding, or restore normal proxying. |
 | `kunato admin-access status\|open\|close` | List or toggle time-limited access to declared administrative functions. |
+| `kunato console --config <PATH>` | Run the optional read-only monitoring console (disabled unless `console.enabled: true`). |
 | `kunato update-rules` | Check for, verify, validate, and apply the latest managed rule set once. |
 | `kunato upgrade` | Upgrade the installed binary and systemd unit while preserving configuration. |
 | `kunato banner` | Print the colored logo banner to the terminal. |
@@ -348,6 +350,7 @@ managed rules file — and nothing else.
 │   ├── systemd/
 │   │   └── system/
 │   │       ├── kunato.service                 # unit (0644)
+│   │       ├── kunato-console.service         # optional unit (0644, disabled)
 │   │       └── multi-user.target.wants/
 │   │           └── kunato.service -> ../kunato.service
 │   └── kunato/                                # settings (0750 root:kunato)
@@ -359,14 +362,39 @@ managed rules file — and nothing else.
 └── var/
     └── lib/
         └── kunato/                            # StateDirectory (0750 kunato:kunato)
+            ├── console/                       # console history (0700 kunato; after enabling the console)
             ├── rules.yaml                     # managed rule set (auto-updated)
             └── rules.yaml.update-state        # updater bookkeeping (auto-updated)
 ```
 
+The monitoring console is optional and disabled on fresh installs and upgrades
+alike. Enabling it takes both steps:
+
+1. Uncomment the `console` block in `/etc/kunato/kunato.yaml`, or add:
+
+   ```yaml
+   console:
+     enabled: true
+   ```
+
+2. Enable and start the unit:
+
+   ```sh
+   sudo systemctl enable --now kunato-console
+   ```
+
+Then open `http://127.0.0.1:9091/` (or the configured `console.listen`). Both
+steps are required: without the configuration setting the process exits
+immediately, and without the unit enablement nothing starts it at boot. After
+later `console` changes, apply them with `sudo systemctl restart kunato-console`
+rather than another `enable`. See the [monitoring console](docs/monitoring-console.md)
+and the [configuration reference](docs/development.md#monitoring-console) for
+remote access, authentication, and TLS.
+
 Auto-updated: `/var/lib/kunato/rules.yaml` and its `rules.yaml.update-state`
 sidecar (last success timestamp, HTTP validators). Never touched by the updater:
-everything under `/etc/kunato/`. The service runs as the `kunato` user (created
-by the installer, no home directory) and only needs write access to
+everything under `/etc/kunato/`. The services run as the `kunato` user (created
+by the installer, no home directory) and only need write access to
 `/var/lib/kunato/`.
 
 ## Attack Coverage
@@ -421,6 +449,7 @@ contributing notes live in the
 | --- | --- |
 | [Development Guide](docs/development.md) | Full YAML configuration reference, deployment options, DoS / DDoS protection, black-box testing, and building from source. |
 | [Design & Architecture](docs/DESIGN.md) | Concurrency model, request/response lifecycle, body/form/upload inspection policies, and design invariants. |
+| [Monitoring Console](docs/monitoring-console.md) | Optional read-only console: enabling it, access control, storage and retention, and implementation status. |
 | [Attack Coverage](docs/attack-coverage.md) | Living tracker of covered, partial, and gap attack classes across the bundled rules and engine mechanisms. |
 | [Rule Updates & Compatibility](docs/rule-updates.md) | How daily rule updates and binary/schema version compatibility work. |
 | [Signing Key Backup](docs/signing-key-backup.md) | Encrypted backup, storage, restore test, and rotation rules for the signing keys. |

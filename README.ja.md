@@ -46,13 +46,15 @@ Kunato は Web アプリケーションの前段でリバースプロキシと�
 - **レスポンスヘッダの書き換え** — アップストリームのレスポンスおよび Kunato 自身が返すブロック／エラーレスポンスの両方から、`Server` や `X-Powered-By` などの識別ヘッダを削除または置換します。
 
 ### DoS / DDoS 防御・振る舞い検知
+- **実験的なデコイ (Experimental decoys)** — ローカルに配置した設定ファイルの囮が架空の HTTP API 資格情報を載せており、それが返ってきたことを送信元アドレスをまたいで相関できます。同梱・生成される設定では、所有する偽 API 上で `BLOCK` を有効にし、送信元 BAN や振る舞いスコアリングは行いません。サイトの公開オリジンを設定してください。`allowed_hosts` は任意です。`decoys` を持たない既存設定では無効のままです。詳細は[設定リファレンス](docs/development.md#experimental-decoys)を参照してください。
 - **DoS / DDoS 検知と自動緩和** — 異常なリクエストパターンを検知し、悪質な送信元を自動的にスロットリングまたはブロック（BAN）します。
-- **振る舞いによる不正利用検知 (Behavioral Abuse Detection)** — アップストリームのレスポンスを送信元ごとの時間窓で集計し、反復的な `404` パス探索（列挙攻撃）や認証失敗のバーストを検知します。またグローバルな時間窓で分散型の認証失敗を記録します。サンプル設定ではパス列挙をブロックし、認証シグナルは観察（LOG）モードとしていますが、シグナルごとに `BLOCK` へ設定可能です。
+- **振る舞いによる不正利用検知 (Behavioral Abuse Detection)** — アップストリームのレスポンスを送信元ごとの時間窓で集計し、反復的な `404` パス探索（列挙攻撃）、認証失敗のバースト、`200` のみを返すクローリングを検知します。またグローバルな時間窓で分散型の認証失敗を記録し、継続性スコアが、Kunato がブロックしたリクエストも含めた攻撃者の進行状況を追跡して、再訪時に 2 つ目の証拠種別で対処します。同梱設定はリリース時点でもすべてのシグナルをブロックしますが、エンジンのデフォルトは観察のみで、シグナルごとに `action` を設定できます。
 
 ### 運用性・高信頼性
 - **YAML ルールとホットリロード** — ルールは YAML で記述します。ルールファイルの変更は実行中に検知され、プロセスの再起動やコネクションの切断なしに即座にリロードされます。
 - **高い耐障害性 (Fault Tolerance)** — 設定ミスがあっても直前の正常な設定（Last Known Good）で稼働を続け、障害を分離し、リロード中もトラフィックを止めません。
-- **ガイド付きインストーラ** — Linux サーバー上で `curl | sudo sh` の1コマンドを実行するだけで、静的バイナリ、systemd サービス、設定ファイル、初期ルールセットのインストールが完了します。
+- **任意のモニタリングコンソール** — `kunato console` は、ブラウザ UI・SSE によるライブ更新・組み込み SQLite への 30 日分の UTC 履歴を持つ、独立した読み取り専用サービスです。デフォルトでは無効で、ルール・メンテナンス・アクセス状態を変更することはできません。
+- **ガイド付きインストーラ** — Linux サーバー上で `curl | sudo sh` の1コマンドを実行するだけで、静的バイナリ、systemd ユニット、設定ファイル、初期ルールセットのインストールが完了します。
 - **シンプルなデプロイ** — 1つのバイナリと1つの YAML 設定ファイルだけで動作します。データベースも外部サービスも複雑なセットアップも不要です。
 - **Rust 実装** — ランタイム依存のない単一の静的バイナリにより、メモリ安全性と予測可能なパフォーマンスを提供します。
 
@@ -80,7 +82,7 @@ Client ──────►  ┌───────────────�
 
 ### 1. Linux サーバーへのインストール
 
-Kunato は Linux 向けの単一静的バイナリとして配布されています。systemd を備えたサーバーでは、以下の1コマンドでバイナリ・サービス・設定ファイル・初期ルールセットをインストールし、自動取得した Let's Encrypt 証明書による TLS 終端を開始できます：
+Kunato は Linux 向けの単一静的バイナリとして配布されています。systemd を備えたサーバーでは、以下の1コマンドでバイナリ・ユニット・設定ファイル・初期ルールセットをインストールし、自動取得した Let's Encrypt 証明書による TLS 終端を開始できます：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/install.sh \
@@ -92,6 +94,8 @@ curl -fsSL https://raw.githubusercontent.com/hiroeorz/kunato/main/scripts/instal
 ```
 
 `--upstream` には保護対象の Web サーバーを、`--acme-domain` と `--acme-contact` にはこのサーバーに名前解決される DNS 名と Let's Encrypt の有効期限通知用メールアドレスを指定してください。自動証明書の取得にはインターネットから TCP ポート 443 へ到達できる必要があるため、ワイルドカード証明書や TLS 終端を行う CDN／プロキシ配下の環境では証明書を手動で管理してください（全オプションの一覧は [Deployment](docs/development.md#deployment) を参照）。
+
+インストーラは埋め込みの minisign 公開鍵でリリースの `SHA256SUMS` を検証します。`curl | sudo sh` でインストールするサーバーには `minisign` を導入してください。導入しない場合は `--allow-unverified` を明示的に指定し、HTTPS 経由のチェックサム検証のみで続行できます（推奨しません）。`kunato upgrade` はインストーラをプロセス内で検証するため、CLI の `minisign` は不要です。
 
 `--acme-domain` で指定した名前は `allowed_hosts` にも書き込まれるため、それ以外の Host ヘッダを持つリクエストは `421` で拒否されます。ヘルスチェックなどで別のホスト名や IP アドレスから Kunato にアクセスする場合は、`--allowed-host` で追加するか `/etc/kunato/kunato.yaml` を編集してください（[Host allowlist](docs/development.md#host-allowlist) を参照）。
 
@@ -139,7 +143,7 @@ kunato admin-access open --client 192.168.1.20 --function wordpress-admin --ttl 
 kunato admin-access status
 ```
 
-設定、パスのマッチング、復旧方法は[管理機能のアクセス制御](docs/development.md#administrative-access)を参照してください。
+`--client` と `--function` は省略可能です。一致する最新のコマンドが優先され、上書きは期限切れで設定されたデフォルトに戻ります。クローズされたリクエストは `404` を受け取り、アップストリームへは到達しません。オープン中のリクエストも通常の WAF ルールを通過し、すべての上書きは Kunato の再起動でリセットされます。設定、パスのマッチング、復旧方法は[管理機能のアクセス制御](docs/development.md#administrative-access)を参照してください。
 
 ### 3. 設定とルールのカスタマイズ
 
@@ -192,7 +196,9 @@ sudo kunato upgrade --version v0.4.0   # 特定のリリースを指定
 sudo kunato upgrade --dry-run          # 実行内容の確認のみ
 ```
 
-既存の設定ファイル（`allowed_hosts` が未設定の場合も含む）はそのまま保持されます。ホスト検証を有効にするには既存ファイルにフィールドを追加してください。インストーラを直接再実行した場合も同様に、設定を保持したままバイナリとユニットを更新してサービスを再起動します。`--uninstall` を渡すとそれらを削除します。インストール後に自動更新される内容については[マネージドルールと自動更新](#マネージドルールと自動更新-managed-rules-and-automatic-updates)を、インストーラの詳細やソースからのビルドについては [Deployment](docs/development.md#deployment) を参照してください。
+実行中のバイナリより古いリリースを指定した場合、`--allow-downgrade` も併せて指定しない限り拒否されます。リプレイされたリリース資産によってサーバーが黙ってロールバックされることを防ぐためです。
+
+既存の設定ファイル（`allowed_hosts` が未設定の場合も含む）はそのまま保持されます。ホスト検証を有効にするには既存ファイルにフィールドを追加してください。インストーラを直接再実行した場合も同様に、設定を保持したままバイナリとユニットを更新してサービスを再起動します。`--uninstall` を渡すとそれらを削除します。インストール後に自動更新される内容については[マネージドルールと自動更新](#managed-rules-and-automatic-updates)を、インストーラの詳細やソースからのビルドについては [Deployment](docs/development.md#deployment) を参照してください。
 
 ### 5. ローカルで試す（ソースから実行）
 
@@ -203,7 +209,7 @@ cargo run --example upstream -- --listen 127.0.0.1:3000
 cargo run -- --config rules.example.yaml
 ```
 
-その後、`http://127.0.0.1:8080/` にリクエストを送信してください（ローカルからブロックルールを試す場合は、`rules.example.yaml` の `trusted-sources` から `127.0.0.1/32` を除外してください）。
+その後、`http://127.0.0.1:8080/` にリクエストを送信してください（`rules.example.yaml` では `trusted-sources` がデフォルトで無効なので、ブロックルールはローカルでもそのまま適用されます）。
 
 ### 6. リリースとルールの署名（メンテナー向け）
 
@@ -228,6 +234,7 @@ sudo apt-get install -y minisign
 | `kunato metrics` | ループバック管理リスナー (`127.0.0.1:9090`) から Prometheus メトリクスを表形式で表示します。 |
 | `kunato maintenance on\|off` | 転送を行わずメンテナンス画面を返すか、通常のプロキシ動作に戻します。 |
 | `kunato admin-access status\|open\|close` | 宣言した管理機能へのアクセスを一覧・期間限定で開閉します。 |
+| `kunato console --config <PATH>` | 任意の読み取り専用モニタリングコンソールを起動します（`console.enabled: true` でない限り無効）。 |
 | `kunato update-rules` | 最新のマネージドルールセットのチェック・検証・適用を1回実行します。 |
 | `kunato upgrade` | 設定を保持したまま、インストール済みバイナリと systemd ユニットをアップグレードします。 |
 | `kunato banner` | カラーのロゴバナーをターミナルに表示します。 |
@@ -266,6 +273,7 @@ sudo kunato update-rules
 │   ├── systemd/
 │   │   └── system/
 │   │       ├── kunato.service                 # ユニット (0644)
+│   │       ├── kunato-console.service         # 任意のユニット (0644、無効)
 │   │       └── multi-user.target.wants/
 │   │           └── kunato.service -> ../kunato.service
 │   └── kunato/                                # 設定ディレクトリ (0750 root:kunato)
@@ -277,9 +285,27 @@ sudo kunato update-rules
 └── var/
     └── lib/
         └── kunato/                            # StateDirectory (0750 kunato:kunato)
+            ├── console/                       # コンソール履歴 (0700 kunato、有効化後)
             ├── rules.yaml                     # マネージドルールセット（自動更新）
             └── rules.yaml.update-state        # アップデータ状態管理ファイル（自動更新）
 ```
+
+モニタリングコンソールは任意機能で、新規インストール・アップグレードのどちらでも無効です。有効化には次の2つが必要です：
+
+1. `/etc/kunato/kunato.yaml` の `console` ブロックのコメントを外す、または次を追記します：
+
+   ```yaml
+   console:
+     enabled: true
+   ```
+
+2. ユニットを有効化して起動します：
+
+   ```sh
+   sudo systemctl enable --now kunato-console
+   ```
+
+`http://127.0.0.1:9091/`（または設定した `console.listen`）を開きます。どちらか一方だけでは動作しません。設定がない場合はプロセスが即座に終了し、ユニットを有効化していなければ起動時に何も開始されません。以降の `console` 設定変更は `sudo systemctl restart kunato-console` で反映します（`enable` の再実行では再起動されません）。リモートアクセス・認証・TLS については[モニタリングコンソール](docs/monitoring-console.md)と[設定リファレンス](docs/development.md#monitoring-console)を参照してください。
 
 自動更新されるもの：`/var/lib/kunato/rules.yaml` とそのサイドカーファイル `rules.yaml.update-state`（最終成功タイムスタンプ、HTTP バリデータ）。アップデータが一切触れないもの：`/etc/kunato/` 配下のすべて。サービスはインストーラが作成する `kunato` ユーザー（ホームディレクトリなし）として実行され、`/var/lib/kunato/` への書き込み権限のみを必要とします。
 
@@ -320,6 +346,7 @@ scripts/security-lab.sh run --sandbox-suite load
 | --- | --- |
 | [Development Guide](docs/development.md) | YAML 設定の全フィールドリファレンス、デプロイオプション、DoS / DDoS 防御、ブラックボックステスト、ソースからのビルド手順。 |
 | [Design & Architecture](docs/DESIGN.md) | 並行処理モデル、リクエスト／レスポンスのライフサイクル、ボディ・フォーム・アップロード検査ポリシー、設計上の不変条件。 |
+| [Monitoring Console](docs/monitoring-console.md) | 任意の読み取り専用コンソール：有効化手順、アクセス制御、保存と保持、実装状況。 |
 | [Attack Coverage](docs/attack-coverage.md) | 同梱ルールとエンジン機構における攻撃クラスごとの対応状況（Covered / Partial / Gap）トラッカー。 |
 | [Rule Updates & Compatibility](docs/rule-updates.md) | 日次ルール更新の仕組みと、バイナリ／スキーマ間のバージョン互換性ポリシー。 |
 | [Signing Key Backup](docs/signing-key-backup.md) | 署名鍵の暗号化バックアップ、保管場所、復元テスト、ローテーションの手順。 |

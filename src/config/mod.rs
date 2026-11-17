@@ -2183,6 +2183,16 @@ impl CompiledConfig {
         ))
     }
 
+    /// Warning to log when the console is enabled but the loopback admin
+    /// listener that serves its statistics snapshot is disabled.
+    pub fn console_warning(&self) -> Option<String> {
+        (self.console.enabled && !self.admin.enabled).then(|| {
+            "console is enabled but the admin listener is disabled; the console \
+             cannot collect the statistics snapshot"
+                .to_owned()
+        })
+    }
+
     /// Warning to log when `admin_access` is enabled but the loopback admin
     /// listener is disabled, which leaves no way to open or close access.
     pub fn admin_access_warning(&self) -> Option<String> {
@@ -3621,21 +3631,16 @@ const MAX_CONSOLE_CLIENTS: usize = 256;
 
 fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<String>) -> Console {
     let source = spec.source.unwrap_or(admin.listen);
-    if spec.enabled && !admin.enabled {
-        issues.push(
-            "console.enabled requires an enabled admin listener for the statistics source"
-                .to_owned(),
-        );
-    }
-    // A disabled console inherits `admin.listen`, which may be an ephemeral
-    // test port. Only an explicit source, or an enabled console, is checked.
-    if spec.enabled || spec.source.is_some() {
-        if !source.ip().is_loopback() {
+    // An inherited `admin.listen` may be an ephemeral test port, and a
+    // disabled admin listener only makes the console inert. Validate an
+    // explicit source and let the console runtime report an unusable one.
+    if let Some(explicit) = spec.source {
+        if !explicit.ip().is_loopback() {
             issues.push(format!(
-                "console.source must be a loopback address, got `{source}`"
+                "console.source must be a loopback address, got `{explicit}`"
             ));
         }
-        if source.port() == 0 {
+        if explicit.port() == 0 {
             issues.push("console.source must include a nonzero port".to_owned());
         }
     }
@@ -7566,20 +7571,25 @@ console: { enabled: true }
     }
 
     #[test]
-    fn console_requires_an_enabled_admin_listener() {
-        let error = parse_with(
+    fn a_disabled_admin_listener_makes_the_console_inert_with_a_warning() {
+        let config = parse_with(
             BASE,
             "admin: { enabled: false }
 console: { enabled: true }
 ",
         )
-        .expect_err("disabled admin");
-        assert!(
-            error
-                .to_string()
-                .contains("requires an enabled admin listener"),
-            "{error}"
-        );
+        .expect("valid config");
+        assert!(config.console.enabled);
+        assert!(!config.admin.enabled);
+        let warning = config.console_warning().expect("warning");
+        assert!(warning.contains("admin listener is disabled"), "{warning}");
+    }
+
+    #[test]
+    fn a_disabled_console_has_no_warning_without_an_admin_listener() {
+        let config = parse_with(BASE, "admin: { enabled: false }\n").expect("valid config");
+        assert!(!config.console.enabled);
+        assert!(config.console_warning().is_none());
     }
 
     #[test]

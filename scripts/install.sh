@@ -17,6 +17,7 @@ STATE_DIR="/var/lib/kunato"
 RULES_FILE="$STATE_DIR/rules.yaml"
 BIN_PATH="/usr/local/bin/kunato"
 UNIT_PATH="/etc/systemd/system/kunato.service"
+CONSOLE_UNIT_PATH="/etc/systemd/system/kunato-console.service"
 
 VERSION="${KUNATO_VERSION:-}"
 UPSTREAM="${KUNATO_UPSTREAM:-}"
@@ -252,6 +253,7 @@ version_lt() {
 
 stop_service_if_present() {
     if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop kunato-console 2>/dev/null || true
         systemctl stop kunato 2>/dev/null || true
     fi
 }
@@ -356,6 +358,11 @@ install_release() {
     elif [ ! -f "$UNIT_PATH" ]; then
         die "archive does not contain kunato.service and no unit file is installed"
     fi
+
+    console_unit=$(find "$workdir" -maxdepth 3 -type f -name kunato-console.service -print -quit)
+    if [ -n "$console_unit" ]; then
+        install -m 0644 "$console_unit" "$CONSOLE_UNIT_PATH"
+    fi
 }
 
 initialize_configuration() {
@@ -459,12 +466,13 @@ initialize_configuration() {
 }
 
 uninstall() {
-    log "stopping and disabling the kunato service"
+    log "stopping and disabling the kunato services"
     if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now kunato-console 2>/dev/null || true
         systemctl disable --now kunato 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
     fi
-    rm -f "$BIN_PATH" "$UNIT_PATH"
+    rm -f "$BIN_PATH" "$UNIT_PATH" "$CONSOLE_UNIT_PATH"
     if [ "$PURGE" -eq 1 ]; then
         rm -rf "$CONFIG_DIR" "$STATE_DIR"
         log "removed $CONFIG_DIR and $STATE_DIR"
@@ -502,11 +510,29 @@ main() {
     sleep 1
     if systemctl is-active --quiet kunato; then
         log "kunato $VERSION is running; metrics: 127.0.0.1:9090/metrics"
-        show_banner
     else
         stop_service_if_present
         die "kunato failed to start; inspect the logs with: kunato log -n 50 (or journalctl -u kunato -e)"
     fi
+
+    if [ -f "$CONSOLE_UNIT_PATH" ]; then
+        if systemctl is-enabled --quiet kunato-console; then
+            log "restarting the enabled kunato-console service"
+            if ! systemctl restart kunato-console; then
+                log "note: kunato-console did not start; inspect: journalctl -u kunato-console -e"
+            fi
+            sleep 1
+            if systemctl is-active --quiet kunato-console; then
+                log "console is running; open the configured console.listen address (default http://127.0.0.1:9091/)"
+            else
+                log "note: kunato-console is not active; set console.enabled: true in the configuration, then run: systemctl restart kunato-console"
+                log "inspect its logs with: journalctl -u kunato-console -e"
+            fi
+        else
+            log "the monitoring console is disabled; to enable it, set console.enabled: true and run: systemctl enable --now kunato-console"
+        fi
+    fi
+    show_banner
 }
 
 main

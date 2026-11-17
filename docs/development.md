@@ -208,7 +208,9 @@ Install the binary to `/usr/local/bin/kunato`, generate a configuration with
 `kunato init --upstream <url> --acme-domain example.com --output
 /etc/kunato/kunato.yaml` (or `--tls-cert <pem> --tls-key <pem>` for a manually
 managed certificate), download the first rules file with `kunato
-update-rules`, and enable `packaging/kunato.service`. `rules.example.yaml` is a
+update-rules`, and enable `packaging/kunato.service`. The optional
+`packaging/kunato-console.service` is installed but stays disabled until the
+console is enabled in the configuration. `rules.example.yaml` is a
 practical starting point with rules for SQL/NoSQL injection, XSS, path traversal,
 command injection, SSRF, XXE, malicious uploads, scanners, sensitive files, and
 more. `scripts/release.sh X.Y.Z` cuts a release: it bumps the `version` in
@@ -1616,8 +1618,10 @@ not stop WAF forwarding, and restarting it does not restart the WAF. It never
 edits rules, toggles maintenance, changes administrative access, or changes a
 protective verdict.
 
-The console is disabled by default, so an installation without a `console`
-block keeps one binary and one configuration file:
+The console is disabled by default for both new installations and upgrades.
+`kunato init` and `rules.example.yaml` ship the block commented out, and the
+release archive ships a separate `kunato-console.service` unit that the
+installer does not enable. Enable both layers to run it:
 
 ```yaml
 console:
@@ -1642,9 +1646,11 @@ console:
 | `auth` | disabled | Operator token authentication; required for a non-loopback listener |
 | `tls` | absent | Console HTTPS; required for a non-loopback listener |
 
-`console.enabled: true` requires an enabled admin listener, because the
-statistics snapshot lives there. The console's `allowed_clients` and
-`allowed_hosts` are separate from the WAF request policies.
+The console reads its statistics from the admin listener. Enabling it while
+`admin.enabled` is false is accepted with a startup warning: `kunato console`
+logs the reason and exits successfully, so the packaged service stays inactive
+instead of failed. The console's `allowed_clients` and `allowed_hosts` are
+separate from the WAF request policies.
 
 #### Loopback access
 
@@ -1737,6 +1743,12 @@ one console process per directory. The console reads the configuration once at
 startup: restart it to apply `console` changes. A bad `console` section also
 fails WAF reload validation, which keeps the previous WAF configuration.
 
+The packaged `kunato-console.service` runs
+`kunato console --config /etc/kunato/kunato.yaml` as the `kunato` user after the
+WAF unit. `scripts/install.sh` installs it but leaves it disabled, so the
+console runs only after the operator sets `console.enabled: true` and enables
+the unit. An upgrade never turns it on.
+
 To try it from source, start the WAF with an admin listener and then the console:
 
 ```sh
@@ -1744,8 +1756,9 @@ cargo run -- --config rules.example.yaml
 cargo run -- console --config rules.example.yaml
 ```
 
-`rules.example.yaml` does not enable the console; add the `console` block above
-with a temporary `storage_dir` first.
+`rules.example.yaml` leaves the console disabled. Uncomment its `console` block
+(and set a temporary `storage_dir`, because an unprivileged source run usually
+cannot create `/var/lib/kunato/console`) before running the command above.
 
 ### Maintenance mode
 

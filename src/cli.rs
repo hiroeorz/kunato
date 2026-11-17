@@ -386,6 +386,14 @@ impl InitArgs {
              admin:\n  enabled: true\n  listen: 127.0.0.1:9090\n",
         );
 
+        out.push_str(
+            "\n# Optional read-only monitoring console served by `kunato console` (the\n\
+             # packaged kunato-console.service). Uncomment to enable it, then run\n\
+             # `systemctl enable --now kunato-console`. History is stored under\n\
+             # /var/lib/kunato/console.\n\
+             # console:\n  # enabled: true\n",
+        );
+
         let allowed_hosts = self.render_allowed_hosts()?;
         if allowed_hosts.is_empty() {
             out.push_str(
@@ -816,6 +824,14 @@ mod tests {
         let text = args.render().expect("render");
         assert!(text.contains("listen: '[::]:443'\n"));
         assert!(!text.contains("# listen:"));
+    }
+
+    #[test]
+    fn renders_a_disabled_console_example() {
+        let text = args().render().expect("render");
+        assert!(text.contains("# console:\n  # enabled: true\n"));
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        assert!(!compiled.console.enabled);
     }
 
     #[test]

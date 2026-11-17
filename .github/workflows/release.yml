@@ -57,6 +57,7 @@ jobs:
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/kunato" "dist/${name}/"
           cp packaging/kunato.service "dist/${name}/"
+          cp packaging/kunato-console.service "dist/${name}/"
           cp rules.example.yaml LICENSE-MIT LICENSE-APACHE "dist/${name}/"
           cp scripts/install.sh "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"

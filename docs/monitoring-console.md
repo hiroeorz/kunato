@@ -9,10 +9,12 @@ aggregation, retention, supplementary measurements, and compact decoy evidence
 as libraries. [Phase 5](monitoring-console-phase5.md) adds the optional console
 process, a read-only HTTP/SSE API, and an embedded real-data UI.
 [Phase 6](monitoring-console-phase6.md) adds the source allowlist, Host
-validation, authentication, and TLS for remote access. Packaging, service
-units, historical event drill-down, CSV export, and comparison periods remain
-future work; the browser prototype is retained as a design reference and still
-uses fictional data.
+validation, authentication, and TLS for remote access. The release packages the
+console as `kunato-console.service`, which stays disabled: the configuration
+default is off for both new installations and upgrades, and enabling requires
+`console.enabled: true` plus enabling the unit. Historical event drill-down,
+CSV export, and comparison periods remain future work; the browser prototype is
+retained as a design reference and still uses fictional data.
 
 Related documents:
 
@@ -53,7 +55,7 @@ The following distinctions apply throughout these documents:
 | --- | --- | --- |
 | Navigation | One console with a left sidebar and two views: Metrics and Real-time monitor | Implemented in the delivered UI (minimal read-only views) |
 | Runtime boundary | An optional console process separate from the WAF process | Implemented as `kunato console` |
-| Distribution | Initially one repository and one executable with a separate console subcommand | Implemented as a subcommand; packaging remains open |
+| Distribution | Initially one repository and one executable with a separate console subcommand | Implemented as a subcommand and a packaged `kunato-console.service` unit |
 | Live transport | SSE from the console to the browser; ordinary HTTP APIs for queries and operations | Implemented with coalesced 1-second state and bounded subscribers |
 | Access | Loopback by default; explicit listener and source-IP/CIDR policy for remote access | Implemented; `allowed_clients` uses the transport peer |
 | Remote transport | HTTPS and user authentication alongside the source allowlist | Implemented with a token, server-side sessions, and TLS |
@@ -340,18 +342,17 @@ four controls at configuration load time.
 
 ### Remaining work
 
-[Remaining work](monitoring-console-remaining.md) tracks installation and
-service units, packaging, historical event drill-down, CSV export, comparison
-periods, complete journal ingestion, further measurement gaps, production
-tuning, and schema/backup work. No remaining item changes rule evaluation,
-protective verdicts, the managed rule format, decoy enforcement, or WAF
-forwarding.
+[Remaining work](monitoring-console-remaining.md) tracks historical event
+drill-down, CSV export, comparison periods, complete journal ingestion, further
+measurement gaps, production tuning, and schema/backup work. No remaining item
+changes rule evaluation, protective verdicts, the managed rule format, decoy
+enforcement, or WAF forwarding.
 
 ## 8. Decisions still required
 
-- Exact console subcommands, optional enablement workflow, and service units.
-- Authentication, session lifecycle, initial credentials, and recovery.
-- Certificate names, material delivery, service permissions, and reload policy.
+- Session recovery and token rotation without restarting the console.
+- Certificate names and service permissions when the console runs as a different
+  account than the WAF.
 - Event cursor/replay handling and bounded pause/resume behavior.
 - Future upgrades beyond schema version four and a supported online backup workflow.
 - Production tuning of storage/queue/query/maintenance limits for the adopted

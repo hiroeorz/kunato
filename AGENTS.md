@@ -97,7 +97,7 @@ docs/
   monitoring-console-phase4.md # Additional source measurements and compact decoy correlation
   monitoring-console-phase5.md # Console runtime, read-only HTTP/SSE delivery, and embedded UI
   monitoring-console-phase6.md # Remote access: source allowlist, authentication, and TLS
-  monitoring-console-remaining.md # Remaining console, packaging, and measurement work
+  monitoring-console-remaining.md # Remaining console and measurement work
   monitoring-console-cadence.md # Measured update costs and proposed one-second live publication
   development.md      # Development, deployment, and the full configuration reference
   rule-updates.md     # Daily rule updates and binary version compatibility
@@ -107,6 +107,7 @@ docs/
   security-testing.md # Local attack-tool lab design and verification process
 packaging/
   kunato.service   # systemd unit
+  kunato-console.service # systemd unit for `kunato console`
 ui/
   console-prototype/ # Browser-only monitoring UI with fictional data; no backend
   console-web/       # Embedded read-only console UI served by `kunato console`

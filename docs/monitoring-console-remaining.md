@@ -28,6 +28,7 @@ Related: [console design](monitoring-console.md),
 | Console runtime | `kunato console`: collector loop, health publication, bounded shutdown, independent process |
 | Web delivery | Read-only HTTP API, bounded SSE, embedded real-data UI |
 | Remote access | CIDR allowlist, Host validation, token login with server-side sessions, TLS, fail-closed validation |
+| Packaging | `kunato-console.service`, installer enablement, and the multi-unit hardening check |
 | Tests | Config, auth, allowlist, Host, TLS, history, SSE, runtime, and slow-consumer behavior |
 
 ## 2. Remaining items
@@ -39,12 +40,17 @@ authority (requirement or design clause) that defines acceptance.
 
 | ID | Item | Authority |
 | --- | --- | --- |
-| OP-01 | systemd unit, service user, installer flag, and separate console enablement | design 3, 8 |
 | OP-02 | Schema upgrade path beyond version 4 and a supported online backup procedure | design 8; storage 8 |
 | OP-03 | Writer failure retry/backoff and priority shedding | phase 1; storage 2.2 |
 | OP-04 | Capacity-pressure degradation (expire, shorten detail, coarsen, restrict) with measured thresholds | storage 7 |
 | OP-05 | Production tuning of queue/query/maintenance/event/correlation budgets | design 8 |
 | OP-06 | Integrated performance and failure validation (SSE latency, slow consumers, database stalls, multiple browsers) | cadence "Remaining validation" |
+
+OP-01 is implemented: the release archive ships `kunato-console.service`,
+`scripts/install.sh` installs it, and `scripts/check-unit-hardening.sh` checks
+both units. The console stays off by default: `kunato init` and
+`rules.example.yaml` ship the block commented out and the installer leaves the
+unit disabled, so it runs only after both are explicitly enabled.
 
 ### 2.2 Measurements and presentation gaps
 
@@ -64,7 +70,6 @@ authority (requirement or design clause) that defines acceptance.
 
 | ID | Decision | Authority |
 | --- | --- | --- |
-| D-01 | Optional enablement workflow and systemd service units | design 8 |
 | D-02 | Session recovery and credential rotation without a restart | design 8 |
 | D-03 | Certificate names, service permissions, and behavior when the console runs as a different account than the WAF | design 8 |
 | D-04 | Event cursor/replay behavior and pause/resume bounds | design 8; LIVE-06 |
@@ -77,6 +82,10 @@ loopback/remote listener policy, token authentication with server-side
 sessions, and PEM or combined ACME-bundle certificate delivery with reload on
 change.
 
+Resolved by packaging: the console enablement workflow. The console is off by
+default, `kunato init` and `rules.example.yaml` ship the block commented out,
+and the installer installs `kunato-console.service` without enabling it.
+
 ### 2.4 Documentation debt
 
 | ID | Item |
@@ -88,8 +97,8 @@ change.
 
 ## 3. Sequence
 
-1. Packaging and service enablement, including the certificate permission
-   decision for separate service accounts.
+1. Service account and certificate permission decision for a separate console
+   account.
 2. Measurement gaps and the remaining interaction design in the delivered UI.
 3. Capacity, backup, and production tuning work.
 

@@ -2325,6 +2325,13 @@ admin:
   enabled: true
   listen: 127.0.0.1:9090
 
+# Optional read-only monitoring console, served by `kunato console` and the
+# packaged kunato-console.service. It stores history under
+# /var/lib/kunato/console. Uncomment this block and enable the service to use
+# it; the console stays off otherwise.
+# console:
+#   enabled: true
+
 # Optional administrative functions with a configurable default state.
 # `default: open` (the shipped default) keeps normal access and lets `close`
 # temporarily restrict it; `default: close` is fail-closed and requires an

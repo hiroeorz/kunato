@@ -205,6 +205,9 @@ fn warn_configuration(config: &CompiledConfig) {
     if let Some(warning) = config.admin_access_warning() {
         warn!("{warning}");
     }
+    if let Some(warning) = config.console_warning() {
+        warn!("{warning}");
+    }
 }
 
 /// Whether the configured upstream authority is the admin listener itself.
