@@ -12,14 +12,30 @@
     <div class="shell">
       <aside class="sidebar" aria-label="Console views">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">K</span>
-          <span class="brand-text">Kunato console</span>
+          <span class="brand-symbol" aria-hidden="true">
+            <svg viewBox="0 0 32 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M16 2 29 7v10c0 8-6 13-13 17C9 30 3 25 3 17V7L16 2Z" stroke="currentColor" stroke-width="2.2" />
+              <path d="M11 11v13m11-13-11 9m5-4 7 8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="brand-text">kunato<span class="brand-caption">Console</span></span>
         </div>
+        <div class="nav-label">Observe</div>
         <nav class="nav" aria-label="Views">
           <button id="nav-live" class="nav-item is-active" type="button" data-view="live">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12h4l3-8 4 16 3-8h4" />
+              </svg>
+            </span>
             Real-time monitor
           </button>
           <button id="nav-metrics" class="nav-item" type="button" data-view="metrics">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 20V11M10 20V5M16 20v-6M22 20H2" />
+              </svg>
+            </span>
             Metrics
           </button>
         </nav>
@@ -35,6 +51,7 @@
       <main id="main" tabindex="-1">
         <header class="page-header">
           <div>
+            <p class="eyebrow">Observe</p>
             <h1 id="page-title">Real-time monitor</h1>
             <p id="page-subtitle" class="muted">
               Latest state from the WAF; UTC timestamps. Read-only.
@@ -50,34 +67,34 @@
 
         <section id="live-view" aria-label="Real-time monitoring">
           <div class="cards" id="live-cards">
-            <article class="card">
+            <article class="card card-featured">
               <h2>Requests</h2>
-              <p class="value" id="live-requests">Unavailable</p>
+              <p class="value is-unavailable" id="live-requests">Unavailable</p>
               <p class="detail" id="live-rate">rate unavailable</p>
             </article>
             <article class="card card-reject">
               <h2>Rejected</h2>
-              <p class="value" id="live-rejected">Unavailable</p>
+              <p class="value is-unavailable" id="live-rejected">Unavailable</p>
               <p class="detail" id="live-rejected-rate">rate unavailable</p>
             </article>
             <article class="card">
               <h2>LOG detections</h2>
-              <p class="value" id="live-logged">Unavailable</p>
+              <p class="value is-unavailable" id="live-logged">Unavailable</p>
               <p class="detail">requests with at least one LOG match</p>
             </article>
             <article class="card">
               <h2>Active connections</h2>
-              <p class="value" id="live-connections">Unavailable</p>
+              <p class="value is-unavailable" id="live-connections">Unavailable</p>
               <p class="detail">latest sample</p>
             </article>
             <article class="card">
               <h2>Upstream failures</h2>
-              <p class="value" id="live-upstream">Unavailable</p>
+              <p class="value is-unavailable" id="live-upstream">Unavailable</p>
               <p class="detail" id="live-upstream-detail">connection failures and timeouts</p>
             </article>
             <article class="card card-decoy">
               <h2>Decoy credential use</h2>
-              <p class="value" id="live-decoy">Unavailable</p>
+              <p class="value is-unavailable" id="live-decoy">Unavailable</p>
               <p class="detail">verified presentations, not attacks</p>
             </article>
           </div>
@@ -133,34 +150,34 @@
           </div>
 
           <div class="cards" id="metrics-cards">
-            <article class="card">
+            <article class="card card-featured">
               <h2>Requests</h2>
-              <p class="value" id="metrics-requests">Unavailable</p>
+              <p class="value is-unavailable" id="metrics-requests">Unavailable</p>
               <p class="detail" id="metrics-requests-detail"></p>
             </article>
             <article class="card card-reject">
               <h2>Rejected</h2>
-              <p class="value" id="metrics-rejected">Unavailable</p>
+              <p class="value is-unavailable" id="metrics-rejected">Unavailable</p>
               <p class="detail" id="metrics-rejected-detail"></p>
             </article>
             <article class="card">
               <h2>Rejection rate</h2>
-              <p class="value" id="metrics-rejection-rate">Unavailable</p>
+              <p class="value is-unavailable" id="metrics-rejection-rate">Unavailable</p>
               <p class="detail">rejected divided by observed requests</p>
             </article>
             <article class="card">
               <h2>LOG detections</h2>
-              <p class="value" id="metrics-logged">Unavailable</p>
+              <p class="value is-unavailable" id="metrics-logged">Unavailable</p>
               <p class="detail">not disjoint from rejected requests</p>
             </article>
             <article class="card">
               <h2>Upstream failures</h2>
-              <p class="value" id="metrics-upstream">Unavailable</p>
+              <p class="value is-unavailable" id="metrics-upstream">Unavailable</p>
               <p class="detail">connection failures and timeouts</p>
             </article>
             <article class="card card-decoy">
               <h2>Decoy credential use</h2>
-              <p class="value" id="metrics-decoy">Unavailable</p>
+              <p class="value is-unavailable" id="metrics-decoy">Unavailable</p>
               <p class="detail">verified presentations</p>
             </article>
           </div>

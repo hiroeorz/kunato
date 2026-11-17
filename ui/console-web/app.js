@@ -66,6 +66,15 @@
     node.className = "banner" + (level === "bad" ? " level-bad" : "");
   }
 
+  function plural(count, singular, many) {
+    return count + " " + (count === 1 ? singular : many);
+  }
+
+  function metricValue(id, value) {
+    text($(id), value);
+    $(id).classList.toggle("is-unavailable", value === "Unavailable");
+  }
+
   function setConnection(connected) {
     state.connected = connected;
     var dot = $("collection-dot");
@@ -172,12 +181,12 @@
       var failures = counter(snapshot, "upstream_connection_failures");
       var timeouts = counter(snapshot, "upstream_timeouts");
       var decoy = counter(snapshot, "decoy_credential_use_requests");
-      text($("live-requests"), number(requests));
-      text($("live-rejected"), number(rejected));
-      text($("live-logged"), number(logged));
-      text($("live-connections"), number(snapshot.active_connections));
-      text($("live-upstream"), number(failures === null && timeouts === null ? null : (failures || 0) + (timeouts || 0)));
-      text($("live-decoy"), number(decoy));
+      metricValue("live-requests", number(requests));
+      metricValue("live-rejected", number(rejected));
+      metricValue("live-logged", number(logged));
+      metricValue("live-connections", number(snapshot.active_connections));
+      metricValue("live-upstream", number(failures === null && timeouts === null ? null : (failures || 0) + (timeouts || 0)));
+      metricValue("live-decoy", number(decoy));
       text(
         $("live-rate"),
         rates.requestsPerSecond === null
@@ -371,18 +380,18 @@
     var timeouts = sumMetric(buckets, "upstream_timeouts");
     var decoy = sumMetric(buckets, "decoy_credential_use_requests");
 
-    text($("metrics-requests"), number(requests.total));
-    text($("metrics-rejected"), number(rejected.total));
-    text($("metrics-logged"), number(logged.total));
-    text($("metrics-upstream"), number(failures.total === null && timeouts.total === null ? null : (failures.total || 0) + (timeouts.total || 0)));
-    text($("metrics-decoy"), number(decoy.total));
-    text($("metrics-rejection-rate"), percent(rejected.total, requests.total));
+    metricValue("metrics-requests", number(requests.total));
+    metricValue("metrics-rejected", number(rejected.total));
+    metricValue("metrics-logged", number(logged.total));
+    metricValue("metrics-upstream", number(failures.total === null && timeouts.total === null ? null : (failures.total || 0) + (timeouts.total || 0)));
+    metricValue("metrics-decoy", number(decoy.total));
+    metricValue("metrics-rejection-rate", percent(rejected.total, requests.total));
 
     var partial = requests.incomplete || rejected.incomplete;
     text(
       $("metrics-requests-detail"),
       buckets.length
-        ? buckets.length + " intervals; " + (partial ? "partial coverage" : "complete intervals only for rates")
+        ? plural(buckets.length, "interval", "intervals") + "; " + (partial ? "partial coverage" : "complete intervals only for rates")
         : "no retained intervals in this range"
     );
     text(
@@ -408,10 +417,10 @@
       meta.push("available: " + utc(first) + " to " + utc(last));
     }
     if (data.truncated) {
-      meta.push("response truncated at " + number(data.returned) + " intervals; narrow the range");
+      meta.push("response truncated at " + plural(data.returned, "interval", "intervals") + "; narrow the range");
     }
     if (data.pending_minutes) {
-      meta.push(number(data.pending_minutes) + " minutes awaiting materialization");
+      meta.push(plural(data.pending_minutes, "minute", "minutes") + " awaiting materialization");
     }
     if (data.oldest_available_ms !== null && data.oldest_available_ms !== undefined) {
       meta.push("oldest retained: " + utc(data.oldest_available_ms));
@@ -448,7 +457,7 @@
       return { requests: requests, rejected: rejected, start: bucket.start_ms };
     });
     var step = innerWidth / series.length;
-    var bar = Math.max(1, step * 0.7);
+    var bar = Math.max(1, Math.min(step * 0.7, 48));
 
     var ns = "http://www.w3.org/2000/svg";
     var svg = document.createElementNS(ns, "svg");
@@ -462,7 +471,7 @@
       axis.setAttribute("x2", width - 12);
       axis.setAttribute("y1", y);
       axis.setAttribute("y2", y);
-      axis.setAttribute("stroke", "#2a323d");
+      axis.setAttribute("stroke", "#edf0f4");
       svg.appendChild(axis);
       var tick = document.createElementNS(ns, "text");
       tick.setAttribute("x", 4);
@@ -484,7 +493,7 @@
       requestsBar.setAttribute("y", top + innerHeight - requestHeight);
       requestsBar.setAttribute("width", bar);
       requestsBar.setAttribute("height", Math.max(0, requestHeight));
-      requestsBar.setAttribute("fill", "#6ea8fe");
+      requestsBar.setAttribute("fill", "#829ab3");
       var title = document.createElementNS(ns, "title");
       title.textContent =
         utc(point.start) +
@@ -500,7 +509,7 @@
       rejectedBar.setAttribute("y", top + innerHeight - rejectHeight);
       rejectedBar.setAttribute("width", bar);
       rejectedBar.setAttribute("height", Math.max(0, rejectHeight));
-      rejectedBar.setAttribute("fill", "rgba(255,107,107,0.85)");
+      rejectedBar.setAttribute("fill", "#dc9b6c");
       svg.appendChild(rejectedBar);
     });
 

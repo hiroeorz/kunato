@@ -17,6 +17,9 @@ own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, and
 `/api/v1/live` endpoints. All event values are rendered with `textContent`; the
 page makes no external requests.
 
+The page follows the prototype's visual language (light theme, warm accent,
+dark sidebar) while keeping the minimal read-only feature set.
+
 The UI is intentionally smaller than the fictional interaction prototype in
 `../console-prototype/`. Arrival effects, event-age backgrounds, pause/resume,
 scroll preservation, CSV export, comparison periods, and historical event
