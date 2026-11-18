@@ -377,17 +377,11 @@ impl PayloadMatcher {
                 return false;
             }
             !body.is_empty()
-                && self.hits(&String::from_utf8_lossy(body))
-                && view
-                    .body_forms
-                    .iter()
-                    .all(|form| self.hits(&String::from_utf8_lossy(form)))
+                && self.hits(body)
+                && view.body_forms.iter().all(|form| self.hits(form))
         } else {
-            (!body.is_empty() && self.hits(&String::from_utf8_lossy(body)))
-                || view
-                    .body_forms
-                    .iter()
-                    .any(|form| self.hits(&String::from_utf8_lossy(form)))
+            (!body.is_empty() && self.hits(body))
+                || view.body_forms.iter().any(|form| self.hits(form))
         }
     }
 

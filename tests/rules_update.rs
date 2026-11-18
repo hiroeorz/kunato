@@ -152,6 +152,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
   interval: 24h
   jitter_percent: 0
   max_bytes: {max_bytes}
@@ -185,6 +186,42 @@ async fn downloads_and_replaces_the_rules_file() {
 
     let state = std::fs::read_to_string(&state_file).expect("state written");
     assert!(state.contains("last_success="));
+}
+
+#[tokio::test]
+async fn an_unsigned_mirror_is_refused_without_the_explicit_opt_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addr = spawn_server(rules_routes(RULES.as_bytes())).await;
+    let (mut settings, rules_file, main) = update_settings(dir.path(), addr.port(), 1024 * 1024);
+    settings.allow_unsigned = false;
+    let state_file = rules_update::state_path(&rules_file);
+
+    let error = rules_update::update_once(&main, &settings, &rules_file, &state_file)
+        .await
+        .expect_err("an unsigned loopback mirror without opt-in must fail");
+
+    assert!(error.to_string().contains("allow_unsigned"), "{error}");
+    assert!(!rules_file.exists());
+}
+
+#[tokio::test]
+async fn an_unsigned_update_preserves_the_signed_timestamp_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let addr = spawn_server(rules_routes(RULES.as_bytes())).await;
+    let (settings, rules_file, main) = update_settings(dir.path(), addr.port(), 1024 * 1024);
+    assert!(settings.allow_unsigned);
+    let state_file = rules_update::state_path(&rules_file);
+    std::fs::write(&state_file, "signature_timestamp=1700000000\n").expect("state");
+
+    rules_update::update_once(&main, &settings, &rules_file, &state_file)
+        .await
+        .expect("unsigned allowed update succeeds");
+
+    let state = std::fs::read_to_string(&state_file).expect("state written");
+    assert!(
+        state.contains("signature_timestamp=1700000000"),
+        "an unsigned mirror must not clear the replay floor: {state}"
+    );
 }
 
 #[tokio::test]
@@ -363,6 +400,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
 ",
         rules_file = rules_file.display(),
         port = addr.port()
@@ -541,6 +579,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
   jitter_percent: 0
 ",
         rules_file = rules_file.display(),
@@ -591,6 +630,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
   jitter_percent: 0
 ",
         rules_file = rules_file.display(),
@@ -638,6 +678,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
   interval: 1s
   jitter_percent: 0
 ",
@@ -718,6 +759,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
   jitter_percent: 0
 ",
         rules_file = rules_file.display(),

@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ring::rand::{SecureRandom, SystemRandom};
+use tokio::sync::watch;
 use tracing::warn;
 
 use crate::error::Error;
@@ -28,6 +29,7 @@ pub struct Auth {
     token: Vec<u8>,
     sessions: Mutex<Sessions>,
     attempts: Mutex<Attempts>,
+    revocations: watch::Sender<u64>,
 }
 
 pub enum Login {
@@ -47,6 +49,7 @@ impl Auth {
             token,
             sessions: Mutex::new(Sessions::default()),
             attempts: Mutex::new(Attempts::default()),
+            revocations: watch::channel(0).0,
         })
     }
 
@@ -77,8 +80,26 @@ impl Auth {
         self.lock_sessions().validate(session, now)
     }
 
+    /// Expiry of a live session. A stream uses this to bound its own lifetime
+    /// even when no further requests arrive to validate the cookie.
+    pub fn session_expiry(&self, session: &str, now: Instant) -> Option<Instant> {
+        self.lock_sessions().expiry(session, now)
+    }
+
     pub fn revoke_session(&self, session: &str) {
         self.lock_sessions().revoke(session);
+        // Wake every live stream so a revoked session stops receiving state
+        // immediately instead of at the next heartbeat.
+        self.revocations.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+    }
+
+    /// Subscribe to session revocations. A live stream revalidates its own
+    /// session when the revision changes, so a logout closes only the streams
+    /// that used the revoked session.
+    pub fn subscribe_revocations(&self) -> watch::Receiver<u64> {
+        self.revocations.subscribe()
     }
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, Sessions> {
@@ -282,6 +303,17 @@ impl Sessions {
         }
     }
 
+    fn expiry(&mut self, session: &str, now: Instant) -> Option<Instant> {
+        match self.entries.get(session).copied() {
+            Some(expiry) if expiry > now => Some(expiry),
+            Some(_) => {
+                self.entries.remove(session);
+                None
+            }
+            None => None,
+        }
+    }
+
     fn revoke(&mut self, session: &str) {
         self.entries.remove(session);
     }
@@ -426,6 +458,27 @@ mod tests {
         assert!(auth.validate_session(&session, now));
         assert!(!auth.validate_session(&session, now + SESSION_TTL + Duration::from_secs(1)));
         auth.revoke_session(&session);
+        assert!(!auth.validate_session(&session, now));
+    }
+
+    #[test]
+    fn revocation_wakes_streams_and_expiry_is_exposed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let auth = auth(dir.path());
+        let token = String::from_utf8(auth.token.clone()).expect("utf8");
+        let now = Instant::now();
+        let Login::Accepted(session) = auth.login("127.0.0.1".parse().unwrap(), &token, now) else {
+            panic!("correct token must authenticate");
+        };
+        assert!(auth.session_expiry(&session, now).is_some());
+        assert!(
+            auth.session_expiry(&session, now + SESSION_TTL + Duration::from_secs(1))
+                .is_none()
+        );
+
+        let revocations = auth.subscribe_revocations();
+        auth.revoke_session(&session);
+        assert!(revocations.has_changed().expect("watch"));
         assert!(!auth.validate_session(&session, now));
     }
 

@@ -33,7 +33,9 @@ Both variants minisign produces are accepted: plain Ed25519 over the file
 default, hashing the artifact with BLAKE2b-512 first; the digest is implemented
 in-tree because `ring` does not expose it. When a signature carries a trusted
 comment, its global signature is verified too and the signed timestamp is used
-to reject a replay of an older release or rule set.
+to reject a replay of an older rule set. A release installer must consume the
+`KUNATO_VERIFIED_SHA256SUMS` handoff; `kunato upgrade` refuses a historical
+installer that would re-download checksums from the same origin instead.
 
 ## Generate the keys
 
@@ -209,5 +211,7 @@ failure when keys are configured):
 - The displayed trusted comment is not authenticated by this verifier; only the
   file signature is checked.
 - A rules URL that uses plain HTTP (only accepted for loopback, the documented
-  development path) skips the signature check with a warning; HTTPS rules URLs
-  enforce it.
+  development path) requires `rules_update.allow_unsigned: true`, skips the
+  signature check, and logs every unsigned install; without the opt-in the
+  configuration is rejected. HTTPS rules URLs enforce the signature. An
+  unsigned update never clears an existing signed-timestamp replay floor.

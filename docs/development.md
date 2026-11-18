@@ -191,9 +191,10 @@ The installer downloads only over HTTPS (`curl --proto '=https' --proto-redir
 `KUNATO_BASE_URL` must therefore be an `https://` URL. `kunato upgrade` reruns
 the installer published with the target release in a cleared environment (only
 `PATH` is inherited, so a caller-supplied `KUNATO_BASE_URL` or a planted `curl`
-cannot steer the root install). It trusts the GitHub release and tag, so
-signing release assets and verifying them in the installer remains a separate
-hardening task.
+cannot steer the root install). It verifies the detached signatures of
+`install.sh` and `SHA256SUMS`, gives the installer the verified checksum file
+through `KUNATO_VERIFIED_SHA256SUMS`, and refuses an installer old enough to
+re-download checksums from the same origin instead.
 
 Without network access, or to build a custom binary, build from source (Rust
 1.89 or later, edition 2024):
@@ -423,10 +424,21 @@ rules_update:
   interval: 24h        # default
   jitter_percent: 10   # randomize the next check by ±10% (default 10, max 50)
   max_bytes: 1048576   # download size limit (default 1 MiB)
+  # allow_unsigned: false  # required opt-in for a loopback plain-HTTP mirror
 ```
 
 The URL must use https; plain http is accepted only for loopback hosts, which is
-handy for tests and local mirrors. Redirects must satisfy the same policy for
+handy for tests and local mirrors, and only when
+`rules_update.allow_unsigned: true` is also set. Without that explicit opt-in
+the configuration is rejected at load and by `kunato validate`, because any
+local process that owns the loopback port can replace the served bytes and a
+plain-HTTP loopback mirror has no detached signature to verify. The command
+`kunato init --rules-url http://127.0.0.1:...` writes the opt-in for the local
+mirror it was explicitly given; the default HTTPS URL never does. The opt-in is
+per-updater, every unsigned install is logged, and an unsigned update preserves
+an existing `signature_timestamp` replay floor instead of erasing it, so
+returning to an HTTPS channel still rejects an older signed rule set. Redirects
+must satisfy the same policy for
 the URL they started from: an https download only follows https, and a
 loopback-http download only follows https or loopback http, so a redirect can
 never downgrade the transport. Redirects may also leave the configured origin
@@ -458,8 +470,11 @@ is configured (HTTPS rule URLs only; the loopback HTTP development path skips it
 with a warning). The signed minisign trusted comment is verified together with
 the file signature, and its timestamp must not move backwards, so replaying an
 older rule set does not roll the install back. `kunato upgrade` verifies
-`install.sh.minisig` before running the installer as root and refuses a release
-tag older than the running binary unless `--allow-downgrade` is given. See [release-signing.md](release-signing.md) for key
+`install.sh.minisig` and `SHA256SUMS.minisig` before running the installer as
+root, hands the verified checksums to installers that consume
+`KUNATO_VERIFIED_SHA256SUMS`, refuses an older installer that would fetch them
+again, and refuses a release tag older than the running binary unless
+`--allow-downgrade` is given. See [release-signing.md](release-signing.md) for key
 generation, signing, rotation, and the remaining trust limits.
 
 ### Content routes
@@ -650,10 +665,16 @@ from the flattened form, so a signature such as `%{` inside compressed pixels
 cannot reject a benign upload while field values, filenames, and unverified file
 payloads stay in scope (the file content is inspected by
 `limits.upload_inspection` instead). A
-`multipart/form-data` message
-that declares several boundaries is flattened once per boundary (up to four),
-because parsers disagree on which one wins (Rack takes the last); messages that
-exceed that fall back to the percent passes on the raw body. Bodies are
+`multipart/form-data` message must declare exactly one boundary. Several
+boundaries are rejected with `413` before rule evaluation instead of being
+flattened once per interpretation: parsers disagree on which one wins (Rack
+takes the last), so a message that names more than one is ambiguous and the
+inspection cannot promise the origin and the rules see the same parts. The
+retained decoded forms are bounded to three times the inspected body (at least
+64 KiB, at most 24 MiB); a body whose escape passes would exceed that bound is
+rejected with `413` rather than evaluated against a partial form set. The
+request inspection reservation covers eight times the buffered body, so the
+decoded forms stay inside the documented process-wide budget. Bodies are
 decompressed first when
 `Content-Encoding` is `gzip`, `deflate`, `br`, or `zstd`: all gzip members and
 all concatenated zstd frames are decoded, repeated `Content-Encoding` fields are
@@ -669,7 +690,11 @@ bounded to 64 parts with 1 KiB names and file names; a `boundary` declaration
 the parser cannot read (an unterminated quote, a control or non-ASCII byte, a
 token outside RFC 2046's set, or more than four boundaries) is rejected with
 `400` before the body is read, so the origin cannot split the body differently
-from the inspection. A quoted boundary that contains spaces is legal and is
+from the inspection. The body text and its decoded forms are converted once per
+request and reused by every body rule; a body of 64 KiB or more holds one of a
+bounded set of request-evaluation CPU permits, and a burst that finds every
+permit in use gets `503` instead of starting a full scan on every worker at
+once. A quoted boundary that contains spaces is legal and is
 inspected in every interpretation.
 
 A body that declares a charset the inspection cannot read (`utf-16`, `utf-32`,
@@ -748,11 +773,15 @@ bytes over HTTP/1.1 (including chunked), HTTP/2, HTTP/3, and WebSocket handshake
 not the declared Content-Length. Forwarded bytes are never rewritten.
 
 An ambiguous or non-canonical request head is rejected with `400` before the
-body is read: duplicate `Host`, `Content-Length`, or `Content-Type` fields, a
+body is read: a missing `Host` (unless an absolute-form target or HTTP/2/HTTP/3
+`:authority` supplies one), duplicate `Host`, `Content-Length`, or `Content-Type`
+fields, a
 `Content-Length` together with `Transfer-Encoding`, a non-chunked
 `Transfer-Encoding`, and a non-canonical method. Duplicate `Content-Type`
 matters because a parser that keeps the last field can decode a body that the
-first field hid from inspection. Chunked trailer fields are dropped in both
+first field hid from inspection, and a missing Host would otherwise let the
+upstream client synthesize the configured upstream authority after rule
+evaluation. Chunked trailer fields are dropped in both
 directions: they are never inspected, so they are not forwarded either (HTTP/2
 and HTTP/3 would otherwise replay them past the header limits and the rules).
 
@@ -865,7 +894,7 @@ mechanism.
 | Field under `limits.saml` | Default | Meaning |
 | --- | --- | --- |
 | `mode` | `strict` | `off`, `log` (decode and log findings only), or `strict` (reject malformed messages and high-confidence findings) |
-| `max_decoded_bytes` | 1 MiB | 1..8 MiB; bound on the base64-decoded or DEFLATE-inflated message |
+| `max_decoded_bytes` | 1 MiB | 1..8 MiB; request-wide bound on the base64-decoded or DEFLATE-inflated messages |
 | `multi_assertion` | `log` | `log` or `block`; multiple plaintext assertions with different `NameID` values |
 | `unsigned` | `log` | `log` or `block`; a `Response` with no XML signature anywhere |
 
@@ -876,6 +905,17 @@ quoted attributes; it does not expand entities or DTDs. Element count (4096),
 depth (64), attributes per element (64), and retained `NameID` bytes (4096) are
 bounded. UTF-16 messages are rejected as uninspectable in `strict` mode rather
 than guessed at.
+
+`max_decoded_bytes` is a budget for the whole request, not a per-field limit,
+and a request may carry at most four `SAMLResponse`/`SAMLRequest` messages.
+Each decoded or inflated message is subtracted from the remaining budget, and
+the guard stops with `TooLarge` once it is exhausted, so repeating a small
+DEFLATE bomb in thousands of fields cannot multiply the work. A form or JSON
+body that carries the `SAML` hint but cannot be parsed by this build is rejected
+in `strict` mode with `400` instead of being forwarded uninspected; that covers
+out-of-range numbers and deeply nested arrays that an origin's parser may still
+accept. Large hinted bodies are decoded and tokenized on the blocking pool
+behind the bounded upload-inspection semaphore.
 
 In `strict` mode the guard rejects:
 
@@ -1444,9 +1484,12 @@ header `alg` is not in the list are rejected with `403` before rule evaluation.
 checks; signatures are not verified because the WAF does not hold the
 application keys. Opaque session tokens and malformed JWTs are ignored when no
 claim policy applies, so this is not a general token validator. A token that has
-the three-segment JWT shape but exceeds the inspection size, or whose header
-repeats a JSON key (the WAF and the application could read different values), is
-rejected instead of skipped. `Authorization` separates the scheme with any
+the three-segment JWT shape but exceeds the inspection size, whose header
+repeats a JSON key (the WAF and the application could read different values), or
+whose header cannot be parsed or nests deeper than 16 levels is rejected instead
+of skipped. The nesting bound is deliberately below serde_json's own recursion
+limit, so a header the WAF cannot read cannot reach an origin with a more
+permissive parser as an unchecked token. `Authorization` separates the scheme with any
 optional whitespace (including a tab), and cookies are inspected both raw and
 after percent-decoding. The check is part of `limits` and therefore remains
 active with `--disable-protection`. Body inspection applies the same
@@ -1694,7 +1737,10 @@ console:
   and creates it with mode 0600 when missing. The file contains 64 hex
   characters; the token is never logged. Sign in at `/login`. Sessions are
   server-side, `HttpOnly`, `SameSite=Strict`, and live in memory for 12 hours;
-  a restart ends them. Five failed attempts per address in 60 seconds return
+  a restart ends them. A live SSE stream revalidates its session on each
+  heartbeat and state tick, is woken when any session is revoked, and closes at
+  the session expiry, so signing out ends the telemetry feed as well as new
+  requests. Five failed attempts per address in 60 seconds return
   `429`. Non-browser clients may send `Authorization: Bearer <token>`.
 - `cert_file` is a PEM chain. Omit `key_file` when the private key is in the
   same file, as in the WAF ACME cache `cert.pem` (a key-and-chain bundle). The
@@ -1894,11 +1940,15 @@ function without the effective state being open. `exclude` patterns keep a
 matching form outside the gate (for example a public AJAX handler below an
 administrative prefix); exclusions are evaluated per form, so a differently
 encoded form that still reaches an administrative page is not hidden by an
-excluded one. Matching happens after percent decoding and dot-segment/border
-normalization only; forms the origin has its own rules for, such as path
-parameters (`;jsessionid=...`) or Windows trailing dots, must be covered by the
-pattern. Custom patterns are case-sensitive unless `(?i)` is written; the
-built-in presets already use it. Only the path is matched; an application that
+excluded one. Servlet matrix parameters (`;jsessionid=...`) are removed from
+each segment before matching, because containers route `/manager;jsessionid=...`
+to the same handler as `/manager`; the stripped form is also used for
+exclusions, so a public `/actuator;x/health` stays outside the gate. Matching
+otherwise happens after percent decoding and dot-segment/border normalization
+only; other forms the origin has its own rules for, such as Windows trailing
+dots, must be covered by the pattern. Custom patterns are case-sensitive unless
+`(?i)` is written; the built-in presets already use it. Only the path is
+matched; an application that
 selects administrative behavior from the query string or a header needs a rule
 for that input in addition to the gate.
 
@@ -2372,10 +2422,13 @@ under normal deployments both share one port. TCP responses then carry an
 
 HTTP/3 requests pass through the same protection, limits, and rule evaluation
 as TCP requests. HEAD responses carry no content, including Kunato-generated
-block and error responses. An HTTP/3 HEADERS frame that declares more than
-`max_header_bytes` is rejected from its declared length before its payload is
-retained (the pinned `h3` release enforces the field-section limit only after it
-has buffered a complete frame). Both connection-close paths (idle watchdog and
+block and error responses. A request-stream frame whose type or declared length
+is read as a QUIC varint is rejected before its payload is retained when it is
+not a DATA frame and declares more than `max_header_bytes`; this covers
+non-minimal HEADERS encodings and non-HEADERS types because the pinned `h3`
+release enforces the field-section limit only after it has buffered a complete
+frame. DATA frames are streamed and their declared length is not materialised.
+Both connection-close paths (idle watchdog and
 listener shutdown) are bounded by a short deadline, so a peer that never reads
 the server control stream cannot keep a connection slot past `connection_idle`. QUIC active migration is disabled: client identity,
 per-source limits, and source allowlists are keyed by the address the

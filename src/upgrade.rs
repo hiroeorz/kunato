@@ -63,6 +63,15 @@ pub async fn run(args: UpgradeArgs) -> Result<(), Error> {
             "the downloaded installer does not look like a shell script".to_owned(),
         ));
     }
+    if !installer_consumes_verified_checksums(&installer) {
+        // Installers before v0.16.1 ignore KUNATO_VERIFIED_SHA256SUMS and
+        // re-download checksums from the same origin, so replaying one would
+        // bypass the checksum handoff this process just verified.
+        return Err(Error::Message(
+            "the downloaded installer predates the verified-checksum handoff; refusing to run a historical installer"
+                .to_owned(),
+        ));
+    }
     let checksums_url = checksums_url(tag.as_deref())?;
     let checksums = rules_update::fetch_release_asset(&checksums_url, MAX_INSTALLER_BYTES).await?;
     verify_release_asset(&checksums_url, &checksums, "SHA256SUMS").await?;
@@ -119,6 +128,16 @@ async fn verify_release_asset(url: &str, asset: &[u8], label: &str) -> Result<()
         crate::trust::Verification::Verified => Ok(()),
         crate::trust::Verification::NoTrustedKeys => Ok(()),
     }
+}
+
+/// Whether the installer can consume the checksums this process verified.
+/// Older releases re-download `SHA256SUMS` themselves, so executing one would
+/// discard the handoff that binds the tarball to the parent-verified asset.
+fn installer_consumes_verified_checksums(installer: &[u8]) -> bool {
+    const MARKER: &[u8] = b"KUNATO_VERIFIED_SHA256SUMS";
+    installer
+        .windows(MARKER.len())
+        .any(|window| window == MARKER)
 }
 
 struct TempFileGuard<'a>(&'a std::path::Path);
@@ -350,6 +369,16 @@ mod tests {
         assert!(version_less(
             parse_version("v0.9.9"),
             parse_version("v0.10.0")
+        ));
+    }
+
+    #[test]
+    fn a_historical_installer_without_the_checksum_handoff_is_refused() {
+        assert!(installer_consumes_verified_checksums(include_bytes!(
+            "../scripts/install.sh"
+        )));
+        assert!(!installer_consumes_verified_checksums(
+            b"#!/bin/sh\ncurl -o SHA256SUMS \"$BASE_URL/$VERSION/SHA256SUMS\"\n"
         ));
     }
 

@@ -184,15 +184,38 @@ impl AdminFunction {
     /// and that form is not excluded. An upstream that decodes differently from
     /// Kunato must not receive an administrative request through a form this
     /// function did not cover, so a single non-excluded matching form is enough
-    /// to apply the effective open or close state. An exclusion only applies to
-    /// the form that matches it, so a differently encoded form of a public path
-    /// cannot hide an administrative one.
+    /// to apply the effective open or close state. Servlet matrix parameters
+    /// (`/manager;jsessionid=...`) are removed before the match because the
+    /// container routes that form to the same handler as `/manager`; the same
+    /// stripped form is used for exclusions, so a public `/actuator;x/health`
+    /// stays public. An exclusion only applies to the form that matches it, so
+    /// a differently encoded form of a public path cannot hide an
+    /// administrative one.
     pub fn matches(&self, path_forms: &[Cow<'_, str>]) -> bool {
         path_forms.iter().any(|form| {
-            self.paths.iter().any(|path| path.is_match(form))
-                && !self.exclude.iter().any(|exclude| exclude.is_match(form))
+            self.matches_form(form)
+                || (form.contains(';') && {
+                    let stripped = without_matrix_params(form);
+                    stripped != form.as_ref() && self.matches_form(&stripped)
+                })
         })
     }
+
+    fn matches_form(&self, form: &str) -> bool {
+        self.paths.iter().any(|path| path.is_match(form))
+            && !self.exclude.iter().any(|exclude| exclude.is_match(form))
+    }
+}
+
+/// Remove servlet matrix parameters (`;name=value`) from every path segment.
+/// The bytes are not decoded: callers pass a form that is already decoded and
+/// normalized, and the upstream container strips the parameter from the same
+/// routing view.
+fn without_matrix_params(path: &str) -> String {
+    path.split('/')
+        .map(|segment| segment.split(';').next().unwrap_or(segment))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Compiled `admin_access` configuration. A disabled policy (or one without
@@ -473,6 +496,28 @@ mod tests {
         assert!(admin.matches(&path_forms("/wp-admin/../wp-admin/users.php")));
         assert!(!admin.matches(&path_forms("/public")));
         assert!(!admin.matches(&path_forms("/blog/wp-admin")));
+    }
+
+    #[test]
+    fn servlet_matrix_parameters_do_not_skip_the_gate() {
+        let policy = policy();
+        let admin = policy.function("wordpress-admin").expect("function");
+        for path in [
+            "/wp-admin;jsessionid=abc",
+            "/wp-admin;jsessionid=abc/options.php",
+            "/wp-admin%3bjsessionid=abc",
+        ] {
+            let forms = path_forms(path);
+            assert!(admin.matches(&forms), "{path}: {forms:?}");
+        }
+
+        let actuator = AdminFunction::new(
+            "spring-actuator".to_owned(),
+            vec![Regex::new(r"(?i)(?:^|/)actuator(?:/|$)").expect("regex")],
+            vec![Regex::new(r"(?i)(?:^|/)actuator/(?:health|info)(?:/|$)").expect("regex")],
+        );
+        assert!(actuator.matches(&path_forms("/actuator;x/env")));
+        assert!(!actuator.matches(&path_forms("/actuator;x/health")));
     }
 
     #[test]

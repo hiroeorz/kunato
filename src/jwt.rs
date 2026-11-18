@@ -15,6 +15,11 @@ use crate::config::Jwt;
 
 const MAX_TOKEN_BYTES: usize = 8192;
 const MAX_HEADER_BYTES: usize = 1024;
+/// Nesting inspected in a JWT header. A legitimate header is a shallow object
+/// (`alg`, `typ`, `kid`, an `x5c` array, a JWK); a deeper value is rejected
+/// before serde_json's own recursion limit can turn the parse failure into an
+/// opaque token.
+const MAX_HEADER_DEPTH: usize = 16;
 
 /// Returns a human-readable policy violation for the first matching JWT in the
 /// request headers or cookies.
@@ -55,8 +60,12 @@ pub fn violation_in_request(
         // unescaping resolves `\u002E`. The raw scan above already handles
         // plain percent-encoded tokens, so these forms only add the escape
         // layers that the raw text cannot show.
-        for form in crate::decoding::decoded_body_forms(body, headers) {
-            if let Some(reason) = check_text(&String::from_utf8_lossy(&form), policy) {
+        let decoded = crate::decoding::decoded_body_forms(body, headers);
+        if !decoded.complete {
+            return Some("jwt body forms exceed the inspection bound".to_owned());
+        }
+        for form in decoded.forms {
+            if let Some(reason) = check_text(&form, policy) {
                 return Some(reason);
             }
         }
@@ -161,7 +170,15 @@ fn looks_like_jwt(token: &str) -> bool {
     if !matches!(parts.len(), 3 | 5) {
         return false;
     }
-    decode_base64url(parts[0]).is_some_and(|decoded| decoded.trim_ascii_start().starts_with(b"{"))
+    decode_base64url(parts[0]).is_some_and(|decoded| json_start(&decoded).starts_with(b"{"))
+}
+
+/// Skip leading whitespace and a UTF-8 byte-order mark before deciding whether
+/// a decoded header is a JSON object. An origin parser may accept either, and
+/// a header this check treats as opaque would skip the algorithm policy.
+fn json_start(decoded: &[u8]) -> &[u8] {
+    let decoded = decoded.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(decoded);
+    decoded.trim_ascii_start()
 }
 
 fn check_token(token: &str, policy: &Jwt) -> Option<String> {
@@ -192,16 +209,29 @@ fn check_token(token: &str, policy: &Jwt) -> Option<String> {
     let Some(decoded) = decode_base64url(header) else {
         return Some("jwt header is not valid base64url".to_owned());
     };
-    if !decoded.trim_ascii_start().starts_with(b"{") {
-        return None;
+    let decoded = json_start(&decoded);
+    if !decoded.starts_with(b"{") {
+        // A `eyJ`-prefixed token whose header is not a JSON object is a
+        // JWT-shaped token this policy cannot inspect. Skipping it would let
+        // an origin that accepts a lenient header encoding bypass every
+        // algorithm and claim check.
+        return Some("jwt header is not a JSON object".to_owned());
     }
-    if crate::hardening::has_duplicate_json_key(&decoded) {
+    if exceeded_json_depth(decoded, MAX_HEADER_DEPTH) {
+        return Some("jwt header is nested too deeply to inspect".to_owned());
+    }
+    if crate::hardening::has_duplicate_json_key(decoded) {
         // The WAF and the application may read different duplicate keys
         // (`{"alg":"none","alg":"RS256"}`), so any duplicate is rejected.
         return Some("jwt header has duplicate keys".to_owned());
     }
-    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    let algorithm = value.get("alg")?.as_str()?;
+    let value: serde_json::Value = match serde_json::from_slice(decoded) {
+        Ok(value) => value,
+        Err(_) => return Some("jwt header is not valid JSON".to_owned()),
+    };
+    let Some(algorithm) = value.get("alg").and_then(|value| value.as_str()) else {
+        return Some("jwt header has no algorithm".to_owned());
+    };
     if !policy
         .allowed_algorithms
         .iter()
@@ -291,6 +321,36 @@ fn audience_allowed(claims: &serde_json::Value, allowed: &[String]) -> bool {
         }),
         _ => false,
     }
+}
+
+fn exceeded_json_depth(json: &[u8], limit: usize) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in json {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn decode_base64url(input: &str) -> Option<Vec<u8>> {
@@ -463,6 +523,69 @@ mod tests {
 
         let opaque = "a".repeat(9000);
         assert_eq!(violation(&bearer(&opaque), &policy()), None);
+    }
+
+    #[test]
+    fn deeply_nested_headers_fail_closed_instead_of_skipping_the_policy() {
+        for depth in [126, 127, 128, 200] {
+            let header = format!(
+                "{{\"alg\":\"none\",\"x\":{}{}}}",
+                "[".repeat(depth),
+                "]".repeat(depth)
+            );
+            let token = token(&encode(&header), "e30");
+            assert_eq!(
+                violation(&bearer(&token), &policy()),
+                Some("jwt header is nested too deeply to inspect".to_owned()),
+                "depth {depth}"
+            );
+        }
+        let deep = format!(
+            "{{\"alg\":\"RS256\",\"x\":{}{}}}",
+            "[".repeat(40),
+            "]".repeat(40)
+        );
+        assert_eq!(
+            violation(&bearer(&token(&encode(&deep), "e30")), &policy()),
+            Some("jwt header is nested too deeply to inspect".to_owned())
+        );
+    }
+
+    #[test]
+    fn unparseable_headers_fail_closed() {
+        let invalid = encode("{\"alg\":}");
+        assert_eq!(
+            violation(&bearer(&token(&invalid, "e30")), &policy()),
+            Some("jwt header is not valid JSON".to_owned())
+        );
+        let missing = encode("{\"typ\":\"JWT\"}");
+        assert_eq!(
+            violation(&bearer(&token(&missing, "e30")), &policy()),
+            Some("jwt header has no algorithm".to_owned())
+        );
+        let bom = encode("\u{feff}{\"alg\":\"none\"}");
+        assert!(
+            violation(&bearer(&token(&bom, "e30")), &policy()).is_some(),
+            "a BOM-prefixed header must not be treated as an opaque token"
+        );
+    }
+
+    #[test]
+    fn deep_payloads_under_a_claim_policy_fail_closed() {
+        let mut claim_policy = policy();
+        claim_policy.require_exp = true;
+        let payload = encode(&format!(
+            "{{\"exp\":1,\"x\":{}{}}}",
+            "[".repeat(200),
+            "]".repeat(200)
+        ));
+        assert!(
+            violation(
+                &bearer(&token("eyJhbGciOiJSUzI1NiJ9", &payload)),
+                &claim_policy
+            )
+            .is_some()
+        );
     }
 
     #[test]

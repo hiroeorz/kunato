@@ -415,6 +415,31 @@ async fn auth_session_flow_and_bearer_access() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    let mut live_stream = TcpStream::connect(running.address).await.expect("connect");
+    live_stream
+        .write_all(
+            format!(
+                "GET /api/v1/live HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {session}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write live request");
+    let mut live_bytes = Vec::new();
+    let mut live_chunk = [0u8; 4096];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(3), live_stream.read(&mut live_chunk))
+            .await
+            .expect("live stream timeout")
+            .expect("live stream read");
+        assert!(read > 0, "the stream must open before logout");
+        live_bytes.extend_from_slice(&live_chunk[..read]);
+        let text = String::from_utf8_lossy(&live_bytes);
+        if text.contains("event: state") && text.contains("\n\n") {
+            break;
+        }
+    }
+
     let (status, _, _) = request(
         &client,
         running.address,
@@ -425,6 +450,22 @@ async fn auth_session_flow_and_bearer_access() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let read = live_stream
+                .read(&mut live_chunk)
+                .await
+                .expect("stream read");
+            if read == 0 {
+                break true;
+            }
+        }
+    })
+    .await
+    .expect("the revoked stream must close");
+    assert!(closed, "the SSE stream must end after session revocation");
+
     let (status, _, _) = request(
         &client,
         running.address,

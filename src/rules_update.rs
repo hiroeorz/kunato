@@ -253,7 +253,7 @@ async fn update_candidate(
             "rules checksum mismatch: expected {expected}, got {actual}"
         )));
     }
-    let signature_timestamp = verify_rules_signature(&client, url, &bytes).await?;
+    let signature_timestamp = verify_rules_signature(&client, url, settings, &bytes).await?;
     if let Some(installed) = installed_signature_timestamp
         && let Some(candidate) = signature_timestamp
         && candidate < installed
@@ -262,6 +262,10 @@ async fn update_candidate(
             "rules signature is older than the installed rule set ({candidate} < {installed}); refusing a rollback"
         )));
     }
+    // An unsigned channel must not erase the replay floor established by an
+    // earlier signed channel. Keeping the installed timestamp means a later
+    // return to HTTPS still rejects a replayed older rule set.
+    let signature_timestamp = signature_timestamp.or(installed_signature_timestamp);
 
     let main_config = main_config.to_path_buf();
     let rules_file = rules_file.to_path_buf();
@@ -535,6 +539,7 @@ fn header_string(headers: &http::HeaderMap, name: http::header::HeaderName) -> O
 async fn verify_rules_signature(
     client: &RulesClient,
     rules_url: &Uri,
+    settings: &RulesUpdate,
     bytes: &[u8],
 ) -> Result<Option<u64>, Error> {
     if crate::trust::RULES_KEYS.is_empty() {
@@ -542,10 +547,20 @@ async fn verify_rules_signature(
         return Ok(None);
     }
     // Loopback HTTP is the documented development/local-mirror path (plain
-    // HTTP is rejected for any other host). Requiring a signature there would
-    // make the local test setup impossible, so it is skipped with a warning.
+    // HTTP is rejected for any other host). It is accepted only when the
+    // operator opted in with `rules_update.allow_unsigned`, and every install
+    // is logged: any local process that owns the port can replace the bytes.
     if rules_url.scheme_str() == Some("http") {
-        warn_once_http_rules_url();
+        if !settings.allow_unsigned {
+            return Err(Error::Message(
+                "rules update URL uses plain HTTP without `rules_update.allow_unsigned: true`; refusing an unsigned rule set"
+                    .to_owned(),
+            ));
+        }
+        warn!(
+            url = %rules_url,
+            "installing a rule set from an unsigned loopback HTTP URL because rules_update.allow_unsigned is enabled"
+        );
         return Ok(None);
     }
     let signature_url = signature_url(rules_url)?;
@@ -594,15 +609,6 @@ fn check_rules_signature(
         crate::trust::Verification::Verified => Ok(Some(timestamp)),
         crate::trust::Verification::NoTrustedKeys => Ok(None),
     }
-}
-
-fn warn_once_http_rules_url() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        warn!(
-            "rules update URL uses plain HTTP; detached signature verification is skipped for this development path"
-        );
-    });
 }
 
 fn warn_once_no_rules_key() {

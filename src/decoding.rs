@@ -17,6 +17,10 @@ const MAX_MULTIPART_NAME_BYTES: usize = 1024;
 const MAX_MULTIPART_BOUNDARY_BYTES: usize = 70;
 const MAX_DISPOSITION_PARAMETERS: usize = 64;
 pub(crate) const MAX_MULTIPART_BOUNDARIES: usize = 4;
+/// Absolute ceiling on retained decoded-form bytes for one body, so the
+/// per-body budget stays inside the request inspection reservation even when
+/// the configured body limit is raised.
+const MAX_DECODED_FORM_BYTES: usize = 24 * 1024 * 1024;
 
 pub struct DecodedBody {
     pub body: Vec<u8>,
@@ -716,55 +720,155 @@ fn looks_like_escaped_json(body: &[u8]) -> bool {
 /// each. Unknown content types still get the percent passes, because
 /// applications may decode the body regardless of the declared type. The raw
 /// body is inspected separately and is not repeated here.
-pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> Vec<Vec<u8>> {
-    let mut forms = Vec::new();
+///
+/// The returned form set is bounded to [`decoded_form_budget`] bytes. A body
+/// whose escape passes would exceed it reports `complete: false`; callers must
+/// fail closed rather than evaluate a partial form set. The inspection
+/// reservation is [`crate::proxy::server::REQUEST_INSPECTION_FACTOR`] times the
+/// raw body, so the budget keeps the retained forms inside that reservation.
+/// A form that is not valid UTF-8 keeps at most one lossy representation and
+/// skips the further text passes, because each pass would retain another
+/// three-times-larger replacement-character copy; the raw body is still matched
+/// separately.
+pub fn decoded_body_forms(body: &[u8], headers: &HeaderMap) -> DecodedBodyForms {
+    let budget = decoded_form_budget(body.len());
+    let mut result = DecodedBodyForms {
+        forms: Vec::new(),
+        complete: true,
+    };
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()))
+        .unwrap_or_default();
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if media_type == "multipart/form-data" {
+        match multipart_boundaries(&content_type) {
+            Ok(boundaries) if boundaries.len() > 1 => {
+                // Different parsers pick the first or the last declared
+                // boundary, and flattening every interpretation multiplied the
+                // form set by the boundary count. A real multipart request has
+                // exactly one; refuse to inspect an ambiguous message.
+                result.complete = false;
+                return result;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                // A multipart declaration this parser cannot read cannot be
+                // flattened safely; the request head normally rejects it, but
+                // the form set must not silently fall back to the raw bytes.
+                result.complete = false;
+                return result;
+            }
+        }
+    }
     let decoded = decode_body_formats(body, headers);
     if decoded.is_empty() {
-        let text = String::from_utf8_lossy(body);
-        push_text_decode_passes(&text, &mut forms);
-        return forms;
+        // Unknown content types still get the percent/entity passes, but a
+        // lossy UTF-8 conversion of invalid bytes can grow each form to three
+        // times the body. Binary bodies are already matched raw; do not retain
+        // a 3x replacement-character copy or run text passes over it.
+        if let Ok(text) = std::str::from_utf8(body) {
+            push_text_decode_passes(text, &mut result, budget);
+        }
+        return result;
     }
     for formatted in decoded {
-        let formatted = String::from_utf8_lossy(&formatted).into_owned();
         if formatted.is_empty() {
             continue;
         }
-        if formatted.as_bytes() != body {
-            push_unique(&mut forms, formatted.as_bytes());
+        if std::str::from_utf8(&formatted).is_err() {
+            // The flattened form is not text. Keep one lossy representation so
+            // a textual signature that survived the flattening is still
+            // visible, but skip the decode passes that would each retain
+            // another 3x copy.
+            let lossy = String::from_utf8_lossy(&formatted).into_owned();
+            if lossy.as_bytes() == body {
+                continue;
+            }
+            if !push_owned(&mut result, lossy, budget) {
+                return result;
+            }
+            continue;
         }
-        push_text_decode_passes(&formatted, &mut forms);
+        let Ok(text) = std::str::from_utf8(&formatted) else {
+            continue;
+        };
+        if formatted.as_slice() != body && !push_unique(&mut result, text, budget) {
+            return result;
+        }
+        if !push_text_decode_passes(text, &mut result, budget) {
+            return result;
+        }
     }
-    forms
+    result
 }
 
-fn push_percent_passes(current: &str, forms: &mut Vec<Vec<u8>>) {
+/// Retained decoded-form bytes allowed for one body. The factor leaves room
+/// for the common content-type form plus one or two decode passes, while
+/// staying well below the request inspection reservation; a body that needs
+/// more passes is rejected rather than matched partially. The floor keeps small
+/// bodies from rejecting an ordinary nested escape; the body itself is already
+/// bounded by `limits.max_body_bytes`.
+fn decoded_form_budget(body_len: usize) -> usize {
+    body_len
+        .saturating_mul(3)
+        .clamp(64 * 1024, MAX_DECODED_FORM_BYTES)
+}
+
+pub struct DecodedBodyForms {
+    pub forms: Vec<String>,
+    pub complete: bool,
+}
+
+fn push_percent_passes(current: &str, result: &mut DecodedBodyForms, budget: usize) -> bool {
+    if !current.contains('%') {
+        return true;
+    }
     let mut current = current.to_owned();
     for _ in 0..MAX_PERCENT_DECODE_PASSES {
         let next = percent_decode(&current).into_owned();
         if next == current {
             break;
         }
-        push_unique(forms, next.as_bytes());
+        if !push_unique(result, &next, budget) {
+            return false;
+        }
         current = next;
     }
+    true
 }
 
 /// Add percent- and HTML/XML-entity-decoded variants. Applications routinely
 /// decode numeric character references before evaluating XML, SOAP, or HTML
 /// attributes, so a rule that only sees the raw body can miss the payload the
 /// origin executes.
-fn push_text_decode_passes(current: &str, forms: &mut Vec<Vec<u8>>) {
-    push_percent_passes(current, forms);
+fn push_text_decode_passes(current: &str, result: &mut DecodedBodyForms, budget: usize) -> bool {
+    if !push_percent_passes(current, result, budget) {
+        return false;
+    }
+    if !current.contains('&') {
+        return true;
+    }
     let mut current = current.to_owned();
     for _ in 0..MAX_PERCENT_DECODE_PASSES {
         let next = decode_entities(&current).into_owned();
         if next == current {
             break;
         }
-        push_unique(forms, next.as_bytes());
-        push_percent_passes(&next, forms);
+        if !push_unique(result, &next, budget) {
+            return false;
+        }
+        if !push_percent_passes(&next, result, budget) {
+            return false;
+        }
         current = next;
     }
+    true
 }
 
 /// Decode HTML/XML character references (`&#x3c;`, `&#60;`, and the common
@@ -858,10 +962,37 @@ fn named_entity(entity: &str) -> Option<char> {
     })
 }
 
-fn push_unique(forms: &mut Vec<Vec<u8>>, bytes: &[u8]) {
-    if !forms.iter().any(|form| form.as_slice() == bytes) {
-        forms.push(bytes.to_vec());
+fn push_unique(result: &mut DecodedBodyForms, text: &str, budget: usize) -> bool {
+    if result.forms.iter().any(|form| form == text) {
+        return true;
     }
+    if !fits_budget(result, text.len(), budget) {
+        return false;
+    }
+    result.forms.push(text.to_owned());
+    true
+}
+
+/// Store an owned form without copying it again. Used for the lossy
+/// representation of a form that is not valid UTF-8.
+fn push_owned(result: &mut DecodedBodyForms, text: String, budget: usize) -> bool {
+    if result.forms.iter().any(|form| form == &text) {
+        return true;
+    }
+    if !fits_budget(result, text.len(), budget) {
+        return false;
+    }
+    result.forms.push(text);
+    true
+}
+
+fn fits_budget(result: &mut DecodedBodyForms, additional: usize, budget: usize) -> bool {
+    let retained: usize = result.forms.iter().map(String::len).sum();
+    if retained.saturating_add(additional) > budget {
+        result.complete = false;
+        return false;
+    }
+    true
 }
 
 /// Percent-decoded variants of `input`, starting with the raw form, with at
@@ -1807,11 +1938,9 @@ mod tests {
     #[test]
     fn body_forms_include_entity_decoding() {
         let headers = headers(CONTENT_TYPE, "text/xml");
-        let forms = decoded_body_forms(b"<x>&#x3C;script&#x3E;</x>", &headers);
+        let forms = decoded_body_forms(b"<x>&#x3C;script&#x3E;</x>", &headers).forms;
         assert!(
-            forms
-                .iter()
-                .any(|form| form.windows(7).any(|window| window == b"<script")),
+            forms.iter().any(|form| form.contains("<script")),
             "{forms:?}"
         );
     }
@@ -2025,14 +2154,17 @@ mod tests {
 
     #[test]
     fn body_percent_decoding_applies_without_a_known_content_type() {
-        let forms = decoded_body_forms(b"q=%27%20or%201%3D1", &HeaderMap::new());
-        let decoded = String::from_utf8_lossy(&forms[0]);
-        assert_eq!(decoded, "q=' or 1=1");
+        let forms = decoded_body_forms(b"q=%27%20or%201%3D1", &HeaderMap::new()).forms;
+        assert_eq!(forms[0], "q=' or 1=1");
     }
 
     #[test]
     fn body_forms_are_empty_without_percent_escapes() {
-        assert!(decoded_body_forms(b"plain text", &HeaderMap::new()).is_empty());
+        assert!(
+            decoded_body_forms(b"plain text", &HeaderMap::new())
+                .forms
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2537,67 +2669,72 @@ mod tests {
     #[test]
     fn multipart_bodies_are_percent_decoded_after_flattening() {
         let body = b"--X\r\n\r\nq=%2527\r\n--X--\r\n";
-        let forms = decoded_body_forms(body, &multipart_headers("X"));
-        let forms: Vec<&str> = forms
-            .iter()
-            .map(|form| std::str::from_utf8(form).expect("utf8"))
-            .collect();
+        let forms = decoded_body_forms(body, &multipart_headers("X")).forms;
+        let forms: Vec<&str> = forms.iter().map(String::as_str).collect();
         assert_eq!(forms, vec!["q=%2527\n", "q=%27\n", "q='\n"]);
     }
 
     #[test]
-    fn multipart_multi_boundary_bodies_inspect_each_interpretation() {
+    fn ambiguous_multipart_boundaries_fail_closed() {
         let body = b"--safe\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--safe--\r\n--malicious\r\nContent-Disposition: form-data; name=\"payload\"\r\n\r\nunion%20select%201\r\n--malicious--\r\n";
-        let forms = decoded_body_forms(
+        let decoded = decoded_body_forms(
             body,
             &headers(
                 CONTENT_TYPE,
                 "multipart/form-data; boundary=safe; boundary=malicious",
             ),
         );
-        let forms: Vec<&str> = forms
-            .iter()
-            .map(|form| std::str::from_utf8(form).expect("utf8"))
-            .collect();
-        assert!(
-            forms.iter().any(|form| form.contains("v\n")),
-            "first boundary interpretation missing: {forms:?}"
-        );
-        assert!(
-            forms.iter().any(|form| form.contains("union select")),
-            "last boundary interpretation missing: {forms:?}"
-        );
+        assert!(!decoded.complete);
+        assert!(decoded.forms.is_empty());
     }
 
     #[test]
-    fn multipart_excess_boundaries_fall_back_to_percent_passes() {
+    fn multipart_excess_boundaries_fail_closed() {
         let body = b"payload=%75nion%20select";
-        let forms = decoded_body_forms(
+        let decoded = decoded_body_forms(
             body,
             &headers(
                 CONTENT_TYPE,
                 "multipart/form-data; boundary=a; boundary=b; boundary=c; boundary=d; boundary=e",
             ),
         );
-        let forms: Vec<&str> = forms
-            .iter()
-            .map(|form| std::str::from_utf8(form).expect("utf8"))
-            .collect();
-        assert_eq!(forms, vec!["payload=union select"]);
+        assert!(!decoded.complete);
+        assert!(decoded.forms.is_empty());
     }
 
     #[test]
     fn multipart_duplicate_boundaries_flatten_once() {
         let body = b"--X\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--X--\r\n";
-        let forms = decoded_body_forms(
+        let decoded = decoded_body_forms(
             body,
             &headers(CONTENT_TYPE, "multipart/form-data; boundary=X; boundary=X"),
         );
-        let forms: Vec<&str> = forms
-            .iter()
-            .map(|form| std::str::from_utf8(form).expect("utf8"))
-            .collect();
+        assert!(decoded.complete);
+        let forms: Vec<&str> = decoded.forms.iter().map(String::as_str).collect();
         assert_eq!(forms, vec!["v\n"]);
+    }
+
+    #[test]
+    fn oversized_decoded_forms_report_incomplete() {
+        let mut result = DecodedBodyForms {
+            forms: Vec::new(),
+            complete: true,
+        };
+        assert!(!push_unique(&mut result, &"a".repeat(64), 32));
+        assert!(!result.complete);
+        assert!(result.forms.is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_multiply_lossy_forms() {
+        let mut body = vec![0xff; 256 * 1024];
+        body.extend_from_slice(b"%25");
+        let decoded = decoded_body_forms(&body, &HeaderMap::new());
+        assert!(decoded.complete);
+        assert!(
+            decoded.forms.is_empty(),
+            "a binary body is matched raw and must not retain lossy copies"
+        );
     }
 
     #[test]

@@ -58,7 +58,12 @@ const INSPECTION_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 /// still admits a single large upload while preventing one client from
 /// reserving every slot.
 pub(crate) const SOURCE_INSPECTION_BUDGET_BYTES: usize = INSPECTION_BUDGET_BYTES / 3;
-const REQUEST_INSPECTION_FACTOR: usize = 8;
+pub(crate) const REQUEST_INSPECTION_FACTOR: usize = 8;
+/// Bodies at or above this size require a rule-evaluation CPU permit. Small
+/// requests evaluate in microseconds and stay on the normal path; a burst of
+/// maximum-size bodies is shed with `503` instead of starting one full scan per
+/// worker.
+const RULE_EVALUATION_PERMIT_BYTES: usize = 64 * 1024;
 const RESPONSE_INSPECTION_FACTOR: usize = 3;
 /// A response with body rules reserves its whole prefix worst case up front,
 /// with this floor so a tiny configured limit still reserves a usable share.
@@ -75,6 +80,14 @@ fn upload_inspection_concurrency() -> usize {
         .map(|count| count.get())
         .unwrap_or(4)
         .clamp(1, 32)
+}
+
+/// Request-phase rule evaluation is CPU-bound; a permit per worker keeps a
+/// burst of maximum-size bodies from starting a full scan on every thread at
+/// once. The same bound as upload inspection is enough: both consume the same
+/// CPU budget and share the request inspection reservation.
+fn rule_evaluation_concurrency() -> usize {
+    upload_inspection_concurrency()
 }
 
 pub(crate) struct InspectionBudget {
@@ -217,6 +230,15 @@ impl InspectionGuard {
             .as_ref()
             .is_some_and(|reclaim| reclaim.release())
             && self.try_grow(additional)
+    }
+
+    /// Raise the reservation to `target` bytes, leaving it unchanged when it
+    /// already reserves more.
+    pub(crate) fn grow_to(&mut self, target: usize) -> bool {
+        if target <= self.bytes() {
+            return true;
+        }
+        self.grow(target - self.bytes())
     }
 
     pub(crate) fn attach_decoy(&mut self, reclaim: crate::decoy::Reclaim) {
@@ -487,6 +509,11 @@ pub struct Context {
     admin_access: Arc<AdminAccessState>,
     inspection: Arc<InspectionBudget>,
     upload_slots: Arc<Semaphore>,
+    /// Concurrency limit for request-phase rule evaluation. Regex matching is
+    /// CPU-bound and linear but a large body times every body rule can keep a
+    /// worker busy, so a saturated pool sheds load with `503` instead of
+    /// letting every worker start another full-body scan.
+    rule_slots: Arc<Semaphore>,
     tls: TlsMode,
     scheme: &'static str,
     alt_svc: Option<HeaderValue>,
@@ -665,6 +692,7 @@ impl Server {
                 admin_access: Arc::new(AdminAccessState::new()),
                 inspection: Arc::new(InspectionBudget::new()),
                 upload_slots: Arc::new(Semaphore::new(upload_inspection_concurrency())),
+                rule_slots: Arc::new(Semaphore::new(rule_evaluation_concurrency())),
                 tls,
                 scheme,
                 alt_svc,
@@ -1638,6 +1666,19 @@ pub(crate) fn request_head_error(
     if let Some(err) = authority_mismatch_error(parts) {
         return Some(err);
     }
+    // RFC 9112 requires HTTP/1.1 clients to send one Host field, and the
+    // upstream client would otherwise synthesize one from the configured
+    // upstream authority after rule evaluation. Rejecting the request keeps
+    // every Host-conditioned rule, the forwarded Host, and the origin's
+    // virtual-host selection looking at the same value. An absolute-form
+    // target carries the authority in the request URI, and HTTP/2/HTTP/3
+    // `:authority` is promoted by `normalize_host_header` before this check.
+    if !parts.headers.contains_key(HOST) && parts.uri.authority().is_none() {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "missing Host header",
+        ));
+    }
     if let Some(err) = connection_header_error(&parts.headers) {
         return Some(err);
     }
@@ -2576,17 +2617,55 @@ async fn process_inner(
             "structured request body nesting too deep",
         ));
     }
-    if saml_body
-        && let Some(inspection) = if body_truncated {
+    let saml_inspection = if saml_body {
+        if body_truncated {
             crate::saml::inspect_truncated(
                 &parts.headers,
                 inspected_body.as_ref(),
                 &config.limits.saml,
             )
+        } else if crate::saml::has_saml_hint(inspected_body.as_ref())
+            && inspected_body.len() >= 64 * 1024
+        {
+            // Base64, DEFLATE, and XML tokenization are CPU-bound and the
+            // message budget is per request. Run a large message on the
+            // blocking pool behind the same bounded semaphore as upload
+            // inspection so it cannot pin an async worker.
+            let permit = match Arc::clone(&context.upload_slots).acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    warn!("SAML inspection semaphore is closed");
+                    return Err(HttpError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "SAML inspection unavailable",
+                    ));
+                }
+            };
+            let headers = parts.headers.clone();
+            let body = inspected_body.clone();
+            let limits = config.limits.saml;
+            match tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                crate::saml::inspect(&headers, body.as_ref(), &limits)
+            })
+            .await
+            {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    warn!(error = %error, "SAML inspection task failed");
+                    return Err(HttpError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "SAML inspection failed",
+                    ));
+                }
+            }
         } else {
             crate::saml::inspect(&parts.headers, inspected_body.as_ref(), &config.limits.saml)
         }
-    {
+    } else {
+        None
+    };
+    if let Some(inspection) = saml_inspection {
         if let Some(finding) = inspection.blocking {
             crate::observations::reject(crate::console::model::RejectionReason::Saml);
             context
@@ -2813,6 +2892,21 @@ async fn process_inner(
     )
     .with_body_truncated(body_truncated)
     .with_body_rules_exempt(body_rules_exempt);
+    if !view.body_forms_complete {
+        context
+            .metrics
+            .request_body_rejected
+            .fetch_add(1, Ordering::Relaxed);
+        warn!(
+            client = %source.client_ip, peer = %source.peer,
+            path = %crate::decoy::log_path(parts.uri.path()),
+            "request body has ambiguous or oversized decoded forms; rejecting"
+        );
+        return Err(HttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body forms exceed the inspection limit",
+        ));
+    }
     if let Some(violation) = crate::hardening::inspect(&view, &config.limits.hardening) {
         crate::observations::reject(crate::console::model::RejectionReason::Hardening);
         debug!(
@@ -2834,7 +2928,32 @@ async fn process_inner(
         );
     }
     drop(decoy_observation);
+    let rule_work = if body_rules && !body_rules_exempt {
+        view.match_body
+            .len()
+            .saturating_add(view.body_forms.iter().map(String::len).sum())
+    } else {
+        0
+    };
+    let _rule_permit = if rule_work >= RULE_EVALUATION_PERMIT_BYTES {
+        let Ok(permit) = Arc::clone(&context.rule_slots).try_acquire_owned() else {
+            context.record_overloaded();
+            warn!(
+                client = %source.client_ip, peer = %source.peer,
+                path = %crate::decoy::log_path(parts.uri.path()),
+                "request rule evaluation capacity exhausted"
+            );
+            return Err(HttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "request rule evaluation capacity exhausted",
+            ));
+        };
+        Some(permit)
+    } else {
+        None
+    };
     let outcome = eval::evaluate(config, &view, Some(context.protection.as_ref()));
+    drop(_rule_permit);
 
     if let Some(allowed) = &outcome.allowed {
         crate::observations::rule_match(crate::console::model::Phase::Request, false);
@@ -3111,6 +3230,11 @@ mod tests {
         assert!((1..=32).contains(&upload_inspection_concurrency()));
     }
 
+    #[test]
+    fn rule_evaluation_concurrency_is_bounded() {
+        assert!((1..=32).contains(&rule_evaluation_concurrency()));
+    }
+
     fn head_config() -> CompiledConfig {
         crate::config::parse(
             "listen: 127.0.0.1:0
@@ -3125,10 +3249,26 @@ categories: []
         Request::builder()
             .method(method)
             .uri(uri)
+            .header(HOST, "example.test")
             .body(())
             .expect("request")
             .into_parts()
             .0
+    }
+
+    #[test]
+    fn a_missing_host_is_rejected_before_rule_evaluation() {
+        let config = head_config();
+        let request = Request::builder()
+            .method("GET")
+            .uri("/nohost")
+            .body(())
+            .expect("request");
+        let (parts, ()) = request.into_parts();
+        let error =
+            request_head_error(&config, &parts).expect("a Host-less request must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "missing Host header");
     }
 
     #[test]
@@ -3302,6 +3442,7 @@ categories: []
         let request = Request::builder()
             .method("POST")
             .uri("/upload")
+            .header(HOST, "example.test")
             .header("content-type", "text/plain")
             .header("content-type", "application/json")
             .body(())
@@ -3325,6 +3466,7 @@ categories: []
         ] {
             let request = Request::builder()
                 .uri("/")
+                .header(HOST, "example.test")
                 .header("connection", name)
                 .header(name, "value")
                 .body(())
@@ -3338,6 +3480,7 @@ categories: []
 
         let request = Request::builder()
             .uri("/")
+            .header(HOST, "example.test")
             .header("connection", "keep-alive, Upgrade")
             .header("upgrade", "websocket")
             .body(())

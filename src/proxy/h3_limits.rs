@@ -4,10 +4,10 @@
 //! complete HEADERS frame, so a client can declare a header block far above the
 //! configured limit and make the WAF retain every delivered byte until
 //! `header_read` expires. The wrapper in this module parses request-stream frame
-//! headers as they pass through and fails the stream as soon as a HEADERS frame
+//! headers as they pass through and fails the stream as soon as a non-DATA frame
 //! declares more than the configured field-section limit, before the payload is
-//! read. DATA and unknown frames are skipped by their declared length, so the
-//! parser adds no buffer of its own beyond a nine-byte frame header.
+//! read. DATA frames are streamed by h3 rather than buffered, so their declared
+//! length is skipped without retaining the payload.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -17,12 +17,13 @@ use h3::quic::{
     self, BidiStream, ConnectionErrorIncoming, OpenStreams, StreamErrorIncoming, WriteBuf,
 };
 
-/// Largest frame header this parser needs: one type byte plus an eight-byte
-/// QUIC varint length.
-const MAX_FRAME_HEADER_BYTES: usize = 9;
+/// Largest frame header this parser needs: an eight-byte QUIC varint type plus
+/// an eight-byte QUIC varint length.
+const MAX_FRAME_HEADER_BYTES: usize = 16;
 
-/// Frame type of an HTTP/3 HEADERS frame (RFC 9114 section 6.2).
-const HEADERS_FRAME_TYPE: u8 = 0x01;
+/// Frame type of an HTTP/3 DATA frame (RFC 9114 section 7.2.1). h3 streams its
+/// payload instead of buffering a declared length.
+const DATA_FRAME_TYPE: u64 = 0x00;
 
 /// QPACK encoding can make a header-block payload slightly larger than the
 /// decoded field section it carries (literal prefixes, name references and
@@ -32,7 +33,7 @@ const HEADERS_FRAME_TYPE: u8 = 0x01;
 const HEAD_FRAME_OVERHEAD_BYTES: u64 = 8 * 1024;
 
 /// A request-stream frame header parser. It only needs the declared length of
-/// each frame: a HEADERS frame above the limit is rejected, and every other
+/// each frame: a non-DATA frame above the limit is rejected, and every other
 /// frame is skipped without retaining its payload.
 #[derive(Default)]
 struct FrameParser {
@@ -41,8 +42,8 @@ struct FrameParser {
 }
 
 impl FrameParser {
-    /// Consume bytes read from the request stream and fail when a HEADERS frame
-    /// declares more than `limit` bytes.
+    /// Consume bytes read from the request stream and fail when a non-DATA
+    /// frame declares more than `limit` bytes.
     fn inspect(&mut self, data: &[u8], limit: u64) -> Result<(), String> {
         let mut index = 0;
         while index < data.len() {
@@ -57,9 +58,9 @@ impl FrameParser {
             index += 1;
             match frame_header(&self.header)? {
                 Some((kind, length)) => {
-                    if kind == HEADERS_FRAME_TYPE && length > limit {
+                    if kind != DATA_FRAME_TYPE && length > limit {
                         return Err(format!(
-                            "HEADERS frame declares {length} bytes, over the {limit}-byte limit"
+                            "frame type {kind} declares {length} bytes, over the {limit}-byte limit"
                         ));
                     }
                     self.header.clear();
@@ -77,22 +78,31 @@ impl FrameParser {
 
 /// Parse one frame header. `Ok(None)` means the accumulated bytes are not enough
 /// yet; `Err` means the bytes cannot be a valid header.
-fn frame_header(header: &[u8]) -> Result<Option<(u8, u64)>, String> {
-    let Some(&kind) = header.first() else {
+fn frame_header(header: &[u8]) -> Result<Option<(u64, u64)>, String> {
+    let Some((kind, kind_len)) = varint(header, 0) else {
         return Ok(None);
     };
-    let Some(&first) = header.get(1) else {
+    let Some((length, length_len)) = varint(header, kind_len) else {
         return Ok(None);
     };
-    let size = 1usize << (first >> 6);
-    if header.len() < 1 + size {
+    if header.len() < kind_len + length_len {
         return Ok(None);
-    }
-    let mut length = u64::from(first & 0x3f);
-    for &byte in &header[2..1 + size] {
-        length = (length << 8) | u64::from(byte);
     }
     Ok(Some((kind, length)))
+}
+
+/// Read one QUIC varint (RFC 9000 section 16) at `offset`. `None` means the
+/// header is incomplete; an invalid prefix is reported by the caller once the
+/// accumulated header exceeds [`MAX_FRAME_HEADER_BYTES`].
+fn varint(input: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let first = *input.get(offset)?;
+    let size = 1usize << (first >> 6);
+    let bytes = input.get(offset..offset + size)?;
+    let mut value = u64::from(first & 0x3f);
+    for byte in &bytes[1..] {
+        value = (value << 8) | u64::from(*byte);
+    }
+    Some((value, size))
 }
 
 /// Shared frame-limit state for the two halves of one request stream.
@@ -424,5 +434,27 @@ mod tests {
         assert!(parser.inspect(&[0x00, 40], 32).is_ok());
         assert!(parser.inspect(&[0u8; 40], 32).is_ok());
         assert!(parser.inspect(&[0x01, 33], 32).is_err());
+    }
+
+    #[test]
+    fn a_non_minimal_frame_type_is_decoded_as_a_varint() {
+        // HEADERS type 1 encoded in two bytes (`40 01`) with a length of 40.
+        let mut parser = FrameParser::default();
+        assert!(parser.inspect(&[0x40, 0x01, 40], 32).is_err());
+    }
+
+    #[test]
+    fn any_non_data_frame_is_bounded() {
+        // Unknown frame type 0x21 with a four-byte varint length of 256 MiB.
+        let mut parser = FrameParser::default();
+        assert!(parser.inspect(&[0x21, 0x90, 0x00, 0x00, 0x00], 32).is_err());
+    }
+
+    #[test]
+    fn a_data_frame_length_is_not_buffered() {
+        // DATA type 0 with a four-byte varint length of 256 MiB; h3 streams the
+        // payload instead of materialising it, so the parser skips it.
+        let mut parser = FrameParser::default();
+        assert!(parser.inspect(&[0x00, 0x90, 0x00, 0x00, 0x00], 32).is_ok());
     }
 }

@@ -63,7 +63,7 @@ struct Context {
     console: Console,
     live: watch::Receiver<Option<Arc<LiveState>>>,
     reader: HistoryReader,
-    auth: Option<Auth>,
+    auth: Option<Arc<Auth>>,
     tls: Option<TlsState>,
     live_slots: Arc<Semaphore>,
     shutdown: watch::Receiver<bool>,
@@ -74,6 +74,15 @@ struct Connection {
     context: Arc<Context>,
     peer: SocketAddr,
     tls: bool,
+}
+
+/// The server-side session bound to one live stream. Bearer-token clients and
+/// an authentication-disabled console have no session, so all fields are
+/// `None` and the stream is bounded only by shutdown.
+struct SessionGuard {
+    auth: Option<Arc<Auth>>,
+    session: Option<String>,
+    expiry: Option<Instant>,
 }
 
 impl ConsoleServer {
@@ -90,7 +99,7 @@ impl ConsoleServer {
                 source,
             })?;
         let auth = match &console.auth {
-            Some(auth) => Some(Auth::load(&auth.token_file)?),
+            Some(auth) => Some(Arc::new(Auth::load(&auth.token_file)?)),
             None => None,
         };
         let tls = match &console.tls {
@@ -555,6 +564,51 @@ fn live(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBo
         .and_then(|value| value.to_str().ok())
         .filter(|value| value.len() <= 256)
         .map(str::to_owned);
+    let (session_guard, revocations) = match &connection.context.auth {
+        Some(auth) => {
+            let bearer_ok =
+                bearer(request.headers()).is_some_and(|token| auth.token_matches(token.as_bytes()));
+            let name = session_cookie_name(connection.tls);
+            let session = if bearer_ok {
+                None
+            } else {
+                session_cookie(request.headers(), name)
+            };
+            match session {
+                Some(session) => {
+                    let Some(expiry) = auth.session_expiry(session, Instant::now()) else {
+                        return error_json(StatusCode::UNAUTHORIZED, "authentication required");
+                    };
+                    (
+                        SessionGuard {
+                            auth: Some(Arc::clone(auth)),
+                            session: Some(session.to_owned()),
+                            expiry: Some(expiry),
+                        },
+                        Some(auth.subscribe_revocations()),
+                    )
+                }
+                // The operator token authenticates without a session. It has
+                // no server-side expiry to enforce.
+                None => (
+                    SessionGuard {
+                        auth: None,
+                        session: None,
+                        expiry: None,
+                    },
+                    None,
+                ),
+            }
+        }
+        None => (
+            SessionGuard {
+                auth: None,
+                session: None,
+                expiry: None,
+            },
+            None,
+        ),
+    };
     let Ok(permit) = Arc::clone(&connection.context.live_slots).try_acquire_owned() else {
         return error_json(StatusCode::SERVICE_UNAVAILABLE, "too many live streams");
     };
@@ -564,7 +618,16 @@ fn live(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBo
     let console = connection.context.console.clone();
     tokio::spawn(async move {
         let _permit = permit;
-        stream_state(console, live, shutdown, tx, last_event_id).await;
+        stream_state(
+            console,
+            live,
+            shutdown,
+            tx,
+            last_event_id,
+            session_guard,
+            revocations,
+        )
+        .await;
     });
     let mut response = Response::new(ChannelBody { receiver: rx }.boxed());
     response.headers_mut().insert(
@@ -586,7 +649,12 @@ async fn stream_state(
     mut shutdown: watch::Receiver<bool>,
     tx: mpsc::Sender<Frame<Bytes>>,
     resume_id: Option<String>,
+    session_guard: SessionGuard,
+    mut revocations: Option<watch::Receiver<u64>>,
 ) {
+    if !session_allowed(&session_guard) {
+        return;
+    }
     if tx
         .try_send(Frame::data(Bytes::from_static(b"retry: 3000\n\n")))
         .is_err()
@@ -611,7 +679,7 @@ async fn stream_state(
     let mut heartbeat =
         tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
     loop {
-        if *shutdown.borrow() {
+        if *shutdown.borrow() || !session_allowed(&session_guard) {
             break;
         }
         tokio::select! {
@@ -620,7 +688,17 @@ async fn stream_state(
                     break;
                 }
             }
+            _ = session_revoked(&mut revocations) => {
+                if !session_allowed(&session_guard) {
+                    debug!("console live stream closed: session revoked or expired");
+                    break;
+                }
+            }
             _ = heartbeat.tick() => {
+                if !session_allowed(&session_guard) {
+                    debug!("console live stream closed: session expired");
+                    break;
+                }
                 if blocked_since.is_some_and(|since| since.elapsed() >= SLOW_STREAM_TIMEOUT) {
                     debug!("console live stream closed: subscriber is not reading");
                     break;
@@ -637,6 +715,10 @@ async fn stream_state(
                 if changed.is_err() {
                     break;
                 }
+                if !session_allowed(&session_guard) {
+                    debug!("console live stream closed: session revoked or expired");
+                    break;
+                }
                 if !send_state(
                     &tx,
                     &console,
@@ -650,6 +732,30 @@ async fn stream_state(
                 }
             }
         }
+    }
+}
+
+fn session_allowed(session_guard: &SessionGuard) -> bool {
+    let (Some(auth), Some(session)) = (&session_guard.auth, &session_guard.session) else {
+        // Authentication is disabled, or the request presented the operator
+        // token instead of a session.
+        return true;
+    };
+    let now = Instant::now();
+    if session_guard.expiry.is_none_or(|expiry| expiry <= now) {
+        return false;
+    }
+    auth.validate_session(session, now)
+}
+
+/// Wait until any session is revoked. The stream revalidates its own session
+/// after every wake-up, so a logout closes exactly the affected streams.
+async fn session_revoked(revocations: &mut Option<watch::Receiver<u64>>) {
+    match revocations {
+        Some(receiver) => {
+            let _ = receiver.changed().await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 

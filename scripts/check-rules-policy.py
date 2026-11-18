@@ -9,11 +9,11 @@ bypass for the bundled rules. This gate runs in the signing job before
 
 The rule file uses a deliberately small YAML subset. The parser below accepts
 only the canonical block style used by ``rules.example.yaml``; a flow mapping,
-a quoted or explicit mapping key, an indentless sequence entry, or an unusual
-indentation is rejected instead of guessed. The config parser accepts those
-spellings, so silently skipping one would let an ALLOW escape the gate. That
-keeps the gate from being bypassed by a spelling the strict scanner does not
-understand.
+a quoted or explicit mapping key, an indentless sequence entry, an unusual
+indentation, or a value that continues onto a later line is rejected instead of
+guessed. The config parser accepts those spellings, so silently skipping one
+would let an ALLOW escape the gate. That keeps the gate from being bypassed by a
+spelling the strict scanner does not understand.
 
 Usage:
     scripts/check-rules-policy.py [--allowlist FILE] FILE [FILE ...]
@@ -116,6 +116,8 @@ def reject_shape(path: Path, number: int, stripped: str) -> None:
 
 def parse(path: Path) -> list[Category]:
     """Read the categories block through the structural allowlist."""
+    text = path.read_text(encoding="utf-8")
+    reject_continuations(path, text)
     categories: list[Category] = []
     current_category: Category | None = None
     current_rule: Rule | None = None
@@ -123,7 +125,7 @@ def parse(path: Path) -> list[Category]:
     in_categories = False
     saw_categories = False
 
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for number, raw in enumerate(text.splitlines(), 1):
         line = strip_comment(raw)
         if not line.strip():
             continue
@@ -222,6 +224,57 @@ def parse(path: Path) -> list[Category]:
     if not saw_categories:
         raise ValueError(f"{path}: no categories block")
     return categories
+
+
+def reject_continuations(path: Path, text: str) -> None:
+    """Reject values whose block role continues onto a later line.
+
+    The runtime parser folds a quoted scalar or flow collection that does not
+    close on its line into the following lines, at any indentation, and then
+    resumes the surrounding mapping. A line at column 0 inside such a value
+    therefore looks like a top-level key to this scanner but is scalar content
+    to the runtime. The scan below runs before the line is folded into the
+    state, so a column-0 line that only closes the value is rejected too.
+    """
+    quote: str | None = None
+    flow_depth = 0
+    for number, raw in enumerate(text.splitlines(), 1):
+        if (quote is not None or flow_depth > 0) and raw and not raw[0].isspace():
+            raise ValueError(
+                f"{path}:{number}: a quoted scalar or flow collection spans "
+                "lines and continues at column 0; the gate cannot verify "
+                "which lines belong to the categories block"
+            )
+        index = 0
+        while index < len(raw):
+            character = raw[index]
+            if quote == '"':
+                if character == "\\":
+                    index += 2
+                    continue
+                if character == '"':
+                    quote = None
+            elif quote == "'":
+                if character == "'":
+                    if index + 1 < len(raw) and raw[index + 1] == "'":
+                        index += 2
+                        continue
+                    quote = None
+            else:
+                if character == "#" and (index == 0 or raw[index - 1].isspace()):
+                    break
+                if character in ("'", '"'):
+                    quote = character
+                elif character in ("{", "["):
+                    flow_depth += 1
+                elif character in ("}", "]") and flow_depth > 0:
+                    flow_depth -= 1
+            index += 1
+    if quote is not None or flow_depth > 0:
+        raise ValueError(
+            f"{path}: a quoted scalar or flow collection is not closed; "
+            "the gate cannot verify the categories block"
+        )
 
 
 def load_allowlist(path: Path) -> set[str]:

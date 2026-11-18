@@ -133,6 +133,40 @@ def main() -> int:
             "         action: ALLOW\n",
             "unrecognised rule-file structure",
         ),
+        "a multi-line quoted scalar cannot hide a column-0 line": (
+            "categories:\n"
+            "  - name: trusted-sources\n"
+            '    description: "quarantined notes\n'
+            "categories: see the advisory\n"
+            '"\n'
+            "    enabled: true\n"
+            "    action: ALLOW\n",
+            "spans lines and continues at column 0",
+        ),
+        "a multi-line flow collection cannot hide a column-0 line": (
+            "categories:\n"
+            "  - name: trusted-sources\n"
+            "    enabled: true\n"
+            "    action: ALLOW\n"
+            "    rules:\n"
+            "      - name: internal\n"
+            "        match: { source_ip: [\n"
+            "127.0.0.1/32] }\n",
+            "spans lines and continues at column 0",
+        ),
+        "a column-0 line that only closes a quoted scalar is rejected": (
+            "categories:\n"
+            "  - name: trusted-sources\n"
+            '    description: "quarantined notes\n'
+            '"\n'
+            "    enabled: true\n"
+            "    action: ALLOW\n",
+            "spans lines and continues at column 0",
+        ),
+        "an unterminated quoted scalar is rejected": (
+            'categories:\n  - name: trusted-sources\n    description: "notes\n',
+            "is not closed",
+        ),
     }
     for label, (text, expected) in cases.items():
         result = run(text)

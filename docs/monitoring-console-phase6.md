@@ -142,7 +142,10 @@ most 4 KiB:
 - `GET /api/v1/session` returns `{"enabled":true,"authenticated":true|false,
   "tls":true|false}` and is safe to call before login.
 - `DELETE /api/v1/session` revokes the server-side session and expires the
-  cookie. It is idempotent.
+  cookie. It is idempotent. Active SSE streams revalidate their session on
+  every heartbeat and collector tick, are woken immediately by a revocation,
+  and end at the session's fixed 12-hour expiry, so a logout cannot leave a
+  live telemetry feed open.
 - Unauthenticated API and SSE requests return `401`; unauthenticated `GET /`
   redirects to `/login`. No state-changing endpoint exists beyond session
   management, and `SameSite=Strict` blocks cross-site cookie use.

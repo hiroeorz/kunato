@@ -397,6 +397,8 @@ pub struct RulesUpdateSpec {
     pub url: Option<String>,
     #[serde(default)]
     pub checksum_url: Option<String>,
+    #[serde(default)]
+    pub allow_unsigned: bool,
     #[serde(default = "hours24", deserialize_with = "de_duration")]
     pub interval: Duration,
     #[serde(default = "default_jitter_percent")]
@@ -411,6 +413,7 @@ impl Default for RulesUpdateSpec {
             enabled: false,
             url: None,
             checksum_url: None,
+            allow_unsigned: false,
             interval: hours24(),
             jitter_percent: default_jitter_percent(),
             max_bytes: default_max_rules_bytes(),
@@ -1757,6 +1760,7 @@ pub struct RulesUpdate {
     pub enabled: bool,
     pub url: Option<Uri>,
     pub checksum_url: Option<Uri>,
+    pub allow_unsigned: bool,
     pub interval: Duration,
     pub jitter_percent: u8,
     pub max_bytes: usize,
@@ -1768,6 +1772,7 @@ impl Default for RulesUpdate {
             enabled: false,
             url: None,
             checksum_url: None,
+            allow_unsigned: false,
             interval: hours24(),
             jitter_percent: default_jitter_percent(),
             max_bytes: default_max_rules_bytes(),
@@ -3490,11 +3495,25 @@ fn compile_rules_update(
             ));
         }
     }
+    if url
+        .as_ref()
+        .is_some_and(|url| url.scheme_str() == Some("http"))
+        && !spec.allow_unsigned
+    {
+        // Plain HTTP is accepted only for a loopback mirror, where any local
+        // process can replace the served bytes. Such a channel carries no
+        // detached signature unless the operator explicitly accepts it.
+        issues.push(
+            "rules_update.url uses plain HTTP without `rules_update.allow_unsigned: true`; the loopback development mirror installs unsigned rule sets"
+                .to_owned(),
+        );
+    }
 
     RulesUpdate {
         enabled: spec.enabled,
         url,
         checksum_url,
+        allow_unsigned: spec.allow_unsigned,
         interval: spec.interval,
         jitter_percent: spec.jitter_percent,
         max_bytes: spec.max_bytes,
@@ -6783,7 +6802,7 @@ rules_update:
     }
 
     #[test]
-    fn accepts_https_and_loopback_http_update_urls() {
+    fn accepts_https_and_gates_loopback_http_update_urls() {
         let config = parse_with(
             BASE,
             &update_block(
@@ -6793,16 +6812,21 @@ rules_update:
         )
         .expect("valid config");
         assert!(config.rules_update.enabled);
+        assert!(!config.rules_update.allow_unsigned);
         assert_eq!(config.rules_update.max_bytes, 1048576);
 
-        parse_with(
-            BASE,
-            &update_block(
-                "http://127.0.0.1:8080/rules.yaml",
-                "http://127.0.0.1:8080/rules.yaml.sha256",
-            ),
-        )
-        .expect("loopback http is allowed for testing");
+        let loopback = update_block(
+            "http://127.0.0.1:8080/rules.yaml",
+            "http://127.0.0.1:8080/rules.yaml.sha256",
+        );
+        let error = parse_with(BASE, &loopback).expect_err("unsigned loopback must be gated");
+        assert!(error.to_string().contains("allow_unsigned"));
+
+        let opted_in =
+            loopback.replace("  interval: 24h", "  allow_unsigned: true\n  interval: 24h");
+        let config =
+            parse_with(BASE, &opted_in).expect("loopback http with explicit opt-in is allowed");
+        assert!(config.rules_update.allow_unsigned);
     }
 
     #[test]

@@ -19,8 +19,17 @@ pub struct RequestView<'a> {
     /// Bytes matched by body targets: the raw body with multipart file payloads
     /// masked out. Form field values, part headers, and boundaries remain in
     /// scope; uploaded file content is inspected by the upload checks instead.
-    pub match_body: Cow<'a, [u8]>,
-    pub body_forms: Vec<Vec<u8>>,
+    /// The text is converted once so every body rule reuses it instead of
+    /// running a lossy UTF-8 conversion per rule.
+    pub match_body: Cow<'a, str>,
+    /// Decoded body variants, already converted to text once. Multipart
+    /// messages with several boundaries or forms past the per-body budget set
+    /// `body_forms_complete` to false instead of returning a partial set.
+    pub body_forms: Vec<String>,
+    /// False when the decoded body forms exceed the inspection budget or a
+    /// multipart body declares several boundaries. Evaluation must fail closed
+    /// instead of matching against a partial form set.
+    pub body_forms_complete: bool,
     /// True when the inspected body is only a prefix of the message (either
     /// because the raw body exceeded the limit or because decoding could not
     /// finish). ALLOW rules must not trust an incomplete body.
@@ -53,6 +62,15 @@ impl<'a> RequestView<'a> {
         decode_body: bool,
     ) -> Self {
         let inspect_body = decode_body && !body.is_empty();
+        let decoded = if inspect_body {
+            Some(decoded_body_forms(body, headers))
+        } else {
+            None
+        };
+        let (body_forms, body_forms_complete) = match decoded {
+            Some(decoded) => (decoded.forms, decoded.complete),
+            None => (Vec::new(), true),
+        };
         Self {
             method,
             path_forms: path_forms(uri.path()),
@@ -61,17 +79,14 @@ impl<'a> RequestView<'a> {
             body,
             match_body: if inspect_body {
                 match mask_multipart_file_payloads(body, headers) {
-                    Some(masked) => Cow::Owned(masked),
-                    None => Cow::Borrowed(body),
+                    Some(masked) => Cow::Owned(String::from_utf8_lossy(&masked).into_owned()),
+                    None => String::from_utf8_lossy(body),
                 }
             } else {
-                Cow::Borrowed(body)
+                String::from_utf8_lossy(body)
             },
-            body_forms: if inspect_body {
-                decoded_body_forms(body, headers)
-            } else {
-                Vec::new()
-            },
+            body_forms,
+            body_forms_complete,
             body_truncated: false,
             body_rules_exempt: false,
             source_ip: normalize_ip(source_ip),
@@ -314,11 +329,7 @@ mod tests {
         );
         let uri: Uri = "/".parse().expect("valid URI");
         let view = view(&uri, &headers, b"q=%2527+union");
-        let forms: Vec<&str> = view
-            .body_forms
-            .iter()
-            .map(|form| std::str::from_utf8(form).expect("utf8"))
-            .collect();
+        let forms: Vec<&str> = view.body_forms.iter().map(String::as_str).collect();
         assert_eq!(forms, vec!["q=%27 union", "q=' union"]);
     }
 

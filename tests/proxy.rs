@@ -927,61 +927,6 @@ async fn send_raw_request(addr: SocketAddr, request: &str) -> StatusCode {
     read_status(&mut stream).await
 }
 
-async fn send_raw_request_body(addr: SocketAddr, request: &str) -> (StatusCode, String) {
-    let mut stream = TcpStream::connect(addr).await.expect("connect kunato");
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("write request");
-    let mut response = Vec::new();
-    let mut chunk = [0u8; 1024];
-    loop {
-        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
-            .await
-            .expect("read timeout")
-            .expect("read response");
-        if read == 0 {
-            break;
-        }
-        response.extend_from_slice(&chunk[..read]);
-        let Some(end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
-            if response.len() > 65536 {
-                break;
-            }
-            continue;
-        };
-        let head = String::from_utf8_lossy(&response[..end]).into_owned();
-        let status = head
-            .split_whitespace()
-            .nth(1)
-            .and_then(|status| status.parse().ok())
-            .and_then(|code| StatusCode::from_u16(code).ok())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
-        let length = head
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-            .unwrap_or(0);
-        while response.len() < end + 4 + length {
-            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
-                .await
-                .expect("read timeout")
-                .expect("read response");
-            if read == 0 {
-                break;
-            }
-            response.extend_from_slice(&chunk[..read]);
-        }
-        let body = response.get(end + 4..).unwrap_or_default().to_vec();
-        return (status, String::from_utf8_lossy(&body).into_owned());
-    }
-    (StatusCode::BAD_GATEWAY, String::new())
-}
-
 fn config_with_allowed_hosts(upstream: SocketAddr, allowed: &str) -> String {
     format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\nallowed_hosts: {allowed}\ncategories: []\n"
@@ -2264,23 +2209,93 @@ async fn allowed_hosts_ignores_x_forwarded_host() {
 }
 
 #[tokio::test]
-async fn a_client_x_forwarded_host_without_a_host_is_stripped() {
+async fn a_request_without_a_host_is_rejected_before_forwarding() {
     let upstream = spawn_header_echo_upstream("x-forwarded-host").await;
     let running = start_kunato(&format!(
         "listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n"
     ))
     .await;
 
-    let (status, body) = send_raw_request_body(
-        running.addr,
+    for request in [
         "GET / HTTP/1.0\r\nX-Forwarded-Host: evil.example\r\n\r\n",
+        "GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
+    ] {
+        let status = send_raw_request(running.addr, request).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a request without Host must not reach the upstream with a synthesized Host: {request:?}"
+        );
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn ambiguous_multipart_boundaries_are_rejected_before_rule_evaluation() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+limits: {{ form: {{ enabled: false }} }}
+protection: {{ enabled: false }}
+categories:
+  - name: body-guard
+    action: BLOCK
+    rules:
+      - name: body-never
+        match: {{ regex: never-matches-this, in: [body] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    let body = "--a\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nvalue\r\n--a--\r\n";
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::POST,
+        "/upload",
+        "example.test",
+        &[(
+            "content-type",
+            "multipart/form-data; boundary=a; boundary=b",
+        )],
+        body,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body, "",
-        "a client X-Forwarded-Host must be removed when no Host can replace it"
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_host_conditioned_rule_cannot_be_bypassed_without_a_host() {
+    let upstream = spawn_upstream(StatusCode::OK, "origin").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+protection: {{ enabled: false }}
+categories:
+  - name: host-guard
+    action: BLOCK
+    rules:
+      - name: host-protected
+        match: {{ headers: {{ Host: '^protected\\.example$' }} }}
+"
     );
+    let running = start_kunato(&yaml).await;
+
+    let status = send_raw_request(
+        running.addr,
+        "GET /nohost HTTP/1.1\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let status = send_raw_request(
+        running.addr,
+        "GET /withhost HTTP/1.1\r\nHost: protected.example\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     running.stop().await;
 }
@@ -2916,6 +2931,78 @@ async fn saml_signature_wrapping_is_rejected() {
         metrics.contains("kunato_saml_rejected_total 1"),
         "{metrics}"
     );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn saml_json_that_serde_json_cannot_parse_fails_closed() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let doctype = "<!DOCTYPE samlp:Response [<!ENTITY x SYSTEM \"file:///nonexistent\">]>\
+         <samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+         ID=\"_response\" Version=\"2.0\"><saml:Assertion \
+         xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_assertion\">\
+         <saml:Subject><saml:NameID>alice@example.com</saml:NameID></saml:Subject>\
+         </saml:Assertion></samlp:Response>";
+    let encoded = saml_base64(doctype.as_bytes());
+    let deep = format!(
+        "{{\"SAMLResponse\":\"{encoded}\",\"pad\":{}{}}}",
+        "[".repeat(200),
+        "]".repeat(200)
+    );
+    for body in [
+        format!("{{\"SAMLResponse\":\"{encoded}\",\"n\":1e400}}").into_bytes(),
+        deep.into_bytes(),
+    ] {
+        let (status, _) = send_bytes(
+            running.addr,
+            Method::POST,
+            "/saml/keycloak",
+            body,
+            &[("content-type", "application/json")],
+        )
+        .await;
+        assert!(
+            matches!(status, StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN),
+            "an unparseable SAML body must fail closed, got {status}"
+        );
+    }
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn repeated_saml_fields_share_a_request_wide_budget() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!("listen: 127.0.0.1:0\nupstream: http://{upstream}\ncategories: []\n");
+    let running = start_kunato(&yaml).await;
+
+    let xml = saml_response_xml(None);
+    let mut body = String::new();
+    for index in 0..5 {
+        if index > 0 {
+            body.push('&');
+        }
+        body.push_str("SAMLResponse=");
+        body.push_str(
+            &saml_base64(xml.as_bytes())
+                .replace('+', "%2B")
+                .replace('/', "%2F")
+                .replace('=', "%3D"),
+        );
+    }
+    let (status, _) = send_bytes(
+        running.addr,
+        Method::POST,
+        "/saml/keycloak",
+        body.into_bytes(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
     running.stop().await;
 }
 
@@ -9483,6 +9570,7 @@ rules_update:
   enabled: true
   url: http://127.0.0.1:{port}/rules.yaml
   checksum_url: http://127.0.0.1:{port}/rules.yaml.sha256
+  allow_unsigned: true
   interval: 24h
   jitter_percent: 0
   max_bytes: 1048576

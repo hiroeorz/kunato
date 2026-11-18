@@ -28,6 +28,11 @@ const MAX_DEPTH: usize = 64;
 const MAX_ATTRIBUTES: usize = 64;
 /// Bytes retained from one `NameID` for subject comparison.
 const MAX_NAME_ID_BYTES: usize = 4096;
+/// SAML messages inspected in one request. A browser posts one response (the
+/// HTTP-POST binding) or one request (the redirect binding); a body with more
+/// fields is not a legitimate SAML exchange and is rejected instead of
+/// inflating and parsing each one.
+const MAX_MESSAGES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Finding {
@@ -148,13 +153,42 @@ fn inspect_with(
     if body.is_empty() {
         return None;
     }
-    let messages = messages(headers, body)?;
+    let messages = match messages(headers, body) {
+        Ok(Some(messages)) => messages,
+        Ok(None) => return None,
+        Err(finding) => {
+            // The declared media type and the SAML field hint say a message
+            // may be present, but this build cannot read it. inspect_truncated
+            // fails closed for the same reason: skipping the structural checks
+            // would forward an uninspected assertion.
+            let findings = vec![finding];
+            let blocking = (limits.mode == SamlInspection::Strict).then_some(finding);
+            return Some(Inspection { findings, blocking });
+        }
+    };
+    if messages.len() > MAX_MESSAGES {
+        let findings = vec![Finding::TooLarge];
+        let blocking = (limits.mode == SamlInspection::Strict).then_some(Finding::TooLarge);
+        return Some(Inspection { findings, blocking });
+    }
     let mut findings = BTreeSet::new();
+    let mut remaining = limits.max_decoded_bytes;
     for message in messages {
-        match decode_message(&message.value, limits.max_decoded_bytes) {
-            Ok(xml) => findings.extend(analyze(&xml, message.is_response)),
+        if remaining == 0 {
+            findings.insert(Finding::TooLarge);
+            break;
+        }
+        match decode_message(&message.value, remaining) {
+            Ok(xml) => {
+                remaining = remaining.saturating_sub(xml.len());
+                findings.extend(analyze(&xml, message.is_response));
+            }
             Err(finding) => {
+                let blocking = finding == Finding::TooLarge;
                 findings.insert(finding);
+                if blocking {
+                    break;
+                }
             }
         }
     }
@@ -172,20 +206,22 @@ fn inspect_with(
     })
 }
 
-fn messages(headers: &HeaderMap, body: &[u8]) -> Option<Vec<Message>> {
-    let media_type = media_type(headers)?;
+fn messages(headers: &HeaderMap, body: &[u8]) -> Result<Option<Vec<Message>>, Finding> {
+    let Some(media_type) = media_type(headers) else {
+        return Ok(None);
+    };
     if !has_saml_hint(body) {
-        return None;
+        return Ok(None);
     }
     if media_type == "application/x-www-form-urlencoded" {
-        form_messages(body)
+        Ok(form_messages(body))
     } else if media_type == "application/json"
         || media_type.ends_with("+json")
         || media_type.contains("/json")
     {
         json_messages(body)
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -208,7 +244,7 @@ pub(crate) fn is_saml_content_type(headers: &HeaderMap) -> bool {
 /// decoder is added that can produce the field name without either byte, this
 /// prefilter must be removed rather than extended, because a spelling it does
 /// not recognize would skip the structural checks entirely.
-fn has_saml_hint(body: &[u8]) -> bool {
+pub(crate) fn has_saml_hint(body: &[u8]) -> bool {
     let mut index = 0;
     while index < body.len() {
         match body[index] {
@@ -271,9 +307,11 @@ fn form_messages(body: &[u8]) -> Option<Vec<Message>> {
     }
 }
 
-fn json_messages(body: &[u8]) -> Option<Vec<Message>> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let object = value.as_object()?;
+fn json_messages(body: &[u8]) -> Result<Option<Vec<Message>>, Finding> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| Finding::Malformed)?;
+    let Some(object) = value.as_object() else {
+        return Err(Finding::Malformed);
+    };
     let mut messages = Vec::new();
     for (key, value) in object {
         let Some(is_response) = key_kind(key.as_bytes()) else {
@@ -285,9 +323,9 @@ fn json_messages(body: &[u8]) -> Option<Vec<Message>> {
         });
     }
     if messages.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(messages)
+        Ok(Some(messages))
     }
 }
 
@@ -1407,6 +1445,64 @@ mod tests {
         .expect("saml inspection");
         assert!(inspection.blocking.is_none());
         assert!(inspection.findings.contains(&Finding::Unsigned));
+    }
+
+    #[test]
+    fn unparseable_json_with_a_saml_hint_fails_closed() {
+        let deep = format!(
+            "{{\"SAMLResponse\":\"eA==\",\"pad\":{}{}}}",
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        for body in [
+            br#"{"SAMLResponse":"eA==","n":1e400}"#.to_vec(),
+            deep.into_bytes(),
+        ] {
+            let inspection = inspect(
+                &headers("application/json"),
+                &body,
+                &limits(SamlInspection::Strict, 1024),
+            )
+            .expect("a hinted but unreadable JSON body must be inspected");
+            assert_eq!(inspection.findings, vec![Finding::Malformed], "{body:?}");
+            assert_eq!(inspection.blocking, Some(Finding::Malformed));
+        }
+    }
+
+    #[test]
+    fn repeated_messages_share_one_request_wide_budget() {
+        let xml = valid_response();
+        let encoded = base64_encode(xml.as_bytes())
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D");
+        let body = format!("SAMLResponse={encoded}&SAMLResponse={encoded}").into_bytes();
+        // The first message fits; the second needs the same number of bytes
+        // again, so the request-wide budget rejects it instead of inflating a
+        // second copy.
+        let inspection = inspect(
+            &headers("application/x-www-form-urlencoded"),
+            &body,
+            &limits(SamlInspection::Strict, xml.len() + xml.len() / 2),
+        )
+        .expect("saml inspection");
+        assert!(
+            inspection.findings.contains(&Finding::TooLarge),
+            "{:?}",
+            inspection.findings
+        );
+        assert_eq!(inspection.blocking, Some(Finding::TooLarge));
+
+        let body = "SAMLResponse=x&SAMLResponse=x&SAMLResponse=x&SAMLResponse=x&SAMLResponse=x"
+            .as_bytes()
+            .to_vec();
+        let inspection = inspect(
+            &headers("application/x-www-form-urlencoded"),
+            &body,
+            &limits(SamlInspection::Strict, 1024),
+        )
+        .expect("saml inspection");
+        assert_eq!(inspection.findings, vec![Finding::TooLarge]);
     }
 
     #[test]

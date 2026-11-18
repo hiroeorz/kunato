@@ -197,13 +197,19 @@ rule-set updates.
   and structurally checked before rules run. `strict` rejects malformed or
   oversized messages, DTDs, duplicate IDs, signature references that do not name
   their enclosing element, and assertions outside the response; `log` records
-  findings only. `multi_assertion` and `unsigned` choose `log` (default) or
-  `block`. XML signature verification remains with the service provider.
+  findings only. `max_decoded_bytes` is a request-wide budget, at most four
+  messages are inspected per request, and a hinted JSON body this build cannot
+  parse fails closed in `strict` mode. `multi_assertion` and `unsigned` choose
+  `log` (default) or `block`. XML signature verification remains with the
+  service provider.
 - `allowed_hosts` is an optional Host/authority allowlist. When set, a missing,
   malformed, duplicate, or unlisted Host (HTTP/1.1) or `:authority`
   (HTTP/2 / HTTP/3) is rejected with `400`/`421` before rule evaluation, and
-  `ALLOW` rules cannot bypass it. A leading `*.` matches subdomains but not the
-  apex; an entry without a port matches any port; IPv4 and bracketed IPv6
+  `ALLOW` rules cannot bypass it. Even when the allowlist is omitted, an
+  HTTP/1.x request with neither a Host field nor an absolute-form authority is
+  rejected with `400`, so rule evaluation and the forwarded request cannot
+  disagree about the origin virtual host. A leading `*.` matches subdomains but
+  not the apex; an entry without a port matches any port; IPv4 and bracketed IPv6
   literals are accepted. An empty list or null value is invalid; omit the field
   to disable the check. `kunato init` seeds `--acme-domain` values and accepts
   `--allowed-host`; the installer passes it through.
@@ -227,7 +233,9 @@ rule-set updates.
 - `admin_access` declares named administrative functions (path regex groups)
   and a default state: `default: open` (the shipped default) or `default:
   close` for fail-closed operation. Matching uses any decoded/normalized form
-  of the path (the inverse of `content_routes`); a closed request gets `404`
+  of the path, with servlet matrix parameters (`;jsessionid=...`) stripped for
+  both paths and exclusions (the inverse of `content_routes`); a closed request
+  gets `404`
   before body reads and never enters the rule engine, while an open request
   still runs the full inspection and rule pipeline. `open` and `close` commands
   create in-memory overrides, optionally scoped to one client address or one

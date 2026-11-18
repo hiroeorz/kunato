@@ -535,6 +535,12 @@ impl InitArgs {
             "  checksum_url: {}\n",
             yaml_scalar(&format!("{}.sha256", self.rules_url))
         ));
+        if self.rules_url.starts_with("http://") {
+            // The explicit --rules-url selected a loopback development mirror;
+            // plain HTTP is only accepted for loopback and carries no detached
+            // signature. Emit the matching opt-in so the generated file loads.
+            out.push_str("  allow_unsigned: true\n");
+        }
         out.push_str("  interval: 24h\n");
         out.push_str("  jitter_percent: 10\n");
         out.push_str("  max_bytes: 1048576\n");
@@ -620,6 +626,7 @@ mod tests {
         assert_eq!(compiled.listen.port(), 443);
         assert!(compiled.tls.is_some());
         assert!(compiled.rules_update.enabled);
+        assert!(!compiled.rules_update.allow_unsigned);
         assert_eq!(
             compiled.rules_file.as_deref(),
             Some(std::path::Path::new(DEFAULT_RULES_FILE))
@@ -628,6 +635,16 @@ mod tests {
             compiled.overrides_file.as_deref(),
             Some(std::path::Path::new("/etc/kunato/overrides.yaml"))
         );
+    }
+
+    #[test]
+    fn a_loopback_http_rules_url_emits_the_unsigned_opt_in() {
+        let mut args = args();
+        args.rules_url = "http://127.0.0.1:8080/rules.yaml".to_owned();
+        let text = args.render().expect("render");
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        assert!(compiled.rules_update.allow_unsigned);
+        assert!(text.contains("allow_unsigned: true"));
     }
 
     #[test]

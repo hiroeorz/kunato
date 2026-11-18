@@ -12,7 +12,7 @@ use crate::config::CompiledConfig;
 use crate::metrics::Metrics;
 use crate::proxy::BodyExt;
 use crate::proxy::forward::{self, HttpError};
-use crate::proxy::server::InspectionGuard;
+use crate::proxy::server::{InspectionGuard, REQUEST_INSPECTION_FACTOR};
 use crate::proxy::{BoxError, PrefixBody, ProxyBody, settle_body_end};
 use crate::request_view::{RequestView, ResponseView};
 use crate::rules::eval;
@@ -90,7 +90,7 @@ pub(crate) async fn inspect(
     inspected_request: InspectedRequest<'_>,
     source: ClientSource,
     response: Response<ProxyBody>,
-    inspection: InspectionGuard,
+    mut inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
     if config.php.matches(request) && config.php.rejects_response(response.headers()) {
         crate::observations::reject(crate::console::model::RejectionReason::PhpResponse);
@@ -207,6 +207,22 @@ pub(crate) async fn inspect(
 
     let body_rules_exempt = config.is_content_route(&request.method, &request.uri);
     let request_body_targets = config.response_targets_request_body() && !body_rules_exempt;
+    if request_body_targets && !inspected_request.body.is_empty() {
+        // The request-phase reservation was shrunk before the upstream
+        // exchange. A response rule that targets the request body rebuilds its
+        // decoded forms now, so reserve the same worst case again until the
+        // evaluation (and the form buffers) are gone.
+        let target = inspected_request
+            .body
+            .len()
+            .saturating_mul(REQUEST_INSPECTION_FACTOR);
+        if !inspection.grow_to(target) {
+            return Err(HttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inspection capacity exhausted",
+            ));
+        }
+    }
     let view = RequestView::with_body_decoding(
         &request.method,
         &request.uri,
@@ -217,6 +233,13 @@ pub(crate) async fn inspect(
     )
     .with_body_truncated(inspected_request.truncated)
     .with_body_rules_exempt(body_rules_exempt);
+    if !view.body_forms_complete {
+        crate::observations::reject(crate::console::model::RejectionReason::ResponseInspection);
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "request body forms exceed the response inspection limit",
+        ));
+    }
     let response_view = ResponseView::new(
         buffered.parts.status,
         &buffered.parts.headers,

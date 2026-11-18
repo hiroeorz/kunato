@@ -90,7 +90,7 @@ fn internal_host(view: &RequestView<'_>, policy: &Hardening) -> Option<String> {
         return Some(host);
     }
     for form in &view.body_forms {
-        if let Some(host) = internal_host_in(&String::from_utf8_lossy(form), policy) {
+        if let Some(host) = internal_host_in(form, policy) {
             return Some(host);
         }
     }
@@ -170,10 +170,12 @@ fn internal_host_in_normalized(text: &str, policy: &Hardening) -> Option<String>
 /// arbitrary `word:value` pair does not.
 fn special_scheme_before(text: &str, scheme_end: usize) -> bool {
     let start = text[..scheme_end]
-        .rfind(|character: char| {
+        .char_indices()
+        .rev()
+        .find(|&(_, character)| {
             !(character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
         })
-        .map_or(0, |index| index + 1);
+        .map_or(0, |(index, character)| index + character.len_utf8());
     let scheme = &text[start..scheme_end];
     ["http", "https", "ws", "wss", "ftp", "file"]
         .iter()
@@ -799,6 +801,30 @@ mod tests {
                 Some(Violation::InternalHost(_))
             ));
         }
+    }
+
+    #[test]
+    fn non_ascii_text_before_a_colon_does_not_panic() {
+        let headers = HeaderMap::new();
+        for target in [
+            "/fetch?url=%E3%81%82a:vuln.corp/",
+            "/fetch?url=%FFa:vuln.corp/",
+            "/fetch?url=%E3%81%82http:vuln.corp/",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            let _ = inspect(&view(&uri, &headers, b""), &policy());
+        }
+        let mut body_headers = HeaderMap::new();
+        body_headers.insert("content-type", "application/json".parse().unwrap());
+        let uri: Uri = "/fetch".parse().unwrap();
+        let _ = inspect(
+            &view(
+                &uri,
+                &body_headers,
+                "{\"url\":\"あhttp:vuln.corp/\"}".as_bytes(),
+            ),
+            &policy(),
+        );
     }
 
     #[test]
