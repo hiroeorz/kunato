@@ -346,7 +346,7 @@ impl MetricBucket {
             ));
         }
         if let Some(site) = &self.site {
-            identifier(site, 64)?;
+            site_identifier(site, 64)?;
         }
         if u64::from(self.coverage.observed_ms) > MINUTE_MS {
             return Err(Error::Invalid("coverage exceeds one minute"));
@@ -399,7 +399,7 @@ impl EventRecord {
         position(self.sequence)?;
         timestamp(self.occurred_at_ms)?;
         if let Some(site) = &self.site {
-            identifier(site, 64)?;
+            site_identifier(site, 64)?;
         }
         if let Some(method) = &self.method {
             text(method, 32)?;
@@ -460,7 +460,20 @@ impl EventRecord {
     }
 }
 
-pub(super) fn identifier(value: &str, max: usize) -> Result<(), Error> {
+pub(crate) fn site_identifier(value: &str, max: usize) -> Result<(), Error> {
+    if value.is_empty()
+        || value.len() > max
+        || value.contains("kdt1")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-/*".contains(&byte))
+    {
+        return Err(Error::Invalid("invalid or oversized observation site"));
+    }
+    Ok(())
+}
+
+pub(crate) fn identifier(value: &str, max: usize) -> Result<(), Error> {
     if value.is_empty()
         || value.len() > max
         || value.contains("kdt1")
@@ -475,7 +488,7 @@ pub(super) fn identifier(value: &str, max: usize) -> Result<(), Error> {
     Ok(())
 }
 
-fn text(value: &str, max: usize) -> Result<(), Error> {
+pub(crate) fn text(value: &str, max: usize) -> Result<(), Error> {
     if value.is_empty()
         || value.len() > max
         || value.chars().any(char::is_control)
@@ -488,7 +501,7 @@ fn text(value: &str, max: usize) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn redacted_path(value: &str) -> Result<(), Error> {
+pub(crate) fn redacted_path(value: &str) -> Result<(), Error> {
     text(value, 2048)?;
     if value != "[redacted]"
         && (!value.starts_with('/')

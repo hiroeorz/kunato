@@ -387,6 +387,15 @@ impl Observations {
 
     pub(crate) fn decoy_detail(&self, detail: DecoyDetail<'_>) {
         use crate::console::model::{DecoyEvidence, Disposition, EventKind};
+        let (method, path) = CURRENT
+            .try_with(|cell| {
+                cell.try_borrow()
+                    .ok()
+                    .map(|value| (value.method.clone(), event_path(&value.path)))
+            })
+            .ok()
+            .flatten()
+            .unwrap_or((None, None));
         self.event_with_priority(true, |sequence, time| EventRecord {
             id: format!("decoy-{sequence}"),
             sequence,
@@ -400,11 +409,11 @@ impl Observations {
                 Disposition::Log
             },
             phase: Phase::Request,
-            site: (detail.site.len() <= 64).then(|| detail.site.into()),
+            site: event_site(detail.site),
             client: Some(detail.source.client_ip),
             peer: Some(detail.source.peer.ip()),
-            method: None,
-            path: None,
+            method,
+            path,
             status: None,
             category: None,
             rule: None,
@@ -744,6 +753,7 @@ struct RequestMeasurement {
     reason: Option<RejectionReason>,
     site: String,
     configuration: String,
+    method: Option<String>,
     path: Option<String>,
     path_hash: Option<[u8; 32]>,
     upstream_failure: bool,
@@ -781,6 +791,7 @@ impl RequestMeasurement {
             reason: None,
             site: "unattributed".into(),
             configuration: String::new(),
+            method: None,
             path: None,
             path_hash: None,
             upstream_failure: false,
@@ -893,6 +904,7 @@ pub fn request_head(config: &crate::config::CompiledConfig, parts: &http::reques
     let _ = CURRENT.try_with(|cell| {
         if let Ok(mut value) = cell.try_borrow_mut() {
             value.configuration = config.observation_id.clone();
+            value.method = event_method(parts.method.as_str());
             value.path = Some(additional::path(parts.uri.path()));
             let hash = ring::digest::digest(&ring::digest::SHA256, parts.uri.path().as_bytes());
             let mut bytes = [0; 32];
@@ -916,6 +928,23 @@ pub fn request_head(config: &crate::config::CompiledConfig, parts: &http::reques
             };
         }
     });
+}
+
+fn event_site(site: &str) -> Option<String> {
+    crate::console::model::site_identifier(site, 64)
+        .ok()
+        .map(|()| site.to_owned())
+}
+
+fn event_method(method: &str) -> Option<String> {
+    (crate::console::model::text(method, 32).is_ok() && method.parse::<http::Method>().is_ok())
+        .then(|| method.to_owned())
+}
+
+fn event_path(path: &Option<String>) -> Option<String> {
+    path.as_ref()
+        .filter(|value| crate::console::model::redacted_path(value).is_ok())
+        .cloned()
 }
 
 pub fn upstream_status(status: u16) {
@@ -978,11 +1007,11 @@ pub fn reject(reason: RejectionReason) {
                     kind: crate::console::model::EventKind::Rejection,
                     disposition: crate::console::model::Disposition::Reject,
                     phase: reason.phase(),
-                    site: None,
+                    site: event_site(&value.site),
                     client: value.client,
                     peer: value.peer,
-                    method: None,
-                    path: None,
+                    method: value.method.clone(),
+                    path: event_path(&value.path),
                     status: None,
                     category: None,
                     rule: None,
@@ -1031,11 +1060,11 @@ pub fn service_failure(timeout: bool) {
                 kind: crate::console::model::EventKind::UpstreamFailure,
                 disposition: crate::console::model::Disposition::Error,
                 phase: Phase::Service,
-                site: None,
+                site: event_site(&value.site),
                 client: value.client,
                 peer: value.peer,
-                method: None,
-                path: None,
+                method: value.method.clone(),
+                path: event_path(&value.path),
                 status: Some(if timeout { 504 } else { 502 }),
                 category: None,
                 rule: None,
@@ -1065,11 +1094,11 @@ pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
                 kind: crate::console::model::EventKind::RuleMatch,
                 disposition: crate::console::model::Disposition::Log,
                 phase,
-                site: None,
+                site: event_site(&value.site),
                 client: value.client,
                 peer: value.peer,
-                method: None,
-                path: None,
+                method: value.method.clone(),
+                path: event_path(&value.path),
                 status: None,
                 category: (category.len() <= 128).then(|| category.into()),
                 rule: (rule.len() <= 128).then(|| rule.into()),
@@ -1242,6 +1271,110 @@ mod tests {
             1
         );
         assert_eq!(snapshot.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn events_preserve_site_method_and_redacted_path() {
+        let history = history();
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\nallowed_hosts: [example.com]\ncategories: []\n",
+        )
+        .unwrap();
+        history.configure(&config);
+        observe(history.clone(), async {
+            let (parts, _) = http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/token/private-value?secret=hidden")
+                .header("host", "example.com")
+                .body(())
+                .unwrap()
+                .into_parts();
+            request_head(&config, &parts);
+            identity(crate::client_ip::ClientSource::direct(
+                "192.0.2.10:4321".parse().unwrap(),
+            ));
+            rule_detail(Phase::Request, "probe", "admin-probe");
+            service_failure(false);
+            reject(RejectionReason::Rule);
+            Response::builder().status(403).body(()).unwrap()
+        })
+        .await;
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.events.len(), 3);
+        for event in &snapshot.events {
+            assert_eq!(event.site.as_deref(), Some("example.com"));
+            assert_eq!(event.method.as_deref(), Some("POST"));
+            assert_eq!(event.path.as_deref(), Some("/token/[redacted]"));
+            assert_eq!(event.client, Some("192.0.2.10".parse().unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_sites_keep_their_configured_identity_in_events() {
+        let history = history();
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\nallowed_hosts: ['*.example.com']\ncategories: []\n",
+        )
+        .unwrap();
+        history.configure(&config);
+        observe(history.clone(), async {
+            let (parts, _) = http::Request::builder()
+                .method(http::Method::GET)
+                .uri("/admin")
+                .header("host", "blog.example.com")
+                .body(())
+                .unwrap()
+                .into_parts();
+            request_head(&config, &parts);
+            rule_detail(Phase::Request, "probe", "admin-probe");
+            Response::new(())
+        })
+        .await;
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(snapshot.events[0].site.as_deref(), Some("*.example.com"));
+        assert_eq!(snapshot.events[0].method.as_deref(), Some("GET"));
+        assert_eq!(snapshot.events[0].path.as_deref(), Some("/admin"));
+    }
+
+    #[tokio::test]
+    async fn decoy_events_include_the_current_request_method_and_path() {
+        let history = history();
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:0\nupstream: http://127.0.0.1:8000\nallowed_hosts: [example.com]\ncategories: []\n",
+        )
+        .unwrap();
+        history.configure(&config);
+        let recorder = history.clone();
+        observe(history.clone(), async move {
+            let (parts, _) = http::Request::builder()
+                .method(http::Method::GET)
+                .uri("/.env")
+                .header("host", "example.com")
+                .body(())
+                .unwrap()
+                .into_parts();
+            request_head(&config, &parts);
+            recorder.decoy_detail(DecoyDetail {
+                site: "dotenv",
+                credential_id: "0123456789abcdef0123456789abcdef",
+                context: crate::console::model::DecoyContext::Issued,
+                age_seconds: None,
+                lure: None,
+                template: None,
+                source: crate::client_ip::ClientSource::direct("192.0.2.11:4321".parse().unwrap()),
+                blocked: false,
+                incomplete: false,
+            });
+            Response::new(())
+        })
+        .await;
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.events.len(), 1);
+        let event = &snapshot.events[0];
+        assert_eq!(event.site.as_deref(), Some("dotenv"));
+        assert_eq!(event.method.as_deref(), Some("GET"));
+        assert_eq!(event.path.as_deref(), Some("/.env"));
     }
 
     #[tokio::test]
