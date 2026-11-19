@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.request
 import uuid
+from collections import Counter
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit
 
@@ -46,6 +47,7 @@ MANUAL_CONFIGS = {
     "rules-backpressure.yaml": {"fixture": "origin", "logs": ("origin", "kunato")},
     "rules-availability.yaml": {"fixture": "origin", "logs": ("origin", "kunato")},
     "rules-connect.yaml": {"fixture": "none", "logs": ("kunato",)},
+    "rules-pentest.yaml": {"fixture": "posture", "logs": ("posture", "kunato")},
 }
 MANUAL_PROTECTED_CONFIGS = {"rules-ffuf.yaml", "rules-ban.yaml",
                             "rules-backpressure.yaml", "rules-availability.yaml"}
@@ -236,6 +238,40 @@ def parse_manual_publish(value):
     if not 1 <= port <= 65535:
         raise ValueError("--publish port must be between 1 and 65535")
     return host, port
+
+
+def docker_bridge_gateways():
+    result = command(["docker", "network", "ls", "--format", "{{.ID}}"], check=False)
+    gateways = set()
+    for network_id in result.stdout.split():
+        inspected = command(["docker", "network", "inspect", network_id], check=False)
+        if inspected.returncode:
+            continue
+        for network in json.loads(inspected.stdout):
+            if network.get("Driver") != "bridge":
+                continue
+            for entry in network.get("IPAM", {}).get("Config") or []:
+                if entry.get("Gateway"):
+                    gateways.add(entry["Gateway"])
+    return gateways
+
+
+def default_attacker_bind(gateways):
+    if "172.17.0.1" in gateways:
+        return "172.17.0.1"
+    for gateway in sorted(gateways):
+        if not gateway.startswith("127."):
+            return gateway
+    return "127.0.0.1"
+
+
+def validate_attacker_bind(host, gateways):
+    if host == "127.0.0.1" or host in gateways:
+        return host
+    available = ", ".join(sorted(gateways)) or "none"
+    raise ValueError(
+        "Attacker bind must be 127.0.0.1 or a local Docker bridge gateway "
+        f"(available: {available}); refusing to expose the lab elsewhere")
 
 
 def manual_listen_port(config_path):
@@ -723,6 +759,24 @@ class SandboxSuite:
                 return nonce
             time.sleep(0.2)
         raise RuntimeError("Kunato/origin did not become ready")
+
+    def reset_posture(self, *, config="rules-pentest.yaml", disable_protection=True):
+        nonce = uuid.uuid4().hex
+        self.env["LAB_NONCE"] = nonce
+        self.env["LAB_CONFIG"] = config
+        self.env["LAB_DISABLE_PROTECTION"] = "1" if disable_protection else "0"
+        self.compose("up", "-d", "--force-recreate", "--pull", "never", "posture", "kunato")
+        directory = self.run_dir / "manual"
+        directory.mkdir(exist_ok=True)
+        for _ in range(50):
+            health = self.probe("client", "health", check=False,
+                                extra=("--path", "/health", "--status", "200", "--nonce", nonce))
+            if health.get("status") == 200 and health.get("origin") == nonce:
+                write_json(directory / "health-before.json", health)
+                write_json(directory / "attempt.json", {"nonce": nonce, "config": config})
+                return nonce
+            time.sleep(0.2)
+        raise RuntimeError("Kunato/posture did not become ready")
 
     def wait_health(self, phase, service, extra, *, nonce=None, status=200, body=None):
         directory = self.run_dir / phase
@@ -1538,6 +1592,9 @@ class SandboxSuite:
         if fixture == "origin":
             return self.reset_origin("manual", config=config,
                                      disable_protection=disable_protection)
+        if fixture == "posture":
+            return self.reset_posture(config=config,
+                                      disable_protection=disable_protection)
         if config == "rules-connect.yaml":
             self.env["LAB_CONFIG"] = config
             self.env["LAB_DISABLE_PROTECTION"] = "1" if disable_protection else "0"
@@ -1556,8 +1613,8 @@ class SandboxSuite:
                 return settings["IPAddress"]
         raise ValueError(f"Manual fixture {service} has no address on {network}")
 
-    def manual_forwarder(self, host_port, container_port):
-        server = ManualForwarder(("127.0.0.1", host_port), ManualForwarderHandler)
+    def manual_forwarder(self, host_port, container_port, *, bind="127.0.0.1"):
+        server = ManualForwarder((bind, host_port), ManualForwarderHandler)
         server.target = (self.container_ip("kunato", self.front_network()), container_port)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
@@ -1902,7 +1959,8 @@ def new_run(suite):
     for name, upstream in (("rules-origin.yaml", "http://origin:8080"),
                            ("rules-dvwa.yaml", "http://dvwa:80"),
                            ("rules-cve.yaml", "http://cve:80"),
-                           ("rules-vuln.yaml", "http://vuln:8080")):
+                           ("rules-vuln.yaml", "http://vuln:8080"),
+                           ("rules-pentest.yaml", "http://posture:8080")):
         (config_dir / name).write_text(make_config(original, upstream))
     (config_dir / "rules-ffuf.yaml").write_text(
         make_config(original, "http://dvwa:80", FFUF_PROTECTION))
@@ -2245,6 +2303,141 @@ def manual_shell(args):
     return status
 
 
+def breach_summary(directory):
+    manual = directory / "manual"
+    receipts = read_jsonl(manual / "posture.log")
+    waf = read_jsonl(manual / "kunato.log")
+    ready = [event for event in receipts if event.get("event") == "ready"]
+    received = [event for event in receipts if event.get("event") == "received"]
+    rejected = [event for event in receipts if event.get("event") == "rejected"]
+    blocks = [event.get("fields", {}) for event in waf
+              if event.get("fields", {}).get("message") == "request blocked"]
+    exploit_shaped = [event for event in received
+                      if event.get("outcome") not in (None, "none")]
+    paths = Counter(urlsplit(event.get("target", "/")).path for event in received)
+    outcomes = Counter(event.get("outcome") or "none" for event in exploit_shaped)
+    rules = Counter((field.get("category"), field.get("rule")) for field in blocks)
+    summary = {
+        "run_id": directory.name,
+        "nonce": ready[0].get("nonce") if ready else None,
+        "received": len(received),
+        "rejected": len(rejected),
+        "exploit_shaped": len(exploit_shaped),
+        "paths": dict(paths.most_common()),
+        "outcomes": dict(outcomes.most_common()),
+        "blocks": [{"category": category, "rule": rule, "count": count}
+                   for (category, rule), count in rules.most_common()],
+        "breaches": [{key: event.get(key) for key in
+                      ("time", "method", "target", "outcome", "body_bytes", "body_preview")}
+                     for event in exploit_shaped[:200]],
+    }
+    write_json(manual / "breach.json", summary)
+    lines = ["# Pentest receipt summary", "",
+             f"Run: `{summary['run_id']}`", "",
+             f"- Origin receipts: {summary['received']} "
+             f"(rejected after receipt: {summary['rejected']})",
+             f"- Exploit-shaped requests that reached the origin: {summary['exploit_shaped']}",
+             f"- Kunato block events: {len(blocks)}", ""]
+    if exploit_shaped:
+        lines += ["## Requests to review", "",
+                  "| Time | Method | Target | Outcome | Body bytes |",
+                  "| --- | --- | --- | --- | --- |"]
+        lines += [f"| {receipt_time(event.get('time'))} | {event.get('method')} | "
+                  f"`{printable_target(event.get('target'))}` | {event.get('outcome')} | "
+                  f"{event.get('body_bytes')} |" for event in exploit_shaped[:50]]
+        lines += ["", "The first 50 exploit-shaped receipts are listed; "
+                      "`breach.json` keeps up to 200.", ""]
+    else:
+        lines += ["No exploit-shaped request reached the origin during this run.", ""]
+    if outcomes:
+        lines += ["## Outcomes", "", "| Outcome | Requests |", "| --- | --- |"]
+        lines += [f"| {name} | {count} |" for name, count in outcomes.most_common()]
+        lines += [""]
+    if rules:
+        lines += ["## WAF blocks", "", "| Category | Rule | Count |",
+                  "| --- | --- | --- |"]
+        lines += [f"| {category} | {rule} | {count} |"
+                  for (category, rule), count in rules.most_common()]
+        lines += [""]
+    (manual / "breach.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines), flush=True)
+    return summary
+
+
+def printable_target(target):
+    return "".join(char if " " <= char <= "~" else " " for char in str(target or ""))[:200]
+
+
+def receipt_time(value):
+    try:
+        return time.strftime("%H:%M:%SZ", time.gmtime(float(value)))
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def pentest(args):
+    global COMMAND_JOURNAL
+    gateways = docker_bridge_gateways()
+    bind = validate_attacker_bind(args.bind or default_attacker_bind(gateways), gateways)
+    if not 1 <= args.port <= 65535:
+        raise ValueError("--port must be between 1 and 65535")
+    directory = new_run("pentest")
+    COMMAND_JOURNAL = directory / "commands.jsonl"
+    lab = SandboxSuite(directory)
+    container_port = manual_listen_port(directory / "input/config/rules-pentest.yaml")
+    forwarder = None
+    status = 0
+    signal.signal(signal.SIGTERM, manual_terminate)
+    target = f"http://{bind}:{args.port}"
+    try:
+        nonce = lab.manual_up("rules-pentest.yaml", disable_protection=not args.protection)
+        lab.manual_preflight()
+        forwarder = lab.manual_forwarder(args.port, container_port, bind=bind)
+        write_json(directory / "manual" / "summary.json",
+                   {"run_id": directory.name, "mode": "pentest", "bind": bind,
+                    "port": args.port, "protection": bool(args.protection),
+                    "nonce": nonce, "target": target,
+                    "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+        print("Pentest lab is running.", flush=True)
+        print(f"  target:     {target}", flush=True)
+        print(f"  receipts:   docker logs -f {lab.project}-posture-1", flush=True)
+        print(f"  source:     {LAB / 'fixtures/posture'}", flush=True)
+        print("  shannon:    npx @keygraph/shannon@latest start "
+              f"-u {target} -r {LAB / 'fixtures/posture'} "
+              f"-w pentest-{directory.name} --follow", flush=True)
+        print("  note:       the relay binds a Docker bridge gateway only; it is not "
+              "reachable from the LAN, but any local container can reach it.", flush=True)
+        print("  stop:       press Ctrl-C to collect receipts and write breach.md",
+              flush=True)
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nStopping the pentest lab.", flush=True)
+    finally:
+        if forwarder is not None:
+            try:
+                forwarder.shutdown()
+                forwarder.server_close()
+            except OSError as error:
+                print(f"security-lab: attacker relay shutdown failed: {error}",
+                      file=sys.stderr)
+                status = 1
+        try:
+            lab.manual_evidence("rules-pentest.yaml")
+            breach_summary(directory)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"security-lab: breach evidence collection failed: {error}",
+                  file=sys.stderr)
+            status = 1
+        try:
+            lab.cleanup()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"security-lab: cleanup failed: {error}", file=sys.stderr)
+            status = 1
+        print(f"Pentest evidence: {directory}", flush=True)
+    return status
+
+
 def render_report(directory):
     report = json.loads((directory / "report.json").read_text())
     lines = ["# Local security lab report", "", f"Run: `{report['run_id']}`", "",
@@ -2299,6 +2492,19 @@ def main():
                             default=None, help="Force protection on")
     protection.add_argument("--no-protection", dest="protection", action="store_false",
                             help="Force protection off")
+    pentest_parser = subs.add_parser(
+        "pentest", help="Run the receipt fixture behind Kunato for an interactive attacker")
+    pentest_parser.add_argument("--port", type=int, default=8080,
+                                help="Port published on the attacker bind address")
+    pentest_parser.add_argument("--bind", metavar="ADDRESS",
+                                help="Host address for the attacker relay "
+                                     "(default: the Docker bridge gateway)")
+    pentest_protection = pentest_parser.add_mutually_exclusive_group()
+    pentest_protection.add_argument("--protection", dest="protection", action="store_true",
+                                    default=False, help="Enable Kunato protection")
+    pentest_protection.add_argument("--no-protection", dest="protection",
+                                    action="store_false",
+                                    help="Keep protection disabled (default)")
     for operation in ("report", "down"):
         sub = subs.add_parser(operation)
         sub.add_argument("run_directory", type=Path)
@@ -2313,6 +2519,8 @@ def main():
             return run(args.suite)
         elif args.operation in {"shell", "manual"}:
             return manual_shell(args)
+        elif args.operation == "pentest":
+            return pentest(args)
         else:
             directory = args.run_directory.resolve()
             if directory.parent != WORK or not re.fullmatch(r"[0-9]{8}T[0-9]{6}-[a-f0-9]{8}", directory.name):

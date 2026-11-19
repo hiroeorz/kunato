@@ -319,6 +319,7 @@ cargo clippy --manifest-path blackbox/Cargo.toml --all-targets -- -D warnings
 ./scripts/security-lab.sh run --sandbox-suite slow     # Bounded slow-HTTP availability
 ./scripts/security-lab.sh run --sandbox-suite load     # k6 mixed load with recovery
 ./scripts/security-lab.sh shell                        # Persistent manual attack shell
+./scripts/security-lab.sh pentest                      # Receipt fixture behind Kunato for an external attacker
 ./scripts/check-rules-compat.sh  # Published rules vs. the newest release binary
 ./scripts/release.sh X.Y.Z       # Cut a release: bump, commit, tag, and push
 ./scripts/generate-signing-keys.sh  # Create the release and rules signing keys

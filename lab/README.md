@@ -126,6 +126,25 @@ Exit the shell or press Ctrl-C to remove the containers, networks, and volumes.
 run. Treat manual results as exploration: promote a finding to `lab/cases/` or
 the black-box corpus before relying on it as regression coverage.
 
+## Pentest lane
+
+`pentest` starts the receipt fixture (`lab/fixtures/posture`) behind Kunato,
+publishes it on a Docker bridge gateway, and leaves it running for an external
+attacker such as Shannon. Every request that reaches the origin is recorded, so
+the origin log is the ground truth for "did the request pass the WAF". Ctrl-C
+collects the logs and writes `breach.md` under `target/security-lab/<run-id>/`.
+
+```sh
+scripts/security-lab.sh pentest
+scripts/security-lab.sh pentest --port 9090 --protection
+```
+
+The relay accepts `127.0.0.1` or a local Docker bridge gateway, never `0.0.0.0`
+or a LAN address. The fixture has no state, no execution, and no outbound
+network access; the apparent vulnerability surfaces only produce canned
+responses. See [PENTEST.md](PENTEST.md) for the attacker wiring, the evidence
+layout, and the receipt-to-fix loop.
+
 ## Isolation and fixtures
 
 The Compose environment uses three `internal: true` networks:

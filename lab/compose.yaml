@@ -53,6 +53,20 @@ services:
       back:
         aliases: [app.test]
 
+  posture:
+    <<: *runtime
+    image: ${LAB_PYTHON_IMAGE:?Run prepare first}
+    platform: ${LAB_PLATFORM}
+    entrypoint: [python3, -B, /lab/fixtures/posture/app.py]
+    environment:
+      LAB_NONCE: ${LAB_NONCE}
+      LAB_PORT: "8080"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ${LAB_INPUT}/lab:/lab:ro
+    networks:
+      back: {}
+
   vuln:
     <<: *runtime
     image: ${LAB_PYTHON_IMAGE:?Run prepare first}

@@ -136,6 +136,12 @@ namespace. The manual shell (`scripts/security-lab.sh shell --publish
 127.0.0.1:8080`) implements this exception with a bounded loopback relay for
 plain HTTP configurations; it is exploratory and produces no verdict evidence.
 See [lab/MANUAL-SHELL.md](../lab/MANUAL-SHELL.md) for the step-by-step commands.
+The pentest lane (`scripts/security-lab.sh pentest`) keeps the receipt fixture
+behind Kunato for an external attacker and publishes it on a Docker bridge
+gateway instead of loopback, because a containerized attacker cannot reach the
+host's loopback. It records every request that reaches the origin and writes
+`breach.md` on stop; it is observation evidence, not a verdict. See
+[lab/PENTEST.md](../lab/PENTEST.md).
 
 Compose's internal network is external network isolation, not a VM boundary or
 proof of host-service isolation. Preflight checks IPv4/IPv6 routes, DNS, redirects,
