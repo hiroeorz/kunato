@@ -915,6 +915,49 @@ mod tests {
     }
 
     #[test]
+    fn bundled_rules_cover_static_file_and_bare_ssrf_variants() {
+        for (uri, rule) in [
+            ("/.env/", "credentials-and-config"),
+            ("/.env%20", "credentials-and-config"),
+            ("/backup.zip", "backup-archives"),
+            ("/server-status", "apache-status-endpoints"),
+            ("/fetch?url=localhost", "bare-internal-host-value"),
+            ("/fetch?url=127.0.0.1:22", "bare-internal-host-value"),
+            ("/fetch?url=0x7f000001", "bare-encoded-address-value"),
+            ("/fetch?url=file:/tmp/data", "bare-internal-scheme-value"),
+        ] {
+            assert_eq!(bundled_rule(uri).as_deref(), Some(rule), "{uri}");
+        }
+        assert!(
+            bundled_rule("/.env%5C").is_some(),
+            "a backslash separator must be blocked by some rule"
+        );
+        let mut form = HeaderMap::new();
+        form.insert(
+            "content-type",
+            "application/x-www-form-urlencoded"
+                .parse()
+                .expect("header value"),
+        );
+        let outcome = evaluate_bundled_request(Method::POST, "/fetch", &form, b"url=localhost");
+        assert_eq!(
+            outcome.blocked.expect("form body URL").rule,
+            "bare-internal-host-value"
+        );
+        for uri in [
+            "/download/report.zip",
+            "/assets/backup-guide.html",
+            "/server-status-guide",
+            "/search?q=localhost",
+            "/api/docs?url=https://example.com/",
+            "/docs/.environment",
+            "/api/backups",
+        ] {
+            assert!(bundled_rule(uri).is_none(), "{uri} must keep passing");
+        }
+    }
+
+    #[test]
     fn bundled_rules_cover_svg_and_focus_event_handlers() {
         for uri in [
             "/p?q=%3Canimate%20onbegin%3Dalert(1)%3E",

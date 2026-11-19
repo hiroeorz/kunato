@@ -331,6 +331,15 @@ GET /proxy?url=http://203.0.113.5/
 GET /?ip=8.8.8.8
 POST /api/networks header="Content-Type: application/json" body="{\"cidr\":\"10.0.0.0/8\",\"gateway\":\"192.168.1.1\"}"
 GET /search?q=7*7
+GET /search?q=localhost
+GET /api/docs?url=https://example.com/
+GET /api/fetch?target=production
+POST /api/fetch body="url=https://example.com/page"
+GET /download/report.zip
+GET /assets/backup-guide.html
+GET /server-status-guide
+GET /api/backups
+GET /docs/.environment
 GET /search?q=it%27s%20--%20fine
 GET /theme?accent=%22%23fff%22
 POST /api/comments body="{\"body\":\"It's -- fine\"}"
