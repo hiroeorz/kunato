@@ -72,6 +72,11 @@ GET /?q=@@version
 GET /?id=1--select
 GET /?id=1%23select
 POST /login body="username=admin'--select"
+# A quote and a comment terminator hide the rest of the statement without an
+# SQL keyword; the marker must still be blocked at the end of a value.
+POST /login body="username=admin'--&password=x"
+GET /?id=1%27%23
+GET / header="Cookie: session=admin'--"
 POST /login body="password=1 or 1=1"
 POST /search body="q=1' OR '1'='1"
 POST /search body="q=1 or (1)=(1)"

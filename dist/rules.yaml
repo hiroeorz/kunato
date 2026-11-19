@@ -1045,6 +1045,12 @@ categories:
         match: { regex: '(?i)(information_schema|sysobjects|syscolumns|xp_cmdshell|load_file|into\s+(out|dump)file|@@version)', in: [query, body, cookies] }
       - name: comment-obfuscation
         match: { regex: '(?i)(--|#)[^\n]{0,12}\b(select|union|insert|update|delete|drop|from|where)\b', in: [query, body, cookies] }
+      # A quote that closes a string literal followed by a comment terminator
+      # hides the rest of the statement even without an SQL keyword, which is
+      # the classic `admin'--` login bypass. Require a delimiter after the
+      # marker so JSON command arguments such as `["--port"]` keep passing.
+      - name: comment-terminated-string
+        match: { regex: '(?i)[\x27"]\s*(?:--|#)(?:&|;|\s|$)', in: [query, body, cookies] }
 
   # NoSQL injection operators.
   - name: nosql-injection

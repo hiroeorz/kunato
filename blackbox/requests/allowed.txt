@@ -331,6 +331,9 @@ GET /proxy?url=http://203.0.113.5/
 GET /?ip=8.8.8.8
 POST /api/networks header="Content-Type: application/json" body="{\"cidr\":\"10.0.0.0/8\",\"gateway\":\"192.168.1.1\"}"
 GET /search?q=7*7
+GET /search?q=it%27s%20--%20fine
+GET /theme?accent=%22%23fff%22
+POST /api/comments body="{\"body\":\"It's -- fine\"}"
 GET /docs?q=%7B%7B+name+%7D%7D
 GET /search?q=%3C%25%3D+image_tag+%25%3E
 GET /download?file=%2Fdocs%2Fmanual.pdf

@@ -872,6 +872,49 @@ mod tests {
     }
 
     #[test]
+    fn bundled_rules_cover_comment_terminated_strings() {
+        let mut form = HeaderMap::new();
+        form.insert(
+            "content-type",
+            "application/x-www-form-urlencoded"
+                .parse()
+                .expect("header value"),
+        );
+        for body in [b"q=admin'--".as_slice(), b"q=admin%27%23".as_slice()] {
+            let outcome = evaluate_bundled_request(Method::POST, "/search", &form, body);
+            assert_eq!(
+                outcome
+                    .blocked
+                    .expect("comment-terminated string must be blocked")
+                    .rule,
+                "comment-terminated-string"
+            );
+        }
+        for uri in ["/p?id=1%27--", "/p?id=1%27%23"] {
+            assert_eq!(
+                bundled_rule(uri).as_deref(),
+                Some("comment-terminated-string"),
+                "{uri} must be blocked"
+            );
+        }
+        let mut cookies = HeaderMap::new();
+        cookies.insert("cookie", "session=admin'--".parse().expect("header value"));
+        let outcome = evaluate_bundled_request(Method::GET, "/", &cookies, b"");
+        assert_eq!(
+            outcome.blocked.expect("cookie tail must be blocked").rule,
+            "comment-terminated-string"
+        );
+        for uri in [
+            "/p?q=O%27Brien",
+            "/p?q=it%27s%20--%20fine",
+            "/p?q=%22--port%22",
+            "/p?q=%22%23fff%22",
+        ] {
+            assert!(bundled_rule(uri).is_none(), "{uri} must keep passing");
+        }
+    }
+
+    #[test]
     fn bundled_rules_cover_svg_and_focus_event_handlers() {
         for uri in [
             "/p?q=%3Canimate%20onbegin%3Dalert(1)%3E",

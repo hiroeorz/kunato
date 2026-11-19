@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-11-18; the managed set carries 577 rules.
+2026-11-19; the managed set carries 578 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -31,7 +31,7 @@ routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| SQL Injection | ✅ | `sql-injection`: UNION (including padded `/*...*/`, `--`, and `#` comments between UNION and SELECT, closed after the local lab bypassed a fixed 20-character gap), boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions |
+| SQL Injection | ✅ | `sql-injection`: UNION (including padded `/*...*/`, `--`, and `#` comments between UNION and SELECT, closed after the local lab bypassed a fixed 20-character gap), boolean, stacked, time-based (comment-obfuscation resistant), blind inference, executable comments, metadata functions, and quote-terminated comment tails (`admin'--`, `'#`) delimited so JSON arguments such as `["--port"]` keep passing |
 | NoSQL Injection | ✅ | `nosql-injection`: Mongo operators (`$where/$ne/$regex`, ...) |
 | OS Command Injection | ✅ | `command-injection`: shell metacharacters, newline separators before command words, `$()`/backticks, brace expansion, `/bin/`, `cmd.exe`, `powershell`, and bash `/dev/tcp` reverse shells (HestiaCP CVE-2026-111627); the Foreman remote-execution `effective_user` value (CVE-2026-12405) and the otterdog webhook `eval()` sink (CVE-2026-123870) have their own signatures in `cve-2026-11-09-signatures`; the agentic chain regression found and covers the newline-separator gap. The path target matches only executable shapes (`/bin/sh`, `cmd.exe`, `powershell.exe`), so article slugs such as `powershell-tpm` reach the upstream |
 | JDBC Injection | ✅ | `jdbc-injection`: MySQL/MariaDB file-read and deserialization parameters (`allowLoadLocalInfile`, `allowUrlInLocalInfile`, `autoDeserialize`) and H2/HSQLDB `INIT=RUNSCRIPT`/`CREATEALIAS` in a caller-supplied `jdbcUrl` (AllData CVE-2026-111613, Apache Kylin CVE-2026-68571); benign datasource URLs keep passing |
@@ -348,7 +348,7 @@ attribution or effectiveness against adaptive AI agents. See
 | Unicode Encoding | 🔶 | JSON `\u0075` is decoded, but no Unicode normalization (documented in `docs/development.md`) |
 | Overlong UTF-8 | 🔶 | No normalization; specific byte patterns (e.g. `%c0%af`) are caught by raw patterns only |
 | Case Variation | ✅ | Main rules use `(?i)` |
-| Comment Insertion | ✅ | SQL keyword adjacency tolerates whitespace and `/*...*/`, `--`, and `#` comments (UNION/SELECT, ALL/DISTINCT, and time-based function/parenthesis); the local lab added the padded-comment regression |
+| Comment Insertion | ✅ | SQL keyword adjacency tolerates whitespace and `/*...*/`, `--`, and `#` comments (UNION/SELECT, ALL/DISTINCT, and time-based function/parenthesis); the local lab added the padded-comment regression, and `comment-terminated-string` covers a quote closed by `--`/`#` without a following keyword |
 | Null Byte | ✅ | `%00` blocked |
 | Payload / Parameter Fragmentation | 🔶 | Embedded-HTTP inspection and multipart flattening exist; general fragmentation is unhandled |
 | Alternative Content-Type | 🔶 | Content-Type-aware decoding plus percent passes for unknown types; evasion itself is not detected. A body whose declared charset, XML declaration, BOM, BOM-less wide signature, or textual-body NUL cannot be read is rejected with `415` when body inspection is active; the check runs on the decoded body and on multipart parts, so gzip and `_charset_` cannot hide it, and response bodies with response rules are replaced with `502`. ASCII-compatible encodings such as `shift_jis` remain accepted |
