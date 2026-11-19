@@ -958,6 +958,65 @@ mod tests {
     }
 
     #[test]
+    fn bundled_rules_cover_new_event_handlers_and_short_ssrf_names() {
+        for uri in [
+            "/?q=%3Cvideo%20src=x%20onloadstart=alert(1)%3E",
+            "/?q=%3Cbody%20onload=alert(1)%3E",
+        ] {
+            assert_eq!(
+                bundled_rule(uri).as_deref(),
+                Some("event-handlers"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            bundled_rule("/?q=%3Cvideo%20src=x%20oncustomthing=alert(1)%3E").as_deref(),
+            Some("tag-event-handlers")
+        );
+        for uri in ["/?u=localhost", "/?u=127.0.0.1:22"] {
+            assert_eq!(
+                bundled_rule(uri).as_deref(),
+                Some("bare-internal-host-value"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            bundled_rule("/?u=file:/tmp/data").as_deref(),
+            Some("bare-internal-scheme-value")
+        );
+        let mut form = HeaderMap::new();
+        form.insert(
+            "content-type",
+            "application/x-www-form-urlencoded"
+                .parse()
+                .expect("header value"),
+        );
+        let outcome = evaluate_bundled_request(Method::POST, "/proxy", &form, b"u=localhost");
+        assert_eq!(
+            outcome.blocked.expect("short name body").rule,
+            "bare-internal-host-value"
+        );
+        for uri in [
+            "/search?q=localhost",
+            "/search?q=online%3Dtrue",
+            "/search?q=%3Cp%3Eonline%3Dtrue%3C%2Fp%3E",
+            "/?u=https://example.com/",
+        ] {
+            assert!(bundled_rule(uri).is_none(), "{uri} must keep passing");
+        }
+        let mut cookies = HeaderMap::new();
+        cookies.insert(
+            "cookie",
+            "status=1; online=true".parse().expect("header value"),
+        );
+        let outcome = evaluate_bundled_request(Method::GET, "/", &cookies, b"");
+        assert!(
+            outcome.blocked.is_none(),
+            "an online cookie must keep passing"
+        );
+    }
+
+    #[test]
     fn bundled_rules_cover_svg_and_focus_event_handlers() {
         for uri in [
             "/p?q=%3Canimate%20onbegin%3Dalert(1)%3E",

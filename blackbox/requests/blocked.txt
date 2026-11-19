@@ -155,6 +155,8 @@ GET /?q=%3Cimg%20src=x%20onerror=alert(1)%3E
 GET /?q=%3Csvg%20onload=alert(1)%3E
 GET /?q=%3Csvg/onload=alert(1)%3E
 GET /?q=%3Cbody%20onload=alert(1)%3E
+GET /?q=%3Cvideo%20src=x%20onloadstart=alert(1)%3E
+GET /?q=%3Cvideo%20src=x%20oncustomthing=alert(1)%3E
 GET /?q=%3Cinput%20onfocus=alert(1)%20autofocus%3E
 GET /?q=%3Cdetails%20open%20ontoggle=alert(1)%3E
 GET /?q=%3Cmarquee%20onstart=alert(1)%3E
@@ -407,6 +409,10 @@ GET /?url=0x7f000001
 GET /?url=2130706433
 GET /?url=file:/tmp/data
 GET /?url=gopher:127.0.0.1:6379
+GET /?u=localhost
+GET /?u=127.0.0.1:22
+GET /?u=file:/tmp/data
+POST /proxy body="u=localhost"
 POST /proxy body="url=localhost"
 GET /?target=http://0.0.0.0:80
 GET /?next=http://localhost/

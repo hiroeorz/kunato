@@ -1168,7 +1168,13 @@ categories:
       - name: script-tags
         match: { regex: '(?i)<\s*/?\s*(script|iframe|object|embed|applet)\b', in: [query, body, headers, cookies] }
       - name: event-handlers
-        match: { regex: '(?i)\bon(error|load|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focusin|focusout|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|begin|end|repeat|animationstart|animationend|transitionend|toggle|beforetoggle|pageshow|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|touchstart|touchend|contentvisibilityautostatechange)\s*=', in: [query, body, headers, cookies] }
+        match: { regex: '(?i)\bon(error|load|loadstart|progress|canplay|canplaythrough|play|playing|pause|seeking|seeked|ended|volumechange|ratechange|durationchange|timeupdate|suspend|waiting|stalled|emptied|abort|click|dblclick|mousedown|mouseup|mouseover|mouseout|mousemove|focusin|focusout|focus|blur|change|submit|reset|keydown|keyup|keypress|input|start|begin|end|repeat|animationstart|animationend|animationiteration|transitionend|transitionrun|transitionstart|transitioncancel|toggle|beforetoggle|pageshow|scroll|wheel|drag|drop|copy|cut|paste|pointerdown|pointerup|pointermove|pointerover|pointerout|pointerenter|pointerleave|pointercancel|touchstart|touchend|touchmove|touchcancel|contentvisibilityautostatechange)\s*=', in: [query, body, headers, cookies] }
+      # The handler list is not exhaustive: media and newer DOM events keep
+      # appearing (`onloadstart`, for example). Match any `on...=` attribute
+      # inside a tag so a new handler cannot bypass the list, while leaving
+      # plain text such as `online=true` outside tags alone.
+      - name: tag-event-handlers
+        match: { regex: '(?i)<[a-z][a-z0-9]*\b[^<>]{0,300}\son[a-z]{4,}\s*=', in: [query, body, headers, cookies] }
       - name: javascript-uri
         match: { regex: '(?i)(javascript|vbscript)\s*:', in: [query, body, headers, cookies] }
       - name: data-html-uri
@@ -1302,11 +1308,11 @@ categories:
       # so a bare internal host, IP, or scheme in a URL-like parameter is
       # already an SSRF attempt even though no scheme appears in the request.
       - name: bare-internal-host-value
-        match: { regex: '(?i)(^|[?&;])(url|uri|host|hostname|target|dest|destination|src|source|fetch|proxy|endpoint|callback|webhook|next|redirect)=(localhost|127\.[0-9]{1,3}(\.[0-9]{1,3}){2}|0\.0\.0\.0|10\.[0-9]{1,3}(\.[0-9]{1,3}){2}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|169\.254\.[0-9]{1,3}\.[0-9]{1,3}|\[::1\])([:/?#&;\s]|$)', in: [query, body] }
+        match: { regex: '(?i)(^|[?&;])(url|uri|u|a|link|img|image|host|hostname|target|dest|destination|src|source|fetch|proxy|endpoint|callback|webhook|next|redirect|return|continue)=(localhost|127\.[0-9]{1,3}(\.[0-9]{1,3}){2}|0\.0\.0\.0|10\.[0-9]{1,3}(\.[0-9]{1,3}){2}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|169\.254\.[0-9]{1,3}\.[0-9]{1,3}|\[::1\])([:/?#&;\s]|$)', in: [query, body] }
       - name: bare-internal-scheme-value
-        match: { regex: '(?i)(^|[?&;])(url|uri|host|hostname|target|dest|destination|src|source|fetch|proxy|endpoint|callback|webhook|next|redirect)=(file|gopher|dict|ftp|sftp|ldap):', in: [query, body] }
+        match: { regex: '(?i)(^|[?&;])(url|uri|u|a|link|img|image|host|hostname|target|dest|destination|src|source|fetch|proxy|endpoint|callback|webhook|next|redirect|return|continue)=(file|gopher|dict|ftp|sftp|ldap):', in: [query, body] }
       - name: bare-encoded-address-value
-        match: { regex: '(?i)(^|[?&;])(url|uri|host|hostname|target|dest|destination|src|source|fetch|proxy|endpoint|callback|webhook|next|redirect)=(0x[0-9a-f]{1,8}|0[0-7]{6,}|[0-9]{8,10})([:/?#&;\s]|$)', in: [query, body] }
+        match: { regex: '(?i)(^|[?&;])(url|uri|u|a|link|img|image|host|hostname|target|dest|destination|src|source|fetch|proxy|endpoint|callback|webhook|next|redirect|return|continue)=(0x[0-9a-f]{1,8}|0[0-7]{6,}|[0-9]{8,10})([:/?#&;\s]|$)', in: [query, body] }
 
   # Ruby deserialization payloads: base64 Marshal blobs (BAh7 is the base64 of
   # the "\x04\x08" Marshal header), percent-encoded raw Marshal bytes, and the

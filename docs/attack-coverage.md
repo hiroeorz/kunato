@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-11-19; the managed set carries 583 rules.
+2026-11-19; the managed set carries 584 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -47,7 +47,7 @@ routes and does not change the bundled verdicts.
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Reflected XSS | ✅ | `xss`: script/iframe/object/embed, broad event-handler list, `javascript:`/`vbscript:`, `data:text/html`, DOM sinks; matched in query, body, header, and decoded cookie values |
+| Reflected XSS | ✅ | `xss`: script/iframe/object/embed, broad event-handler list (media, animation, pointer, and touch handlers included), `tag-event-handlers` matches any `on...=` inside a tag so a handler the list does not name cannot bypass it, `javascript:`/`vbscript:`, `data:text/html`, DOM sinks; matched in query, body, header, and decoded cookie values |
 | Stored XSS | 🔶 | Input-side detection uses the same rules and `xss` matches header and decoded cookie values, so header-injection stored XSS (Crafty Controller CVE-2026-18516) is stopped at the input; output-time context escaping is the application's job. `response-leaks` ships no XSS signatures |
 | DOM Based XSS | 🔶 | `dom-sinks` (`document.cookie`, `eval(` etc.) exists but the root cause is client-side |
 | HTML Injection | 🔶 | script/iframe-like tags are blocked; generic tags (`<div>`) pass |
@@ -160,7 +160,7 @@ tests exercise these paths without adding attack signatures or changing verdicts
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| SSRF | ✅ | `ssrf`: metadata endpoints, loopback (127/8, `localhost`, `[::1]`, `[::]`), RFC1918 ranges, link-local, CGNAT, decimal/hex/octal address forms, IPv6 ULA/link-local/mapped forms, protocol-relative values, non-HTTP schemes, `file://`, and single-label hosts such as `vuln` or `metadata`, in query, body, headers, and cookies; a bare internal host, IP, or scheme (`url=localhost`, `url=127.0.0.1:22`, `url=0x7f000001`, `url=file:/tmp/data`) in URL-like parameters is matched without a `://`, because application code often prepends the scheme; opt-in `limits.hardening.ssrf` adds configured internal hosts and suffixes and normalizes tab/CR/LF, `\` as `/`, and zero/one/two separators after a special scheme, so `http:/internal`, `http:\internal`, and `http:internal` are rejected; the host is canonicalized (Unicode dot variants and inet_aton decimal/octal/hex/mixed/shortened forms) before the configured-host comparison. Unconfigured multi-label internal names remain outside static reach. |
+| SSRF | ✅ | `ssrf`: metadata endpoints, loopback (127/8, `localhost`, `[::1]`, `[::]`), RFC1918 ranges, link-local, CGNAT, decimal/hex/octal address forms, IPv6 ULA/link-local/mapped forms, protocol-relative values, non-HTTP schemes, `file://`, and single-label hosts such as `vuln` or `metadata`, in query, body, headers, and cookies; a bare internal host, IP, or scheme (`url=localhost`, `url=127.0.0.1:22`, `url=0x7f000001`, `url=file:/tmp/data`) in URL-like parameters (including short names such as `u`, `a`, `link`, and `img`) is matched without a `://`, because application code often prepends the scheme; a custom parameter name outside that list still needs the application URL policy or `limits.hardening.ssrf`; opt-in `limits.hardening.ssrf` adds configured internal hosts and suffixes and normalizes tab/CR/LF, `\` as `/`, and zero/one/two separators after a special scheme, so `http:/internal`, `http:\internal`, and `http:internal` are rejected; the host is canonicalized (Unicode dot variants and inet_aton decimal/octal/hex/mixed/shortened forms) before the configured-host comparison. Unconfigured multi-label internal names remain outside static reach. |
 | XXE | ✅ | `xxe` matches an internal subset, `<!ENTITY`, and external `SYSTEM`/`PUBLIC` doctypes; external entities are also unreachable through an uninspectable charset because request and response body charset checks run after decompression and cover BOM-less wide encodings and in-band XML `encoding` declarations. CVE-specific rules add defense in depth |
 | Unsafe Deserialization | 🔶 | Dense CVE-specific signatures (`rO0AB`, WDDX, ObjectStateFormatter, XStream, OFBiz, ...); `ruby-deserialization` adds generic Marshal (`BAh7`, encoded raw `%04%08`) and YAML `!ruby/` shapes for Ruby/Rails; other runtimes remain CVE-specific |
 | RCE Payloads | ✅ | `command-injection` plus JNDI/OGNL/EL known-exploits plus the CVE set |
