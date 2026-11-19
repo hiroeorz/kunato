@@ -18,12 +18,25 @@ own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, and
 page makes no external requests.
 
 The page follows the prototype's visual language (light theme, warm accent,
-dark sidebar) while keeping the minimal read-only feature set.
+dark sidebar) while keeping the minimal read-only feature set. Event rows carry
+the prototype's event-age backgrounds (pale red through pale yellow for the
+first five minutes) with a labeled legend above the table. Ages are computed
+against the snapshot clock and refreshed at most every ten seconds while the
+stream is idle.
+
+The Metrics chart labels each stored interval's start in UTC. Stored grain gets
+finer toward the present, so each bar represents one interval rather than a
+fixed time span; the tooltip gives the exact bounds and the metrics metadata
+lists the grain changes. Hovering over an interval shows requests, rejected
+requests and their share, LOG detections, upstream failures and timeouts, and
+decoy credential use. The chart is focusable: the left and right arrow keys
+move between intervals, Home and End jump to the edges, and Escape hides the
+tooltip.
 
 The UI is intentionally smaller than the fictional interaction prototype in
-`../console-prototype/`. Arrival effects, event-age backgrounds, pause/resume,
-scroll preservation, CSV export, comparison periods, and historical event
-drill-down remain future work; see `docs/monitoring-console-remaining.md`.
+`../console-prototype/`. Arrival effects, pause/resume, scroll preservation,
+CSV export, comparison periods, and historical event drill-down remain future
+work; see `docs/monitoring-console-remaining.md`.
 
 ## Editing
 
@@ -44,4 +57,6 @@ do not add inline scripts or styles, external fonts, or third-party assets.
   4 MiB and reports a truncation instead of silently dropping data.
 - Rates are derived from two consecutive live samples and labeled as such; a
   source generation change resets them.
+- Event-age backgrounds use the latest snapshot clock, so browser clock skew
+  does not change the classification.
 - Unavailable values render as `Unavailable`, never as zero.

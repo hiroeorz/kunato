@@ -65,7 +65,7 @@ The following distinctions apply throughout these documents:
 | Retention | 1/5/10/20/60-minute precision tiers, hourly history through 30 days, then expiry | Phase 3 logical expiry and bounded cleanup implemented |
 | Writes | Bounded buffering and batched writes, independent of request forwarding | Implemented in the console runtime; WAF request path unchanged |
 | Decoys | Treat credential-use attempts as a first-class signal in both views | Counted, persisted, correlated, and shown in the UI |
-| Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Prototype-only; the delivered UI does not replay backlog effects |
+| Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Event-age backgrounds implemented; arrival effects prototype-only |
 | Reading position | Preserve the same visible events during updates, including horizontal position | Prototype-only; the delivered event list renders newest first |
 
 ## 2. Architecture and responsibility boundaries

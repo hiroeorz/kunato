@@ -13,6 +13,7 @@
     correlations: null,
     connected: false,
     source: null,
+    clockOffsetMs: 0,
   };
 
   var view = {
@@ -46,6 +47,65 @@
       return "unavailable";
     }
     return new Date(ms).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  }
+
+  var GRAIN_MS = {
+    minute: 60000,
+    five_minutes: 300000,
+    ten_minutes: 600000,
+    twenty_minutes: 1200000,
+    hour: 3600000,
+  };
+
+  function utcMinute(ms) {
+    return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+  }
+
+  function intervalLabel(bucket) {
+    var start = utcMinute(bucket.start_ms);
+    var duration = GRAIN_MS[bucket.grain] || 0;
+    if (!duration) {
+      return start + " UTC";
+    }
+    var end = utcMinute(bucket.start_ms + duration);
+    if (start.slice(0, 10) === end.slice(0, 10)) {
+      return start + "–" + end.slice(11) + " UTC";
+    }
+    return start + " – " + end + " UTC";
+  }
+
+  function bucketCounter(bucket, name) {
+    var stats = bucket.counters ? bucket.counters[name] : null;
+    return stats && stats.known_minutes ? stats.sum : null;
+  }
+
+  function now() {
+    return Date.now() + state.clockOffsetMs;
+  }
+
+  function ageClass(occurredAt) {
+    var age = Math.max(0, now() - occurredAt);
+    if (age <= 60000) {
+      return "age-1m";
+    }
+    if (age <= 180000) {
+      return "age-3m";
+    }
+    if (age <= 300000) {
+      return "age-5m";
+    }
+    return "age-older";
+  }
+
+  function updateEventAges() {
+    var rows = $("live-events").querySelectorAll("tr[data-occurred-at]");
+    for (var index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      var className = ageClass(Number(row.getAttribute("data-occurred-at")));
+      if (row.className !== className) {
+        row.className = className;
+      }
+    }
   }
 
   function text(node, value) {
@@ -213,6 +273,8 @@
     var health = $("live-health");
     health.innerHTML = "";
     function row(name, value, level) {
+      var item = document.createElement("div");
+      item.className = "health-item";
       var dt = document.createElement("dt");
       dt.textContent = name;
       var dd = document.createElement("dd");
@@ -220,8 +282,9 @@
       if (level) {
         dd.className = level;
       }
-      health.appendChild(dt);
-      health.appendChild(dd);
+      item.appendChild(dt);
+      item.appendChild(dd);
+      health.appendChild(item);
     }
     if (!collection) {
       row("state", "waiting for the first snapshot");
@@ -271,6 +334,8 @@
     }
     events.slice(0, 200).forEach(function (event) {
       var row = document.createElement("tr");
+      row.className = ageClass(event.occurred_at_ms);
+      row.setAttribute("data-occurred-at", String(event.occurred_at_ms));
       function add(value, className) {
         var cell = document.createElement("td");
         cell.textContent = value === null || value === undefined || value === "" ? "unrecorded" : String(value);
@@ -294,6 +359,9 @@
   function applyState(data) {
     var snapshot = data.snapshot;
     state.latest = data;
+    if (snapshot && typeof snapshot.observed_at_ms === "number") {
+      state.clockOffsetMs = snapshot.observed_at_ms - Date.now();
+    }
     if (snapshot && snapshot.source) {
       if (state.generation !== snapshot.source.generation) {
         state.generation = snapshot.source.generation;
@@ -400,19 +468,18 @@
     );
 
     var first = buckets.length ? buckets[0].start_ms : null;
-    var grainMs = {
-      minute: 60000,
-      five_minutes: 300000,
-      ten_minutes: 600000,
-      twenty_minutes: 1200000,
-      hour: 3600000,
-    };
     var last = buckets.length
-      ? buckets[buckets.length - 1].start_ms + (grainMs[buckets[buckets.length - 1].grain] || 0)
+      ? buckets[buckets.length - 1].start_ms + (GRAIN_MS[buckets[buckets.length - 1].grain] || 0)
       : null;
-    var grain = buckets.length ? String(buckets[0].grain).replace(/_/g, " ") : "unavailable";
+    var grains = [];
+    buckets.forEach(function (bucket) {
+      var label = String(bucket.grain).replace(/_/g, " ");
+      if (grains.indexOf(label) === -1) {
+        grains.push(label);
+      }
+    });
     var meta = [];
-    meta.push("grain: " + grain);
+    meta.push("grain: " + (grains.length ? grains.join(" → ") : "unavailable"));
     if (first !== null) {
       meta.push("available: " + utc(first) + " to " + utc(last));
     }
@@ -443,18 +510,28 @@
     }
     host.className = "chart";
     var width = 960;
-    var height = 220;
+    var height = 244;
     var left = 48;
-    var bottom = 24;
+    var right = 12;
+    var bottom = 46;
     var top = 12;
-    var innerWidth = width - left - 12;
+    var innerWidth = width - left - right;
     var innerHeight = height - top - bottom;
     var max = 1;
     var series = buckets.map(function (bucket) {
-      var requests = bucket.counters && bucket.counters.requests ? bucket.counters.requests.sum : 0;
-      var rejected = bucket.counters && bucket.counters.rejected_requests ? bucket.counters.rejected_requests.sum : 0;
-      max = Math.max(max, requests, rejected);
-      return { requests: requests, rejected: rejected, start: bucket.start_ms };
+      var requests = bucketCounter(bucket, "requests");
+      var rejected = bucketCounter(bucket, "rejected_requests");
+      max = Math.max(max, requests || 0, rejected || 0);
+      return {
+        bucket: bucket,
+        requests: requests,
+        rejected: rejected,
+        logged: bucketCounter(bucket, "log_requests"),
+        failures: bucketCounter(bucket, "upstream_connection_failures"),
+        timeouts: bucketCounter(bucket, "upstream_timeouts"),
+        decoy: bucketCounter(bucket, "decoy_credential_use_requests"),
+        incomplete: Boolean(bucket.coverage && bucket.coverage.incomplete),
+      };
     });
     var step = innerWidth / series.length;
     var bar = Math.max(1, Math.min(step * 0.7, 48));
@@ -463,12 +540,17 @@
     var svg = document.createElementNS(ns, "svg");
     svg.setAttribute("viewBox", "0 0 " + width + " " + height);
     svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", "Requests and rejections per interval");
+    svg.setAttribute("tabindex", "0");
+    svg.setAttribute("focusable", "true");
+    svg.setAttribute(
+      "aria-label",
+      "Requests and rejections per UTC interval. Use the left and right arrow keys to inspect intervals."
+    );
 
     function line(y, label) {
       var axis = document.createElementNS(ns, "line");
       axis.setAttribute("x1", left);
-      axis.setAttribute("x2", width - 12);
+      axis.setAttribute("x2", width - right);
       axis.setAttribute("y1", y);
       axis.setAttribute("y2", y);
       axis.setAttribute("stroke", "#edf0f4");
@@ -484,25 +566,26 @@
     line(top + innerHeight / 2, Math.round(max / 2));
     line(top + innerHeight, 0);
 
+    var hoverBand = document.createElementNS(ns, "rect");
+    hoverBand.setAttribute("y", top);
+    hoverBand.setAttribute("height", innerHeight);
+    hoverBand.setAttribute("fill", "#f2f5f9");
+    hoverBand.setAttribute("pointer-events", "none");
+    hoverBand.setAttribute("visibility", "hidden");
+    svg.appendChild(hoverBand);
+
     series.forEach(function (point, index) {
       var x = left + index * step + (step - bar) / 2;
-      var requestHeight = (point.requests / max) * innerHeight;
-      var rejectHeight = (point.rejected / max) * innerHeight;
+      var requests = point.requests || 0;
+      var rejected = point.rejected || 0;
+      var requestHeight = (requests / max) * innerHeight;
+      var rejectHeight = (rejected / max) * innerHeight;
       var requestsBar = document.createElementNS(ns, "rect");
       requestsBar.setAttribute("x", x);
       requestsBar.setAttribute("y", top + innerHeight - requestHeight);
       requestsBar.setAttribute("width", bar);
       requestsBar.setAttribute("height", Math.max(0, requestHeight));
       requestsBar.setAttribute("fill", "#829ab3");
-      var title = document.createElementNS(ns, "title");
-      title.textContent =
-        utc(point.start) +
-        ": " +
-        number(point.requests) +
-        " requests, " +
-        number(point.rejected) +
-        " rejected";
-      requestsBar.appendChild(title);
       svg.appendChild(requestsBar);
       var rejectedBar = document.createElementNS(ns, "rect");
       rejectedBar.setAttribute("x", x);
@@ -513,11 +596,181 @@
       svg.appendChild(rejectedBar);
     });
 
+    var tooltip = document.createElement("div");
+    tooltip.className = "chart-tooltip";
+    tooltip.hidden = true;
+    var tooltipIndex = -1;
+
+    function addTooltipRow(list, label, value) {
+      var term = document.createElement("dt");
+      term.textContent = label;
+      var detail = document.createElement("dd");
+      detail.textContent = value;
+      list.appendChild(term);
+      list.appendChild(detail);
+    }
+
+    function showTooltip(index, event) {
+      var point = series[index];
+      hoverBand.setAttribute("x", left + index * step);
+      hoverBand.setAttribute("width", Math.max(1, step));
+      hoverBand.setAttribute("visibility", "visible");
+      if (index !== tooltipIndex) {
+        tooltipIndex = index;
+        tooltip.textContent = "";
+        var heading = document.createElement("p");
+        heading.className = "chart-tooltip-time";
+        heading.textContent = intervalLabel(point.bucket);
+        tooltip.appendChild(heading);
+        var list = document.createElement("dl");
+        list.className = "chart-tooltip-list";
+        addTooltipRow(list, "Requests", number(point.requests));
+        addTooltipRow(list, "Rejected", number(point.rejected));
+        addTooltipRow(list, "Rejection rate", percent(point.rejected, point.requests));
+        addTooltipRow(list, "LOG detections", number(point.logged));
+        addTooltipRow(list, "Upstream failures", number(point.failures));
+        addTooltipRow(list, "Upstream timeouts", number(point.timeouts));
+        addTooltipRow(list, "Decoy use", number(point.decoy));
+        tooltip.appendChild(list);
+        if (point.incomplete) {
+          var note = document.createElement("p");
+          note.className = "chart-tooltip-note";
+          note.textContent = "Partial interval coverage";
+          tooltip.appendChild(note);
+        }
+      }
+      tooltip.hidden = false;
+      positionTooltip(index, event);
+    }
+
+    function positionTooltip(index, event) {
+      var frame = host.getBoundingClientRect();
+      var anchorX;
+      var anchorY;
+      if (event) {
+        anchorX = event.clientX - frame.left;
+        anchorY = event.clientY - frame.top;
+      } else {
+        var svgFrame = svg.getBoundingClientRect();
+        anchorX = svgFrame.left - frame.left + ((left + (index + 0.5) * step) / width) * svgFrame.width;
+        anchorY = svgFrame.top - frame.top + ((top + innerHeight / 2) / height) * svgFrame.height;
+      }
+      var x = anchorX + 14;
+      var y = anchorY - tooltip.offsetHeight - 12;
+      if (x + tooltip.offsetWidth > host.clientWidth - 8) {
+        x = anchorX - tooltip.offsetWidth - 14;
+      }
+      if (x < 8) {
+        x = 8;
+      }
+      if (y < 8) {
+        y = anchorY + 18;
+      }
+      if (y + tooltip.offsetHeight > host.clientHeight - 8) {
+        y = Math.max(8, host.clientHeight - tooltip.offsetHeight - 8);
+      }
+      tooltip.style.left = x + "px";
+      tooltip.style.top = y + "px";
+    }
+
+    function hideTooltip() {
+      tooltipIndex = -1;
+      tooltip.hidden = true;
+      hoverBand.setAttribute("visibility", "hidden");
+    }
+
+    function inspectHover(event) {
+      var frame = svg.getBoundingClientRect();
+      if (!frame.width) {
+        return;
+      }
+      var x = ((event.clientX - frame.left) / frame.width) * width;
+      if (x < left || x > left + innerWidth) {
+        hideTooltip();
+        return;
+      }
+      var index = Math.floor((x - left) / step);
+      index = Math.max(0, Math.min(series.length - 1, index));
+      keyboardIndex = index;
+      showTooltip(index, event);
+    }
+
+    var keyboardIndex = series.length - 1;
+
+    svg.addEventListener("pointermove", inspectHover);
+    svg.addEventListener("pointerdown", inspectHover);
+    svg.addEventListener("pointerleave", hideTooltip);
+    svg.addEventListener("pointercancel", hideTooltip);
+    svg.addEventListener("blur", hideTooltip);
+    svg.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        hideTooltip();
+        return;
+      }
+      var next = keyboardIndex;
+      if (event.key === "ArrowLeft") {
+        next -= 1;
+      } else if (event.key === "ArrowRight") {
+        next += 1;
+      } else if (event.key === "Home") {
+        next = 0;
+      } else if (event.key === "End") {
+        next = series.length - 1;
+      } else {
+        return;
+      }
+      event.preventDefault();
+      keyboardIndex = Math.max(0, Math.min(series.length - 1, next));
+      showTooltip(keyboardIndex);
+    });
+
+    var labelCount = Math.max(2, Math.min(7, Math.floor(innerWidth / 120)));
+    labelCount = Math.min(labelCount, series.length);
+    var used = {};
+    for (var slot = 0; slot < labelCount; slot += 1) {
+      var labelIndex = Math.round((slot * (series.length - 1)) / Math.max(1, labelCount - 1));
+      if (used[labelIndex]) {
+        continue;
+      }
+      used[labelIndex] = true;
+      var point = series[labelIndex];
+      var x = left + (labelIndex + 0.5) * step;
+      var anchor = "middle";
+      if (labelIndex === 0) {
+        x = left;
+        anchor = "start";
+      } else if (labelIndex === series.length - 1) {
+        x = left + innerWidth;
+        anchor = "end";
+      }
+      var tick = document.createElementNS(ns, "line");
+      tick.setAttribute("x1", x);
+      tick.setAttribute("x2", x);
+      tick.setAttribute("y1", top + innerHeight);
+      tick.setAttribute("y2", top + innerHeight + 5);
+      tick.setAttribute("stroke", "#d9dfe7");
+      svg.appendChild(tick);
+      var label = document.createElementNS(ns, "text");
+      label.setAttribute("x", x);
+      label.setAttribute("y", top + innerHeight + 20);
+      label.setAttribute("text-anchor", anchor);
+      label.textContent = utcMinute(point.bucket.start_ms);
+      svg.appendChild(label);
+    }
+    var axisTitle = document.createElementNS(ns, "text");
+    axisTitle.setAttribute("x", width - right);
+    axisTitle.setAttribute("y", height - 6);
+    axisTitle.setAttribute("text-anchor", "end");
+    axisTitle.setAttribute("class", "chart-axis-title");
+    axisTitle.textContent = "UTC";
+    svg.appendChild(axisTitle);
+
     host.appendChild(svg);
     var legend = document.createElement("div");
     legend.className = "legend";
     legend.innerHTML = '<span class="legend-requests">requests</span><span class="legend-rejected">rejected</span>';
     host.appendChild(legend);
+    host.appendChild(tooltip);
   }
 
   var REASONS = [
@@ -672,6 +925,8 @@
     );
     if (name === "metrics") {
       loadMetrics();
+    } else {
+      updateEventAges();
     }
   }
 
@@ -691,6 +946,13 @@
     fetch("/api/v1/session", { method: "DELETE", credentials: "same-origin" }).finally(function () {
       window.location.replace("/login");
     });
+  });
+
+  setInterval(updateEventAges, 10000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) {
+      updateEventAges();
+    }
   });
 
   fetch("/api/v1/session", { credentials: "same-origin" })

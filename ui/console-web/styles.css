@@ -479,19 +479,28 @@ main {
 
 .health {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 7px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px 24px;
   font-size: 12px;
+}
+
+.health-item {
+  min-width: 0;
 }
 
 .health dt {
   color: #939aa5;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
 }
 
 .health dd {
-  margin: 0;
+  margin: 3px 0 0;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
+  line-height: 1.4;
 }
 
 .toolbar {
@@ -509,6 +518,60 @@ main {
 
 #range {
   font-size: 12px;
+}
+
+.panel > .event-age-legend {
+  padding: 10px 22px 0;
+}
+
+.event-age-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  color: #939aa5;
+  font-size: 10px;
+}
+
+.event-age-legend strong {
+  color: #a3acb8;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.event-age-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.event-age-legend i {
+  width: 9px;
+  height: 9px;
+  border: 1px solid #e8e9ec;
+  border-radius: 2px;
+}
+
+.event-age-legend .age-1m {
+  border-color: #edc7c1;
+  background: #fff0ee;
+}
+
+.event-age-legend .age-3m {
+  border-color: #ecd5b8;
+  background: #fff4e7;
+}
+
+.event-age-legend .age-5m {
+  border-color: #e7dca6;
+  background: #fffbe4;
+}
+
+.event-age-legend .age-older {
+  background: #ffffff;
 }
 
 .table-wrap {
@@ -544,8 +607,28 @@ tbody tr:last-child td {
   border-bottom: none;
 }
 
+tbody tr {
+  background: var(--row-background, transparent);
+  transition: background 0.12s;
+}
+
+tbody tr.age-1m {
+  --row-background: #fff0ee;
+  --row-background-hover: #ffe7e3;
+}
+
+tbody tr.age-3m {
+  --row-background: #fff4e7;
+  --row-background-hover: #ffecd6;
+}
+
+tbody tr.age-5m {
+  --row-background: #fffbe4;
+  --row-background-hover: #fff5cd;
+}
+
 tbody tr:hover {
-  background: #fafbfc;
+  background: var(--row-background-hover, #fafbfc);
 }
 
 td {
@@ -563,6 +646,7 @@ th.num {
 }
 
 .chart {
+  position: relative;
   min-height: 180px;
 }
 
@@ -570,11 +654,22 @@ th.num {
   display: block;
   width: 100%;
   height: auto;
+  cursor: crosshair;
+}
+
+.chart svg:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 3px;
 }
 
 .chart text {
   fill: #a0a8b3;
   font-size: 11px;
+}
+
+.chart .chart-axis-title {
+  font-size: 9px;
+  letter-spacing: 0.08em;
 }
 
 .chart.muted {
@@ -583,6 +678,58 @@ th.num {
   padding: 40px 0;
   color: #9aa1ab;
   font-size: 12px;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 4;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(280px, calc(100% - 16px));
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 26px rgba(32, 44, 61, 0.14);
+  color: var(--ink);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.chart-tooltip[hidden] {
+  display: none;
+}
+
+.chart-tooltip-time {
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chart-tooltip-list {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 18px;
+  margin: 7px 0 0;
+}
+
+.chart-tooltip-list dt {
+  color: var(--muted);
+}
+
+.chart-tooltip-list dd {
+  margin: 0;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.chart-tooltip-note {
+  margin-top: 7px;
+  color: #b07a2e;
+  font-size: 10px;
 }
 
 .legend {
