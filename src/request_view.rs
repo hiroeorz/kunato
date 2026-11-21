@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 
 use http::header::{COOKIE, HeaderMap};
+use http::uri::Authority;
 use http::{Method, StatusCode, Uri};
 
 use crate::decoding::{
@@ -15,6 +16,10 @@ pub struct RequestView<'a> {
     pub path_forms: Vec<Cow<'a, str>>,
     pub query_forms: Vec<Cow<'a, str>>,
     pub headers: &'a HeaderMap,
+    /// Authority the client used to reach the proxy, from an absolute request
+    /// target or the `Host` header. Used to ignore same-origin browser
+    /// metadata headers when payload rules inspect headers.
+    pub authority: Option<Authority>,
     pub body: &'a [u8],
     /// Bytes matched by body targets: the raw body with multipart file payloads
     /// masked out. Form field values, part headers, and boundaries remain in
@@ -71,8 +76,16 @@ impl<'a> RequestView<'a> {
             Some(decoded) => (decoded.forms, decoded.complete),
             None => (Vec::new(), true),
         };
+        let authority = uri.authority().cloned().or_else(|| {
+            headers
+                .get(http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<Authority>().ok())
+        });
+
         Self {
             method,
+            authority,
             path_forms: path_forms(uri.path()),
             query_forms: uri.query().map(query_decode_forms).unwrap_or_default(),
             headers,
@@ -101,6 +114,37 @@ impl<'a> RequestView<'a> {
     pub fn with_body_rules_exempt(mut self, body_rules_exempt: bool) -> Self {
         self.body_rules_exempt = body_rules_exempt;
         self
+    }
+
+    /// True when `value` is an absolute HTTP(S) URL whose authority matches
+    /// the authority this request was sent to. Same-origin `Referer` and
+    /// `Origin` values are browser metadata, not attacker-controlled SSRF
+    /// targets, and must not trigger header payload rules.
+    pub fn is_same_origin_url(&self, value: &str) -> bool {
+        let Ok(uri) = value.parse::<Uri>() else {
+            return false;
+        };
+        let Some(scheme) = uri.scheme_str() else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return false;
+        }
+        let (Some(reference), Some(own)) = (uri.authority(), self.authority.as_ref()) else {
+            return false;
+        };
+        same_authority(own, reference)
+    }
+}
+
+fn same_authority(left: &Authority, right: &Authority) -> bool {
+    if !left.host().eq_ignore_ascii_case(right.host()) {
+        return false;
+    }
+    match (left.port_u16(), right.port_u16()) {
+        (Some(left), Some(right)) => left == right,
+        (Some(port), None) | (None, Some(port)) => port == 80 || port == 443,
+        (None, None) => true,
     }
 }
 

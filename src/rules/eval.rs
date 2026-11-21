@@ -864,6 +864,49 @@ mod tests {
     }
 
     #[test]
+    fn bundled_response_rules_block_password_hash_fields() {
+        let config = config::parse(include_str!("../../rules.example.yaml"))
+            .expect("example configuration must parse");
+        let method = Method::GET;
+        let uri: Uri = "/api/v1/user".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let view = RequestView::new(
+            &method,
+            &uri,
+            &headers,
+            b"",
+            "198.51.100.9".parse().expect("valid IP"),
+        );
+        let response_headers = HeaderMap::new();
+        let response = ResponseView::new(
+            StatusCode::OK,
+            &response_headers,
+            br#"[{"id":1,"name":"tony","password":"1c8bfe8f801d79745c4631d09fff36c82aa37fc4cce4fc946683d7b336b63032"}]"#,
+            false,
+        );
+        let outcome = evaluate_response(&config, &view, &response);
+        assert_eq!(
+            outcome
+                .blocked
+                .expect("a serialized password hash must be blocked")
+                .rule,
+            "password-hash-field"
+        );
+
+        let response = ResponseView::new(
+            StatusCode::OK,
+            &response_headers,
+            br#"{"password":"secret"}"#,
+            false,
+        );
+        assert!(
+            evaluate_response(&config, &view, &response)
+                .blocked
+                .is_none()
+        );
+    }
+
+    #[test]
     fn bundled_parameter_pollution_tolerates_intervening_parameters() {
         assert_eq!(
             bundled_rule("/p?role=user&a=1&b=2&role=admin").as_deref(),

@@ -5584,3 +5584,20 @@ POST /saml/callback header="Content-Type: application/json" body="{\"SAMLRespons
 POST /saml/callback header="Content-Type: application/json" body="{\"SAMLResponse\":\"PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfcmVzcG9uc2UiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTE0VDAwOjAwOjAwWiI+PHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX3Jlc3BvbnNlIi8+PC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2ExIiBWZXJzaW9uPSIyLjAiPjxzYW1sOlN1YmplY3Q+PHNhbWw6TmFtZUlEPmFsaWNlQGV4YW1wbGUuY29tPC9zYW1sOk5hbWVJRD48L3NhbWw6U3ViamVjdD48L3NhbWw6QXNzZXJ0aW9uPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2EyIiBWZXJzaW9uPSIyLjAiPjxzYW1sOlN1YmplY3Q+PHNhbWw6TmFtZUlEPm1hbGxvcnlAZXhhbXBsZS5jb208L3NhbWw6TmFtZUlEPjwvc2FtbDpTdWJqZWN0Pjwvc2FtbDpBc3NlcnRpb24+PC9zYW1scDpSZXNwb25zZT4=\",\"RelayState\":\"state\"}"
 POST /saml/callback header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIElEPSJfcmVzcG9uc2UiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTE0VDAwOjAwOjAwWiI%2BPHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxkczpTaWduYXR1cmUgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX290aGVyIi8%2BPC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjxzYW1sOkFzc2VydGlvbiB4bWxuczpzYW1sPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6YXNzZXJ0aW9uIiBJRD0iX2Fzc2VydGlvbiIgVmVyc2lvbj0iMi4wIj48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5tYWxsb3J5QGV4YW1wbGUuY29tPC9zYW1sOk5hbWVJRD48L3NhbWw6U3ViamVjdD48L3NhbWw6QXNzZXJ0aW9uPjwvc2FtbHA6UmVzcG9uc2U%2B&RelayState=state"
 POST /saml/callback header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=not-base64!&RelayState=state"
+
+# DVWA/Shannon assessment regressions (2026-11-20): the fronting WAF missed
+# these shapes. The gzip part hides a PHP tag from the compressed-body scan;
+# upload_expansion must decompress and inspect it.
+POST /vulnerabilities/exec/ body="ip=127.0.0.1; date&Submit=Submit"
+POST /vulnerabilities/exec/ body="ip=127.0.0.1; od //etc//passwd&Submit=Submit"
+GET /vulnerabilities/fi/?page=data://text/plain,%3C%3Fphp%20echo%201%3B%20%3F%3E
+GET /vulnerabilities/fi/?page=/etc/./passwd
+GET /vulnerabilities/sqli_blind/?id=1+AND+2%3E1
+GET /vulnerabilities/sqli_blind/ header="Cookie: id=1' OR 2>1#"
+POST /vulnerabilities/authbypass/change_user_details.php header="Content-Type: application/json" body="{\"id\":\"1 OR 2>1\",\"first_name\":\"x\",\"surname\":\"y\"}"
+POST /vulnerabilities/api/v2/user header="Content-Type: application/json" body="{\"name\":\"repro\",\"level\":0}"
+POST /vulnerabilities/upload/ header="Content-Type: multipart/form-data; boundary=----kunatoBB" bodyhex=2d2d2d2d2d2d6b756e61746f42420d0a436f6e74656e742d446973706f736974696f6e3a20666f726d2d646174613b206e616d653d2275706c6f61646564223b2066696c656e616d653d2270776e2e747874220d0a436f6e74656e742d547970653a206170706c69636174696f6e2f677a69700d0a0d0a1f8b0800d7fc006b02ffb3b12fc82850484dcec857500a08f753b256b0b70300be3c0e55140000000d0a2d2d2d2d2d2d6b756e61746f42422d2d0d0a
+# True-positive controls for the same-origin Referer/Origin exception.
+GET /index.php header="Referer: http://169.254.169.254/latest/meta-data/"
+GET /index.php header="Referer: http://127.0.0.1:9090/other"
+POST /vulnerabilities/sqli/session-input.php body="id=2>1&Submit=Submit"

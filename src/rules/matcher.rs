@@ -66,6 +66,20 @@ fn header_regex_hits(value: &str, regexes: &[Regex], allow_mode: bool) -> bool {
     }
 }
 
+/// A browser sends `Referer` and `Origin` for ordinary same-origin requests.
+/// The value is a URL, so URL-based rules (SSRF, open redirect, remote
+/// include) otherwise treat the site's own origin as an attack target. Skip
+/// only absolute HTTP(S) URLs whose authority matches the request target;
+/// cross-origin values, `null`, `javascript:`, and malformed values are still
+/// inspected.
+fn is_same_origin_metadata(
+    name: &HeaderName,
+    value: &http::HeaderValue,
+    view: &RequestView<'_>,
+) -> bool {
+    matches!(name.as_str(), "referer" | "origin") && view.is_same_origin_url(&header_text(value))
+}
+
 fn header_payload_hits(value: &str, matcher: &PayloadMatcher, allow_mode: bool) -> bool {
     let forms = percent_decode_forms(value);
     if allow_mode {
@@ -337,14 +351,15 @@ impl PayloadMatcher {
         if self.targets & TARGET_HEADERS != 0 {
             let hit = if allow_mode {
                 !view.headers.is_empty()
-                    && view
-                        .headers
-                        .values()
-                        .all(|value| header_payload_hits(&header_text(value), self, true))
+                    && view.headers.iter().all(|(name, value)| {
+                        is_same_origin_metadata(name, value, view)
+                            || header_payload_hits(&header_text(value), self, true)
+                    })
             } else {
-                view.headers
-                    .values()
-                    .any(|value| header_payload_hits(&header_text(value), self, false))
+                view.headers.iter().any(|(name, value)| {
+                    !is_same_origin_metadata(name, value, view)
+                        && header_payload_hits(&header_text(value), self, false)
+                })
             };
             if hit {
                 return true;
@@ -1088,5 +1103,95 @@ mod tests {
         let uri: Uri = "/public".parse().expect("valid URI");
         let request = view(&method, &uri, &headers, b"");
         assert!(!matcher.matches_response(&request, &response));
+    }
+
+    #[test]
+    fn same_origin_browser_metadata_is_not_a_header_payload() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)https?://")],
+                targets: TARGET_HEADERS,
+            }),
+            ..Matcher::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:8080"));
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("http://127.0.0.1:8080/index.php"),
+        );
+        headers.insert("origin", HeaderValue::from_static("http://127.0.0.1:8080"));
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+
+        // A cross-origin URL in the same header is still an SSRF-shaped value.
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("http://169.254.169.254/latest/meta-data/"),
+        );
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+
+        // A different port is a different origin even on the same address.
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("http://127.0.0.1:9090/other"),
+        );
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+
+        // The exception is limited to Referer and Origin. An application
+        // header carrying the same URL must still be inspected.
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn same_origin_default_ports_are_tolerated() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)https?://example\.com")],
+                targets: TARGET_HEADERS,
+            }),
+            ..Matcher::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("example.com"));
+        headers.insert("referer", HeaderValue::from_static("http://example.com/"));
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("https://example.com:443/login"),
+        );
+        assert!(!matcher.matches(&view(&method, &uri, &headers, b"")));
+
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("https://example.com:8443/login"),
+        );
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn javascript_referer_is_still_a_header_payload() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let matcher = Matcher {
+            payload: Some(PayloadMatcher {
+                regexes: vec![regex(r"(?i)javascript\s*:")],
+                targets: TARGET_HEADERS,
+            }),
+            ..Matcher::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("example.com"));
+        headers.insert("referer", HeaderValue::from_static("javascript:alert(1)"));
+        assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
     }
 }

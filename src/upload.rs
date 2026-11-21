@@ -64,6 +64,8 @@ pub(crate) enum DangerousKind {
     /// The archive uses encryption or a compression method the inspector
     /// cannot expand.
     ArchiveUnsupported,
+    /// The archive expands to executable, script, or active web content.
+    ArchiveContent,
 }
 
 impl DangerousKind {
@@ -77,6 +79,7 @@ impl DangerousKind {
             Self::ArchiveExpansion => "archive-expansion",
             Self::ArchiveMalformed => "archive-malformed",
             Self::ArchiveUnsupported => "archive-unsupported",
+            Self::ArchiveContent => "archive-content",
         }
     }
 }
@@ -106,6 +109,7 @@ impl Rejection {
             DangerousKind::ArchiveUnsupported => {
                 "upload archive uses compression or encryption that cannot be inspected"
             }
+            DangerousKind::ArchiveContent => "upload archive contains executable or script content",
             _ => "upload content does not match its declared type",
         }
     }
@@ -403,6 +407,63 @@ enum ExpansionError {
     Unsupported,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct Expansion {
+    bytes: u64,
+    dangerous: Option<DangerousKind>,
+}
+
+/// Scan a decompressed stream in bounded chunks. A marker can straddle a
+/// decoder chunk boundary, so each chunk is checked alone and together with a
+/// short tail from the previous chunk. The tail is bounded by the longest
+/// marker this inspector cares about (`<script` and `<?php`).
+#[derive(Debug, Default)]
+struct ContentScanner {
+    tail: Vec<u8>,
+    dangerous: Option<DangerousKind>,
+}
+
+impl ContentScanner {
+    const TAIL_BYTES: usize = 16;
+
+    fn push(&mut self, chunk: &[u8]) {
+        if self.dangerous.is_some() {
+            return;
+        }
+        if archive_content_kind(chunk).is_some() {
+            self.dangerous = Some(DangerousKind::ArchiveContent);
+            return;
+        }
+        if !self.tail.is_empty() {
+            let mut joined = Vec::with_capacity(self.tail.len() + chunk.len());
+            joined.extend_from_slice(&self.tail);
+            joined.extend_from_slice(chunk);
+            if archive_content_kind(&joined).is_some() {
+                self.dangerous = Some(DangerousKind::ArchiveContent);
+            }
+            let keep = joined.len().min(Self::TAIL_BYTES);
+            self.tail.clear();
+            self.tail.extend_from_slice(&joined[joined.len() - keep..]);
+        } else {
+            let keep = chunk.len().min(Self::TAIL_BYTES);
+            self.tail.extend_from_slice(&chunk[chunk.len() - keep..]);
+        }
+    }
+}
+
+/// Archive entries commonly contain XML (OOXML, ODF, SVG) that starts with
+/// `<`, so generic active-web detection would reject legitimate documents.
+/// Only executable and server-side script markers are strong enough to reject
+/// an otherwise valid archive.
+fn archive_content_kind(value: &[u8]) -> Option<DangerousKind> {
+    match dangerous_content(value) {
+        Some(DangerousKind::Script | DangerousKind::Executable) => {
+            Some(DangerousKind::ArchiveContent)
+        }
+        _ => None,
+    }
+}
+
 struct ZipEntry {
     flags: u16,
     method: u16,
@@ -454,10 +515,10 @@ fn archive_expansion_rejection_value(
         ArchiveKind::Zip => zip_expansion(value, limit, expansion.max_entries),
     };
     match result {
-        Ok(expanded) => {
-            let expanded = usize::try_from(expanded).unwrap_or(usize::MAX);
+        Ok(expansion) => {
+            let expanded = usize::try_from(expansion.bytes).unwrap_or(usize::MAX);
             *budget = budget.saturating_sub(expanded);
-            None
+            expansion.dangerous
         }
         Err(ExpansionError::TooLarge) => Some(DangerousKind::ArchiveExpansion),
         Err(ExpansionError::Malformed) => Some(DangerousKind::ArchiveMalformed),
@@ -482,17 +543,30 @@ fn archive_value(value: &[u8]) -> &[u8] {
         .unwrap_or(value)
 }
 
-fn gzip_expansion(value: &[u8], limit: usize) -> Result<u64, ExpansionError> {
+fn gzip_expansion(value: &[u8], limit: usize) -> Result<Expansion, ExpansionError> {
     let mut decoder = MultiGzDecoder::new(value);
     let mut buffer = [0u8; 64 * 1024];
     let mut total = 0usize;
+    let mut scanner = ContentScanner::default();
     loop {
         match decoder.read(&mut buffer) {
-            Ok(0) => return Ok(total as u64),
+            Ok(0) => {
+                return Ok(Expansion {
+                    bytes: total as u64,
+                    dangerous: scanner.dangerous,
+                });
+            }
             Ok(read) => {
                 total = total.saturating_add(read);
                 if total > limit {
                     return Err(ExpansionError::TooLarge);
+                }
+                scanner.push(&buffer[..read]);
+                if scanner.dangerous.is_some() {
+                    return Ok(Expansion {
+                        bytes: total as u64,
+                        dangerous: scanner.dangerous,
+                    });
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -501,7 +575,11 @@ fn gzip_expansion(value: &[u8], limit: usize) -> Result<u64, ExpansionError> {
     }
 }
 
-fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, ExpansionError> {
+fn zip_expansion(
+    value: &[u8],
+    limit: usize,
+    max_entries: usize,
+) -> Result<Expansion, ExpansionError> {
     let end = find_zip_end(value).ok_or(ExpansionError::Malformed)?;
     let (entries, directory_offset, directory_size, central_end) = zip_directory(value, end)?;
     if entries > max_entries as u64 {
@@ -518,7 +596,7 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, 
         {
             return Err(ExpansionError::Malformed);
         }
-        return Ok(0);
+        return Ok(Expansion::default());
     }
     // A self-extracting archive may carry an arbitrary prefix before the
     // first local header. The central directory records offsets relative to
@@ -558,15 +636,19 @@ fn zip_expansion(value: &[u8], limit: usize, max_entries: usize) -> Result<u64, 
     // while hiding additional local headers that streaming unzip clients still
     // expand. Walk the local headers and require every one to be listed.
     validate_local_entries(value, &parsed, concat, directory_offset)?;
-    let mut total = 0u64;
+    let mut total = Expansion::default();
     for entry in &parsed {
-        let remaining = limit.saturating_sub(total as usize);
+        let remaining = limit.saturating_sub(total.bytes as usize);
         let expanded = zip_entry_expansion(value, entry, remaining)?;
-        total = total
-            .checked_add(expanded)
+        total.bytes = total
+            .bytes
+            .checked_add(expanded.bytes)
             .ok_or(ExpansionError::Malformed)?;
-        if total > limit as u64 {
+        if total.bytes > limit as u64 {
             return Err(ExpansionError::TooLarge);
+        }
+        if total.dangerous.is_none() {
+            total.dangerous = expanded.dangerous;
         }
     }
     Ok(total)
@@ -832,7 +914,7 @@ fn zip_entry_expansion(
     value: &[u8],
     entry: &ZipEntry,
     remaining: usize,
-) -> Result<u64, ExpansionError> {
+) -> Result<Expansion, ExpansionError> {
     if entry.flags & 1 != 0 {
         return Err(ExpansionError::Unsupported);
     }
@@ -841,21 +923,18 @@ fn zip_entry_expansion(
             if entry.compressed != entry.uncompressed {
                 return Err(ExpansionError::Malformed);
             }
-            Ok(entry.compressed)
+            let (data, data_end) = zip_data_range(value, entry)?;
+            Ok(Expansion {
+                bytes: entry.compressed,
+                dangerous: archive_content_kind(&value[data..data_end]),
+            })
         }
         8 => zip_deflate_expansion(value, entry, remaining),
         _ => Err(ExpansionError::Unsupported),
     }
 }
 
-fn zip_deflate_expansion(
-    value: &[u8],
-    entry: &ZipEntry,
-    remaining: usize,
-) -> Result<u64, ExpansionError> {
-    if entry.compressed == 0 {
-        return Ok(0);
-    }
+fn zip_data_range(value: &[u8], entry: &ZipEntry) -> Result<(usize, usize), ExpansionError> {
     let start = usize::try_from(entry.local_offset).map_err(|_| ExpansionError::Malformed)?;
     let header_end = start.checked_add(30).ok_or(ExpansionError::Malformed)?;
     if header_end > value.len() || value.get(start..start + 4) != Some(&ZIP_LOCAL_HEADER[..]) {
@@ -874,16 +953,41 @@ fn zip_deflate_expansion(
     if data_end > value.len() {
         return Err(ExpansionError::Malformed);
     }
+    Ok((data, data_end))
+}
+
+fn zip_deflate_expansion(
+    value: &[u8],
+    entry: &ZipEntry,
+    remaining: usize,
+) -> Result<Expansion, ExpansionError> {
+    if entry.compressed == 0 {
+        return Ok(Expansion::default());
+    }
+    let (data, data_end) = zip_data_range(value, entry)?;
     let mut decoder = DeflateDecoder::new(&value[data..data_end]);
     let mut buffer = [0u8; 64 * 1024];
     let mut total = 0usize;
+    let mut scanner = ContentScanner::default();
     loop {
         match decoder.read(&mut buffer) {
-            Ok(0) => return Ok(total as u64),
+            Ok(0) => {
+                return Ok(Expansion {
+                    bytes: total as u64,
+                    dangerous: scanner.dangerous,
+                });
+            }
             Ok(read) => {
                 total = total.saturating_add(read);
                 if total > remaining {
                     return Err(ExpansionError::TooLarge);
+                }
+                scanner.push(&buffer[..read]);
+                if scanner.dangerous.is_some() {
+                    return Ok(Expansion {
+                        bytes: total as u64,
+                        dangerous: scanner.dangerous,
+                    });
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -1066,7 +1170,8 @@ fn blocks(mode: UploadInspection, claim: Claim, kind: DangerousKind) -> bool {
             | DangerousKind::ClaimMismatch
             | DangerousKind::ArchiveExpansion
             | DangerousKind::ArchiveMalformed
-            | DangerousKind::ArchiveUnsupported => true,
+            | DangerousKind::ArchiveUnsupported
+            | DangerousKind::ArchiveContent => true,
             DangerousKind::ActiveWeb => claim != Claim::ActiveWeb,
         },
     }
@@ -2030,6 +2135,65 @@ mod tests {
         .expect("rejected");
         assert_eq!(rejection.kind, DangerousKind::ArchiveExpansion);
         assert_eq!(rejection.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn uploaded_gzip_with_script_content_is_rejected() {
+        let archive = gzip(b"<?php echo 'pwn'; ?>");
+        let body = body(&[("pwn.txt", Some("application/gzip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(1024 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveContent);
+        assert_eq!(rejection.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn uploaded_stored_zip_with_script_content_is_rejected() {
+        let archive = zip(b"<?php echo 'pwn'; ?>", 0);
+        let body = body(&[("pwn.zip", Some("application/zip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(1024 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveContent);
+    }
+
+    #[test]
+    fn uploaded_deflated_zip_with_script_content_is_rejected() {
+        let archive = zip(b"<?php echo 'pwn'; ?>", 8);
+        let body = body(&[("pwn.zip", Some("application/zip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(1024 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveContent);
+    }
+
+    #[test]
+    fn uploaded_gzip_with_script_marker_split_across_chunks_is_rejected() {
+        let mut payload = vec![b'a'; 64 * 1024 - 2];
+        payload.extend_from_slice(b"<?php echo 'pwn'; ?>");
+        let archive = gzip(&payload);
+        let body = body(&[("pwn.txt", Some("application/gzip"), &archive)]);
+        let rejection = super::inspect(
+            &headers(),
+            &body,
+            UploadInspection::Strict,
+            expansion(2 * 1024 * 1024),
+        )
+        .expect("rejected");
+        assert_eq!(rejection.kind, DangerousKind::ArchiveContent);
     }
 
     #[test]

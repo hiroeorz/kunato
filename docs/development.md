@@ -731,6 +731,14 @@ evaluation, because servers that compare methods case-sensitively can be
 bypassed by variant case (OpenNMS CVE-2026-111235); custom methods that are not
 case variants keep their previous behavior.
 
+`in: [headers]` inspects every request header value, with one exception: an
+absolute `http` or `https` `Referer`/`Origin` value whose authority matches the
+request's `Host` (or `:authority`) is skipped. Browsers send those headers on
+ordinary same-origin navigations, so URL-based rules such as `ssrf` otherwise
+block the site's own pages when it is reached through a private address.
+Cross-origin values, `null`, `javascript:`, and malformed values are still
+inspected; other headers carrying the same URL are not exempt.
+
 Response-phase rules may combine request conditions (`path`, `method`, `source_ip`,
 `headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule
 can require a path and a response body signature. `status`, `response_headers`, and
