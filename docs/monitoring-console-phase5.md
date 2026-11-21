@@ -275,8 +275,10 @@ network requests. It shows:
   credential use.
 - Live event list from the bounded snapshot, rendered as text.
 - History summary and reason table for 1 hour, 24 hours, 7 days, and 30 days,
-  with the returned grain, effective bounds, missing/partial coverage, and
-  truncation disclosed.
+  read across all history pages for the selected range. The chart uses
+  range-appropriate UTC display intervals and per-minute rates over complete
+  minutes, with storage grain, effective bounds, missing/partial coverage, and
+  any page-cap truncation disclosed.
 - Decoy correlation table with hashed identifiers only.
 
 The UI is read-only, labels unavailable data honestly, and does not replay

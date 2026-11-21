@@ -188,11 +188,13 @@
           </div>
 
           <section class="panel" aria-labelledby="chart-title">
-            <h2 id="chart-title">Traffic and rejections per interval</h2>
+            <h2 id="chart-title">Traffic and rejections per minute</h2>
             <p class="muted small">
-              UTC interval starts. Each bar is one stored interval; grain becomes
-              finer toward the present. Hover or use the arrow keys to inspect an
-              interval.
+              UTC interval starts. Bar height is the per-minute rate over complete
+              minutes, so retained 1-minute and 1-hour intervals are comparable. The
+              display interval is 1 minute, 1 hour, or 1 UTC day for the selected
+              range; hover or use the arrow keys for totals, storage grain, and
+              coverage.
             </p>
             <div id="chart" class="chart"></div>
           </section>
@@ -202,7 +204,7 @@
               <h2 id="reasons-title">Rejection reasons</h2>
               <p class="muted small">
                 A rejected request contributes once to one primary reason.
-                Incomplete intervals are excluded from shares.
+                Shares use observed rejections in the fetched range.
               </p>
               <div class="table-wrap">
                 <table>

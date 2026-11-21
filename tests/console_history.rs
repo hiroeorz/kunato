@@ -8,9 +8,13 @@ use kunato::console::{
 
 const BASE: u64 = 1_800_000_000_000;
 const NOW: u64 = BASE + 13 * HOUR_MS;
+const FULL_DAY_NOW: u64 = BASE + 24 * HOUR_MS;
 
 fn now() -> u64 {
     NOW
+}
+fn full_day_now() -> u64 {
+    FULL_DAY_NOW
 }
 fn early() -> u64 {
     BASE + 2 * HOUR_MS
@@ -590,6 +594,78 @@ fn logical_expiry_precedes_cleanup_and_survives_clock_rollback_and_replay() {
         22
     );
     assert_eq!(sql_count(&config, "SELECT count(*) FROM history_dirty"), 0);
+}
+
+#[test]
+fn full_day_history_pages_cover_the_range_and_rates_are_grain_invariant() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(&temp, full_day_now);
+    let mut store = Store::open(config.clone()).unwrap();
+    let minutes = (0..24 * 60)
+        .map(|index| minute(BASE + index * MINUTE_MS, 60, RejectionReason::Rule, 6))
+        .collect::<Vec<_>>();
+    for (index, chunk) in minutes.chunks(100).enumerate() {
+        store
+            .write_batch(&batch("a", index as u64 + 1, chunk.to_vec()))
+            .unwrap();
+    }
+    drain(&mut store, FULL_DAY_NOW);
+
+    let mut request = query(BASE, FULL_DAY_NOW);
+    let first = store.history(&request).unwrap();
+    assert_eq!(first.buckets.len(), 128);
+    let next = first
+        .next_start_ms
+        .expect("a full day exceeds one history page");
+    assert_eq!(FULL_DAY_NOW - next, 7 * MINUTE_MS);
+    request.from_ms = next;
+    request.revision = Some(first.revision);
+    let second = store.history(&request).unwrap();
+    assert!(second.next_start_ms.is_none());
+
+    let mut buckets = first.buckets;
+    buckets.extend(second.buckets);
+    assert_eq!(buckets.len(), 135);
+    let counts = Grain::ALL.map(|grain| {
+        buckets
+            .iter()
+            .filter(|bucket| bucket.grain == grain)
+            .count()
+    });
+    assert_eq!(counts, [60, 30, 15, 18, 12]);
+    assert_eq!(
+        buckets
+            .iter()
+            .map(|bucket| bucket.counters[&CountMetric::Requests].sum)
+            .sum::<u64>(),
+        24 * 60 * 60
+    );
+    assert_eq!(
+        buckets
+            .iter()
+            .map(|bucket| bucket.counters[&CountMetric::RejectedRequests].sum)
+            .sum::<u64>(),
+        24 * 60 * 6
+    );
+    for bucket in &buckets {
+        assert!(!bucket.coverage.incomplete);
+        let requests = bucket
+            .complete_rate(CountMetric::Requests)
+            .expect("complete requests rate");
+        let rejected = bucket
+            .complete_rate(CountMetric::RejectedRequests)
+            .expect("complete rejection rate");
+        assert!((requests - 1.0).abs() < 1e-9);
+        assert!((rejected - 0.1).abs() < 1e-9);
+    }
+    assert_eq!(
+        buckets.first().map(|bucket| bucket.grain),
+        Some(Grain::Hour)
+    );
+    assert_eq!(
+        buckets.last().map(|bucket| bucket.grain),
+        Some(Grain::Minute)
+    );
 }
 
 #[test]

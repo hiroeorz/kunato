@@ -61,22 +61,138 @@
     return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
   }
 
-  function intervalLabel(bucket) {
-    var start = utcMinute(bucket.start_ms);
-    var duration = GRAIN_MS[bucket.grain] || 0;
-    if (!duration) {
-      return start + " UTC";
+  var DAY_MS = 86400000;
+
+  function displayGrainMs(rangeMs, buckets) {
+    var maxGrain = 0;
+    buckets.forEach(function (bucket) {
+      maxGrain = Math.max(maxGrain, GRAIN_MS[bucket.grain] || 0);
+    });
+    var width = GRAIN_MS.minute;
+    if (rangeMs > 2 * GRAIN_MS.hour) {
+      width = rangeMs <= 14 * DAY_MS ? GRAIN_MS.hour : DAY_MS;
     }
-    var end = utcMinute(bucket.start_ms + duration);
+    return Math.max(width, maxGrain);
+  }
+
+  function displayGrainLabel(widthMs) {
+    if (widthMs >= DAY_MS) {
+      return "1 UTC day";
+    }
+    if (widthMs >= GRAIN_MS.hour) {
+      var hours = Math.round(widthMs / GRAIN_MS.hour);
+      return hours === 1 ? "1 hour" : hours + " hours";
+    }
+    var minutes = Math.round(widthMs / GRAIN_MS.minute);
+    return minutes === 1 ? "1 minute" : minutes + " minutes";
+  }
+
+  function grainLabel(grain) {
+    return String(grain || "unknown").replace(/_/g, " ");
+  }
+
+  function grainShortLabel(grain) {
+    var milliseconds = GRAIN_MS[grain] || 0;
+    if (milliseconds >= DAY_MS) {
+      return "1d";
+    }
+    if (milliseconds >= GRAIN_MS.hour) {
+      return Math.round(milliseconds / GRAIN_MS.hour) + "h";
+    }
+    if (milliseconds >= GRAIN_MS.minute) {
+      return Math.round(milliseconds / GRAIN_MS.minute) + "m";
+    }
+    return "?";
+  }
+
+  function formatRate(value) {
+    if (value === null || value === undefined) {
+      return "Unavailable";
+    }
+    var digits = Math.abs(value) >= 10 ? 0 : Math.abs(value) >= 1 ? 1 : 2;
+    return new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: digits,
+    }).format(value);
+  }
+
+  function counterTotal(group, name) {
+    var stats = group.counters[name];
+    return stats && stats.known_minutes ? stats.sum : null;
+  }
+
+  function counterRate(group, name) {
+    var stats = group.counters[name];
+    return stats && stats.complete_minutes ? stats.complete_sum / stats.complete_minutes : null;
+  }
+
+  function addCounter(target, stats) {
+    if (!stats || typeof stats.sum !== "number") {
+      return;
+    }
+    target.sum += stats.sum || 0;
+    target.known_minutes += stats.known_minutes || 0;
+    target.complete_minutes += stats.complete_minutes || 0;
+    target.complete_sum += stats.complete_sum || 0;
+  }
+
+  // Storage grain changes with age; group stored buckets into a range-specific
+  // display grain so every bar covers a comparable interval. Never split a
+  // stored bucket: the display grain is always at least as wide as storage.
+  function groupBuckets(buckets, widthMs) {
+    var groups = [];
+    var byStart = new Map();
+    buckets.forEach(function (bucket) {
+      var key = Math.floor(bucket.start_ms / widthMs) * widthMs;
+      var end = bucket.start_ms + (GRAIN_MS[bucket.grain] || 0);
+      var group = byStart.get(key);
+      if (!group) {
+        group = {
+          start_ms: bucket.start_ms,
+          end_ms: end,
+          counters: {},
+          grains: {},
+          incomplete: false,
+          observed_minutes: 0,
+        };
+        byStart.set(key, group);
+        groups.push(group);
+      }
+      group.start_ms = Math.min(group.start_ms, bucket.start_ms);
+      group.end_ms = Math.max(group.end_ms, end);
+      group.incomplete = group.incomplete || Boolean(bucket.coverage && bucket.coverage.incomplete);
+      group.observed_minutes += Number(bucket.coverage && bucket.coverage.represented_minutes) || 0;
+      group.grains[bucket.grain] = true;
+      var counters = bucket.counters || {};
+      Object.keys(counters).forEach(function (name) {
+        if (!group.counters[name]) {
+          group.counters[name] = {
+            sum: 0,
+            known_minutes: 0,
+            complete_minutes: 0,
+            complete_sum: 0,
+          };
+        }
+        addCounter(group.counters[name], counters[name]);
+      });
+    });
+    groups.sort(function (a, b) {
+      return a.start_ms - b.start_ms;
+    });
+    return groups;
+  }
+
+  function displayLabel(group) {
+    var start = utcMinute(group.start_ms);
+    var end = utcMinute(group.end_ms);
     if (start.slice(0, 10) === end.slice(0, 10)) {
       return start + "–" + end.slice(11) + " UTC";
     }
     return start + " – " + end + " UTC";
   }
 
-  function bucketCounter(bucket, name) {
-    var stats = bucket.counters ? bucket.counters[name] : null;
-    return stats && stats.known_minutes ? stats.sum : null;
+  function displayTimeLabel(ms, widthMs) {
+    return widthMs >= DAY_MS ? new Date(ms).toISOString().slice(0, 10) : utcMinute(ms);
   }
 
   function now() {
@@ -441,6 +557,7 @@
       return;
     }
     var buckets = data.buckets || [];
+    var displayWidth = displayGrainMs(data.range_ms || state.rangeMs, buckets);
     var requests = sumMetric(buckets, "requests");
     var rejected = sumMetric(buckets, "rejected_requests");
     var logged = sumMetric(buckets, "log_requests");
@@ -459,7 +576,7 @@
     text(
       $("metrics-requests-detail"),
       buckets.length
-        ? plural(buckets.length, "interval", "intervals") + "; " + (partial ? "partial coverage" : "complete intervals only for rates")
+        ? plural(buckets.length, "stored interval", "stored intervals") + (partial ? "; partial coverage" : "; complete coverage")
         : "no retained intervals in this range"
     );
     text(
@@ -473,18 +590,23 @@
       : null;
     var grains = [];
     buckets.forEach(function (bucket) {
-      var label = String(bucket.grain).replace(/_/g, " ");
+      var label = grainLabel(bucket.grain);
       if (grains.indexOf(label) === -1) {
         grains.push(label);
       }
     });
     var meta = [];
-    meta.push("grain: " + (grains.length ? grains.join(" → ") : "unavailable"));
+    meta.push("chart: " + displayGrainLabel(displayWidth) + " buckets, per-minute rate");
+    meta.push("storage grain: " + (grains.length ? grains.join(" → ") : "unavailable"));
     if (first !== null) {
       meta.push("available: " + utc(first) + " to " + utc(last));
     }
+    if (data.pages > 1) {
+      meta.push(plural(data.pages, "page", "pages") + " fetched");
+    }
     if (data.truncated) {
-      meta.push("response truncated at " + plural(data.returned, "interval", "intervals") + "; narrow the range");
+      var cut = data.next_start_ms !== null && data.next_start_ms !== undefined ? " at " + utc(data.next_start_ms) : "";
+      meta.push("history incomplete" + cut + "; narrow the range");
     }
     if (data.pending_minutes) {
       meta.push(plural(data.pending_minutes, "minute", "minutes") + " awaiting materialization");
@@ -495,12 +617,12 @@
     meta.push("expiry: " + utc(data.expiry_ms));
     text($("metrics-meta"), meta.join(" | "));
 
-    renderChart(buckets);
+    renderChart(groupBuckets(buckets, displayWidth), displayWidth);
     renderReasons(buckets);
     renderCorrelations();
   }
 
-  function renderChart(buckets) {
+  function renderChart(buckets, displayWidth) {
     var host = $("chart");
     host.innerHTML = "";
     if (!buckets.length) {
@@ -517,24 +639,47 @@
     var top = 12;
     var innerWidth = width - left - right;
     var innerHeight = height - top - bottom;
-    var max = 1;
-    var series = buckets.map(function (bucket) {
-      var requests = bucketCounter(bucket, "requests");
-      var rejected = bucketCounter(bucket, "rejected_requests");
+    var max = 0;
+    var hasRate = false;
+    var series = buckets.map(function (group) {
+      var requests = counterRate(group, "requests");
+      var rejected = counterRate(group, "rejected_requests");
+      if (requests !== null || rejected !== null) {
+        hasRate = true;
+      }
       max = Math.max(max, requests || 0, rejected || 0);
+      var grains = Object.keys(group.grains).sort(function (a, b) {
+        return (GRAIN_MS[a] || 0) - (GRAIN_MS[b] || 0);
+      });
       return {
-        bucket: bucket,
+        group: group,
         requests: requests,
         rejected: rejected,
-        logged: bucketCounter(bucket, "log_requests"),
-        failures: bucketCounter(bucket, "upstream_connection_failures"),
-        timeouts: bucketCounter(bucket, "upstream_timeouts"),
-        decoy: bucketCounter(bucket, "decoy_credential_use_requests"),
-        incomplete: Boolean(bucket.coverage && bucket.coverage.incomplete),
+        requestsTotal: counterTotal(group, "requests"),
+        rejectedTotal: counterTotal(group, "rejected_requests"),
+        logged: counterTotal(group, "log_requests"),
+        failures: counterTotal(group, "upstream_connection_failures"),
+        timeouts: counterTotal(group, "upstream_timeouts"),
+        decoy: counterTotal(group, "decoy_credential_use_requests"),
+        completeMinutes: group.counters.requests ? group.counters.requests.complete_minutes : 0,
+        observedMinutes: group.observed_minutes,
+        incomplete: group.incomplete,
+        grains: grains.map(grainShortLabel),
       };
     });
-    var step = innerWidth / series.length;
-    var bar = Math.max(1, Math.min(step * 0.7, 48));
+    if (!hasRate) {
+      host.textContent = "No complete-minute data in this range.";
+      host.className = "chart muted";
+      return;
+    }
+    max = Math.max(1, max);
+
+    var spanStart = series[0].group.start_ms;
+    var spanEnd = series[series.length - 1].group.end_ms;
+    var span = Math.max(1, spanEnd - spanStart);
+    function x(ms) {
+      return left + ((ms - spanStart) / span) * innerWidth;
+    }
 
     var ns = "http://www.w3.org/2000/svg";
     var svg = document.createElementNS(ns, "svg");
@@ -544,7 +689,7 @@
     svg.setAttribute("focusable", "true");
     svg.setAttribute(
       "aria-label",
-      "Requests and rejections per UTC interval. Use the left and right arrow keys to inspect intervals."
+      "Requests and rejections per minute by UTC interval. Use the left and right arrow keys to inspect intervals."
     );
 
     function line(y, label) {
@@ -558,12 +703,12 @@
       var tick = document.createElementNS(ns, "text");
       tick.setAttribute("x", 4);
       tick.setAttribute("y", y + 4);
-      tick.textContent = new Intl.NumberFormat().format(label);
+      tick.textContent = formatRate(label);
       svg.appendChild(tick);
     }
 
     line(top, max);
-    line(top + innerHeight / 2, Math.round(max / 2));
+    line(top + innerHeight / 2, max / 2);
     line(top + innerHeight, 0);
 
     var hoverBand = document.createElementNS(ns, "rect");
@@ -574,23 +719,23 @@
     hoverBand.setAttribute("visibility", "hidden");
     svg.appendChild(hoverBand);
 
-    series.forEach(function (point, index) {
-      var x = left + index * step + (step - bar) / 2;
-      var requests = point.requests || 0;
-      var rejected = point.rejected || 0;
-      var requestHeight = (requests / max) * innerHeight;
-      var rejectHeight = (rejected / max) * innerHeight;
+    series.forEach(function (point) {
+      var x0 = x(point.group.start_ms);
+      var x1 = x(point.group.end_ms);
+      var barWidth = Math.max(1, x1 - x0);
+      var requestHeight = point.requests === null ? 0 : (point.requests / max) * innerHeight;
+      var rejectHeight = point.rejected === null ? 0 : (point.rejected / max) * innerHeight;
       var requestsBar = document.createElementNS(ns, "rect");
-      requestsBar.setAttribute("x", x);
+      requestsBar.setAttribute("x", x0);
       requestsBar.setAttribute("y", top + innerHeight - requestHeight);
-      requestsBar.setAttribute("width", bar);
+      requestsBar.setAttribute("width", barWidth);
       requestsBar.setAttribute("height", Math.max(0, requestHeight));
       requestsBar.setAttribute("fill", "#829ab3");
       svg.appendChild(requestsBar);
       var rejectedBar = document.createElementNS(ns, "rect");
-      rejectedBar.setAttribute("x", x);
+      rejectedBar.setAttribute("x", x0);
       rejectedBar.setAttribute("y", top + innerHeight - rejectHeight);
-      rejectedBar.setAttribute("width", bar);
+      rejectedBar.setAttribute("width", barWidth);
       rejectedBar.setAttribute("height", Math.max(0, rejectHeight));
       rejectedBar.setAttribute("fill", "#dc9b6c");
       svg.appendChild(rejectedBar);
@@ -612,30 +757,45 @@
 
     function showTooltip(index, event) {
       var point = series[index];
-      hoverBand.setAttribute("x", left + index * step);
-      hoverBand.setAttribute("width", Math.max(1, step));
+      var x0 = x(point.group.start_ms);
+      var x1 = x(point.group.end_ms);
+      hoverBand.setAttribute("x", x0);
+      hoverBand.setAttribute("width", Math.max(1, x1 - x0));
       hoverBand.setAttribute("visibility", "visible");
       if (index !== tooltipIndex) {
         tooltipIndex = index;
         tooltip.textContent = "";
         var heading = document.createElement("p");
         heading.className = "chart-tooltip-time";
-        heading.textContent = intervalLabel(point.bucket);
+        heading.textContent = displayLabel(point.group);
         tooltip.appendChild(heading);
         var list = document.createElement("dl");
         list.className = "chart-tooltip-list";
-        addTooltipRow(list, "Requests", number(point.requests));
-        addTooltipRow(list, "Rejected", number(point.rejected));
-        addTooltipRow(list, "Rejection rate", percent(point.rejected, point.requests));
+        addTooltipRow(list, "Requests", number(point.requestsTotal));
+        addTooltipRow(list, "Requests / min", formatRate(point.requests));
+        addTooltipRow(list, "Rejected", number(point.rejectedTotal));
+        addTooltipRow(list, "Rejection rate", percent(point.rejectedTotal, point.requestsTotal));
+        addTooltipRow(list, "Rejected / min", formatRate(point.rejected));
         addTooltipRow(list, "LOG detections", number(point.logged));
         addTooltipRow(list, "Upstream failures", number(point.failures));
         addTooltipRow(list, "Upstream timeouts", number(point.timeouts));
         addTooltipRow(list, "Decoy use", number(point.decoy));
+        if (point.observedMinutes) {
+          addTooltipRow(list, "Complete minutes", number(point.completeMinutes) + " of " + number(point.observedMinutes));
+        }
+        if (point.grains.length) {
+          addTooltipRow(list, "Storage grain", point.grains.join(", "));
+        }
         tooltip.appendChild(list);
-        if (point.incomplete) {
+        var noteText = point.requests === null && point.rejected === null
+          ? "No complete minutes in this interval."
+          : point.incomplete
+            ? "Partial interval coverage; rate uses complete minutes."
+            : "";
+        if (noteText) {
           var note = document.createElement("p");
           note.className = "chart-tooltip-note";
-          note.textContent = "Partial interval coverage";
+          note.textContent = noteText;
           tooltip.appendChild(note);
         }
       }
@@ -652,16 +812,18 @@
         anchorY = event.clientY - frame.top;
       } else {
         var svgFrame = svg.getBoundingClientRect();
-        anchorX = svgFrame.left - frame.left + ((left + (index + 0.5) * step) / width) * svgFrame.width;
+        var group = series[index].group;
+        var center = (x(group.start_ms) + x(group.end_ms)) / 2;
+        anchorX = svgFrame.left - frame.left + (center / width) * svgFrame.width;
         anchorY = svgFrame.top - frame.top + ((top + innerHeight / 2) / height) * svgFrame.height;
       }
-      var x = anchorX + 14;
+      var tooltipX = anchorX + 14;
       var y = anchorY - tooltip.offsetHeight - 12;
-      if (x + tooltip.offsetWidth > host.clientWidth - 8) {
-        x = anchorX - tooltip.offsetWidth - 14;
+      if (tooltipX + tooltip.offsetWidth > host.clientWidth - 8) {
+        tooltipX = anchorX - tooltip.offsetWidth - 14;
       }
-      if (x < 8) {
-        x = 8;
+      if (tooltipX < 8) {
+        tooltipX = 8;
       }
       if (y < 8) {
         y = anchorY + 18;
@@ -669,7 +831,7 @@
       if (y + tooltip.offsetHeight > host.clientHeight - 8) {
         y = Math.max(8, host.clientHeight - tooltip.offsetHeight - 8);
       }
-      tooltip.style.left = x + "px";
+      tooltip.style.left = tooltipX + "px";
       tooltip.style.top = y + "px";
     }
 
@@ -679,18 +841,39 @@
       hoverBand.setAttribute("visibility", "hidden");
     }
 
+    function groupAt(ms) {
+      var low = 0;
+      var high = series.length - 1;
+      while (low <= high) {
+        var middle = Math.floor((low + high) / 2);
+        var group = series[middle].group;
+        if (ms < group.start_ms) {
+          high = middle - 1;
+        } else if (ms >= group.end_ms) {
+          low = middle + 1;
+        } else {
+          return middle;
+        }
+      }
+      return -1;
+    }
+
     function inspectHover(event) {
       var frame = svg.getBoundingClientRect();
       if (!frame.width) {
         return;
       }
-      var x = ((event.clientX - frame.left) / frame.width) * width;
-      if (x < left || x > left + innerWidth) {
+      var position = ((event.clientX - frame.left) / frame.width) * width;
+      if (position < left || position > left + innerWidth) {
         hideTooltip();
         return;
       }
-      var index = Math.floor((x - left) / step);
-      index = Math.max(0, Math.min(series.length - 1, index));
+      var ms = spanStart + ((position - left) / innerWidth) * span;
+      var index = groupAt(ms);
+      if (index < 0) {
+        hideTooltip();
+        return;
+      }
       keyboardIndex = index;
       showTooltip(index, event);
     }
@@ -733,28 +916,32 @@
         continue;
       }
       used[labelIndex] = true;
-      var point = series[labelIndex];
-      var x = left + (labelIndex + 0.5) * step;
+      var labelPoint = series[labelIndex];
+      var x0 = x(labelPoint.group.start_ms);
+      var x1 = x(labelPoint.group.end_ms);
+      var labelX = (x0 + x1) / 2;
       var anchor = "middle";
+      var labelTime = labelPoint.group.start_ms;
       if (labelIndex === 0) {
-        x = left;
+        labelX = x0;
         anchor = "start";
       } else if (labelIndex === series.length - 1) {
-        x = left + innerWidth;
+        labelX = x1;
         anchor = "end";
+        labelTime = labelPoint.group.end_ms;
       }
       var tick = document.createElementNS(ns, "line");
-      tick.setAttribute("x1", x);
-      tick.setAttribute("x2", x);
+      tick.setAttribute("x1", labelX);
+      tick.setAttribute("x2", labelX);
       tick.setAttribute("y1", top + innerHeight);
       tick.setAttribute("y2", top + innerHeight + 5);
       tick.setAttribute("stroke", "#d9dfe7");
       svg.appendChild(tick);
       var label = document.createElementNS(ns, "text");
-      label.setAttribute("x", x);
+      label.setAttribute("x", labelX);
       label.setAttribute("y", top + innerHeight + 20);
       label.setAttribute("text-anchor", anchor);
-      label.textContent = utcMinute(point.bucket.start_ms);
+      label.textContent = displayTimeLabel(labelTime, displayWidth);
       svg.appendChild(label);
     }
     var axisTitle = document.createElementNS(ns, "text");
@@ -768,7 +955,7 @@
     host.appendChild(svg);
     var legend = document.createElement("div");
     legend.className = "legend";
-    legend.innerHTML = '<span class="legend-requests">requests</span><span class="legend-rejected">rejected</span>';
+    legend.innerHTML = '<span class="legend-requests">requests / min</span><span class="legend-rejected">rejected / min</span>';
     host.appendChild(legend);
     host.appendChild(tooltip);
   }
@@ -865,46 +1052,138 @@
     });
   }
 
+  var MAX_HISTORY_PAGES = 64;
+  var HISTORY_PAGE_LIMIT = 128;
+  var metricsRequest = 0;
+
+  async function fetchHistory(from, until, attempt) {
+    attempt = attempt || 0;
+    var buckets = [];
+    var seen = {};
+    var firstPage = null;
+    var pageCount = 0;
+    var pageFrom = from;
+    var revision = null;
+    var nextStart = null;
+    var truncated = false;
+    for (var page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+      var query = "?from_ms=" + pageFrom + "&until_ms=" + until + "&limit=" + HISTORY_PAGE_LIMIT;
+      if (revision !== null) {
+        query += "&revision=" + revision;
+      }
+      var response = await fetch("/api/v1/history" + query, { credentials: "same-origin" });
+      if (response.status === 401) {
+        window.location.replace("/login");
+        throw new Error("unauthorized");
+      }
+      if (response.status === 409) {
+        if (attempt >= 2) {
+          throw new Error("history changed; retry");
+        }
+        return fetchHistory(from, until, attempt + 1);
+      }
+      if (response.status === 503) {
+        if (attempt >= 2) {
+          throw new Error("history is busy; retry");
+        }
+        await new Promise(function (resolve) {
+          setTimeout(resolve, 1000);
+        });
+        return fetchHistory(from, until, attempt + 1);
+      }
+      if (!response.ok) {
+        throw new Error("history request failed with " + response.status);
+      }
+      var data = await response.json();
+      if (!firstPage) {
+        firstPage = data;
+        revision = data.revision;
+      }
+      pageCount += 1;
+      var pageBuckets = data.buckets || [];
+      pageBuckets.forEach(function (bucket) {
+        if (seen[bucket.start_ms]) {
+          return;
+        }
+        seen[bucket.start_ms] = true;
+        buckets.push(bucket);
+      });
+      nextStart = data.next_start_ms;
+      if (nextStart === null || nextStart === undefined || !pageBuckets.length) {
+        nextStart = nextStart === undefined ? null : nextStart;
+        break;
+      }
+      if (nextStart <= pageFrom || page === MAX_HISTORY_PAGES - 1) {
+        truncated = true;
+        break;
+      }
+      pageFrom = nextStart;
+    }
+    if (nextStart !== null && nextStart !== undefined) {
+      truncated = true;
+    }
+    buckets.sort(function (a, b) {
+      return a.start_ms - b.start_ms;
+    });
+    return {
+      version: 1,
+      instance: firstPage ? firstPage.instance : null,
+      from_ms: from,
+      until_ms: until,
+      range_ms: until - from,
+      expiry_ms: firstPage ? firstPage.expiry_ms : null,
+      oldest_available_ms: firstPage ? firstPage.oldest_available_ms : null,
+      pending_minutes: firstPage ? firstPage.pending_minutes : 0,
+      revision: firstPage ? firstPage.revision : null,
+      returned: buckets.length,
+      pages: pageCount,
+      truncated: truncated,
+      next_start_ms: truncated ? nextStart : null,
+      buckets: buckets,
+    };
+  }
+
+  async function fetchCorrelations(from, until, request) {
+    try {
+      var query = "?from_ms=" + from + "&until_ms=" + until + "&limit=128";
+      var response = await fetch("/api/v1/correlations" + query, { credentials: "same-origin" });
+      if (!response.ok) {
+        throw new Error("correlation request failed with " + response.status);
+      }
+      var page = await response.json();
+      if (request === metricsRequest) {
+        state.correlations = page;
+        renderCorrelations();
+      }
+    } catch (error) {
+      if (request === metricsRequest) {
+        state.correlations = null;
+        renderCorrelations();
+      }
+    }
+  }
+
   function loadMetrics() {
+    var request = ++metricsRequest;
     var until = Date.now();
     var from = until - state.rangeMs;
     text($("metrics-meta"), "Loading history...");
-    var query = "?from_ms=" + from + "&until_ms=" + until + "&limit=128";
-    fetch("/api/v1/history" + query, { credentials: "same-origin" })
-      .then(function (response) {
-        if (response.status === 401) {
-          window.location.replace("/login");
-          throw new Error("unauthorized");
+    fetchCorrelations(from, until, request);
+    fetchHistory(from, until)
+      .then(function (data) {
+        if (request !== metricsRequest) {
+          return;
         }
-        if (!response.ok) {
-          throw new Error("history request failed with " + response.status);
-        }
-        return response.json();
-      })
-      .then(function (page) {
-        state.metrics = page;
+        state.metrics = data;
         renderMetrics();
       })
       .catch(function (error) {
+        if (request !== metricsRequest) {
+          return;
+        }
         if (error.message !== "unauthorized") {
           text($("metrics-meta"), "History unavailable: " + error.message);
         }
-      });
-
-    fetch("/api/v1/correlations" + query, { credentials: "same-origin" })
-      .then(function (response) {
-        if (!response.ok) {
-          throw new Error("correlation request failed with " + response.status);
-        }
-        return response.json();
-      })
-      .then(function (page) {
-        state.correlations = page;
-        renderCorrelations();
-      })
-      .catch(function () {
-        state.correlations = null;
-        renderCorrelations();
       });
   }
 
@@ -921,7 +1200,7 @@
       $("page-subtitle"),
       name === "live"
         ? "Latest state from the WAF; UTC timestamps. Read-only."
-        : "Retained UTC history; grain and coverage are shown with the data."
+        : "Retained UTC history; chart display grain, storage grain, and coverage are shown with the data."
     );
     if (name === "metrics") {
       loadMetrics();

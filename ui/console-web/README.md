@@ -24,14 +24,14 @@ first five minutes) with a labeled legend above the table. Ages are computed
 against the snapshot clock and refreshed at most every ten seconds while the
 stream is idle.
 
-The Metrics chart labels each stored interval's start in UTC. Stored grain gets
-finer toward the present, so each bar represents one interval rather than a
-fixed time span; the tooltip gives the exact bounds and the metrics metadata
-lists the grain changes. Hovering over an interval shows requests, rejected
-requests and their share, LOG detections, upstream failures and timeouts, and
-decoy credential use. The chart is focusable: the left and right arrow keys
-move between intervals, Home and End jump to the edges, and Escape hides the
-tooltip.
+The Metrics chart uses UTC display intervals chosen for the range: one minute
+for the one-hour view, one hour for the 24-hour and seven-day views, and one UTC
+day for the 30-day view. Bars show requests and rejections per minute, averaged
+over complete minutes in each display interval, so retained 1-minute and 1-hour
+storage intervals are comparable; the tooltip also shows interval totals,
+storage grain, and coverage. The chart is focusable: the left and right arrow
+keys move between intervals, Home and End jump to the edges, and Escape hides
+the tooltip.
 
 The UI is intentionally smaller than the fictional interaction prototype in
 `../console-prototype/`. Arrival effects, pause/resume, scroll preservation,
@@ -53,8 +53,10 @@ do not add inline scripts or styles, external fonts, or third-party assets.
 ## Limits
 
 - The browser keeps at most 200 selected events and renders newest first.
-- History requests use at most 128 buckets; the server also caps a response at
-  4 MiB and reports a truncation instead of silently dropping data.
+- History reads page at 128 buckets per request, follow `next_start_ms` while
+  reusing the first page's `revision`, and stop after 64 pages. A page may also
+  be cut at 4 MiB; the next start continues the read. A remaining
+  `next_start_ms` is reported as an incomplete range instead of being hidden.
 - Rates are derived from two consecutive live samples and labeled as such; a
   source generation change resets them.
 - Event-age backgrounds use the latest snapshot clock, so browser clock skew
