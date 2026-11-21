@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "kunato"
-version = "0.21.5"
+version = "0.21.6"
 dependencies = [
  "brotli",
  "brotli-decompressor",
