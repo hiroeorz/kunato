@@ -62,6 +62,7 @@
   }
 
   var DAY_MS = 86400000;
+  var THREE_HOURS_MS = 3 * GRAIN_MS.hour;
   var MAX_BAR_WIDTH = 12;
 
   function displayGrainMs(rangeMs, buckets) {
@@ -71,7 +72,13 @@
     });
     var width = GRAIN_MS.minute;
     if (rangeMs > 2 * GRAIN_MS.hour) {
-      width = rangeMs <= 14 * DAY_MS ? GRAIN_MS.hour : DAY_MS;
+      if (rangeMs <= 2 * DAY_MS) {
+        width = GRAIN_MS.hour;
+      } else if (rangeMs <= 8 * DAY_MS) {
+        width = THREE_HOURS_MS;
+      } else {
+        width = DAY_MS;
+      }
     }
     return Math.max(width, maxGrain);
   }
@@ -618,12 +625,12 @@
     meta.push("expiry: " + utc(data.expiry_ms));
     text($("metrics-meta"), meta.join(" | "));
 
-    renderChart(groupBuckets(buckets, displayWidth), displayWidth);
+    renderChart(groupBuckets(buckets, displayWidth), displayWidth, data.from_ms, data.until_ms);
     renderReasons(buckets);
     renderCorrelations();
   }
 
-  function renderChart(buckets, displayWidth) {
+  function renderChart(buckets, displayWidth, rangeStart, rangeEnd) {
     var host = $("chart");
     host.innerHTML = "";
     if (!buckets.length) {
@@ -675,8 +682,18 @@
     }
     max = Math.max(1, max);
 
-    var spanStart = series[0].group.start_ms;
-    var spanEnd = series[series.length - 1].group.end_ms;
+    var spanStart = rangeStart;
+    var spanEnd = rangeEnd;
+    if (
+      typeof spanStart !== "number" ||
+      typeof spanEnd !== "number" ||
+      !isFinite(spanStart) ||
+      !isFinite(spanEnd) ||
+      spanEnd <= spanStart
+    ) {
+      spanStart = series[0].group.start_ms;
+      spanEnd = series[series.length - 1].group.end_ms;
+    }
     var span = Math.max(1, spanEnd - spanStart);
     function x(ms) {
       return left + ((ms - spanStart) / span) * innerWidth;
@@ -690,7 +707,7 @@
     svg.setAttribute("focusable", "true");
     svg.setAttribute(
       "aria-label",
-      "Requests and rejections per minute by UTC interval. Use the left and right arrow keys to inspect intervals."
+      "Requests and rejections per minute by UTC interval across the selected range. Use the left and right arrow keys to inspect intervals."
     );
 
     function line(y, label) {
@@ -721,8 +738,11 @@
     svg.appendChild(hoverBand);
 
     series.forEach(function (point) {
-      var x0 = x(point.group.start_ms);
-      var x1 = x(point.group.end_ms);
+      var x0 = Math.max(left, x(point.group.start_ms));
+      var x1 = Math.min(left + innerWidth, x(point.group.end_ms));
+      if (x1 <= x0) {
+        return;
+      }
       var slotWidth = x1 - x0;
       var barWidth = Math.max(1, Math.min(slotWidth, MAX_BAR_WIDTH));
       var barX = x0 + (slotWidth - barWidth) / 2;
@@ -760,8 +780,8 @@
 
     function showTooltip(index, event) {
       var point = series[index];
-      var x0 = x(point.group.start_ms);
-      var x1 = x(point.group.end_ms);
+      var x0 = Math.max(left, x(point.group.start_ms));
+      var x1 = Math.min(left + innerWidth, x(point.group.end_ms));
       hoverBand.setAttribute("x", x0);
       hoverBand.setAttribute("width", Math.max(1, x1 - x0));
       hoverBand.setAttribute("visibility", "visible");
@@ -817,6 +837,7 @@
         var svgFrame = svg.getBoundingClientRect();
         var group = series[index].group;
         var center = (x(group.start_ms) + x(group.end_ms)) / 2;
+        center = Math.max(left, Math.min(left + innerWidth, center));
         anchorX = svgFrame.left - frame.left + (center / width) * svgFrame.width;
         anchorY = svgFrame.top - frame.top + ((top + innerHeight / 2) / height) * svgFrame.height;
       }
@@ -910,28 +931,26 @@
       showTooltip(keyboardIndex);
     });
 
-    var labelCount = Math.max(2, Math.min(7, Math.floor(innerWidth / 120)));
-    labelCount = Math.min(labelCount, series.length);
-    var used = {};
+    var labelGap = displayWidth >= DAY_MS ? 120 : 150;
+    var labelCount = Math.max(2, Math.min(7, Math.floor(innerWidth / labelGap)));
     for (var slot = 0; slot < labelCount; slot += 1) {
-      var labelIndex = Math.round((slot * (series.length - 1)) / Math.max(1, labelCount - 1));
-      if (used[labelIndex]) {
-        continue;
-      }
-      used[labelIndex] = true;
-      var labelPoint = series[labelIndex];
-      var x0 = x(labelPoint.group.start_ms);
-      var x1 = x(labelPoint.group.end_ms);
-      var labelX = (x0 + x1) / 2;
+      var fraction = slot / Math.max(1, labelCount - 1);
+      var labelTime = spanStart + fraction * span;
+      var labelX = x(labelTime);
       var anchor = "middle";
-      var labelTime = labelPoint.group.start_ms;
-      if (labelIndex === 0) {
-        labelX = x0;
+      if (slot === 0) {
+        labelX = left;
         anchor = "start";
-      } else if (labelIndex === series.length - 1) {
-        labelX = x1;
+      } else if (slot === labelCount - 1) {
+        labelX = left + innerWidth;
         anchor = "end";
-        labelTime = labelPoint.group.end_ms;
+        labelTime = spanEnd;
+      } else {
+        labelTime = Math.round(labelTime / displayWidth) * displayWidth;
+        if (labelTime <= spanStart || labelTime >= spanEnd) {
+          continue;
+        }
+        labelX = x(labelTime);
       }
       var tick = document.createElementNS(ns, "line");
       tick.setAttribute("x1", labelX);
