@@ -62,6 +62,7 @@
   }
 
   var DAY_MS = 86400000;
+  var MAX_BAR_WIDTH = 12;
 
   function displayGrainMs(rangeMs, buckets) {
     var maxGrain = 0;
@@ -722,18 +723,20 @@
     series.forEach(function (point) {
       var x0 = x(point.group.start_ms);
       var x1 = x(point.group.end_ms);
-      var barWidth = Math.max(1, x1 - x0);
+      var slotWidth = x1 - x0;
+      var barWidth = Math.max(1, Math.min(slotWidth, MAX_BAR_WIDTH));
+      var barX = x0 + (slotWidth - barWidth) / 2;
       var requestHeight = point.requests === null ? 0 : (point.requests / max) * innerHeight;
       var rejectHeight = point.rejected === null ? 0 : (point.rejected / max) * innerHeight;
       var requestsBar = document.createElementNS(ns, "rect");
-      requestsBar.setAttribute("x", x0);
+      requestsBar.setAttribute("x", barX);
       requestsBar.setAttribute("y", top + innerHeight - requestHeight);
       requestsBar.setAttribute("width", barWidth);
       requestsBar.setAttribute("height", Math.max(0, requestHeight));
       requestsBar.setAttribute("fill", "#829ab3");
       svg.appendChild(requestsBar);
       var rejectedBar = document.createElementNS(ns, "rect");
-      rejectedBar.setAttribute("x", x0);
+      rejectedBar.setAttribute("x", barX);
       rejectedBar.setAttribute("y", top + innerHeight - rejectHeight);
       rejectedBar.setAttribute("width", barWidth);
       rejectedBar.setAttribute("height", Math.max(0, rejectHeight));

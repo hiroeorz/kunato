@@ -29,9 +29,11 @@ for the one-hour view, one hour for the 24-hour and seven-day views, and one UTC
 day for the 30-day view. Bars show requests and rejections per minute, averaged
 over complete minutes in each display interval, so retained 1-minute and 1-hour
 storage intervals are comparable; the tooltip also shows interval totals,
-storage grain, and coverage. The chart is focusable: the left and right arrow
-keys move between intervals, Home and End jump to the edges, and Escape hides
-the tooltip.
+storage grain, and coverage. Bars are capped at a fixed maximum width and
+centered in their display interval, so the sparse 24-hour and 30-day views use
+the same bar thickness as the one-hour view. The chart is focusable: the left
+and right arrow keys move between intervals, Home and End jump to the edges, and
+Escape hides the tooltip.
 
 The UI is intentionally smaller than the fictional interaction prototype in
 `../console-prototype/`. Arrival effects, pause/resume, scroll preservation,
