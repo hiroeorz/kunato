@@ -195,30 +195,52 @@ const ATTACK_CLASSES: &[AttackClass] = &[
     },
 ];
 
+const CVE_NAME: &str = "cve";
+const OTHER_NAME: &str = "other";
+const CVE_INDEX: usize = ATTACK_CLASSES.len();
+const OTHER_INDEX: usize = CVE_INDEX + 1;
+pub(crate) const CLASS_COUNT: usize = OTHER_INDEX + 1;
+
 fn is_cve(category: &str) -> bool {
     category
         .get(..4)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cve-"))
 }
 
-pub(crate) fn classify(category: &str) -> Option<&'static AttackClass> {
+/// Stable dense index for a category-based attack class counter.
+pub(crate) fn class_index(category: &str) -> usize {
     if is_cve(category) {
-        return None;
+        return CVE_INDEX;
     }
-    ATTACK_CLASSES.iter().find(|class| {
-        class
-            .categories
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(category))
-    })
+    ATTACK_CLASSES
+        .iter()
+        .position(|class| {
+            class
+                .categories
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(category))
+        })
+        .unwrap_or(OTHER_INDEX)
+}
+
+pub(crate) fn class_name(index: usize) -> &'static str {
+    match ATTACK_CLASSES.get(index) {
+        Some(class) => class.name,
+        None if index == CVE_INDEX => CVE_NAME,
+        None => OTHER_NAME,
+    }
+}
+
+pub(crate) fn class_names() -> impl Iterator<Item = &'static str> {
+    ATTACK_CLASSES
+        .iter()
+        .map(|class| class.name)
+        .chain([CVE_NAME, OTHER_NAME])
 }
 
 /// The short name shown in table and JSON output.
 pub(crate) fn attack_name(category: &str) -> &'static str {
-    if is_cve(category) {
-        return "cve";
-    }
-    classify(category).map_or("other", |class| class.name)
+    class_name(class_index(category))
 }
 
 #[derive(Debug, Clone)]

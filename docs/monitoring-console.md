@@ -61,7 +61,7 @@ The following distinctions apply throughout these documents:
 | Remote transport | HTTPS and user authentication alongside the source allowlist | Implemented with a token, server-side sessions, and TLS |
 | Certificates | Use the WAF's public-443 ACME acquisition path to supply a certificate usable by the private console listener | Implemented for a PEM chain or the combined ACME cache `cert.pem`; reload on change |
 | History | Persist console history locally with embedded SQLite | Implemented end to end, including HTTP history reads |
-| Statistics | UTC intervals, independent overall totals, and separate fixed primary-rejection-reason series | Phase 3 reason rows and aggregates implemented |
+| Statistics | UTC intervals, independent overall totals, separate fixed primary-rejection-reason series, and attack-class/cause detail | Reason rows and bounded rejection-class counters implemented |
 | Retention | 1/5/10/20/60-minute precision tiers, hourly history through 30 days, then expiry | Phase 3 logical expiry and bounded cleanup implemented |
 | Writes | Bounded buffering and batched writes, independent of request forwarding | Implemented in the console runtime; WAF request path unchanged |
 | Decoys | Treat credential-use attempts as a first-class signal in both views | Counted, persisted, correlated, and shown in the UI |

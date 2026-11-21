@@ -168,6 +168,9 @@ pub struct HistoryBucket {
     /// Stored in separate reason rows; populated by the history read API.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reasons: BTreeMap<RejectionReason, CountStatistics>,
+    /// Attack classes and built-in rejection causes, keyed by stable class name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rejection_classes: BTreeMap<String, CountStatistics>,
     pub coverage: HistoryCoverage,
     pub connections: ConnectionStatistics,
     pub outcomes: Option<Outcomes>,
@@ -250,6 +253,16 @@ impl HistoryBucket {
                 complete &= counts.into_iter().try_fold(0, add)? == rejected;
             }
         }
+        let class_keys = values
+            .iter()
+            .filter_map(|value| value.counters.rejection_classes.as_ref())
+            .flat_map(|classes| classes.keys().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in &class_keys {
+            result
+                .rejection_classes
+                .insert(key.clone(), CountStatistics::default());
+        }
         result.coverage = HistoryCoverage {
             represented_minutes: 1,
             complete_minutes: u32::from(complete),
@@ -289,6 +302,19 @@ impl HistoryBucket {
                     .ok_or(Error::Invalid("missing history reason"))?
                     .merge(&CountStatistics::sample(count, complete))?;
             }
+            for key in &class_keys {
+                let count = value
+                    .counters
+                    .rejection_classes
+                    .as_ref()
+                    .and_then(|classes| classes.get(key))
+                    .copied();
+                result
+                    .rejection_classes
+                    .get_mut(key)
+                    .ok_or(Error::Invalid("missing history rejection class"))?
+                    .merge(&CountStatistics::sample(count, complete))?;
+            }
             result.coverage.omitted_events = option_sum(
                 result.coverage.omitted_events,
                 value.coverage.omitted_events,
@@ -326,6 +352,7 @@ impl HistoryBucket {
             .counters
             .values_mut()
             .chain(result.reasons.values_mut())
+            .chain(result.rejection_classes.values_mut())
         {
             statistics.known_minutes = u32::from(statistics.known_minutes != 0);
         }
@@ -340,6 +367,15 @@ impl HistoryBucket {
     pub(crate) fn merge(start_ms: u64, grain: Grain, children: &[Self]) -> Result<Self, Error> {
         let mut result = Self::empty(start_ms, grain);
         result.coverage.omitted_events = Some(0);
+        let class_keys = children
+            .iter()
+            .flat_map(|child| child.rejection_classes.keys().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in &class_keys {
+            result
+                .rejection_classes
+                .insert(key.clone(), CountStatistics::default());
+        }
         let mut end = start_ms;
         for child in children {
             child.validate()?;
@@ -372,6 +408,19 @@ impl HistoryBucket {
                             .reasons
                             .get(&reason)
                             .ok_or(Error::Invalid("missing history reason"))?,
+                    )?;
+            }
+            for key in &class_keys {
+                result
+                    .rejection_classes
+                    .get_mut(key)
+                    .ok_or(Error::Invalid("missing history rejection class"))?
+                    .merge(
+                        &child
+                            .rejection_classes
+                            .get(key)
+                            .cloned()
+                            .unwrap_or_default(),
                     )?;
             }
             result.coverage.represented_minutes += child.coverage.represented_minutes;
@@ -441,6 +490,7 @@ impl HistoryBucket {
                 .into_iter()
                 .map(|reason| (reason, CountStatistics::default()))
                 .collect(),
+            rejection_classes: BTreeMap::new(),
             coverage: HistoryCoverage::default(),
             connections: ConnectionStatistics::default(),
             outcomes: None,
@@ -510,7 +560,15 @@ impl HistoryBucket {
         {
             return Err(Error::Invalid("invalid history interval or coverage"));
         }
-        for value in self.counters.values().chain(self.reasons.values()) {
+        for class in self.rejection_classes.keys() {
+            super::model::text(class, 64)?;
+        }
+        for value in self
+            .counters
+            .values()
+            .chain(self.reasons.values())
+            .chain(self.rejection_classes.values())
+        {
             if value.known_minutes > self.coverage.represented_minutes
                 || value.complete_minutes > value.known_minutes
                 || value.complete_minutes > self.coverage.complete_minutes

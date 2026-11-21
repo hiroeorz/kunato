@@ -25,7 +25,8 @@ pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 const EXCLUSIVE: u64 = 1 << 63;
 const EMPTY: u64 = u64::MAX;
 const REASONS: usize = 16;
-const STATUS: usize = REASONS + RejectionReason::ALL.len();
+const ATTACK_CLASSES: usize = REASONS + RejectionReason::ALL.len();
+const STATUS: usize = ATTACK_CLASSES + crate::logs::ATTACK_CLASS_COUNT;
 const LATENCY: usize = STATUS + 500;
 const LATENCY_COUNT: usize = LATENCY + 15;
 const LATENCY_SUM: usize = LATENCY_COUNT + 1;
@@ -417,6 +418,7 @@ impl Observations {
             status: None,
             category: None,
             rule: None,
+            attack_class: None,
             reason: None,
             decoy: Some(DecoyEvidence {
                 credential_id: detail.credential_id.into(),
@@ -709,6 +711,10 @@ impl Default for Observations {
 
 fn counters(load: impl Fn(usize) -> u64) -> Counters {
     Counters {
+        rejection_classes: Some(rejection_classes(
+            |index| load(ATTACK_CLASSES + index),
+            |reason| load(REASONS + reason as usize),
+        )),
         requests: Some(load(Count::Requests as usize)),
         rejected_requests: Some(load(Count::Rejected as usize)),
         log_requests: Some(load(Count::Logged as usize)),
@@ -732,6 +738,70 @@ fn counters(load: impl Fn(usize) -> u64) -> Counters {
                 .collect::<BTreeMap<_, _>>(),
         ),
     }
+}
+
+fn rejection_reason_class(reason: RejectionReason) -> &'static str {
+    match reason {
+        RejectionReason::Rule | RejectionReason::ResponseRule => "other",
+        RejectionReason::RateLimit => "rate-limit",
+        RejectionReason::Ban => "ban",
+        RejectionReason::Overload => "overload",
+        RejectionReason::ClientIdentity => "client-identity",
+        RejectionReason::Host => "host",
+        RejectionReason::AdminAccess => "admin-access",
+        RejectionReason::Body => "body-limit",
+        RejectionReason::Decode => "decode",
+        RejectionReason::Form => "form",
+        RejectionReason::Upload => "malicious-upload",
+        RejectionReason::Graphql => "graphql",
+        RejectionReason::Saml => "saml",
+        RejectionReason::PhpRequest => "php-request",
+        RejectionReason::PhpResponse => "php-response",
+        RejectionReason::Hardening => "hardening",
+        RejectionReason::Jwt => "jwt",
+        RejectionReason::Decoy => "decoy",
+        RejectionReason::Behavior => "behavior",
+        RejectionReason::Protocol => "protocol",
+        RejectionReason::ResponseInspection => "response-inspection",
+    }
+}
+
+fn rejection_class(reason: RejectionReason, category: Option<&str>) -> &'static str {
+    if matches!(
+        reason,
+        RejectionReason::Rule | RejectionReason::ResponseRule
+    ) {
+        return crate::logs::observation_attack_name(category.unwrap_or(""));
+    }
+    rejection_reason_class(reason)
+}
+
+fn rejection_classes(
+    load_attack: impl Fn(usize) -> u64,
+    load_reason: impl Fn(RejectionReason) -> u64,
+) -> BTreeMap<String, u64> {
+    let mut classes = crate::logs::attack_class_names()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            let count = load_attack(index);
+            (count != 0).then(|| (name.to_owned(), count))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for reason in RejectionReason::ALL {
+        if matches!(
+            reason,
+            RejectionReason::Rule | RejectionReason::ResponseRule
+        ) {
+            continue;
+        }
+        let count = load_reason(reason);
+        if count != 0 {
+            *classes
+                .entry(rejection_reason_class(reason).to_owned())
+                .or_default() += count;
+        }
+    }
+    classes
 }
 
 fn minute(time: u64) -> u64 {
@@ -977,16 +1047,37 @@ pub fn dimension_match(phase: Phase, category: &str, rule: &str, action: crate::
 }
 
 pub fn reject(reason: RejectionReason) {
+    reject_detail(reason, None);
+}
+
+/// Record a rule-based rejection together with the category that classified it.
+pub fn reject_rule(reason: RejectionReason, category: &str, rule: &str) {
+    reject_detail(reason, Some((category, rule)));
+}
+
+fn reject_detail(reason: RejectionReason, matched: Option<(&str, &str)>) {
     let _ = CURRENT.try_with(|value| {
         if let Ok(mut value) = value.try_borrow_mut()
             && !value.rejected
         {
+            let (category, rule) = matched.unzip();
+            let attack_class = rejection_class(reason, category);
             value.rejected = true;
             value.reason = Some(reason);
             value.history.count(value.start, Count::Rejected);
             value
                 .history
                 .update(value.start, REASONS + reason as usize, 1);
+            if matches!(
+                reason,
+                RejectionReason::Rule | RejectionReason::ResponseRule
+            ) {
+                value.history.update(
+                    value.start,
+                    ATTACK_CLASSES + crate::logs::attack_class_index(category.unwrap_or("")),
+                    1,
+                );
+            }
             let counter = match reason {
                 RejectionReason::ResponseRule => Some(Count::ResponseBlocks),
                 RejectionReason::RateLimit => Some(Count::RateLimited),
@@ -1013,8 +1104,11 @@ pub fn reject(reason: RejectionReason) {
                     method: value.method.clone(),
                     path: event_path(&value.path),
                     status: None,
-                    category: None,
-                    rule: None,
+                    category: category
+                        .filter(|value| value.len() <= 128)
+                        .map(str::to_owned),
+                    rule: rule.filter(|value| value.len() <= 128).map(str::to_owned),
+                    attack_class: Some(attack_class.to_owned()),
                     reason: Some(format!("{reason:?}")),
                     decoy: None,
                     gap: None,
@@ -1068,6 +1162,7 @@ pub fn service_failure(timeout: bool) {
                 status: Some(if timeout { 504 } else { 502 }),
                 category: None,
                 rule: None,
+                attack_class: None,
                 reason: Some(
                     if timeout {
                         "upstream timeout"
@@ -1102,6 +1197,7 @@ pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
                 status: None,
                 category: (category.len() <= 128).then(|| category.into()),
                 rule: (rule.len() <= 128).then(|| rule.into()),
+                attack_class: Some(crate::logs::observation_attack_name(category).to_owned()),
                 reason: None,
                 decoy: None,
                 gap: None,
@@ -1270,7 +1366,62 @@ mod tests {
             snapshot.counters.rejection_reasons.as_ref().unwrap()[&RejectionReason::Rule],
             1
         );
+        assert_eq!(
+            snapshot.counters.rejection_classes.as_ref().unwrap()["other"],
+            1
+        );
         assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(snapshot.events[0].attack_class.as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn rejection_classes_partition_attack_and_builtin_causes() {
+        let history = history();
+        observe(history.clone(), async {
+            reject_rule(RejectionReason::Rule, "sql-injection", "union-select");
+            Response::builder().status(403).body(()).unwrap()
+        })
+        .await;
+        observe(history.clone(), async {
+            reject_rule(RejectionReason::ResponseRule, "response-leaks", "secret");
+            Response::builder().status(403).body(()).unwrap()
+        })
+        .await;
+        observe(history.clone(), async {
+            reject(RejectionReason::Upload);
+            Response::builder().status(403).body(()).unwrap()
+        })
+        .await;
+        observe(history.clone(), async {
+            reject(RejectionReason::RateLimit);
+            Response::builder().status(429).body(()).unwrap()
+        })
+        .await;
+        let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
+        assert_eq!(snapshot.counters.rejected_requests, Some(4));
+        let classes = snapshot.counters.rejection_classes.as_ref().unwrap();
+        assert_eq!(classes["sql-injection"], 1);
+        assert_eq!(classes["info-disclosure"], 1);
+        assert_eq!(classes["malicious-upload"], 1);
+        assert_eq!(classes["rate-limit"], 1);
+        assert_eq!(classes.values().sum::<u64>(), 4);
+        let rules = snapshot
+            .events
+            .iter()
+            .filter(|event| event.category.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].category.as_deref(), Some("sql-injection"));
+        assert_eq!(rules[0].rule.as_deref(), Some("union-select"));
+        assert_eq!(rules[0].attack_class.as_deref(), Some("sql-injection"));
+        assert_eq!(rules[1].category.as_deref(), Some("response-leaks"));
+        assert_eq!(rules[1].attack_class.as_deref(), Some("info-disclosure"));
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.attack_class.as_deref() == Some("malicious-upload"))
+        );
     }
 
     #[tokio::test]
@@ -1584,6 +1735,7 @@ mod tests {
                     status: None,
                     category: None,
                     rule: None,
+                    attack_class: None,
                     reason: Some("kdt1.secret".into()),
                     decoy: None,
                     gap: None,

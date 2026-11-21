@@ -255,6 +255,15 @@ gauges and response-status distributions remain overall measurements. Phase 4
 measures reason-specific header-decision latency independently at source; it
 is not reconstructed from selected events.
 
+A separate bounded rejection-class detail partitions the same rejected
+requests by attack class or built-in cause. Rule blocks use the category-based
+attack class already shared with `kunato log`; other terminal reasons map to
+their cause (rate limit, host policy, form guard, and so on). Each rejected
+request contributes once, and a complete interval's class counts sum to its
+overall rejection total. The detail is stored in the history interval payload
+rather than as additional reason rows. Missing classes in older intervals stay
+unknown and are never reinterpreted as measured zero.
+
 ### 4.2 Extrema, averages, and merge inputs
 
 For overall and reason-specific count series, retain total count, valid

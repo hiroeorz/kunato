@@ -3000,11 +3000,15 @@ async fn process_inner(
             &blocked.rule,
             crate::config::Action::Block,
         );
-        crate::observations::reject(if blocked.rate_limited {
-            crate::console::model::RejectionReason::RateLimit
-        } else {
-            crate::console::model::RejectionReason::Rule
-        });
+        crate::observations::reject_rule(
+            if blocked.rate_limited {
+                crate::console::model::RejectionReason::RateLimit
+            } else {
+                crate::console::model::RejectionReason::Rule
+            },
+            &blocked.category,
+            &blocked.rule,
+        );
         context.metrics.blocked.fetch_add(1, Ordering::Relaxed);
         if blocked.rate_limited {
             context.metrics.rule_limited.fetch_add(1, Ordering::Relaxed);

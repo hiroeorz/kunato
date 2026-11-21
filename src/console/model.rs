@@ -131,6 +131,9 @@ pub struct Counters {
     pub response_log_requests: Option<u64>,
     pub aborted_requests: Option<u64>,
     pub rejection_reasons: Option<BTreeMap<RejectionReason, u64>>,
+    /// Rule-block attack classes and built-in rejection causes. A rejected
+    /// request contributes once; missing keys are unrecorded, never zero.
+    pub rejection_classes: Option<BTreeMap<String, u64>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +289,8 @@ pub struct EventRecord {
     pub status: Option<u16>,
     pub category: Option<String>,
     pub rule: Option<String>,
+    /// Category-based attack class for a rule event, or the rejection cause.
+    pub attack_class: Option<String>,
     pub reason: Option<String>,
     pub decoy: Option<DecoyEvidence>,
     pub gap: Option<GapEvidence>,
@@ -347,6 +352,9 @@ impl MetricBucket {
         }
         if let Some(site) = &self.site {
             site_identifier(site, 64)?;
+        }
+        if let Some(classes) = &self.counters.rejection_classes {
+            rejection_classes(classes)?;
         }
         if u64::from(self.coverage.observed_ms) > MINUTE_MS {
             return Err(Error::Invalid("coverage exceeds one minute"));
@@ -422,6 +430,9 @@ impl EventRecord {
         if let Some(rule) = &self.rule {
             text(rule, 128)?;
         }
+        if let Some(attack_class) = &self.attack_class {
+            text(attack_class, 64)?;
+        }
         if let Some(reason) = &self.reason {
             text(reason, 512)?;
         }
@@ -458,6 +469,16 @@ impl EventRecord {
         }
         Ok(())
     }
+}
+
+pub(crate) fn rejection_classes(classes: &BTreeMap<String, u64>) -> Result<(), Error> {
+    if classes.len() > 64 {
+        return Err(Error::Invalid("too many rejection classes"));
+    }
+    for class in classes.keys() {
+        text(class, 64)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn site_identifier(value: &str, max: usize) -> Result<(), Error> {

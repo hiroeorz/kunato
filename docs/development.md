@@ -1635,9 +1635,10 @@ open/close endpoints; see [Maintenance mode](#maintenance-mode) and
 collector and still accepts version 2 input. It shares the existing loopback
 Host/forwarding-marker restrictions, rejects query parameters, and returns
 `Cache-Control: no-store`. It includes a process generation, cumulative
-statistics, ten bounded UTC minute slots, sampled connection data, optional
-bounded site/rule/status/latency/ranking measurements, and selected bounded
-event detail. Basic request and rejection measurements update in memory without
+statistics, ten bounded UTC minute slots, sampled connection data,
+attack-class/cause rejection detail, optional bounded
+site/rule/status/latency/ranking measurements, and selected bounded event
+detail. Basic request and rejection measurements update in memory without
 access-log or database writes. See
 [Phase 4 source measurements](monitoring-console-phase4.md) for field
 semantics and bounds. The console process that consumes this endpoint is
@@ -1784,8 +1785,11 @@ reconnects with the latest state.
 
 The console UI shows measured data only. It labels unavailable values instead of
 rendering zero, shows the returned grain and effective bounds, and does not
-replay live arrival effects for backlog. Historical event drill-down, CSV
-export, comparison periods, and complete journal ingestion remain future work;
+replay live arrival effects for backlog. Rejection detail uses the category-based
+attack classes shared with `kunato log`, with built-in guard causes kept separate;
+older intervals without class detail remain unavailable or unrecorded. Historical event
+drill-down, CSV export, comparison periods, and complete journal ingestion remain
+future work;
 see [remaining work](monitoring-console-remaining.md).
 
 #### First run and storage

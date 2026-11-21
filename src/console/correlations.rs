@@ -328,6 +328,7 @@ mod tests {
             status: None,
             category: None,
             rule: None,
+            attack_class: None,
             reason: None,
             decoy: Some(DecoyEvidence {
                 credential_id: "00000000000000000000000000000000".into(),

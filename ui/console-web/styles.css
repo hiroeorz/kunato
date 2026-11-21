@@ -450,6 +450,90 @@ main {
   color: var(--orange);
 }
 
+.reject-detail {
+  margin: -8px 0 20px;
+  padding: 14px 16px 16px;
+  border: 1px solid #dfe3e9;
+  border-radius: 10px;
+  background: #edf0f4;
+  box-shadow: inset 0 2px 5px rgba(32, 44, 61, 0.06);
+}
+
+.reject-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 16px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.reject-detail h2 {
+  color: #7d8694;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.reject-detail-note {
+  color: #8b939f;
+  font-size: 10px;
+}
+
+.reject-detail-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+}
+
+.reject-detail-card {
+  min-width: 0;
+  padding: 8px 10px 9px;
+  border: 1px solid #e2e6ec;
+  border-radius: 7px;
+  background: #ffffff;
+  box-shadow: 0 1px 1px rgba(32, 44, 61, 0.03);
+}
+
+.reject-detail-card strong {
+  display: block;
+  color: var(--red);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reject-detail-card span {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.reject-detail-card small {
+  display: block;
+  margin-top: 2px;
+  color: #9aa1ab;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reject-detail-card.is-unrecorded strong {
+  color: #9aa1ab;
+  font-weight: 600;
+}
+
+.reject-detail-empty {
+  grid-column: 1 / -1;
+  padding: 2px 1px;
+  color: #8b939f;
+  font-size: 11px;
+}
+
 .panel-grid {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) minmax(0, 2fr);
@@ -469,6 +553,15 @@ main {
 .panel > h2 {
   padding: 20px 22px 0;
   font-size: 15px;
+}
+
+.panel > h3 {
+  padding: 18px 22px 0;
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .panel > p.small {
@@ -1189,8 +1282,8 @@ th.num {
 
 .topo-legend-swatch.is-fabric {
   border-style: dashed;
-  border-color: #c9d1dc;
-  background: #fbfcfd;
+  border-color: #dcb8b6;
+  background: #fdf1f0;
 }
 
 .topo-legend-swatch.is-upstream {
@@ -1211,11 +1304,31 @@ th.num {
 
 /* SVG topology */
 
+.topo-fabric-wash {
+  fill: #c66361;
+  fill-opacity: 0.08;
+  pointer-events: none;
+}
+
 .topo-fabric {
   fill: url(#topo-dot-grid);
-  stroke: #e6eaef;
+  stroke: #dcb8b6;
   stroke-width: 1;
   stroke-dasharray: 3 5;
+}
+
+.topo-phase-arrow {
+  fill: none;
+  stroke: #c2c8d1;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.topo-phase-label {
+  fill: #9ba3ae;
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
 }
 
 .topo-fabric-label {
@@ -1269,6 +1382,7 @@ th.num {
   fill: #ffffff;
   stroke: #e0e4ea;
   stroke-width: 1;
+  filter: drop-shadow(0 2px 3px rgba(32, 44, 61, 0.12));
   transition:
     fill 0.22s,
     stroke 0.22s;
@@ -1382,26 +1496,19 @@ th.num {
   opacity: 0.6;
 }
 
-.topo-internet-card {
-  fill: url(#topo-internet-fill);
-  stroke: #3a5278;
-  stroke-width: 1;
+.topo-internet-disk {
+  fill: url(#topo-internet-disk);
+  stroke: #3e6b9e;
+  stroke-width: 1.2;
   transition: stroke 0.25s;
 }
 
 .topo-internet-halo {
   fill: none;
-  stroke: #9eacbf;
+  stroke: #9db5d4;
   stroke-width: 1;
   stroke-dasharray: 3 5;
-  opacity: 0.55;
-}
-
-.topo-internet-kicker {
-  fill: #91a8c9;
-  font-size: 7.5px;
-  font-weight: 700;
-  letter-spacing: 1.3px;
+  opacity: 0.35;
 }
 
 .topo-internet-title {
@@ -1409,51 +1516,22 @@ th.num {
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 1.4px;
+  text-anchor: middle;
 }
 
 .topo-internet-sub {
-  fill: #8fa6c7;
+  fill: #cfe1f2;
   font-size: 8px;
   letter-spacing: 1px;
-}
-
-.topo-internet-untrusted {
-  fill: #e4b06b;
-  font-size: 7.5px;
-  font-weight: 700;
-  letter-spacing: 1.2px;
-}
-
-.topo-internet-divider {
-  stroke: #ffffff;
-  stroke-opacity: 0.12;
-}
-
-.topo-internet-origin-label {
-  fill: #6f89ad;
-  font-size: 6.8px;
-  font-weight: 700;
-  letter-spacing: 1.2px;
-}
-
-.topo-internet-origin {
-  fill: #dce9fa;
-  font-size: 8.4px;
-  font-weight: 600;
-}
-
-.topo-internet-transport {
-  fill: #7f97ba;
-  font-size: 7.4px;
-  letter-spacing: 0.5px;
+  text-anchor: middle;
 }
 
 .topo-globe circle,
 .topo-globe ellipse,
 .topo-globe path {
   fill: none;
-  stroke: #8db8e8;
-  stroke-width: 1.15;
+  stroke: #a9d0f3;
+  stroke-width: 1.2;
 }
 
 .topo-globe .topo-globe-dot {
@@ -1461,8 +1539,8 @@ th.num {
   stroke: none;
 }
 
-.topo-internet.is-receiving .topo-internet-card {
-  stroke: #7fb7ea;
+.topo-internet.is-receiving .topo-internet-disk {
+  stroke: #8fc6f0;
 }
 
 .topo-internet.is-receiving .topo-internet-halo {

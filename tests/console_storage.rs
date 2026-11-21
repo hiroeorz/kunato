@@ -28,6 +28,7 @@ fn event(sequence: u64) -> EventRecord {
         status: Some(403),
         category: Some("probe".into()),
         rule: Some("admin-probe".into()),
+        attack_class: Some("other".into()),
         reason: None,
         decoy: None,
         gap: None,
@@ -88,6 +89,19 @@ fn storage(temp: &tempfile::TempDir) -> StorageConfig {
     let mut config = StorageConfig::new(temp.path().join("history"));
     config.clock = || 120_000;
     config
+}
+
+#[test]
+fn rejection_class_detail_is_bounded() {
+    let mut value = batch(1);
+    let metric = &mut value.metrics[0];
+    metric.counters.rejection_classes = Some([("xss".to_owned(), 2)].into_iter().collect());
+    metric.validate().unwrap();
+    metric.counters.rejection_classes = Some([("x".repeat(65), 1)].into_iter().collect());
+    assert!(metric.validate().is_err());
+    metric.counters.rejection_classes =
+        Some((0..65).map(|index| (format!("class-{index}"), 1)).collect());
+    assert!(metric.validate().is_err());
 }
 
 #[test]

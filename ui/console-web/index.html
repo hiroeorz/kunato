@@ -99,6 +99,18 @@
             </article>
           </div>
 
+          <section class="reject-detail" aria-labelledby="live-reject-detail-title">
+            <div class="reject-detail-head">
+              <h2 id="live-reject-detail-title">Rejection detail</h2>
+              <p class="reject-detail-note" id="live-reject-detail-note">
+                Waiting for the first snapshot.
+              </p>
+            </div>
+            <div class="reject-detail-cards" id="live-reject-cards">
+              <p class="reject-detail-empty">Waiting for the first snapshot.</p>
+            </div>
+          </section>
+
           <section
             class="panel topo-panel"
             id="topo-panel"
@@ -114,7 +126,7 @@
                 </p>
                 <h2 id="topo-title">Real-time packet intercept map</h2>
                 <p class="topo-last" id="topo-last">
-                  Waiting for the first detection from the internet edge.
+                  Waiting for the first detection from the internet globe.
                 </p>
               </div>
               <div class="topo-controls">
@@ -213,6 +225,7 @@
                     <th scope="col">UTC time</th>
                     <th scope="col">Kind</th>
                     <th scope="col">Disposition</th>
+                    <th scope="col">Attack type</th>
                     <th scope="col">Reason / rule</th>
                     <th scope="col">Method</th>
                     <th scope="col">Path</th>
@@ -221,7 +234,7 @@
                   </tr>
                 </thead>
                 <tbody id="live-events">
-                  <tr><td colspan="8" class="muted">No events received yet.</td></tr>
+                  <tr><td colspan="9" class="muted">No events received yet.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -298,9 +311,31 @@
             <section class="panel" aria-labelledby="reasons-title">
               <h2 id="reasons-title">Rejection reasons</h2>
               <p class="muted small">
-                A rejected request contributes once to one primary reason.
-                Shares use observed rejections in the fetched range.
+                Both tables partition the same rejected requests; each request
+                contributes once per table. Shares use observed rejections in the
+                fetched range.
               </p>
+              <h3>Attack type and cause</h3>
+              <p class="muted small">
+                Rule blocks use the attack class of their category; built-in guards
+                use their rejection cause. Older intervals without this detail remain
+                unrecorded, never zero.
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Attack type / cause</th>
+                      <th scope="col">Count</th>
+                      <th scope="col">Share of rejections</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rejection-classes">
+                    <tr><td colspan="3" class="muted">No history loaded.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <h3>Terminal mechanism</h3>
               <div class="table-wrap">
                 <table>
                   <thead>

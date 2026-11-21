@@ -22,13 +22,16 @@ page makes no external requests.
 The Real-time monitor includes a light-theme **edge shield topology** above the
 event table. It reads from the same snapshot and makes no additional requests:
 
-- A dark **internet edge** marks the untrusted ingress side with a globe,
-  public-network labeling, source address, and transport notes. Six defense
-  layers (Admin Gate, Rate / Ban, YAML Rules, Decoy Ward, Payload Guards, and
-  Behavior) sit inside a dotted defense fabric, with trusted upstream origins on
-  the right.
+- A circular blue-gradient **internet globe** marks the untrusted ingress
+  side, with the INTERNET / PUBLIC NETWORK labels above the globe icon.
+  Traffic leaves the globe and enters the Admin Gate. Six defense layers
+  (Admin Gate, Rate / Ban, YAML Rules, Decoy Ward, Payload Guards, and
+  Behavior) sit inside a faintly red-washed, dotted defense fabric that marks
+  the inspection boundary, with trusted upstream origins on the right. A
+  right-pointing arrow on the top edge and a left-pointing arrow on the bottom
+  edge mark the request and response directions.
 - **Real-time mode** is the default. Each newly received event sends a packet
-  along the route from the internet edge to the layer derived from its kind,
+  along the route from the internet globe to the layer derived from its kind,
   reason, and disposition. A colored spark bursts at that layer, the node keeps
   a short colored highlight, and the route edges pulse in the layer color.
   Multiple events in one update light different layers in their own colors.
@@ -51,6 +54,28 @@ event table. It reads from the same snapshot and makes no additional requests:
 Node counters describe the retained browser event window, not lifetime totals.
 The mapping is illustrative: it shows where the recorded event was handled and
 does not prove malicious intent or a successful compromise.
+
+## Rejection detail
+
+Below the summary cards, the Real-time monitor shows a recessed **Rejection
+detail** strip. Each card is one attack type or built-in rejection cause for
+rejections measured since the source generation started. Rule blocks use the
+same category-based attack classes as `kunato log` (SQL injection, XSS, path
+traversal, CVE signatures, and so on); built-in guards use their cause, such as
+rate limit, form guard, or response inspection. A request contributes once, and
+the cards show its share of all rejected requests. Unrecorded causes are shown
+separately rather than silently omitted.
+
+The Recent detections table has an Attack type column populated from the same
+classification. Rejected rule events also retain their category and rule name,
+and the topology focus summary shows the attack type with the matched rule.
+
+The Metrics view keeps the terminal-mechanism table and adds an **Attack type
+and cause** table from the retained per-minute class counters. Older intervals
+that predate the class counters remain unavailable or unrecorded, never
+zero. The live snapshot reports the cumulative map as
+`counters.rejection_classes`; history intervals report per-class count
+statistics as `rejection_classes`.
 
 The page follows the prototype's visual language (light theme, warm accent,
 dark sidebar) while keeping the minimal read-only feature set. Event rows carry

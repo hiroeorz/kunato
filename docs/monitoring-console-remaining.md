@@ -22,7 +22,7 @@ Related: [console design](monitoring-console.md),
 | Source API | Loopback `GET /console/snapshot` (version 3, version 2 input accepted) on the admin listener |
 | Collection | `src/console/collector.rs`: one-second polling, coalescing, persistence admission, bounded memory, health |
 | Storage | SQLite schema version 4, atomic writes/checkpoints, replay, capacity budget, private paths |
-| History | UTC minute input, 1/5/10/20/60-minute materialization, 22 primary rejection reasons, 30-day logical expiry |
+| History | UTC minute input, 1/5/10/20/60-minute materialization, 22 primary rejection reasons, attack-class/cause detail, 30-day logical expiry |
 | Reads | Bounded `HistoryReader`, `Store::history`, `Store::correlations` |
 | Correlation | Compact decoy evidence with 30-day/4,096-record bounds |
 | Console runtime | `kunato console`: collector loop, health publication, bounded shutdown, independent process |

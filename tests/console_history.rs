@@ -79,6 +79,13 @@ fn minute(start_ms: u64, requests: u64, reason: RejectionReason, rejected: u64) 
     }
 }
 
+fn classes(values: &[(&str, u64)]) -> std::collections::BTreeMap<String, u64> {
+    values
+        .iter()
+        .map(|(name, count)| ((*name).to_owned(), *count))
+        .collect()
+}
+
 fn batch(generation: &str, sequence: u64, mut metrics: Vec<MetricBucket>) -> WriteBatch {
     for metric in &mut metrics {
         metric.revision = sequence;
@@ -351,6 +358,42 @@ fn utc_tiers_preserve_all_reasons_totals_extrema_and_distributions() {
     assert_eq!(
         reopened.history(&query(BASE, NOW)).unwrap().buckets,
         page.buckets
+    );
+}
+
+#[test]
+fn rejection_classes_merge_across_coarsening_and_keep_unknown_minutes() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(&temp, early);
+    let mut store = Store::open(config.clone()).unwrap();
+    let mut first = minute(BASE, 10, RejectionReason::Rule, 4);
+    first.counters.rejection_classes = Some(classes(&[("sql-injection", 3), ("xss", 1)]));
+    let mut second = minute(BASE + MINUTE_MS, 10, RejectionReason::Rule, 2);
+    second.counters.rejection_classes = Some(classes(&[("sql-injection", 2)]));
+    let unknown = minute(BASE + 2 * MINUTE_MS, 10, RejectionReason::Rule, 1);
+    store
+        .write_batch(&batch("a", 1, vec![first, second, unknown]))
+        .unwrap();
+    drain(&mut store, early());
+    let page = store.history(&query(BASE, BASE + 5 * MINUTE_MS)).unwrap();
+    let bucket = &page.buckets[0];
+    assert_eq!(bucket.grain, Grain::FiveMinutes);
+    let sql = &bucket.rejection_classes["sql-injection"];
+    assert_eq!(sql.sum, 5);
+    assert_eq!(sql.known_minutes, 2);
+    assert_eq!(bucket.rejection_classes["xss"].sum, 1);
+    assert_eq!(bucket.rejection_classes["xss"].known_minutes, 1);
+    assert_eq!(
+        bucket
+            .rejection_classes
+            .values()
+            .map(|value| value.sum)
+            .sum::<u64>(),
+        6
+    );
+    assert_eq!(
+        serde_json::to_value(bucket).unwrap()["rejection_classes"]["sql-injection"]["known_minutes"],
+        2
     );
 }
 
@@ -927,6 +970,7 @@ fn event_expiry_does_not_erase_statistics_and_expired_replay_is_skipped() {
         status: None,
         category: None,
         rule: None,
+        attack_class: None,
         reason: None,
         decoy: None,
         gap: None,

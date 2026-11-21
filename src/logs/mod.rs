@@ -3,8 +3,18 @@ mod filter;
 mod output;
 mod parse;
 
+pub(crate) const ATTACK_CLASS_COUNT: usize = attack::CLASS_COUNT;
+
 pub(crate) fn observation_attack_name(category: &str) -> &'static str {
     attack::attack_name(category)
+}
+
+pub(crate) fn attack_class_index(category: &str) -> usize {
+    attack::class_index(category)
+}
+
+pub(crate) fn attack_class_names() -> impl Iterator<Item = &'static str> {
+    attack::class_names()
 }
 
 use std::io::{self, IsTerminal, Write};

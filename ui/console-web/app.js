@@ -103,8 +103,8 @@
   });
 
   var TOPO_EDGES = [
-    { id: "ingress-admin", d: "M186 130 C198 130 204 70 220 70" },
-    { id: "ingress-decoy", d: "M186 130 C198 130 204 190 220 190" },
+    { id: "ingress-admin", d: "M176 130 C198 130 204 70 220 70" },
+    { id: "ingress-decoy", d: "M176 130 C198 130 204 190 220 190" },
     { id: "admin-rate", d: "M358 70 L418 70" },
     { id: "decoy-guards", d: "M358 190 L418 190" },
     { id: "rate-rules", d: "M556 70 L616 70" },
@@ -116,31 +116,31 @@
   var TOPO_ROUTES = {
     admin: {
       edges: ["ingress-admin"],
-      d: "M186 130 C198 130 204 70 220 70 L289 70",
+      d: "M176 130 C198 130 204 70 220 70 L289 70",
     },
     rate: {
       edges: ["ingress-admin", "admin-rate"],
-      d: "M186 130 C198 130 204 70 220 70 L358 70 L418 70 L487 70",
+      d: "M176 130 C198 130 204 70 220 70 L358 70 L418 70 L487 70",
     },
     rules: {
       edges: ["ingress-admin", "admin-rate", "rate-rules"],
-      d: "M186 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L685 70",
+      d: "M176 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L685 70",
     },
     decoy: {
       edges: ["ingress-decoy"],
-      d: "M186 130 C198 130 204 190 220 190 L289 190",
+      d: "M176 130 C198 130 204 190 220 190 L289 190",
     },
     guards: {
       edges: ["ingress-decoy", "decoy-guards"],
-      d: "M186 130 C198 130 204 190 220 190 L358 190 L418 190 L487 190",
+      d: "M176 130 C198 130 204 190 220 190 L358 190 L418 190 L487 190",
     },
     behavior: {
       edges: ["ingress-decoy", "decoy-guards", "guards-behavior"],
-      d: "M186 130 C198 130 204 190 220 190 L358 190 L418 190 L556 190 L616 190 L685 190",
+      d: "M176 130 C198 130 204 190 220 190 L358 190 L418 190 L556 190 L616 190 L685 190",
     },
     upstream: {
       edges: ["ingress-admin", "admin-rate", "rate-rules", "rules-upstream"],
-      d: "M186 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L754 70 C792 70 802 130 840 130 L911 130",
+      d: "M176 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L754 70 C792 70 802 130 840 130 L911 130",
     },
   };
 
@@ -567,21 +567,28 @@
     if (!event) {
       return "";
     }
+    var attack = event.attack_class ? rejectClassLabel(event.attack_class) : "";
     var category = event.category ? String(event.category) : "";
     var rule = event.rule ? String(event.rule) : "";
     if (category && rule) {
-      return rule.indexOf(category + "/") === 0 ? rule : category + " / " + rule;
+      var qualified = rule.indexOf(category + "/") === 0;
+      var detail = qualified ? rule.slice(category.length + 1) : rule;
+      if (attack) {
+        return attack + " · " + detail;
+      }
+      return qualified ? rule : category + " / " + rule;
     }
     if (rule) {
-      return rule;
+      return attack ? attack + " · " + rule : rule;
     }
     if (category) {
-      return category;
+      return attack ? attack + " · " + category : category;
     }
-    if (event.reason) {
-      return humanToken(event.reason);
+    var reason = event.reason ? humanToken(event.reason) : "";
+    if (attack && reason && normalizeToken(attack) !== normalizeToken(reason)) {
+      return attack + " · " + reason;
     }
-    return "";
+    return attack || reason;
   }
 
   function requestSummary(event) {
@@ -726,7 +733,6 @@
     }
     var origin =
       topo.mode === "log" && topo.selected ? topo.selected.client || topo.selected.peer || "" : "";
-    text($("topo-internet-origin"), origin ? shorten(origin, 23) : "any public address");
     topo.internet.group.classList.toggle("is-source", Boolean(origin));
   }
 
@@ -813,7 +819,7 @@
         ".";
     } else {
       line =
-        "Waiting for the first detection. New packets travel from the internet edge and spark at the layer that handles them.";
+        "Waiting for the first detection. New packets travel from the internet globe and spark at the layer that handles them.";
     }
     text($("topo-last"), line);
   }
@@ -839,7 +845,7 @@
     }
     text(
       $("topo-summary"),
-      "Edge shield topology. Mode " +
+      "Edge shield topology. Top row request path, bottom row response path. Mode " +
         (topo.mode === "log" ? "log" : "real-time") +
         ". Retained events by layer: " +
         parts.join(", ") +
@@ -950,13 +956,10 @@
       '<pattern id="topo-dot-grid" width="18" height="18" patternUnits="userSpaceOnUse">' +
       '<circle cx="2" cy="2" r="0.8" fill="#e4e9f0"/>' +
       "</pattern>" +
-      '<linearGradient id="topo-internet-fill" x1="0" y1="0" x2="0.8" y2="1">' +
-      '<stop offset="0" stop-color="#121d33"/>' +
-      '<stop offset="1" stop-color="#1e3154"/>' +
-      "</linearGradient>" +
-      '<radialGradient id="topo-internet-glow">' +
-      '<stop offset="0" stop-color="#3d6fa8" stop-opacity="0.5"/>' +
-      '<stop offset="1" stop-color="#3d6fa8" stop-opacity="0"/>' +
+      '<radialGradient id="topo-internet-disk" cx="0.35" cy="0.28" r="0.85">' +
+      '<stop offset="0" stop-color="#356a9b"/>' +
+      '<stop offset="0.55" stop-color="#1f466d"/>' +
+      '<stop offset="1" stop-color="#0d1b30"/>' +
       "</radialGradient>" +
       '<linearGradient id="topo-upstream-fill" x1="0" y1="0" x2="0" y2="1">' +
       '<stop offset="0" stop-color="#f5fbf8"/>' +
@@ -965,28 +968,29 @@
       '<marker id="topo-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' +
       '<path d="M0 0L8 4L0 8z" fill="#3c8b70"/>' +
       "</marker>" +
+      '<marker id="topo-phase-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">' +
+      '<path d="M0 0L8 4L0 8z" fill="#aeb5bf"/>' +
+      "</marker>" +
       "</defs>" +
+      '<rect class="topo-fabric-wash" x="202" y="18" width="570" height="226" rx="18"/>' +
       '<rect class="topo-fabric" x="202" y="18" width="570" height="226" rx="18"/>' +
+      '<text class="topo-phase-label" x="250" y="15">REQUEST</text>' +
+      '<path class="topo-phase-arrow" d="M310 12H680" marker-end="url(#topo-phase-arrow)"/>' +
+      '<path class="topo-phase-arrow" d="M680 249H310" marker-end="url(#topo-phase-arrow)"/>' +
+      '<text class="topo-phase-label" x="690" y="252">RESPONSE</text>' +
       '<text class="topo-fabric-label" x="220" y="31">KUNATO DEFENSE FABRIC</text>' +
       '<text class="topo-fabric-meta" x="758" y="31">SIX LAYERS</text>' +
       '<g class="topo-internet" id="topo-internet">' +
-      '<rect class="topo-internet-halo" x="10" y="26" width="184" height="208" rx="20"/>' +
-      '<rect class="topo-internet-card" x="18" y="34" width="168" height="192" rx="16"/>' +
-      '<circle cx="60" cy="104" r="44" fill="url(#topo-internet-glow)"/>' +
-      '<text class="topo-internet-kicker" x="34" y="58">PUBLIC INGRESS</text>' +
-      '<g class="topo-globe" transform="translate(60 104)" aria-hidden="true">' +
+      '<circle class="topo-internet-halo" cx="100" cy="130" r="80"/>' +
+      '<circle class="topo-internet-disk" cx="100" cy="130" r="76"/>' +
+      '<text class="topo-internet-title" x="100" y="82" text-anchor="middle">INTERNET</text>' +
+      '<text class="topo-internet-sub" x="100" y="97" text-anchor="middle">PUBLIC NETWORK</text>' +
+      '<g class="topo-globe" transform="translate(100 143) scale(1.4)" aria-hidden="true">' +
       '<circle cx="0" cy="0" r="24"/>' +
       '<ellipse cx="0" cy="0" rx="10" ry="24"/>' +
       '<path d="M-24 0H24M-22 -9H22M-22 9H22"/>' +
       '<circle class="topo-globe-dot" cx="16" cy="-13" r="2.3"/>' +
       "</g>" +
-      '<text class="topo-internet-title" x="94" y="100">INTERNET</text>' +
-      '<text class="topo-internet-sub" x="94" y="116">PUBLIC NETWORK</text>' +
-      '<line class="topo-internet-divider" x1="34" y1="142" x2="170" y2="142"/>' +
-      '<text class="topo-internet-origin-label" x="34" y="157">SOURCE</text>' +
-      '<text class="topo-internet-origin" id="topo-internet-origin" x="34" y="173">any public address</text>' +
-      '<text class="topo-internet-transport" x="34" y="194">TLS · H3 / H2 / H1</text>' +
-      '<text class="topo-internet-untrusted" x="34" y="211">UNTRUSTED NETWORK</text>' +
       "</g>" +
       '<g class="topo-edges" aria-hidden="true">' +
       edges +
@@ -1283,23 +1287,23 @@
       [trailOne, "3.2", "0.36"],
       [core, "3.8", "1"],
     ].forEach(function (item) {
-      item[0].setAttribute("cx", "186");
+      item[0].setAttribute("cx", "176");
       item[0].setAttribute("cy", "130");
       item[0].setAttribute("r", item[1]);
       item[0].setAttribute("fill", color);
       item[0].setAttribute("opacity", item[2]);
       group.appendChild(item[0]);
     });
-    streak.setAttribute("x1", "186");
+    streak.setAttribute("x1", "176");
     streak.setAttribute("y1", "130");
-    streak.setAttribute("x2", "186");
+    streak.setAttribute("x2", "176");
     streak.setAttribute("y2", "130");
     streak.setAttribute("stroke", color);
     streak.setAttribute("stroke-width", "2");
     streak.setAttribute("stroke-linecap", "round");
     streak.setAttribute("opacity", "0.42");
     group.appendChild(streak);
-    head.setAttribute("cx", "186");
+    head.setAttribute("cx", "176");
     head.setAttribute("cy", "130");
     head.setAttribute("r", "2.4");
     head.setAttribute("fill", "#ffffff");
@@ -2026,6 +2030,94 @@
     return rates;
   }
 
+  function rejectClassEntries(snapshot) {
+    var classes = counter(snapshot, "rejection_classes");
+    if (classes === null || typeof classes !== "object") {
+      return null;
+    }
+    var entries = [];
+    Object.keys(classes).forEach(function (key) {
+      var count = Number(classes[key]);
+      if (isFinite(count) && count > 0) {
+        entries.push({ key: key, count: count });
+      }
+    });
+    return entries;
+  }
+
+  function renderRejectDetail(snapshot) {
+    var host = $("live-reject-cards");
+    var note = $("live-reject-detail-note");
+    if (!host) {
+      return;
+    }
+    host.innerHTML = "";
+    function message(value) {
+      var empty = document.createElement("p");
+      empty.className = "reject-detail-empty";
+      empty.textContent = value;
+      host.appendChild(empty);
+    }
+    if (!snapshot) {
+      text(note, "Waiting for the first snapshot.");
+      message("Waiting for the first snapshot.");
+      return;
+    }
+    var rejected = counter(snapshot, "rejected_requests");
+    var entries = rejectClassEntries(snapshot);
+    if (entries === null) {
+      text(note, "Detailed causes are unavailable from this source.");
+      message("Detailed causes are unavailable; this source did not report them.");
+      return;
+    }
+    if (!entries.length && (rejected === null || rejected === 0)) {
+      text(note, "No rejections recorded since this source started.");
+      message("No rejections recorded since this source started.");
+      return;
+    }
+    var measured = 0;
+    entries.forEach(function (entry) {
+      measured += entry.count;
+    });
+    if (rejected !== null && rejected > measured) {
+      entries.push({ key: "unrecorded", count: rejected - measured, unrecorded: true });
+    }
+    entries.sort(function (a, b) {
+      if (Boolean(a.unrecorded) !== Boolean(b.unrecorded)) {
+        return a.unrecorded ? 1 : -1;
+      }
+      return b.count - a.count || a.key.localeCompare(b.key);
+    });
+    if (!entries.length) {
+      text(note, "No detailed rejection classes recorded in this snapshot.");
+      message("No detailed rejection classes recorded in this snapshot.");
+      return;
+    }
+    var denominator = rejected === null ? measured : rejected;
+    text(
+      note,
+      "Counted once per rejected request; shares use all " +
+        number(denominator) +
+        " rejections."
+    );
+    entries.forEach(function (entry) {
+      var card = document.createElement("div");
+      card.className = "reject-detail-card" + (entry.unrecorded ? " is-unrecorded" : "");
+      var count = document.createElement("strong");
+      count.textContent = number(entry.count);
+      var label = document.createElement("span");
+      label.textContent = entry.unrecorded ? "Unrecorded cause" : rejectClassLabel(entry.key);
+      var share = document.createElement("small");
+      share.textContent = denominator
+        ? ((100 * entry.count) / denominator).toFixed(1) + "% of rejections"
+        : "share unavailable";
+      card.appendChild(count);
+      card.appendChild(label);
+      card.appendChild(share);
+      host.appendChild(card);
+    });
+  }
+
   function renderLive() {
     var latest = state.latest;
     var snapshot = latest ? latest.snapshot : null;
@@ -2070,6 +2162,8 @@
         banner("The WAF reported a clock discontinuity; minute attribution in that interval is incomplete.", "warn");
       }
     }
+
+    renderRejectDetail(snapshot);
 
     var collection = latest ? latest.collection : null;
     var writer = latest ? latest.writer : null;
@@ -2129,7 +2223,7 @@
     if (events.length === 0) {
       var empty = document.createElement("tr");
       var cell = document.createElement("td");
-      cell.colSpan = 8;
+      cell.colSpan = 9;
       cell.className = "muted";
       cell.textContent = "No events received yet.";
       empty.appendChild(cell);
@@ -2161,7 +2255,9 @@
       add(utc(event.occurred_at_ms));
       add(String(event.kind).replace(/_/g, " "));
       add(String(event.disposition).toUpperCase());
-      add(event.reason || (event.category ? event.category + (event.rule ? "/" + event.rule : "") : null));
+      add(event.attack_class ? rejectClassLabel(event.attack_class) : null);
+      var matched = event.category ? event.category + (event.rule ? "/" + event.rule : "") : event.rule || null;
+      add(event.reason && matched ? event.reason + " · " + matched : event.reason || matched);
       add(event.method);
       add(event.path);
       add(event.site);
@@ -2354,6 +2450,7 @@
     text($("metrics-meta"), meta.join(" | "));
 
     renderChart(groupBuckets(buckets, displayWidth), displayWidth, data.from_ms, data.until_ms);
+    renderReasonClasses(buckets, rejected.total || 0);
     renderReasons(buckets);
     renderCorrelations();
   }
@@ -2716,6 +2813,133 @@
     "php_request", "php_response", "hardening", "jwt", "decoy", "behavior",
     "protocol", "response_inspection",
   ];
+
+  var REJECT_CLASS_LABELS = {
+    "sql-injection": "SQL injection",
+    "nosql-injection": "NoSQL injection",
+    "ldap-injection": "LDAP injection",
+    "xpath-injection": "XPath injection",
+    "jdbc-injection": "JDBC injection",
+    "xss": "XSS",
+    "css-injection": "CSS injection",
+    "ssti": "SSTI",
+    "command-injection": "Command injection",
+    "path-traversal": "Path traversal",
+    "remote-file-inclusion": "Remote file inclusion",
+    "ssrf": "SSRF",
+    "xxe": "XXE",
+    "deserialization": "Deserialization",
+    "prototype-pollution": "Prototype pollution",
+    "open-redirect": "Open redirect",
+    "parameter-pollution": "Parameter pollution",
+    "mass-assignment": "Mass assignment",
+    "prompt-injection": "Prompt injection",
+    "cache-deception": "Cache deception",
+    "config-injection": "Config injection",
+    "jwt": "JWT",
+    "malicious-upload": "Malicious upload",
+    "protocol": "Protocol anomaly",
+    "scanner": "Scanner",
+    "brute-force": "Brute force",
+    "discovery": "Discovery",
+    "exposure": "Exposure",
+    "info-disclosure": "Info disclosure",
+    "bypass": "Bypass",
+    "exploit": "Known exploit",
+    "cve": "CVE signature",
+    "other": "Other rule",
+    "rate-limit": "Rate limit",
+    "ban": "Active ban",
+    "overload": "Overload",
+    "client-identity": "Client identity",
+    "host": "Host policy",
+    "admin-access": "Admin gate",
+    "body-limit": "Body limit",
+    "decode": "Decode failure",
+    "form": "Form guard",
+    "graphql": "GraphQL guard",
+    "saml": "SAML guard",
+    "php-request": "PHP request",
+    "php-response": "PHP response",
+    "hardening": "Hardening",
+    "decoy": "Decoy",
+    "behavior": "Behavior",
+    "response-inspection": "Response inspection",
+  };
+
+  function rejectClassLabel(value) {
+    var key = String(value === null || value === undefined ? "" : value);
+    return REJECT_CLASS_LABELS[key] || humanToken(key.replace(/-/g, " "));
+  }
+
+  function renderReasonClasses(buckets, rejected) {
+    var body = $("rejection-classes");
+    if (!body) {
+      return;
+    }
+    body.innerHTML = "";
+    var totals = {};
+    var known = false;
+    buckets.forEach(function (bucket) {
+      var classes = bucket.rejection_classes || {};
+      Object.keys(classes).forEach(function (key) {
+        var stats = classes[key];
+        if (!stats || !stats.known_minutes) {
+          return;
+        }
+        totals[key] = (totals[key] || 0) + stats.sum;
+        known = true;
+      });
+    });
+    var entries = Object.keys(totals).map(function (key) {
+      return { key: key, count: totals[key] };
+    });
+    entries.sort(function (a, b) {
+      return b.count - a.count || a.key.localeCompare(b.key);
+    });
+    var measured = entries.reduce(function (sum, entry) {
+      return sum + entry.count;
+    }, 0);
+    function message(value) {
+      var row = document.createElement("tr");
+      var cell = document.createElement("td");
+      cell.colSpan = 3;
+      cell.className = "muted";
+      cell.textContent = value;
+      row.appendChild(cell);
+      body.appendChild(row);
+    }
+    if (!known) {
+      message(
+        rejected
+          ? "Attack-type detail is unavailable for these stored intervals."
+          : "No measured rejections in this range."
+      );
+      return;
+    }
+    if (rejected > measured) {
+      entries.push({ key: "unrecorded", count: rejected - measured, unrecorded: true });
+    }
+    if (!entries.length) {
+      message("No measured rejections in this range.");
+      return;
+    }
+    entries.forEach(function (entry) {
+      var row = document.createElement("tr");
+      var name = document.createElement("td");
+      name.textContent = entry.unrecorded ? "Unrecorded cause" : rejectClassLabel(entry.key);
+      var count = document.createElement("td");
+      count.className = "num";
+      count.textContent = number(entry.count);
+      var share = document.createElement("td");
+      share.className = "num";
+      share.textContent = rejected ? ((100 * entry.count) / rejected).toFixed(1) + "%" : "Unavailable";
+      row.appendChild(name);
+      row.appendChild(count);
+      row.appendChild(share);
+      body.appendChild(row);
+    });
+  }
 
   function renderReasons(buckets) {
     var body = $("reasons");

@@ -87,6 +87,10 @@ async fn http1_and_http2_account_actual_denials_without_log_emission() {
         1
     );
     assert_eq!(
+        snapshot.counters.rejection_classes.as_ref().unwrap()["other"],
+        1
+    );
+    assert_eq!(
         snapshot
             .buckets
             .iter()

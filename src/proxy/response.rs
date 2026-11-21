@@ -292,7 +292,11 @@ pub(crate) async fn inspect(
             &blocked.rule,
             crate::config::Action::Block,
         );
-        crate::observations::reject(crate::console::model::RejectionReason::ResponseRule);
+        crate::observations::reject_rule(
+            crate::console::model::RejectionReason::ResponseRule,
+            &blocked.category,
+            &blocked.rule,
+        );
         metrics.response_blocked.fetch_add(1, Ordering::Relaxed);
         info!(
             phase = blocked.phase.as_str(),
