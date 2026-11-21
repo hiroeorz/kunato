@@ -21,6 +21,210 @@
     metrics: document.getElementById("metrics-view"),
   };
 
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  var TOPO_LAYERS = [
+    {
+      id: "admin",
+      name: "Admin Gate",
+      title: "ADMIN GATE",
+      color: "#b8811f",
+      x: 220,
+      y: 42,
+      width: 138,
+      height: 56,
+      icon: '<circle cx="6" cy="6" r="3.4"/><path d="M8.5 8.5 17 17M13 13l2-2M15.5 15.5l2-2"/>',
+    },
+    {
+      id: "rate",
+      name: "Rate / Ban",
+      title: "RATE / BAN",
+      color: "#c66361",
+      x: 418,
+      y: 42,
+      width: 138,
+      height: 56,
+      icon: '<path d="M2.5 15.5a7.5 7.5 0 1 1 15 0"/><path d="M10 15.5 14.8 9.5"/><circle cx="10" cy="15.5" r="1.1"/>',
+    },
+    {
+      id: "rules",
+      name: "YAML Rules",
+      title: "YAML RULES",
+      color: "#4f7fa8",
+      x: 616,
+      y: 42,
+      width: 138,
+      height: 56,
+      icon: '<path d="M5 2.5h7.2L16.5 6v11.5H5z"/><path d="M12 2.5V6.2h4.3M8 9.5h5.5M8 12.5h5.5M8 15.5h3.4"/>',
+    },
+    {
+      id: "decoy",
+      name: "Decoy Ward",
+      title: "DECOY WARD",
+      color: "#e88336",
+      x: 220,
+      y: 162,
+      width: 138,
+      height: 56,
+      icon: '<path d="M10 2.5 17.5 10 10 17.5 2.5 10z"/><circle cx="10" cy="10" r="2.1"/>',
+    },
+    {
+      id: "guards",
+      name: "Payload Guards",
+      title: "PAYLOAD GUARDS",
+      color: "#9a6bb8",
+      x: 418,
+      y: 162,
+      width: 138,
+      height: 56,
+      icon: '<path d="M10 2.5 17.5 6.4 10 10.3 2.5 6.4z"/><path d="M2.8 10.2 10 14l7.2-3.8M2.8 14 10 17.8l7.2-3.8"/>',
+    },
+    {
+      id: "behavior",
+      name: "Behavior",
+      title: "BEHAVIOR",
+      color: "#3c8b70",
+      x: 616,
+      y: 162,
+      width: 138,
+      height: 56,
+      icon: '<path d="M2 10h3.6l2.1-5 4.1 10 2.1-5H18"/>',
+    },
+  ];
+
+  TOPO_LAYERS.forEach(function (layer) {
+    layer.cx = layer.x + layer.width / 2;
+    layer.cy = layer.y + layer.height / 2;
+  });
+
+  var TOPO_LAYER_BY_ID = {};
+  TOPO_LAYERS.forEach(function (layer) {
+    TOPO_LAYER_BY_ID[layer.id] = layer;
+  });
+
+  var TOPO_EDGES = [
+    { id: "ingress-admin", d: "M186 130 C198 130 204 70 220 70" },
+    { id: "ingress-decoy", d: "M186 130 C198 130 204 190 220 190" },
+    { id: "admin-rate", d: "M358 70 L418 70" },
+    { id: "decoy-guards", d: "M358 190 L418 190" },
+    { id: "rate-rules", d: "M556 70 L616 70" },
+    { id: "guards-behavior", d: "M556 190 L616 190" },
+    { id: "rules-upstream", d: "M754 70 C792 70 802 130 840 130" },
+    { id: "behavior-upstream", d: "M754 190 C792 190 802 130 840 130" },
+  ];
+
+  var TOPO_ROUTES = {
+    admin: {
+      edges: ["ingress-admin"],
+      d: "M186 130 C198 130 204 70 220 70 L289 70",
+    },
+    rate: {
+      edges: ["ingress-admin", "admin-rate"],
+      d: "M186 130 C198 130 204 70 220 70 L358 70 L418 70 L487 70",
+    },
+    rules: {
+      edges: ["ingress-admin", "admin-rate", "rate-rules"],
+      d: "M186 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L685 70",
+    },
+    decoy: {
+      edges: ["ingress-decoy"],
+      d: "M186 130 C198 130 204 190 220 190 L289 190",
+    },
+    guards: {
+      edges: ["ingress-decoy", "decoy-guards"],
+      d: "M186 130 C198 130 204 190 220 190 L358 190 L418 190 L487 190",
+    },
+    behavior: {
+      edges: ["ingress-decoy", "decoy-guards", "guards-behavior"],
+      d: "M186 130 C198 130 204 190 220 190 L358 190 L418 190 L556 190 L616 190 L685 190",
+    },
+    upstream: {
+      edges: ["ingress-admin", "admin-rate", "rate-rules", "rules-upstream"],
+      d: "M186 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L754 70 C792 70 802 130 840 130 L911 130",
+    },
+  };
+
+  var TOPO_KIND_LAYER = {
+    rulematch: "rules",
+    ratelimit: "rate",
+    ban: "rate",
+    behavior: "behavior",
+    decoy: "decoy",
+    upstreamfailure: "upstream",
+  };
+
+  var TOPO_LAYER_INK = {
+    admin: "#7a5314",
+    rate: "#a34442",
+    rules: "#396a92",
+    decoy: "#a95d18",
+    guards: "#7d4e9b",
+    behavior: "#2f7159",
+    upstream: "#a34442",
+  };
+
+  var TOPO_SPARK_COLOR = {
+    admin: "#e3a13c",
+    rate: "#f07182",
+    rules: "#5aa7d8",
+    decoy: "#fb923c",
+    guards: "#bd86e0",
+    behavior: "#4db392",
+    upstream: "#f07182",
+  };
+
+  var TOPO_REASON_LAYER = {
+    adminaccess: "admin",
+    rule: "rules",
+    responserule: "rules",
+    responseinspection: "rules",
+    ratelimit: "rate",
+    ban: "rate",
+    overload: "rate",
+    clientidentity: "rate",
+    host: "rate",
+    protocol: "rate",
+    upload: "guards",
+    graphql: "guards",
+    saml: "guards",
+    form: "guards",
+    body: "guards",
+    decode: "guards",
+    phprequest: "guards",
+    phpresponse: "guards",
+    hardening: "guards",
+    jwt: "guards",
+    decoy: "decoy",
+    behavior: "behavior",
+  };
+
+  var topo = {
+    built: false,
+    mode: "realtime",
+    selectedKey: null,
+    selected: null,
+    lastSequence: null,
+    newSinceFocus: 0,
+    counts: {},
+    nodes: {},
+    edges: {},
+    upstream: null,
+    internet: null,
+    geometry: {},
+    routeLength: {},
+    packets: null,
+    sparks: null,
+    stop: null,
+    forward: null,
+    epoch: 0,
+    packetCount: 0,
+    edgeTimers: {},
+    internetTimer: null,
+    focusTimer: null,
+    panelTimer: null,
+    revealTimer: null,
+  };
+
   function $(id) {
     return document.getElementById(id);
   }
@@ -47,6 +251,13 @@
       return "unavailable";
     }
     return new Date(ms).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  }
+
+  function utcClock(ms) {
+    if (ms === null || ms === undefined) {
+      return "unavailable";
+    }
+    return new Date(ms).toISOString().slice(11, 19) + " UTC";
   }
 
   var GRAIN_MS = {
@@ -232,6 +443,1477 @@
     }
   }
 
+  function normalizeToken(value) {
+    return String(value === null || value === undefined ? "" : value)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  function humanToken(value) {
+    var textValue = String(value === null || value === undefined ? "" : value)
+      .replace(/_/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2");
+    if (!textValue) {
+      return "event";
+    }
+    return textValue.charAt(0).toUpperCase() + textValue.slice(1);
+  }
+
+  function layerById(layerId) {
+    return layerId ? TOPO_LAYER_BY_ID[layerId] || null : null;
+  }
+
+  function layerForEvent(event) {
+    if (!event) {
+      return null;
+    }
+    var kind = normalizeToken(event.kind);
+    if (kind === "rejection") {
+      var rejectionReason = normalizeToken(event.reason);
+      if (TOPO_REASON_LAYER[rejectionReason]) {
+        return TOPO_REASON_LAYER[rejectionReason];
+      }
+      return "guards";
+    }
+    if (TOPO_KIND_LAYER[kind]) {
+      return TOPO_KIND_LAYER[kind];
+    }
+    var reason = normalizeToken(event.reason);
+    if (TOPO_REASON_LAYER[reason]) {
+      return TOPO_REASON_LAYER[reason];
+    }
+    return null;
+  }
+
+  function layerName(layerId) {
+    if (layerId === "upstream") {
+      return "Upstream Origins";
+    }
+    var layer = layerById(layerId);
+    return layer ? layer.name : "service event";
+  }
+
+  function layerColor(layerId) {
+    if (layerId === "upstream") {
+      return "#c66361";
+    }
+    var layer = layerById(layerId);
+    return layer ? layer.color : "#828994";
+  }
+
+  function sparkColor(layerId) {
+    return TOPO_SPARK_COLOR[layerId] || "#e88336";
+  }
+
+  function layerInk(layerId) {
+    return TOPO_LAYER_INK[layerId] || "#596271";
+  }
+
+  function focusColor(event) {
+    return layerColor(layerForEvent(event));
+  }
+
+  function isForwarded(event) {
+    var disposition = normalizeToken(event && event.disposition);
+    return disposition === "log" || disposition === "observe";
+  }
+
+  function isStopped(event) {
+    var disposition = normalizeToken(event && event.disposition);
+    return disposition === "block" || disposition === "reject";
+  }
+
+  function actionLabel(event) {
+    var disposition = normalizeToken(event && event.disposition);
+    if (disposition === "block") {
+      return "INTERCEPT";
+    }
+    if (disposition === "reject") {
+      return "STOPPED";
+    }
+    if (disposition === "log") {
+      return "DETECTED";
+    }
+    if (disposition === "observe") {
+      return "OBSERVED";
+    }
+    if (disposition === "error") {
+      return "FAILED";
+    }
+    return "EVENT";
+  }
+
+  function actionWord(event) {
+    var disposition = normalizeToken(event && event.disposition);
+    if (disposition === "block") {
+      return "Blocked";
+    }
+    if (disposition === "reject") {
+      return "Rejected";
+    }
+    if (disposition === "log") {
+      return "Logged";
+    }
+    if (disposition === "observe") {
+      return "Observed";
+    }
+    if (disposition === "error") {
+      return "Failed";
+    }
+    return "Handled";
+  }
+
+  function ruleSummary(event) {
+    if (!event) {
+      return "";
+    }
+    var category = event.category ? String(event.category) : "";
+    var rule = event.rule ? String(event.rule) : "";
+    if (category && rule) {
+      return rule.indexOf(category + "/") === 0 ? rule : category + " / " + rule;
+    }
+    if (rule) {
+      return rule;
+    }
+    if (category) {
+      return category;
+    }
+    if (event.reason) {
+      return humanToken(event.reason);
+    }
+    return "";
+  }
+
+  function requestSummary(event) {
+    if (!event) {
+      return "";
+    }
+    var request = [event.method, event.path].filter(Boolean).join(" ").trim();
+    if (event.status !== null && event.status !== undefined) {
+      request += (request ? " " : "") + "(" + event.status + ")";
+    }
+    return request.trim();
+  }
+
+  function shorten(value, maximum) {
+    var textValue = String(value === null || value === undefined ? "" : value);
+    return textValue.length > maximum ? textValue.slice(0, maximum - 1) + "…" : textValue;
+  }
+
+  function eventKey(event) {
+    return (state.generation || "generation") + ":" + event.sequence;
+  }
+
+  function copyEvent(event) {
+    var copy = {};
+    Object.keys(event || {}).forEach(function (key) {
+      copy[key] = event[key];
+    });
+    return copy;
+  }
+
+  function latestRetainedEvent() {
+    var latest = null;
+    state.events.forEach(function (event) {
+      if (!latest || event.sequence > latest.sequence) {
+        latest = event;
+      }
+    });
+    return latest;
+  }
+
+  function uniqueSites() {
+    var seen = {};
+    var sites = [];
+    state.events.forEach(function (event) {
+      if (!event.site || seen[event.site]) {
+        return;
+      }
+      seen[event.site] = true;
+      sites.push(event.site);
+    });
+    sites.sort();
+    return sites;
+  }
+
+  function prefersReducedMotion() {
+    return Boolean(
+      window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  }
+
+  function routeCenter(layerId) {
+    if (layerId === "upstream") {
+      return { x: 911, y: 130 };
+    }
+    var layer = layerById(layerId);
+    return layer ? { x: layer.cx, y: layer.cy } : { x: 500, y: 130 };
+  }
+
+  function countLayers() {
+    var counts = {
+      admin: 0,
+      rate: 0,
+      rules: 0,
+      decoy: 0,
+      guards: 0,
+      behavior: 0,
+      upstream: 0,
+    };
+    state.events.forEach(function (event) {
+      var layerId = layerForEvent(event);
+      if (layerId && counts[layerId] !== undefined) {
+        counts[layerId] += 1;
+      }
+    });
+    return counts;
+  }
+
+  function nodeStatusText(count) {
+    if (!count) {
+      return "ARMED";
+    }
+    return count + (count === 1 ? " EVENT" : " EVENTS");
+  }
+
+  function updateNodeStatus(layerId) {
+    if (!topo.built) {
+      return;
+    }
+    var node = topo.nodes[layerId];
+    if (!node) {
+      return;
+    }
+    if (node.group.classList.contains("is-hit")) {
+      return;
+    }
+    if (topo.mode === "log" && topo.selected && layerForEvent(topo.selected) === layerId) {
+      return;
+    }
+    node.sub.textContent = nodeStatusText(topo.counts[layerId] || 0);
+  }
+
+  function updateUpstreamChrome() {
+    if (!topo.built || !topo.upstream || !topo.upstream.group) {
+      return;
+    }
+    var status = document.getElementById("topo-upstream-status");
+    var sites = document.getElementById("topo-upstream-sites");
+    var count = topo.counts.upstream || 0;
+    var focusedOnUpstream =
+      topo.mode === "log" && topo.selected && layerForEvent(topo.selected) === "upstream";
+    if (status && !topo.upstream.group.classList.contains("is-hit") && !focusedOnUpstream) {
+      status.textContent = count ? count + (count === 1 ? " ERROR" : " ERRORS") : "NO ERRORS";
+    }
+    if (status) {
+      status.classList.toggle("has-errors", count > 0);
+    }
+    var siteList = uniqueSites();
+    var siteText = "trusted origins";
+    if (siteList.length === 1) {
+      siteText = shorten(siteList[0], 22);
+    } else if (siteList.length > 1) {
+      siteText = shorten(siteList[0], 15) + " +" + (siteList.length - 1);
+    }
+    if (sites) {
+      sites.textContent = siteText;
+    }
+  }
+
+  function updateInternetChrome() {
+    if (!topo.built || !topo.internet || !topo.internet.group) {
+      return;
+    }
+    var origin =
+      topo.mode === "log" && topo.selected ? topo.selected.client || topo.selected.peer || "" : "";
+    text($("topo-internet-origin"), origin ? shorten(origin, 23) : "any public address");
+    topo.internet.group.classList.toggle("is-source", Boolean(origin));
+  }
+
+  function updateNewBadge() {
+    var badge = $("topo-new");
+    if (!badge) {
+      return;
+    }
+    var show = topo.mode === "log" && topo.newSinceFocus > 0;
+    badge.hidden = !show;
+    if (!show) {
+      badge.textContent = "0 new";
+      return;
+    }
+    badge.textContent = topo.newSinceFocus + " new";
+    badge.setAttribute(
+      "aria-label",
+      topo.newSinceFocus +
+        " new events since the focused log; switch to real-time to watch them"
+    );
+    badge.classList.remove("is-pulsing");
+    void badge.offsetWidth;
+    badge.classList.add("is-pulsing");
+  }
+
+  function updateTopologyModeUI() {
+    var panel = $("topo-panel");
+    var holder = $("topo-mode");
+    if (panel) {
+      panel.setAttribute("data-mode", topo.mode);
+    }
+    if (holder) {
+      holder.setAttribute("data-mode", topo.mode);
+    }
+    document.querySelectorAll("[data-topo-mode]").forEach(function (button) {
+      var active = button.getAttribute("data-topo-mode") === topo.mode;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  function updateTopologyMeta() {
+    var latest = latestRetainedEvent();
+    var line = "";
+    if (topo.mode === "log") {
+      if (!topo.selected) {
+        line =
+          "Log mode. Select a row in Recent detections and service events to trace the path to its defense point.";
+      } else {
+        var layerId = layerForEvent(topo.selected);
+        var fate = "no defense layer applies to this service event";
+        if (layerId === "upstream") {
+          fate = "the request reached the origin";
+        } else if (layerId && isStopped(topo.selected)) {
+          fate = "the request stopped before upstream";
+        } else if (layerId && isForwarded(topo.selected)) {
+          fate = "the request continued to upstream";
+        }
+        line =
+          "Log focus " +
+          utcClock(topo.selected.occurred_at_ms) +
+          " · " +
+          layerName(layerId) +
+          " · " +
+          fate +
+          ".";
+      }
+    } else if (!state.connected) {
+      line = "Live stream disconnected. The topology resumes with the next snapshot.";
+    } else if (latest) {
+      var latestLayer = layerForEvent(latest);
+      var detail = ruleSummary(latest) || humanToken(latest.kind);
+      var summary =
+        normalizeToken(latest.disposition) === "error"
+          ? "upstream failure (" + shorten(detail, 42) + ")"
+          : actionWord(latest) + " " + shorten(detail, 54);
+      line =
+        "Last detection " +
+        utcClock(latest.occurred_at_ms) +
+        " · " +
+        layerName(latestLayer) +
+        " · " +
+        summary +
+        ".";
+    } else {
+      line =
+        "Waiting for the first detection. New packets travel from the internet edge and spark at the layer that handles them.";
+    }
+    text($("topo-last"), line);
+  }
+
+  function updateTopologySummary() {
+    var parts = [];
+    TOPO_LAYERS.forEach(function (layer) {
+      parts.push(layer.name + " " + (topo.counts[layer.id] || 0));
+    });
+    parts.push("Upstream Origins " + (topo.counts.upstream || 0));
+    var focus = "";
+    if (topo.mode === "log" && topo.selected) {
+      focus =
+        " Log focus: " +
+        actionWord(topo.selected) +
+        " " +
+        (ruleSummary(topo.selected) || humanToken(topo.selected.kind)) +
+        " at " +
+        layerName(layerForEvent(topo.selected)) +
+        ".";
+    } else if (topo.mode === "log") {
+      focus = " Log mode with no event selected.";
+    }
+    text(
+      $("topo-summary"),
+      "Edge shield topology. Mode " +
+        (topo.mode === "log" ? "log" : "real-time") +
+        ". Retained events by layer: " +
+        parts.join(", ") +
+        "." +
+        focus
+    );
+  }
+
+  function updateTopology() {
+    if (!topo.built) {
+      buildTopology();
+    }
+    if (!topo.built) {
+      return;
+    }
+    topo.counts = countLayers();
+    TOPO_LAYERS.forEach(function (layer) {
+      updateNodeStatus(layer.id);
+    });
+    updateUpstreamChrome();
+    updateInternetChrome();
+    updateTopologyMeta();
+    updateTopologySummary();
+  }
+
+  function buildTopology() {
+    if (topo.built) {
+      return;
+    }
+    var canvas = $("topo-canvas");
+    if (!canvas) {
+      return;
+    }
+    var nodes = TOPO_LAYERS.map(function (layer) {
+      return (
+        '<g class="topo-node" data-layer="' +
+        layer.id +
+        '">' +
+        '<rect class="topo-node-halo" x="' +
+        (layer.x - 5) +
+        '" y="' +
+        (layer.y - 5) +
+        '" width="' +
+        (layer.width + 10) +
+        '" height="' +
+        (layer.height + 10) +
+        '" rx="14"/>' +
+        '<rect class="topo-node-card" x="' +
+        layer.x +
+        '" y="' +
+        layer.y +
+        '" width="' +
+        layer.width +
+        '" height="' +
+        layer.height +
+        '" rx="10"/>' +
+        '<rect class="topo-node-wash" x="' +
+        layer.x +
+        '" y="' +
+        layer.y +
+        '" width="' +
+        layer.width +
+        '" height="' +
+        layer.height +
+        '" rx="10"/>' +
+        '<rect class="topo-node-outline" x="' +
+        layer.x +
+        '" y="' +
+        layer.y +
+        '" width="' +
+        layer.width +
+        '" height="' +
+        layer.height +
+        '" rx="10"/>' +
+        '<rect class="topo-node-accent" x="' +
+        layer.x +
+        '" y="' +
+        (layer.y + 12) +
+        '" width="2.5" height="32" rx="1.25"/>' +
+        '<g class="topo-node-icon" transform="translate(' +
+        (layer.x + 16) +
+        " " +
+        (layer.y + 18) +
+        ')" aria-hidden="true">' +
+        layer.icon +
+        "</g>" +
+        '<text class="topo-node-title" x="' +
+        (layer.x + 40) +
+        '" y="' +
+        (layer.y + 24) +
+        '">' +
+        layer.title +
+        "</text>" +
+        '<text class="topo-node-sub" x="' +
+        (layer.x + 40) +
+        '" y="' +
+        (layer.y + 40) +
+        '">ARMED</text>' +
+        "</g>"
+      );
+    }).join("");
+    var edges = TOPO_EDGES.map(function (edge) {
+      return '<path class="topo-edge" data-edge="' + edge.id + '" d="' + edge.d + '"/>';
+    }).join("");
+    canvas.innerHTML =
+      '<svg id="topo-svg" viewBox="0 0 1000 260" role="img" aria-labelledby="topo-title" aria-describedby="topo-summary" preserveAspectRatio="xMidYMid meet">' +
+      "<defs>" +
+      '<pattern id="topo-dot-grid" width="18" height="18" patternUnits="userSpaceOnUse">' +
+      '<circle cx="2" cy="2" r="0.8" fill="#e4e9f0"/>' +
+      "</pattern>" +
+      '<linearGradient id="topo-internet-fill" x1="0" y1="0" x2="0.8" y2="1">' +
+      '<stop offset="0" stop-color="#121d33"/>' +
+      '<stop offset="1" stop-color="#1e3154"/>' +
+      "</linearGradient>" +
+      '<radialGradient id="topo-internet-glow">' +
+      '<stop offset="0" stop-color="#3d6fa8" stop-opacity="0.5"/>' +
+      '<stop offset="1" stop-color="#3d6fa8" stop-opacity="0"/>' +
+      "</radialGradient>" +
+      '<linearGradient id="topo-upstream-fill" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0" stop-color="#f5fbf8"/>' +
+      '<stop offset="1" stop-color="#eef7f2"/>' +
+      "</linearGradient>" +
+      '<marker id="topo-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' +
+      '<path d="M0 0L8 4L0 8z" fill="#3c8b70"/>' +
+      "</marker>" +
+      "</defs>" +
+      '<rect class="topo-fabric" x="202" y="18" width="570" height="226" rx="18"/>' +
+      '<text class="topo-fabric-label" x="220" y="31">KUNATO DEFENSE FABRIC</text>' +
+      '<text class="topo-fabric-meta" x="758" y="31">SIX LAYERS</text>' +
+      '<g class="topo-internet" id="topo-internet">' +
+      '<rect class="topo-internet-halo" x="10" y="26" width="184" height="208" rx="20"/>' +
+      '<rect class="topo-internet-card" x="18" y="34" width="168" height="192" rx="16"/>' +
+      '<circle cx="60" cy="104" r="44" fill="url(#topo-internet-glow)"/>' +
+      '<text class="topo-internet-kicker" x="34" y="58">PUBLIC INGRESS</text>' +
+      '<g class="topo-globe" transform="translate(60 104)" aria-hidden="true">' +
+      '<circle cx="0" cy="0" r="24"/>' +
+      '<ellipse cx="0" cy="0" rx="10" ry="24"/>' +
+      '<path d="M-24 0H24M-22 -9H22M-22 9H22"/>' +
+      '<circle class="topo-globe-dot" cx="16" cy="-13" r="2.3"/>' +
+      "</g>" +
+      '<text class="topo-internet-title" x="94" y="100">INTERNET</text>' +
+      '<text class="topo-internet-sub" x="94" y="116">PUBLIC NETWORK</text>' +
+      '<line class="topo-internet-divider" x1="34" y1="142" x2="170" y2="142"/>' +
+      '<text class="topo-internet-origin-label" x="34" y="157">SOURCE</text>' +
+      '<text class="topo-internet-origin" id="topo-internet-origin" x="34" y="173">any public address</text>' +
+      '<text class="topo-internet-transport" x="34" y="194">TLS · H3 / H2 / H1</text>' +
+      '<text class="topo-internet-untrusted" x="34" y="211">UNTRUSTED NETWORK</text>' +
+      "</g>" +
+      '<g class="topo-edges" aria-hidden="true">' +
+      edges +
+      "</g>" +
+      '<path class="topo-forward" id="topo-forward" d="" marker-end="url(#topo-arrow)"/>' +
+      '<g class="topo-nodes">' +
+      nodes +
+      "</g>" +
+      '<g class="topo-upstream" id="topo-upstream">' +
+      '<rect class="topo-upstream-halo" x="834" y="76" width="154" height="108" rx="18"/>' +
+      '<rect class="topo-upstream-card" x="840" y="82" width="142" height="96" rx="14"/>' +
+      '<g class="topo-upstream-icon" transform="translate(856 96)" aria-hidden="true">' +
+      '<rect x="2" y="2" width="16" height="6" rx="1.5"/>' +
+      '<rect x="2" y="12" width="16" height="6" rx="1.5"/>' +
+      '<path d="M5 5h.01M5 15h.01M9 5h4M9 15h4"/>' +
+      "</g>" +
+      '<text class="topo-upstream-kicker" x="884" y="105">UPSTREAM</text>' +
+      '<text class="topo-upstream-trusted" x="884" y="118">TRUSTED ZONE</text>' +
+      '<text class="topo-upstream-status" id="topo-upstream-status" x="856" y="147">NO ERRORS</text>' +
+      '<text class="topo-upstream-sites" id="topo-upstream-sites" x="856" y="164">trusted origins</text>' +
+      "</g>" +
+      '<g class="topo-stop" id="topo-stop" visibility="hidden">' +
+      '<circle cx="0" cy="0" r="8"/>' +
+      '<path d="M-2.8 -2.8L2.8 2.8M2.8 -2.8L-2.8 2.8"/>' +
+      "</g>" +
+      '<g class="topo-packets" id="topo-packets" aria-hidden="true"></g>' +
+      '<g class="topo-sparks" id="topo-sparks" aria-hidden="true"></g>' +
+      "</svg>";
+
+    var svg = canvas.querySelector("svg");
+    if (!svg) {
+      return;
+    }
+    topo.packets = svg.querySelector("#topo-packets");
+    topo.sparks = svg.querySelector("#topo-sparks");
+    topo.stop = svg.querySelector("#topo-stop");
+    topo.forward = svg.querySelector("#topo-forward");
+    topo.internet = { group: svg.querySelector("#topo-internet"), timer: null };
+    topo.upstream = { group: svg.querySelector("#topo-upstream"), timer: null };
+    if (topo.upstream.group) {
+      topo.upstream.group.style.setProperty("--layer", "#3c8b70");
+      topo.upstream.group.style.setProperty("--layer-ink", layerInk("upstream"));
+    }
+
+    TOPO_LAYERS.forEach(function (layer) {
+      var group = svg.querySelector('.topo-node[data-layer="' + layer.id + '"]');
+      if (!group) {
+        return;
+      }
+      group.style.setProperty("--layer", layer.color);
+      group.style.setProperty("--layer-ink", layerInk(layer.id));
+      topo.nodes[layer.id] = {
+        group: group,
+        sub: group.querySelector(".topo-node-sub"),
+        timer: null,
+      };
+    });
+
+    TOPO_EDGES.forEach(function (edge) {
+      var element = svg.querySelector('[data-edge="' + edge.id + '"]');
+      if (element) {
+        topo.edges[edge.id] = element;
+      }
+    });
+
+    var geometry = document.createElementNS(SVG_NS, "g");
+    geometry.setAttribute("class", "topo-geometry");
+    geometry.setAttribute("aria-hidden", "true");
+    Object.keys(TOPO_ROUTES).forEach(function (layerId) {
+      var path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", TOPO_ROUTES[layerId].d);
+      geometry.appendChild(path);
+      topo.geometry[layerId] = path;
+      topo.routeLength[layerId] = 0;
+    });
+    svg.appendChild(geometry);
+    Object.keys(topo.geometry).forEach(function (layerId) {
+      try {
+        topo.routeLength[layerId] = topo.geometry[layerId].getTotalLength();
+      } catch (error) {
+        topo.routeLength[layerId] = 0;
+      }
+    });
+
+    topo.built = true;
+    updateTopologyModeUI();
+    updateNewBadge();
+    TOPO_LAYERS.forEach(function (layer) {
+      updateNodeStatus(layer.id);
+    });
+    updateUpstreamChrome();
+    updateInternetChrome();
+    updateTopologySummary();
+  }
+
+  function activateEdges(edgeIds, color, duration) {
+    edgeIds.forEach(function (edgeId) {
+      var edge = topo.edges[edgeId];
+      if (!edge) {
+        return;
+      }
+      clearTimeout(topo.edgeTimers[edgeId]);
+      edge.style.setProperty("--edge-color", color);
+      edge.classList.add("is-route-hit");
+      topo.edgeTimers[edgeId] = setTimeout(function () {
+        edge.classList.remove("is-route-hit");
+        edge.style.removeProperty("--edge-color");
+        delete topo.edgeTimers[edgeId];
+      }, duration);
+    });
+  }
+
+  function pulseInternet() {
+    if (!topo.internet || !topo.internet.group) {
+      return;
+    }
+    topo.internet.group.classList.add("is-receiving");
+    clearTimeout(topo.internetTimer);
+    topo.internetTimer = setTimeout(function () {
+      topo.internet.group.classList.remove("is-receiving");
+    }, 950);
+  }
+
+  function burstSpark(layerId, color, strong) {
+    if (prefersReducedMotion() || !topo.sparks) {
+      return;
+    }
+    var center = routeCenter(layerId);
+    while (topo.sparks.childNodes.length >= 10) {
+      topo.sparks.removeChild(topo.sparks.firstChild);
+    }
+    var group = document.createElementNS(SVG_NS, "g");
+    group.setAttribute("class", "topo-spark");
+    var ring = document.createElementNS(SVG_NS, "circle");
+    ring.setAttribute("cx", String(center.x));
+    ring.setAttribute("cy", String(center.y));
+    var flash = document.createElementNS(SVG_NS, "circle");
+    flash.setAttribute("cx", String(center.x));
+    flash.setAttribute("cy", String(center.y));
+    flash.setAttribute("r", "10");
+    flash.setAttribute("fill", color);
+    flash.setAttribute("opacity", "0.8");
+    group.appendChild(flash);
+    ring.setAttribute("r", "7");
+    ring.setAttribute("fill", "none");
+    ring.setAttribute("stroke", color);
+    ring.setAttribute("stroke-width", "2.6");
+    ring.setAttribute("opacity", "1");
+    group.appendChild(ring);
+
+    var particles = [];
+    var count = strong ? 18 : 12;
+    for (var index = 0; index < count; index += 1) {
+      var angle = (Math.PI * 2 * index) / count + (Math.random() * 0.28 - 0.14);
+      var reach = (strong ? 34 : 24) + Math.random() * (strong ? 24 : 16);
+      var line = document.createElementNS(SVG_NS, "line");
+      line.setAttribute("x1", String(center.x));
+      line.setAttribute("y1", String(center.y));
+      line.setAttribute("x2", String(center.x));
+      line.setAttribute("y2", String(center.y));
+      line.setAttribute("stroke", color);
+      line.setAttribute("stroke-width", strong ? "2.3" : "1.8");
+      line.setAttribute("stroke-linecap", "round");
+      line.setAttribute("opacity", "0");
+      group.appendChild(line);
+      particles.push({
+        element: line,
+        angle: angle,
+        reach: reach,
+        delay: Math.random() * 0.08,
+      });
+    }
+    var core = document.createElementNS(SVG_NS, "circle");
+    core.setAttribute("cx", String(center.x));
+    core.setAttribute("cy", String(center.y));
+    core.setAttribute("r", strong ? "5" : "3.8");
+    core.setAttribute("fill", "#ffffff");
+    core.setAttribute("opacity", "1");
+    group.appendChild(core);
+    var innerRing = document.createElementNS(SVG_NS, "circle");
+    innerRing.setAttribute("cx", String(center.x));
+    innerRing.setAttribute("cy", String(center.y));
+    innerRing.setAttribute("r", "4");
+    innerRing.setAttribute("fill", "none");
+    innerRing.setAttribute("stroke", "#ffffff");
+    innerRing.setAttribute("stroke-width", "1");
+    innerRing.setAttribute("opacity", "0.8");
+    group.appendChild(innerRing);
+    topo.sparks.appendChild(group);
+
+    var duration = strong ? 940 : 720;
+    var start = null;
+    function frame(time) {
+      if (start === null) {
+        start = time;
+      }
+      var progress = Math.min(1, (time - start) / duration);
+      var expansion = Math.min(1, progress * 2.4);
+      ring.setAttribute("r", String(7 + (strong ? 48 : 36) * expansion));
+      ring.setAttribute("opacity", String(Math.max(0, 1 - progress * 1.15)));
+      flash.setAttribute("r", String(10 + 10 * progress));
+      flash.setAttribute("opacity", String(Math.max(0, 0.8 - progress * 2.2)));
+      core.setAttribute("opacity", String(Math.max(0, 1 - progress * 1.5)));
+      innerRing.setAttribute("r", String(4 + (strong ? 18 : 13) * expansion));
+      innerRing.setAttribute("opacity", String(Math.max(0, 0.8 * (1 - progress * 1.3))));
+      particles.forEach(function (particle) {
+        var local = Math.max(
+          0,
+          Math.min(1, (progress - particle.delay) / Math.max(0.01, 1 - particle.delay))
+        );
+        var outward = Math.min(1, local * 2.4);
+        var begin = 7;
+        var end = 7 + particle.reach * outward;
+        particle.element.setAttribute(
+          "x1",
+          String(center.x + Math.cos(particle.angle) * begin)
+        );
+        particle.element.setAttribute(
+          "y1",
+          String(center.y + Math.sin(particle.angle) * begin)
+        );
+        particle.element.setAttribute("x2", String(center.x + Math.cos(particle.angle) * end));
+        particle.element.setAttribute("y2", String(center.y + Math.sin(particle.angle) * end));
+        particle.element.setAttribute("opacity", String(Math.max(0, 1 - local)));
+      });
+      if (progress < 1 && group.parentNode) {
+        requestAnimationFrame(frame);
+      } else if (group.parentNode) {
+        group.parentNode.removeChild(group);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function flashNode(layerId, event, withSpark) {
+    if (layerId === "upstream") {
+      if (!topo.upstream || !topo.upstream.group) {
+        return;
+      }
+      topo.upstream.group.classList.add("is-hit");
+      text($("topo-upstream-status"), "UPSTREAM ERROR");
+      clearTimeout(topo.upstream.timer);
+      topo.upstream.timer = setTimeout(function () {
+        topo.upstream.group.classList.remove("is-hit");
+        if (topo.mode === "log" && topo.selected && layerForEvent(topo.selected) === "upstream") {
+          text($("topo-upstream-status"), "UPSTREAM ERROR");
+        } else {
+          updateUpstreamChrome();
+        }
+      }, 1500);
+    } else {
+      var node = topo.nodes[layerId];
+      if (!node) {
+        return;
+      }
+      node.group.classList.add("is-hit");
+      node.sub.textContent = actionLabel(event);
+      clearTimeout(node.timer);
+      node.timer = setTimeout(function () {
+        node.group.classList.remove("is-hit");
+        updateNodeStatus(layerId);
+      }, 1500);
+    }
+    if (withSpark) {
+      burstSpark(layerId, sparkColor(layerId), false);
+    }
+    if (topo.mode === "realtime") {
+      updateTopologyMeta();
+    }
+  }
+
+  function launchPacket(layerId, event) {
+    var geometry = topo.geometry[layerId];
+    var color = layerColor(layerId);
+    var length = topo.routeLength[layerId] || 0;
+    if (!geometry || !topo.packets || !length) {
+      flashNode(layerId, event, true);
+      return;
+    }
+    var epoch = topo.epoch;
+    var group = document.createElementNS(SVG_NS, "g");
+    group.setAttribute("class", "topo-packet");
+    var glow = document.createElementNS(SVG_NS, "circle");
+    var trailOne = document.createElementNS(SVG_NS, "circle");
+    var trailTwo = document.createElementNS(SVG_NS, "circle");
+    var trailThree = document.createElementNS(SVG_NS, "circle");
+    var core = document.createElementNS(SVG_NS, "circle");
+    var head = document.createElementNS(SVG_NS, "circle");
+    var streak = document.createElementNS(SVG_NS, "line");
+    [
+      [glow, "9", "0.2"],
+      [trailThree, "2.4", "0.1"],
+      [trailTwo, "2.8", "0.2"],
+      [trailOne, "3.2", "0.36"],
+      [core, "3.8", "1"],
+    ].forEach(function (item) {
+      item[0].setAttribute("cx", "186");
+      item[0].setAttribute("cy", "130");
+      item[0].setAttribute("r", item[1]);
+      item[0].setAttribute("fill", color);
+      item[0].setAttribute("opacity", item[2]);
+      group.appendChild(item[0]);
+    });
+    streak.setAttribute("x1", "186");
+    streak.setAttribute("y1", "130");
+    streak.setAttribute("x2", "186");
+    streak.setAttribute("y2", "130");
+    streak.setAttribute("stroke", color);
+    streak.setAttribute("stroke-width", "2");
+    streak.setAttribute("stroke-linecap", "round");
+    streak.setAttribute("opacity", "0.42");
+    group.appendChild(streak);
+    head.setAttribute("cx", "186");
+    head.setAttribute("cy", "130");
+    head.setAttribute("r", "2.4");
+    head.setAttribute("fill", "#ffffff");
+    head.setAttribute("opacity", "0.98");
+    group.appendChild(head);
+    topo.packets.appendChild(group);
+    topo.packetCount += 1;
+    activateEdges(TOPO_ROUTES[layerId].edges, color, 1400);
+    var duration = Math.max(500, Math.min(1040, length * 0.7 + 220));
+    var start = null;
+    var finished = false;
+
+    function finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (group.parentNode) {
+        group.parentNode.removeChild(group);
+      }
+      topo.packetCount = Math.max(0, topo.packetCount - 1);
+    }
+
+    function pointAt(progress) {
+      return geometry.getPointAtLength(length * Math.max(0, Math.min(1, progress)));
+    }
+
+    function place(element, progress) {
+      var point = pointAt(progress);
+      element.setAttribute("cx", String(point.x));
+      element.setAttribute("cy", String(point.y));
+    }
+
+    function frame(time) {
+      if (finished) {
+        return;
+      }
+      if (epoch !== topo.epoch || topo.mode !== "realtime" || !group.parentNode) {
+        finish();
+        return;
+      }
+      if (start === null) {
+        start = time;
+      }
+      var progress = Math.min(1, (time - start) / duration);
+      var eased = 1 - Math.pow(1 - progress, 2);
+      var headPoint = pointAt(eased);
+      var tailPoint = pointAt(eased - 0.055);
+      [core, head, glow].forEach(function (element) {
+        element.setAttribute("cx", String(headPoint.x));
+        element.setAttribute("cy", String(headPoint.y));
+      });
+      streak.setAttribute("x1", String(tailPoint.x));
+      streak.setAttribute("y1", String(tailPoint.y));
+      streak.setAttribute("x2", String(headPoint.x));
+      streak.setAttribute("y2", String(headPoint.y));
+      place(trailOne, eased - 0.03);
+      place(trailTwo, eased - 0.06);
+      place(trailThree, eased - 0.09);
+      if (progress < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        finish();
+        if (epoch === topo.epoch && topo.mode === "realtime") {
+          flashNode(layerId, event, true);
+        }
+      }
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  function processFreshEvents(events) {
+    if (!events.length) {
+      return;
+    }
+    if (topo.mode === "log") {
+      topo.newSinceFocus += events.length;
+      updateNewBadge();
+      return;
+    }
+    var byLayer = {};
+    var order = [];
+    events.forEach(function (event) {
+      var layerId = layerForEvent(event);
+      if (!layerId) {
+        return;
+      }
+      if (!byLayer[layerId]) {
+        byLayer[layerId] = [];
+        order.push(layerId);
+      }
+      byLayer[layerId].push(event);
+    });
+    var epoch = topo.epoch;
+    order.forEach(function (layerId, index) {
+      var event = byLayer[layerId][0];
+      window.setTimeout(
+        function () {
+          if (topo.mode !== "realtime" || epoch !== topo.epoch) {
+            return;
+          }
+          pulseInternet();
+          if (prefersReducedMotion() || topo.packetCount >= 6) {
+            flashNode(layerId, event, true);
+          } else {
+            launchPacket(layerId, event);
+          }
+        },
+        prefersReducedMotion() ? 0 : index * 70
+      );
+    });
+  }
+
+  function setFocusTheme(color) {
+    var bar = $("topo-focus");
+    if (!bar) {
+      return;
+    }
+    if (!color) {
+      bar.style.removeProperty("--focus-color");
+      bar.style.removeProperty("--focus-ink");
+      bar.style.removeProperty("--focus-wash");
+      bar.style.removeProperty("--focus-border");
+      return;
+    }
+    bar.style.setProperty("--focus-color", color);
+    bar.style.setProperty("--focus-ink", focusInkFromColor(color));
+    bar.style.setProperty("--focus-wash", rgbaFromHex(color, 0.07));
+    bar.style.setProperty("--focus-border", rgbaFromHex(color, 0.33));
+  }
+
+  function focusInkFromColor(color) {
+    var found = "#596271";
+    Object.keys(TOPO_LAYER_INK).forEach(function (layerId) {
+      if (layerColor(layerId) === color) {
+        found = TOPO_LAYER_INK[layerId];
+      }
+    });
+    return found;
+  }
+
+  function rgbaFromHex(color, alpha) {
+    var value = String(color || "").replace("#", "");
+    if (value.length !== 6) {
+      return "rgba(130, 137, 148, " + alpha + ")";
+    }
+    var red = parseInt(value.slice(0, 2), 16);
+    var green = parseInt(value.slice(2, 4), 16);
+    var blue = parseInt(value.slice(4, 6), 16);
+    return "rgba(" + red + ", " + green + ", " + blue + ", " + alpha + ")";
+  }
+
+  function clearFocusEdges() {
+    TOPO_EDGES.forEach(function (edge) {
+      var element = topo.edges[edge.id];
+      if (!element) {
+        return;
+      }
+      element.classList.remove("is-route-focus");
+      element.style.removeProperty("--edge-color");
+    });
+  }
+
+  function setFocusEdges(edgeIds, color) {
+    edgeIds.forEach(function (edgeId) {
+      var edge = topo.edges[edgeId];
+      if (!edge) {
+        return;
+      }
+      edge.style.setProperty("--edge-color", color);
+      edge.classList.add("is-route-focus");
+    });
+  }
+
+  function showStopMarker(layerId, color) {
+    if (!topo.stop) {
+      return;
+    }
+    var layer = layerById(layerId);
+    if (!layer) {
+      return;
+    }
+    topo.stop.style.setProperty("--layer", color);
+    topo.stop.setAttribute(
+      "transform",
+      "translate(" + (layer.x + layer.width + 11) + " " + (layer.y + layer.height / 2) + ")"
+    );
+    topo.stop.setAttribute("visibility", "visible");
+  }
+
+  function hideStopMarker() {
+    if (topo.stop) {
+      topo.stop.setAttribute("visibility", "hidden");
+    }
+  }
+
+  function showForwardPath(layerId) {
+    if (!topo.forward) {
+      return;
+    }
+    var layer = layerById(layerId);
+    if (!layer) {
+      return;
+    }
+    var x1 = layer.x + layer.width;
+    var y1 = layer.y + layer.height / 2;
+    var arcY = layer.y < 100 ? 34 : 226;
+    var d =
+      "M" +
+      x1 +
+      " " +
+      y1 +
+      " C" +
+      (x1 + 34) +
+      " " +
+      y1 +
+      " " +
+      (x1 + 34) +
+      " " +
+      arcY +
+      " " +
+      (x1 + 78) +
+      " " +
+      arcY +
+      " C 790 " +
+      arcY +
+      " 812 130 840 130";
+    topo.forward.setAttribute("d", d);
+    topo.forward.classList.add("is-visible");
+  }
+
+  function hideForwardPath() {
+    if (topo.forward) {
+      topo.forward.classList.remove("is-visible");
+    }
+  }
+
+  function animateFocusBar() {
+    var bar = $("topo-focus");
+    if (!bar || bar.hidden) {
+      return;
+    }
+    bar.classList.remove("is-entering");
+    void bar.offsetWidth;
+    bar.classList.add("is-entering");
+    clearTimeout(topo.focusTimer);
+    topo.focusTimer = setTimeout(function () {
+      bar.classList.remove("is-entering");
+    }, 400);
+  }
+
+  function focusTitle(event, layerId) {
+    if (layerId === "upstream" && normalizeToken(event.kind) === "upstreamfailure") {
+      return "Upstream error at Upstream Origins";
+    }
+    if (layerId) {
+      return actionWord(event) + " at " + layerName(layerId);
+    }
+    return humanToken(event.kind) + " event";
+  }
+
+  function focusDetail(event, layerId) {
+    var parts = [];
+    var rule = ruleSummary(event);
+    var request = requestSummary(event);
+    var client = event.client || event.peer;
+    if (rule) {
+      parts.push(rule);
+    }
+    if (request) {
+      parts.push(request);
+    }
+    if (client) {
+      parts.push("client " + client);
+    }
+    if (event.site) {
+      parts.push(event.site);
+    }
+    if (layerId === "upstream") {
+      parts.push("upstream did not complete the request");
+    } else if (layerId && isStopped(event)) {
+      parts.push("stopped before upstream");
+    } else if (layerId && isForwarded(event)) {
+      parts.push("forwarded to upstream");
+    } else if (!layerId) {
+      parts.push("no defense layer applies");
+    }
+    return parts.length ? parts.join(" · ") : "No request metadata was recorded for this event.";
+  }
+
+  function clearLiveEffects() {
+    TOPO_LAYERS.forEach(function (layer) {
+      var node = topo.nodes[layer.id];
+      if (!node) {
+        return;
+      }
+      node.group.classList.remove("is-hit");
+      clearTimeout(node.timer);
+      node.timer = null;
+    });
+    if (topo.upstream) {
+      topo.upstream.group.classList.remove("is-hit", "is-reaching", "is-dimmed");
+      clearTimeout(topo.upstream.timer);
+      topo.upstream.timer = null;
+    }
+    TOPO_EDGES.forEach(function (edge) {
+      var element = topo.edges[edge.id];
+      clearTimeout(topo.edgeTimers[edge.id]);
+      delete topo.edgeTimers[edge.id];
+      if (element) {
+        element.classList.remove("is-route-hit", "is-route-focus");
+        element.style.removeProperty("--edge-color");
+      }
+    });
+    if (topo.packets) {
+      topo.packets.textContent = "";
+    }
+    if (topo.sparks) {
+      topo.sparks.textContent = "";
+    }
+    hideStopMarker();
+    hideForwardPath();
+    if (topo.internet) {
+      topo.internet.group.classList.remove("is-receiving");
+      clearTimeout(topo.internetTimer);
+      topo.internetTimer = null;
+    }
+    topo.packetCount = 0;
+  }
+
+  function renderTopologyFocus() {
+    if (!topo.built) {
+      return;
+    }
+    TOPO_LAYERS.forEach(function (layer) {
+      var node = topo.nodes[layer.id];
+      if (node) {
+        node.group.classList.remove("is-focused");
+      }
+    });
+    if (topo.upstream) {
+      topo.upstream.group.classList.remove("is-focused", "is-reaching", "is-dimmed", "is-error");
+    }
+    clearFocusEdges();
+    hideStopMarker();
+    hideForwardPath();
+    var panel = $("topo-panel");
+    var bar = $("topo-focus");
+    if (!panel || !bar) {
+      return;
+    }
+    if (topo.mode !== "log") {
+      bar.hidden = true;
+      panel.setAttribute("data-focus", "none");
+      TOPO_LAYERS.forEach(function (layer) {
+        updateNodeStatus(layer.id);
+      });
+      updateUpstreamChrome();
+      updateInternetChrome();
+      updateTopologyMeta();
+      updateTopologySummary();
+      return;
+    }
+    bar.hidden = false;
+    animateFocusBar();
+    var event = topo.selected;
+    if (!event) {
+      panel.setAttribute("data-focus", "none");
+      bar.classList.add("is-empty");
+      setFocusTheme(null);
+      text($("topo-focus-badge"), "LOG");
+      text($("topo-focus-title"), "Select an event");
+      text(
+        $("topo-focus-detail"),
+        "Choose a row in Recent detections and service events to trace the request path and the layer that handled it."
+      );
+      text($("topo-focus-time"), "");
+      $("topo-focus-time").removeAttribute("datetime");
+      TOPO_LAYERS.forEach(function (layer) {
+        updateNodeStatus(layer.id);
+      });
+      updateUpstreamChrome();
+      updateInternetChrome();
+      updateTopologyMeta();
+      updateTopologySummary();
+      return;
+    }
+
+    bar.classList.remove("is-empty");
+    var layerId = layerForEvent(event);
+    var color = focusColor(event);
+    setFocusTheme(color);
+    text($("topo-focus-badge"), String(event.disposition || "event").toUpperCase());
+    text($("topo-focus-title"), focusTitle(event, layerId));
+    text($("topo-focus-detail"), focusDetail(event, layerId));
+    text($("topo-focus-time"), utc(event.occurred_at_ms));
+    $("topo-focus-time").setAttribute("datetime", new Date(event.occurred_at_ms).toISOString());
+
+    if (layerId === "upstream") {
+      panel.setAttribute("data-focus", "layer");
+      topo.upstream.group.classList.add("is-focused", "is-error");
+      text($("topo-upstream-status"), "UPSTREAM ERROR");
+      setFocusEdges(TOPO_ROUTES.upstream.edges, "#c66361");
+    } else if (layerId) {
+      panel.setAttribute("data-focus", "layer");
+      var node = topo.nodes[layerId];
+      if (node) {
+        node.group.classList.add("is-focused");
+        node.sub.textContent = isForwarded(event) ? "DETECTION POINT" : "DEFENSE POINT";
+      }
+      setFocusEdges(TOPO_ROUTES[layerId].edges, color);
+      if (isStopped(event)) {
+        showStopMarker(layerId, color);
+        if (topo.upstream) {
+          topo.upstream.group.classList.add("is-dimmed");
+        }
+      } else if (isForwarded(event)) {
+        showForwardPath(layerId);
+        if (topo.upstream) {
+          topo.upstream.group.classList.add("is-reaching");
+        }
+      } else if (topo.upstream) {
+        topo.upstream.group.classList.add("is-dimmed");
+      }
+    } else {
+      panel.setAttribute("data-focus", "none");
+    }
+
+    TOPO_LAYERS.forEach(function (layer) {
+      if (layer.id !== layerId) {
+        updateNodeStatus(layer.id);
+      }
+    });
+    updateInternetChrome();
+    updateUpstreamChrome();
+    updateTopologyMeta();
+    updateTopologySummary();
+    if (layerId) {
+      window.requestAnimationFrame(function () {
+        revealFocusedLayer(layerId);
+      });
+    }
+  }
+
+  function updateTopologyScrollHint() {
+    var hint = $("topo-scroll-hint");
+    var canvas = $("topo-canvas");
+    if (!hint || !canvas) {
+      return;
+    }
+    hint.classList.toggle("is-visible", canvas.scrollWidth > canvas.clientWidth + 1);
+  }
+
+  function revealLiveStart() {
+    var canvas = $("topo-canvas");
+    if (!canvas || canvas.scrollWidth <= canvas.clientWidth + 1 || canvas.scrollLeft < 4) {
+      return;
+    }
+    if (canvas.scrollTo) {
+      canvas.scrollTo({
+        left: 0,
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+      });
+    } else {
+      canvas.scrollLeft = 0;
+    }
+  }
+
+  function revealFocusedLayer(layerId) {
+    if (!layerId) {
+      return;
+    }
+    var canvas = $("topo-canvas");
+    var svg = canvas ? canvas.querySelector("svg") : null;
+    if (!canvas || !svg || canvas.scrollWidth <= canvas.clientWidth + 1) {
+      return;
+    }
+    var width = svg.getBoundingClientRect().width || canvas.scrollWidth;
+    var center = routeCenter(layerId).x;
+    var target = (center / 1000) * width;
+    var left = Math.max(
+      0,
+      Math.min(canvas.scrollWidth - canvas.clientWidth, target - canvas.clientWidth / 2)
+    );
+    if (Math.abs(canvas.scrollLeft - left) > 4) {
+      if (canvas.scrollTo) {
+        canvas.scrollTo({
+          left: left,
+          behavior: prefersReducedMotion() ? "auto" : "smooth",
+        });
+      } else {
+        canvas.scrollLeft = left;
+      }
+    }
+  }
+
+  function setTopologyMode(mode, options) {
+    options = options || {};
+    if (mode !== "realtime" && mode !== "log") {
+      return;
+    }
+    if (topo.mode === mode && !options.force) {
+      return;
+    }
+    topo.epoch += 1;
+    clearLiveEffects();
+    topo.mode = mode;
+    if (mode === "log") {
+      if (!topo.selected) {
+        var latest = latestRetainedEvent();
+        if (latest) {
+          topo.selectedKey = eventKey(latest);
+          topo.selected = copyEvent(latest);
+        }
+      }
+      topo.newSinceFocus = 0;
+    } else {
+      topo.newSinceFocus = 0;
+      revealLiveStart();
+    }
+    updateTopologyModeUI();
+    updateNewBadge();
+    syncSelectedRows();
+    renderTopologyFocus();
+    updateTopologyMeta();
+    var panel = $("topo-panel");
+    if (panel) {
+      panel.classList.add("is-switching");
+      clearTimeout(topo.panelTimer);
+      topo.panelTimer = setTimeout(function () {
+        panel.classList.remove("is-switching");
+      }, 450);
+    }
+  }
+
+  function selectEvent(event) {
+    if (!event) {
+      return;
+    }
+    topo.selectedKey = eventKey(event);
+    topo.selected = copyEvent(event);
+    topo.newSinceFocus = 0;
+    setTopologyMode("log", { force: true });
+    syncSelectedRows();
+    var layerId = layerForEvent(event);
+    if (layerId) {
+      window.setTimeout(function () {
+        if (topo.mode === "log" && topo.selectedKey === eventKey(event)) {
+          burstSpark(layerId, sparkColor(layerId), true);
+        }
+      }, 90);
+    }
+    revealTopology();
+  }
+
+  function syncSelectedRows() {
+    var body = $("live-events");
+    if (!body) {
+      return;
+    }
+    var rows = body.querySelectorAll("tr[data-event-key]");
+    var color = topo.selected ? focusColor(topo.selected) : "#828994";
+    for (var index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      var selected = row.getAttribute("data-event-key") === topo.selectedKey;
+      row.classList.toggle("is-selected", selected);
+      row.setAttribute("aria-selected", selected ? "true" : "false");
+      if (selected) {
+        row.style.setProperty("--row-accent", color);
+      } else {
+        row.style.removeProperty("--row-accent");
+      }
+    }
+  }
+
+  function revealTopology() {
+    var panel = $("topo-panel");
+    if (!panel) {
+      return;
+    }
+    var rect = panel.getBoundingClientRect();
+    if (rect.top < 0 || rect.bottom > window.innerHeight - 48) {
+      panel.scrollIntoView({
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+        block: "nearest",
+      });
+    }
+    panel.classList.remove("is-revealed");
+    void panel.offsetWidth;
+    panel.classList.add("is-revealed");
+    clearTimeout(topo.revealTimer);
+    topo.revealTimer = setTimeout(function () {
+      panel.classList.remove("is-revealed");
+    }, 1200);
+  }
+
+  function resetTopology() {
+    topo.epoch += 1;
+    clearLiveEffects();
+    topo.mode = "realtime";
+    topo.selectedKey = null;
+    topo.selected = null;
+    topo.lastSequence = null;
+    topo.newSinceFocus = 0;
+    topo.counts = {};
+    updateTopologyModeUI();
+    updateNewBadge();
+    revealLiveStart();
+    syncSelectedRows();
+    renderTopologyFocus();
+    updateTopologyMeta();
+  }
+
   function text(node, value) {
     if (node) {
       node.textContent = value;
@@ -268,25 +1950,22 @@
     if (!connected) {
       dot.className = "dot dot-bad";
       label.textContent = "Live stream disconnected";
-      return;
-    }
-    if (!collection) {
+    } else if (!collection) {
       dot.className = "dot dot-unknown";
       label.textContent = "Waiting for collection";
-      return;
-    }
-    if (!collection.connected) {
+    } else if (!collection.connected) {
       dot.className = "dot dot-bad";
       label.textContent = "WAF snapshot source unavailable";
-      return;
-    }
-    if (collection.storage_error) {
+    } else if (collection.storage_error) {
       dot.className = "dot dot-warn";
       label.textContent = "Collecting; storage error";
-      return;
+    } else {
+      dot.className = "dot dot-ok";
+      label.textContent = "Collecting";
     }
-    dot.className = "dot dot-ok";
-    label.textContent = "Collecting";
+    if (topo.built) {
+      updateTopologyMeta();
+    }
   }
 
   function updateHeader() {
@@ -438,6 +2117,7 @@
       }
     }
     renderEvents();
+    updateTopology();
   }
 
   function renderEvents() {
@@ -454,12 +2134,22 @@
       cell.textContent = "No events received yet.";
       empty.appendChild(cell);
       body.appendChild(empty);
+      syncSelectedRows();
       return;
     }
     events.slice(0, 200).forEach(function (event) {
       var row = document.createElement("tr");
+      var key = eventKey(event);
       row.className = ageClass(event.occurred_at_ms);
       row.setAttribute("data-occurred-at", String(event.occurred_at_ms));
+      row.setAttribute("data-event-key", key);
+      row.setAttribute("aria-selected", topo.selectedKey === key ? "true" : "false");
+      row.tabIndex = 0;
+      row.title = "Trace this event in the edge topology";
+      if (topo.selectedKey === key) {
+        row.classList.add("is-selected");
+        row.style.setProperty("--row-accent", focusColor(event));
+      }
       function add(value, className) {
         var cell = document.createElement("td");
         cell.textContent = value === null || value === undefined || value === "" ? "unrecorded" : String(value);
@@ -476,8 +2166,18 @@
       add(event.path);
       add(event.site);
       add(event.client || event.peer);
+      row.addEventListener("click", function () {
+        selectEvent(event);
+      });
+      row.addEventListener("keydown", function (keyboardEvent) {
+        if (keyboardEvent.key === "Enter" || keyboardEvent.key === " " || keyboardEvent.key === "Spacebar") {
+          keyboardEvent.preventDefault();
+          selectEvent(event);
+        }
+      });
       body.appendChild(row);
     });
+    syncSelectedRows();
   }
 
   function applyState(data) {
@@ -486,15 +2186,40 @@
     if (snapshot && typeof snapshot.observed_at_ms === "number") {
       state.clockOffsetMs = snapshot.observed_at_ms - Date.now();
     }
+    var fresh = [];
     if (snapshot && snapshot.source) {
-      if (state.generation !== snapshot.source.generation) {
-        state.generation = snapshot.source.generation;
+      var generation = snapshot.source.generation;
+      var generationChanged = state.generation !== generation;
+      if (generationChanged) {
+        state.generation = generation;
         state.events.clear();
         state.previous = null;
+        resetTopology();
       }
-      (snapshot.events || []).forEach(function (event) {
-        state.events.set(snapshot.source.generation + ":" + event.sequence, event);
+      var incoming = snapshot.events || [];
+      var maximumSequence = topo.lastSequence || 0;
+      incoming.forEach(function (event) {
+        var key = generation + ":" + event.sequence;
+        if (!state.events.has(key)) {
+          state.events.set(key, event);
+          if (
+            !generationChanged &&
+            topo.lastSequence !== null &&
+            event.sequence > topo.lastSequence &&
+            (typeof snapshot.observed_at_ms !== "number" ||
+              snapshot.observed_at_ms - event.occurred_at_ms <= 15000)
+          ) {
+            fresh.push(event);
+          }
+        }
+        if (event.sequence > maximumSequence) {
+          maximumSequence = event.sequence;
+        }
       });
+      if (topo.lastSequence === null) {
+        fresh = [];
+      }
+      topo.lastSequence = maximumSequence;
       while (state.events.size > 200) {
         var oldest = state.events.keys().next();
         state.events.delete(oldest.value);
@@ -504,6 +2229,9 @@
     setConnection(state.connected);
     if (state.view === "live") {
       renderLive();
+      if (fresh.length) {
+        processFreshEvents(fresh);
+      }
     }
   }
 
@@ -1228,6 +2956,8 @@
       loadMetrics();
     } else {
       updateEventAges();
+      updateTopology();
+      updateTopologyScrollHint();
     }
   }
 
@@ -1247,6 +2977,30 @@
     fetch("/api/v1/session", { method: "DELETE", credentials: "same-origin" }).finally(function () {
       window.location.replace("/login");
     });
+  });
+
+  document.querySelectorAll("[data-topo-mode]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      setTopologyMode(button.getAttribute("data-topo-mode"));
+    });
+  });
+
+  $("topo-return").addEventListener("click", function () {
+    setTopologyMode("realtime");
+  });
+
+  $("topo-new").addEventListener("click", function () {
+    setTopologyMode("realtime");
+  });
+
+  buildTopology();
+  updateTopologyScrollHint();
+  window.requestAnimationFrame(updateTopologyScrollHint);
+
+  var topoResizeTimer = null;
+  window.addEventListener("resize", function () {
+    clearTimeout(topoResizeTimer);
+    topoResizeTimer = setTimeout(updateTopologyScrollHint, 120);
   });
 
   setInterval(updateEventAges, 10000);

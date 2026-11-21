@@ -99,17 +99,104 @@
             </article>
           </div>
 
-          <section class="panel" aria-labelledby="live-health-title">
-            <h2 id="live-health-title">Collection health</h2>
-            <dl class="health" id="live-health">
-              <div class="health-item"><dt>state</dt><dd>waiting</dd></div>
-            </dl>
+          <section
+            class="panel topo-panel"
+            id="topo-panel"
+            data-mode="realtime"
+            data-focus="none"
+            aria-labelledby="topo-title"
+          >
+            <div class="topo-head">
+              <div class="topo-titles">
+                <p class="eyebrow topo-eyebrow">
+                  <span class="topo-signal" aria-hidden="true"></span>
+                  Live edge shield topology
+                </p>
+                <h2 id="topo-title">Real-time packet intercept map</h2>
+                <p class="topo-last" id="topo-last">
+                  Waiting for the first detection from the internet edge.
+                </p>
+              </div>
+              <div class="topo-controls">
+                <span class="topo-mode-label">Topology mode</span>
+                <div
+                  class="topo-mode"
+                  id="topo-mode"
+                  data-mode="realtime"
+                  role="group"
+                  aria-label="Topology mode"
+                >
+                  <span class="topo-mode-thumb" aria-hidden="true"></span>
+                  <button
+                    class="topo-mode-button is-active"
+                    type="button"
+                    data-topo-mode="realtime"
+                    aria-pressed="true"
+                    title="Watch live detections ignite their defense layer"
+                  >
+                    <span class="topo-mode-dot topo-mode-dot-live" aria-hidden="true"></span>
+                    Real-time
+                  </button>
+                  <button
+                    class="topo-mode-button"
+                    type="button"
+                    data-topo-mode="log"
+                    aria-pressed="false"
+                    title="Trace the selected event through the topology"
+                  >
+                    <span class="topo-mode-dot topo-mode-dot-log" aria-hidden="true"></span>
+                    Log
+                  </button>
+                </div>
+                <button class="topo-new" id="topo-new" type="button" hidden>0 new</button>
+              </div>
+            </div>
+            <div class="topo-focus" id="topo-focus" hidden>
+              <span class="topo-focus-badge" id="topo-focus-badge">LOG</span>
+              <div class="topo-focus-copy" role="status" aria-live="polite" aria-atomic="true">
+                <p class="topo-focus-title" id="topo-focus-title">Select an event</p>
+                <p class="topo-focus-detail" id="topo-focus-detail">
+                  Choose a row below to trace where the request was handled.
+                </p>
+              </div>
+              <time class="topo-focus-time" id="topo-focus-time"></time>
+              <button class="topo-focus-return" id="topo-return" type="button">
+                Return to live
+              </button>
+            </div>
+            <div class="topo-canvas" id="topo-canvas"></div>
+            <p class="topo-scroll-hint" id="topo-scroll-hint">
+              Scroll the map sideways to follow the route →
+            </p>
+            <div class="topo-foot">
+              <div class="topo-legend">
+                <span>
+                  <i class="topo-legend-swatch is-internet" aria-hidden="true"></i>
+                  Internet edge (untrusted)
+                </span>
+                <span>
+                  <i class="topo-legend-swatch is-fabric" aria-hidden="true"></i>
+                  Defense fabric
+                </span>
+                <span>
+                  <i class="topo-legend-swatch is-upstream" aria-hidden="true"></i>
+                  Upstream (trusted)
+                </span>
+                <span class="topo-legend-spark">
+                  <i aria-hidden="true">✦</i>
+                  Spark = detection
+                </span>
+              </div>
+              <p class="topo-note">Layer counters follow the retained event window.</p>
+            </div>
+            <p class="sr-only" id="topo-summary">The edge topology is waiting for events.</p>
           </section>
 
           <section class="panel" aria-labelledby="live-events-title">
             <h2 id="live-events-title">Recent detections and service events</h2>
             <p class="muted small">
               Selected evidence from the bounded source snapshot, newest first.
+              Select a row to switch the topology to Log and trace its defense point.
               Not a complete request log.
             </p>
             <div class="event-age-legend" role="group" aria-label="Row background colors by event age">
@@ -138,6 +225,13 @@
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <section class="panel" aria-labelledby="live-health-title">
+            <h2 id="live-health-title">Collection health</h2>
+            <dl class="health" id="live-health">
+              <div class="health-item"><dt>state</dt><dd>waiting</dd></div>
+            </dl>
           </section>
         </section>
 

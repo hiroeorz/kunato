@@ -63,7 +63,7 @@ unit disabled, so it runs only after both are explicitly enabled.
 | M-05 | CSV export and historical event drill-down; the live list is snapshot-only | MET-10, LIVE-04 |
 | M-06 | Honest labeling of estimates, omissions, gaps, and unavailable fields in every view | UI-02, UI-09, COUNT-11 |
 | M-07 | Site dimension completeness beyond the `allowed_hosts` policy | phase 4 |
-| M-08 | Arrival effects in the delivered UI (prototype-only today); event-age backgrounds are implemented | LIVE-09, LIVE-10 |
+| M-08 | Card/row arrival flares in the delivered UI (prototype-only today); event-age backgrounds and topology packet/spark effects are implemented | LIVE-09, LIVE-10 |
 | M-09 | Scroll-position preservation and pause/resume in the delivered UI (prototype-only today) | LIVE-06, LIVE-07 |
 
 ### 2.3 Open design decisions
@@ -93,7 +93,7 @@ and the installer installs `kunato-console.service` without enabling it.
 | DOC-01 | Keep [development.md](development.md) in sync with every new `console` field and command |
 | DOC-02 | Update the console status tables when a phase is implemented |
 | DOC-03 | Retire superseded prototype periods (90 days, one year) and the JST default when the real UI replaces it |
-| DOC-04 | Promote the minimal delivered UI to the full interaction design (arrival effects, pause, scroll preservation) |
+| DOC-04 | Promote the minimal delivered UI to the full interaction design (card/row arrival flares, pause, scroll preservation; the topology effects are delivered) |
 
 ## 3. Sequence
 

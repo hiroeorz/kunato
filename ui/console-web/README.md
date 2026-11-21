@@ -17,6 +17,41 @@ own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, and
 `/api/v1/live` endpoints. All event values are rendered with `textContent`; the
 page makes no external requests.
 
+## Live edge shield topology
+
+The Real-time monitor includes a light-theme **edge shield topology** above the
+event table. It reads from the same snapshot and makes no additional requests:
+
+- A dark **internet edge** marks the untrusted ingress side with a globe,
+  public-network labeling, source address, and transport notes. Six defense
+  layers (Admin Gate, Rate / Ban, YAML Rules, Decoy Ward, Payload Guards, and
+  Behavior) sit inside a dotted defense fabric, with trusted upstream origins on
+  the right.
+- **Real-time mode** is the default. Each newly received event sends a packet
+  along the route from the internet edge to the layer derived from its kind,
+  reason, and disposition. A colored spark bursts at that layer, the node keeps
+  a short colored highlight, and the route edges pulse in the layer color.
+  Multiple events in one update light different layers in their own colors.
+  Initial snapshots, backlog, older events, and navigation back to the view do
+  not replay the animation.
+- **Log mode** focuses one selected event. Clicking or pressing Enter/Space on a
+  row in Recent detections and service events switches the topology switch to
+  Log with its sliding animation, dims unrelated nodes, colors the route to the
+  layer that handled the event, and marks the point as a defense or detection
+  point. Blocked and rejected requests end with a stop marker; logged
+  observations continue to upstream with a dashed pass-through path. Service
+  events keep a neutral focus card because no defense layer applies.
+- **New** counts the events that arrived while a log is focused. Selecting an
+  event resets it, and Return to live or the switch restores real-time mode.
+  The selected row remains marked while its event is in the retained window.
+- On narrow screens the map scrolls horizontally, shows a scroll hint, and
+  automatically centers the focused layer. Reduced-motion preferences use
+  static highlights instead of packets and sparks.
+
+Node counters describe the retained browser event window, not lifetime totals.
+The mapping is illustrative: it shows where the recorded event was handled and
+does not prove malicious intent or a successful compromise.
+
 The page follows the prototype's visual language (light theme, warm accent,
 dark sidebar) while keeping the minimal read-only feature set. Event rows carry
 the prototype's event-age backgrounds (pale red through pale yellow for the
@@ -39,9 +74,10 @@ focusable: the left and right arrow keys move between intervals, Home and End
 jump to the edges, and Escape hides the tooltip.
 
 The UI is intentionally smaller than the fictional interaction prototype in
-`../console-prototype/`. Arrival effects, pause/resume, scroll preservation,
-CSV export, comparison periods, and historical event drill-down remain future
-work; see `docs/monitoring-console-remaining.md`.
+`../console-prototype/`. Table-row arrival flares, pause/resume, scroll
+preservation, CSV export, comparison periods, and historical event drill-down
+remain future work; the topology's packet, spark, and focus effects are
+implemented; see `docs/monitoring-console-remaining.md`.
 
 ## Editing
 
@@ -52,12 +88,16 @@ cargo build --bin kunato
 ```
 
 `node --check app.js && node --check login.js` catches script syntax errors
-without any package installation. The server sets a `default-src 'self'` CSP, so
+without any package installation. The topology SVG is generated at runtime and
+uses only embedded styles and `textContent`; no external font, image, or request
+is added. The server sets a `default-src 'self'` CSP, so
 do not add inline scripts or styles, external fonts, or third-party assets.
 
 ## Limits
 
 - The browser keeps at most 200 selected events and renders newest first.
+- Topology counters and selections use that same retained window; an evicted
+  event can remain focused in the focus card but has no row in the table.
 - History reads page at 128 buckets per request, follow `next_start_ms` while
   reusing the first page's `revision`, and stop after 64 pages. A page may also
   be cut at 4 MiB; the next start continues the read. A remaining
