@@ -110,8 +110,17 @@ nonempty contributing latency population lacks them.
 Country counts merge by summing request and rejection counts and are trimmed
 last when an oversized record must be shrunk, after the optional dimension,
 ranking, status, and reason-latency detail. The console renders them as a
-country-coloured traffic/rejection chart and a top-10 request table; the
-underlying counts are not decoy-specific.
+country-coloured traffic/rejection chart, a top-10 request table, and a world
+map of WAF-rejected requests; the underlying counts are not decoy-specific.
+
+The world map uses pre-projected Natural Earth 1:50m country geometry embedded
+as `ui/console-web/world-map.js`
+([source](https://github.com/nvkelso/natural-earth-vector)). Natural Earth is
+public domain; the console footer credits it. The map follows the selected history range, colours the
+`rejected` count with a logarithmic scale, distinguishes no data from zero,
+and adds point markers for small countries that would otherwise disappear.
+Countries without geometry remain available in the top-10 table, and `ZZ`
+(unknown country) is reported outside the map.
 
 Additional values travel with absolute minute revisions through the existing
 collector and atomic parent replacement. They use the same UTC 1/5/10/20/60

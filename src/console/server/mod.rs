@@ -281,6 +281,7 @@ async fn route(request: Request<Incoming>, connection: Connection) -> Response<P
             match (method.as_str(), path.as_str()) {
                 ("GET", "/") => html(assets::INDEX),
                 ("GET", "/app.js") => script(assets::APP_JS),
+                ("GET", "/world-map.js") => script(assets::WORLD_MAP_JS),
                 ("GET", "/api/v1/health") => health(&connection),
                 ("GET", "/api/v1/history") => history(request, &connection).await,
                 ("GET", "/api/v1/correlations") => correlations(request, &connection).await,
@@ -293,7 +294,8 @@ async fn route(request: Request<Incoming>, connection: Connection) -> Response<P
 
 fn allowed_methods(path: &str) -> Option<&'static str> {
     match path {
-        "/" | "/app.js" | "/login" | "/login.js" | "/styles.css" | "/favicon.svg" => Some("GET"),
+        "/" | "/app.js" | "/world-map.js" | "/login" | "/login.js" | "/styles.css"
+        | "/favicon.svg" => Some("GET"),
         "/api/v1/health" | "/api/v1/history" | "/api/v1/correlations" | "/api/v1/live" => {
             Some("GET")
         }

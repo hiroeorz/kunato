@@ -9,6 +9,7 @@ is no build step, Node.js runtime, external font, or network request.
 | `index.html` | Console shell with the Real-time monitor and Metrics views |
 | `app.js` | SSE state, history/correlation fetches, rendering, sign-out |
 | `login.html`, `login.js` | Token sign-in used when `console.auth.enabled` is set |
+| `world-map.js` | Pre-projected Natural Earth 1:50m country paths and small-country markers |
 | `styles.css` | Shared styles for both pages |
 | `favicon.svg` | Embedded icon |
 
@@ -75,8 +76,9 @@ country code for the resolved client address. The globe also shows a country
 badge near its lower half for the selected log event or the latest real-time
 detection, using the browser's English region display names when available.
 
-The sidebar footer credits the embedded DB-IP Lite data. The links are ordinary
-anchors and are not fetched until the operator clicks them.
+The sidebar footer credits the embedded DB-IP Lite data and the Natural Earth
+map geometry. The links are ordinary anchors and are not fetched until the
+operator clicks them.
 
 The Metrics view keeps the terminal-mechanism table and adds an **Attack type
 and cause** table from the retained per-minute class counters. Older intervals
@@ -108,10 +110,14 @@ left and right arrow keys move between intervals, Home and End jump to the
 edges, and Escape hides the tooltip. A second chart below it uses the same UTC
 intervals and per-minute rates, with each interval's requests and rejections
 stacked by country; the top eight countries keep stable colours and the rest
-are grouped as OTHER. A top-10 country table below the metrics panels shows
-request, rejection, and rejection-rate totals for the fetched range. Country
-detail comes from bounded per-minute supplementary measurements, so older
-intervals without it remain explicitly unavailable.
+are grouped as OTHER. A world map below it colours countries by all
+WAF-rejected requests in the selected range on a logarithmic scale, separates
+no data from zero, and uses point markers for small countries. Small islands,
+territories, and other countries without map geometry remain in the top-10
+table. A top-10 country table below
+the metrics panels shows request, rejection, and rejection-rate totals for the
+fetched range. Country detail comes from bounded per-minute supplementary
+measurements, so older intervals without it remain explicitly unavailable.
 
 The UI is intentionally smaller than the fictional interaction prototype in
 `../console-prototype/`. Table-row arrival flares, pause/resume, scroll

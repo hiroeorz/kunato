@@ -196,6 +196,19 @@ async fn serves_history_live_state_and_assets() {
         body.contains(r#"<option value="604800000" selected>Last 7 days</option>"#),
         "{body}"
     );
+    assert!(body.contains("/world-map.js"), "{body}");
+
+    let (status, body, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/world-map.js",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("KUNATO_WORLD_MAP"), "{body}");
 
     let (status, body, _) = request(
         &client,

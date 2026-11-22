@@ -362,6 +362,10 @@ licensed under the [Creative Commons Attribution 4.0 International License](http
 and is attributed as "IP Geolocation by [DB-IP](https://db-ip.com/)". The
 embedded database is a separate work from Kunato's source code.
 
+監視コンソールの世界地図は Natural Earth 1:50m の国境形状を使用しています。
+Natural Earth はパブリックドメインであり、「Map geometry:
+[Natural Earth](https://www.naturalearthdata.com/) (public domain)」と表示します。
+
 ## ライセンス (License)
 
 Kunato is provided "as is", without warranty of any kind, express or implied,

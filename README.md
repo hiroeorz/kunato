@@ -465,6 +465,10 @@ licensed under the [Creative Commons Attribution 4.0 International License](http
 and is attributed as "IP Geolocation by [DB-IP](https://db-ip.com/)". The
 embedded database is a separate work from Kunato's source code.
 
+The monitoring console's world map uses Natural Earth 1:50m country geometry.
+Natural Earth is in the public domain and is attributed as "Map geometry:
+[Natural Earth](https://www.naturalearthdata.com/) (public domain)."
+
 ## License
 
 Kunato is provided "as is", without warranty of any kind, express or implied,

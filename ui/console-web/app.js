@@ -35,6 +35,11 @@
     "#b36d9b", "#82904b",
   ];
   var COUNTRY_OTHER_COLOR = "#9aa6b2";
+  var WORLD_MAP_NO_DATA = "#e7ecf1";
+  var WORLD_MAP_ZERO = "#f7f9fb";
+  var WORLD_MAP_COLORS = [
+    "#fde8d8", "#f9c9a8", "#f2a47c", "#dd7048", "#b94b35", "#7f2a2a",
+  ];
 
   var TOPO_LAYERS = [
     {
@@ -2593,6 +2598,7 @@
     var grouped = groupBuckets(buckets, displayWidth);
     renderChart(grouped, displayWidth, data.from_ms, data.until_ms);
     renderCountryChart(grouped, displayWidth, data.from_ms, data.until_ms);
+    renderCountryMap(buckets);
     renderReasonClasses(buckets, rejected.total || 0);
     renderReasons(buckets);
     renderCorrelations();
@@ -2970,6 +2976,29 @@
 
   function countryColor(index) {
     return COUNTRY_COLORS[index % COUNTRY_COLORS.length];
+  }
+
+  function countryTotalsFromBuckets(buckets) {
+    var totals = {};
+    var known = false;
+    var incomplete = false;
+    buckets.forEach(function (bucket) {
+      var countries = bucket.additional && bucket.additional.countries;
+      if (!countries) {
+        if (bucket.counters && bucket.counters.requests && bucket.counters.requests.sum) {
+          incomplete = true;
+        }
+        return;
+      }
+      Object.keys(countries).forEach(function (code) {
+        addCountryCount(totals, code, countries[code]);
+        known = true;
+      });
+      if ((bucket.additional.country_overflow || 0) > 0) {
+        incomplete = true;
+      }
+    });
+    return { totals: totals, known: known, incomplete: incomplete };
   }
 
   function renderCountryChart(groups, displayWidth, rangeStart, rangeEnd) {
@@ -3400,6 +3429,298 @@
     legend.appendChild(note);
     host.appendChild(legend);
     host.appendChild(tooltip);
+  }
+
+  function worldMapBounds(max) {
+    var bounds = [];
+    for (var index = 1; index < 6; index += 1) {
+      var raw = Math.ceil(Math.expm1((index / 6) * Math.log1p(max)));
+      var value = Math.min(max, Math.max(index, raw));
+      if (bounds.length && value <= bounds[bounds.length - 1]) {
+        value = Math.min(max, bounds[bounds.length - 1] + 1);
+      }
+      bounds.push(value);
+    }
+    return bounds;
+  }
+
+  function worldMapColor(info, max) {
+    if (!info) {
+      return WORLD_MAP_NO_DATA;
+    }
+    if (info.rejected <= 0) {
+      return WORLD_MAP_ZERO;
+    }
+    if (max <= WORLD_MAP_COLORS.length) {
+      return WORLD_MAP_COLORS[Math.min(WORLD_MAP_COLORS.length - 1, info.rejected - 1)];
+    }
+    var bounds = worldMapBounds(max);
+    for (var index = 0; index < bounds.length; index += 1) {
+      if (info.rejected <= bounds[index]) {
+        return WORLD_MAP_COLORS[index];
+      }
+    }
+    return WORLD_MAP_COLORS[WORLD_MAP_COLORS.length - 1];
+  }
+
+  function worldMapTitle(code, info) {
+    var label = countryLabel(code) || code;
+    if (!info) {
+      return label + " - no country data";
+    }
+    return (
+      label +
+      " - " +
+      number(info.rejected) +
+      " blocked, " +
+      number(info.requests) +
+      " requests"
+    );
+  }
+
+  function addWorldMapLegendItem(legend, colour, label) {
+    var item = document.createElement("span");
+    item.className = "country-map-legend-item";
+    var swatch = document.createElement("span");
+    swatch.className = "country-map-swatch";
+    swatch.style.setProperty("--country-map-swatch", colour);
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(label));
+    legend.appendChild(item);
+  }
+
+  function renderCountryMap(buckets) {
+    var host = $("country-map");
+    host.innerHTML = "";
+    var world = window.KUNATO_WORLD_MAP;
+    if (!world || !world.countries || !world.width || !world.height) {
+      host.textContent = "World map geometry is unavailable.";
+      host.className = "country-map country-map-muted";
+      return;
+    }
+    var data = countryTotalsFromBuckets(buckets);
+    if (!data.known) {
+      host.textContent = "No country detail in these retained intervals.";
+      host.className = "country-map country-map-muted";
+      return;
+    }
+    var totals = data.totals;
+    var max = 0;
+    Object.keys(totals).forEach(function (code) {
+      if (code !== "ZZ") {
+        max = Math.max(max, totals[code].rejected);
+      }
+    });
+    var markerByCode = {};
+    (world.markers || []).forEach(function (marker) {
+      if (marker && marker.code) {
+        markerByCode[marker.code] = marker;
+      }
+    });
+    var unmapped = [];
+    Object.keys(totals).forEach(function (code) {
+      if (code !== "ZZ" && !world.countries[code] && !markerByCode[code]) {
+        unmapped.push(code);
+      }
+    });
+
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + world.width + " " + world.height);
+    svg.setAttribute("width", String(world.width));
+    svg.setAttribute("height", String(world.height));
+    svg.setAttribute("role", "img");
+    svg.setAttribute(
+      "aria-label",
+      "World map coloured by the number of WAF-blocked requests per country in the selected history range."
+    );
+    svg.setAttribute("class", "country-map-svg");
+
+    Object.keys(world.countries)
+      .sort()
+      .forEach(function (code) {
+        var info = totals[code];
+        var path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", world.countries[code]);
+        path.setAttribute("fill", worldMapColor(info, max));
+        path.setAttribute("class", "country-path");
+        path.setAttribute("data-country", code);
+        var title = document.createElementNS(SVG_NS, "title");
+        title.textContent = worldMapTitle(code, info);
+        path.appendChild(title);
+        svg.appendChild(path);
+      });
+
+    Object.keys(markerByCode)
+      .sort()
+      .forEach(function (code) {
+        if (!totals[code]) {
+          return;
+        }
+        var marker = markerByCode[code];
+        var circle = document.createElementNS(SVG_NS, "circle");
+        circle.setAttribute("cx", String(marker.x));
+        circle.setAttribute("cy", String(marker.y));
+        circle.setAttribute("r", "3.3");
+        circle.setAttribute("fill", worldMapColor(totals[code], max));
+        circle.setAttribute("class", "country-marker");
+        circle.setAttribute("data-country", code);
+        var title = document.createElementNS(SVG_NS, "title");
+        title.textContent = worldMapTitle(code, totals[code]);
+        circle.appendChild(title);
+        svg.appendChild(circle);
+      });
+
+    host.className = "country-map";
+    host.appendChild(svg);
+
+    var legend = document.createElement("div");
+    legend.className = "country-map-legend";
+    addWorldMapLegendItem(legend, WORLD_MAP_NO_DATA, "No country data");
+    addWorldMapLegendItem(legend, WORLD_MAP_ZERO, "0 blocked");
+    if (max > 0) {
+      if (max <= WORLD_MAP_COLORS.length) {
+        for (var count = 1; count <= max; count += 1) {
+          addWorldMapLegendItem(
+            legend,
+            WORLD_MAP_COLORS[Math.min(WORLD_MAP_COLORS.length - 1, count - 1)],
+            number(count)
+          );
+        }
+      } else {
+        var bounds = worldMapBounds(max);
+        var lower = 1;
+        bounds.forEach(function (upper, index) {
+          if (upper < lower) {
+            return;
+          }
+          addWorldMapLegendItem(
+            legend,
+            WORLD_MAP_COLORS[index],
+            lower === upper ? number(lower) : number(lower) + "–" + number(upper)
+          );
+          lower = upper + 1;
+        });
+        if (lower <= max) {
+          addWorldMapLegendItem(
+            legend,
+            WORLD_MAP_COLORS[WORLD_MAP_COLORS.length - 1],
+            number(lower) + "–" + number(max)
+          );
+        }
+      }
+    }
+    host.appendChild(legend);
+
+    var notes = [];
+    if (totals.ZZ) {
+      notes.push(
+        "UNKNOWN (ZZ): " +
+          number(totals.ZZ.rejected) +
+          " blocked, " +
+          number(totals.ZZ.requests) +
+          " requests; not mapped."
+      );
+    }
+    if (unmapped.length) {
+      notes.push(
+        plural(unmapped.length, "country", "countries") +
+          " with data have no map geometry and remain in the top table."
+      );
+    }
+    if (data.incomplete) {
+      notes.push("Country detail is incomplete for some intervals in this range.");
+    }
+    if (max === 0) {
+      notes.push("No blocked requests in this range.");
+    }
+    if (notes.length) {
+      var note = document.createElement("p");
+      note.className = "country-map-note";
+      note.textContent = notes.join(" ");
+      host.appendChild(note);
+    }
+
+    var tooltip = document.createElement("div");
+    tooltip.className = "chart-tooltip country-map-tooltip";
+    tooltip.hidden = true;
+    host.appendChild(tooltip);
+
+    function mapCode(target) {
+      while (target && target !== svg) {
+        if (target.getAttribute) {
+          var code = target.getAttribute("data-country");
+          if (code) {
+            return code;
+          }
+        }
+        target = target.parentNode;
+      }
+      return null;
+    }
+
+    function positionMapTooltip(event) {
+      var frame = host.getBoundingClientRect();
+      var x = event.clientX - frame.left + 14;
+      var y = event.clientY - frame.top - tooltip.offsetHeight - 12;
+      if (x + tooltip.offsetWidth > host.clientWidth - 8) {
+        x = event.clientX - frame.left - tooltip.offsetWidth - 14;
+      }
+      if (x < 8) {
+        x = 8;
+      }
+      if (y < 8) {
+        y = event.clientY - frame.top + 18;
+      }
+      if (y + tooltip.offsetHeight > host.clientHeight - 8) {
+        y = Math.max(8, host.clientHeight - tooltip.offsetHeight - 8);
+      }
+      tooltip.style.left = x + "px";
+      tooltip.style.top = y + "px";
+    }
+
+    function showMapTooltip(code, event) {
+      var info = totals[code];
+      tooltip.textContent = "";
+      var heading = document.createElement("p");
+      heading.className = "chart-tooltip-time";
+      heading.textContent = countryLabel(code) || code;
+      tooltip.appendChild(heading);
+      var list = document.createElement("dl");
+      list.className = "chart-tooltip-list";
+      function row(label, value) {
+        var term = document.createElement("dt");
+        term.textContent = label;
+        var detail = document.createElement("dd");
+        detail.textContent = value;
+        list.appendChild(term);
+        list.appendChild(detail);
+      }
+      if (info) {
+        row("Blocked", number(info.rejected));
+        row("Requests", number(info.requests));
+        row("Block rate", percent(info.rejected, info.requests));
+      } else {
+        row("Country detail", "Unavailable");
+      }
+      tooltip.appendChild(list);
+      tooltip.hidden = false;
+      positionMapTooltip(event);
+    }
+
+    function hideMapTooltip() {
+      tooltip.hidden = true;
+    }
+
+    svg.addEventListener("pointermove", function (event) {
+      var code = mapCode(event.target);
+      if (!code) {
+        hideMapTooltip();
+        return;
+      }
+      showMapTooltip(code, event);
+    });
+    svg.addEventListener("pointerleave", hideMapTooltip);
+    svg.addEventListener("pointercancel", hideMapTooltip);
   }
 
   var REASONS = [

@@ -48,6 +48,9 @@
           <p class="attribution">
             IP Geolocation by <a href="https://db-ip.com/" target="_blank" rel="noopener noreferrer">DB-IP</a>
             · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>
+            <br>
+            Map geometry: <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener noreferrer">Natural Earth</a>
+            · Public domain
           </p>
         </div>
       </aside>
@@ -324,6 +327,19 @@
             <div id="country-chart" class="chart"></div>
           </section>
 
+          <section class="panel" aria-labelledby="country-map-title">
+            <h2 id="country-map-title">Blocked requests by country</h2>
+            <p class="muted small">
+              All WAF-rejected requests in the fetched range, mapped by the
+              resolved source country. Darker colour means more blocked requests;
+              the scale is logarithmic so a single large source does not hide
+              smaller countries. Grey means no country detail, pale means zero
+              blocked requests. Natural Earth 1:50m geometry is embedded and
+              served locally.
+            </p>
+            <div id="country-map" class="country-map"></div>
+          </section>
+
           <div class="panel-grid">
             <section class="panel" aria-labelledby="reasons-title">
               <h2 id="reasons-title">Rejection reasons</h2>
@@ -423,6 +439,7 @@
         </section>
       </main>
     </div>
+    <script src="/world-map.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
