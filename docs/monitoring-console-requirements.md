@@ -55,7 +55,7 @@ quality information.
 
 - Offer 24 hours, 7 days, 30 days, and a custom date range within retained data.
   The prototype's 90-day and one-year options are superseded for real data.
-- Default to the last 24 hours.
+- Default to the last 7 days.
 - Reject invalid or reversed custom ranges and disclose retained-range limits.
 - Select an appropriate aggregation grain and show it to the operator.
 - Preserve the adopted 1/5/10/20/60-minute precision tiers in the

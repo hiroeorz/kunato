@@ -192,6 +192,10 @@ async fn serves_history_live_state_and_assets() {
     let (status, body, _) = request(&client, running.address, Method::GET, "/", &[], None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Kunato console"), "{body}");
+    assert!(
+        body.contains(r#"<option value="604800000" selected>Last 7 days</option>"#),
+        "{body}"
+    );
 
     let (status, body, _) = request(
         &client,

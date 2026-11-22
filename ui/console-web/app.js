@@ -8,7 +8,7 @@
     previous: null,
     events: new Map(),
     generation: null,
-    rangeMs: 86400000,
+    rangeMs: 604800000,
     metrics: null,
     correlations: null,
     connected: false,
