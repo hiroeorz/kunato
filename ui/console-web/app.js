@@ -43,13 +43,24 @@
 
   var TOPO_LAYERS = [
     {
+      id: "country",
+      name: "Country Gate",
+      title: "COUNTRY GATE",
+      color: "#557a8a",
+      x: 225,
+      y: 42,
+      width: 126,
+      height: 56,
+      icon: '<circle cx="10" cy="10" r="7.2"/><path d="M2.8 10h14.4M10 2.8c2.2 2.2 3.2 4.6 3.2 7.2s-1 5-3.2 7.2C7.8 15 6.8 12.6 6.8 10s1-5 3.2-7.2z"/>',
+    },
+    {
       id: "admin",
       name: "Admin Gate",
       title: "ADMIN GATE",
       color: "#b8811f",
-      x: 220,
+      x: 363,
       y: 42,
-      width: 138,
+      width: 126,
       height: 56,
       icon: '<circle cx="6" cy="6" r="3.4"/><path d="M8.5 8.5 17 17M13 13l2-2M15.5 15.5l2-2"/>',
     },
@@ -58,9 +69,9 @@
       name: "Rate / Ban",
       title: "RATE / BAN",
       color: "#c66361",
-      x: 418,
+      x: 501,
       y: 42,
-      width: 138,
+      width: 126,
       height: 56,
       icon: '<path d="M2.5 15.5a7.5 7.5 0 1 1 15 0"/><path d="M10 15.5 14.8 9.5"/><circle cx="10" cy="15.5" r="1.1"/>',
     },
@@ -69,9 +80,9 @@
       name: "YAML Rules",
       title: "YAML RULES",
       color: "#4f7fa8",
-      x: 616,
+      x: 639,
       y: 42,
-      width: 138,
+      width: 126,
       height: 56,
       icon: '<path d="M5 2.5h7.2L16.5 6v11.5H5z"/><path d="M12 2.5V6.2h4.3M8 9.5h5.5M8 12.5h5.5M8 15.5h3.4"/>',
     },
@@ -108,17 +119,6 @@
       height: 56,
       icon: '<path d="M2 10h3.6l2.1-5 4.1 10 2.1-5H18"/>',
     },
-    {
-      id: "country",
-      name: "Country Gate",
-      title: "COUNTRY GATE",
-      color: "#557a8a",
-      x: 220,
-      y: 108,
-      width: 138,
-      height: 44,
-      icon: '<circle cx="10" cy="10" r="7.2"/><path d="M2.8 10h14.4M10 2.8c2.2 2.2 3.2 4.6 3.2 7.2s-1 5-3.2 7.2C7.8 15 6.8 12.6 6.8 10s1-5 3.2-7.2z"/>',
-    },
   ];
 
   TOPO_LAYERS.forEach(function (layer) {
@@ -132,49 +132,49 @@
   });
 
   var TOPO_EDGES = [
-    { id: "ingress-country", d: "M176 130 C194 130 202 130 220 130" },
-    { id: "country-admin", d: "M289 108 L289 98" },
-    { id: "country-decoy", d: "M289 152 L289 162" },
-    { id: "admin-rate", d: "M358 70 L418 70" },
-    { id: "decoy-guards", d: "M358 190 L418 190" },
-    { id: "rate-rules", d: "M556 70 L616 70" },
-    { id: "guards-behavior", d: "M556 190 L616 190" },
-    { id: "rules-upstream", d: "M754 70 C792 70 802 130 840 130" },
+    { id: "ingress-country", d: "M176 130 C198 130 206 70 225 70" },
+    { id: "country-admin", d: "M351 70 H363" },
+    { id: "country-decoy", d: "M289 98 L289 162" },
+    { id: "admin-rate", d: "M489 70 H501" },
+    { id: "decoy-guards", d: "M358 190 H418" },
+    { id: "rate-rules", d: "M627 70 H639" },
+    { id: "guards-behavior", d: "M556 190 H616" },
+    { id: "rules-upstream", d: "M765 70 C800 70 808 130 840 130" },
     { id: "behavior-upstream", d: "M754 190 C792 190 802 130 840 130" },
   ];
 
   var TOPO_ROUTES = {
     country: {
       edges: ["ingress-country"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130",
+      d: "M176 130 C198 130 206 70 225 70 L288 70",
     },
     admin: {
       edges: ["ingress-country", "country-admin"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L426 70",
     },
     rate: {
       edges: ["ingress-country", "country-admin", "admin-rate"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70 L358 70 L418 70 L487 70",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L426 70 L564 70",
     },
     rules: {
       edges: ["ingress-country", "country-admin", "admin-rate", "rate-rules"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70 L358 70 L418 70 L556 70 L616 70 L685 70",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L426 70 L564 70 L702 70",
     },
     decoy: {
       edges: ["ingress-country", "country-decoy"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 190",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L289 98 L289 190",
     },
     guards: {
       edges: ["ingress-country", "country-decoy", "decoy-guards"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 190 L358 190 L418 190 L487 190",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L289 98 L289 190 L358 190 L487 190",
     },
     behavior: {
       edges: ["ingress-country", "country-decoy", "decoy-guards", "guards-behavior"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 190 L358 190 L418 190 L556 190 L616 190 L685 190",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L289 98 L289 190 L358 190 L487 190 L685 190",
     },
     upstream: {
       edges: ["ingress-country", "country-admin", "admin-rate", "rate-rules", "rules-upstream"],
-      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70 L358 70 L418 70 L556 70 L616 70 L754 70 C792 70 802 130 840 130 L911 130",
+      d: "M176 130 C198 130 206 70 225 70 L288 70 L426 70 L564 70 L702 70 C800 70 808 130 840 130 L911 130",
     },
   };
 
@@ -1036,7 +1036,7 @@
     }
     text(
       $("topo-summary"),
-      "Edge shield topology. Country gate first, then the top request path and bottom response path. Mode " +
+      "Edge shield topology. The country gate is checked on request admission only; the top track shows the request path and the bottom track shows the response return. Mode " +
         (topo.mode === "log" ? "log" : "real-time") +
         ". Retained events by layer: " +
         parts.join(", ") +

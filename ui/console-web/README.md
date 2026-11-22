@@ -25,13 +25,14 @@ event table. It reads from the same snapshot and makes no additional requests:
 
 - A circular blue-gradient **internet globe** marks the untrusted ingress
   side, with the INTERNET / PUBLIC NETWORK labels above the globe icon.
-  Traffic leaves the globe through the **Country Gate** and then enters the
-  Admin Gate or Decoy Ward. Six defense layers (Admin Gate, Rate / Ban, YAML
-  Rules, Decoy Ward, Payload Guards, and Behavior) sit inside a faintly
-  red-washed, dotted defense fabric that marks the inspection boundary, with
-  trusted upstream origins on the right. A right-pointing arrow on the top edge
-  and a left-pointing arrow on the bottom edge mark the request and response
-  directions.
+  Traffic leaves the globe through the **Country Gate** on the request side.
+  The top track continues through **Admin Gate**, **Rate / Ban**, and **YAML
+  Rules**; the lower track groups **Decoy Ward**, **Payload Guards**, and
+  **Behavior**. Six defense layers sit inside a faintly red-washed, dotted
+  defense fabric that marks the inspection boundary, with trusted upstream
+  origins on the right. A right-pointing arrow on the top edge and a
+  left-pointing arrow on the bottom edge mark the request and response
+  directions; the response return does not pass through the country gate.
 - **Real-time mode** is the default. Each newly received event sends a packet
   along the route from the internet globe to the layer derived from its kind,
   reason, and disposition. A colored spark bursts at that layer, the node keeps
