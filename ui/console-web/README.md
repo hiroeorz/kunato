@@ -112,9 +112,10 @@ intervals and per-minute rates, with each interval's requests and rejections
 stacked by country; the top eight countries keep stable colours and the rest
 are grouped as OTHER. A world map below it colours countries by all
 WAF-rejected requests in the selected range on a logarithmic scale, separates
-no data from zero, and uses point markers for small countries. Small islands,
-territories, and other countries without map geometry remain in the top-10
-table. A top-10 country table below
+no data from zero, and uses point markers for small countries. When no country
+detail exists, the map still renders with every country in the no-data colour.
+Small islands, territories, and other countries without map geometry remain in
+the top-10 table. A top-10 country table below
 the metrics panels shows request, rejection, and rejection-rate totals for the
 fetched range. Country detail comes from bounded per-minute supplementary
 measurements, so older intervals without it remain explicitly unavailable.

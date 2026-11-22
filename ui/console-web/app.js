@@ -3499,11 +3499,6 @@
       return;
     }
     var data = countryTotalsFromBuckets(buckets);
-    if (!data.known) {
-      host.textContent = "No country detail in these retained intervals.";
-      host.className = "country-map country-map-muted";
-      return;
-    }
     var totals = data.totals;
     var max = 0;
     Object.keys(totals).forEach(function (code) {
@@ -3612,6 +3607,14 @@
     host.appendChild(legend);
 
     var notes = [];
+    if (!data.known) {
+      notes.push(
+        "No country detail in these retained intervals; countries are shown without data."
+      );
+    }
+    if (!buckets.length) {
+      notes.push("No retained intervals in this range.");
+    }
     if (totals.ZZ) {
       notes.push(
         "UNKNOWN (ZZ): " +
@@ -3630,7 +3633,7 @@
     if (data.incomplete) {
       notes.push("Country detail is incomplete for some intervals in this range.");
     }
-    if (max === 0) {
+    if (data.known && max === 0) {
       notes.push("No blocked requests in this range.");
     }
     if (notes.length) {
