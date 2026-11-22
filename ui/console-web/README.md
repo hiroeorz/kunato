@@ -73,8 +73,10 @@ classification. Rejected rule events also retain their category and rule name,
 and the topology focus summary shows the attack type with the matched rule. The
 Client column is paired with a Country column when the WAF recorded an ISO
 country code for the resolved client address. The globe also shows a country
-badge near its lower half for the selected log event or the latest real-time
-detection, using the browser's English region display names when available.
+badge near its lower half for the selected log event, using the browser's
+English region display names when available. In real-time mode the badge follows
+the latest country-bearing event for 20 seconds and then clears; returning from
+a selected log to real-time hides the selected log's badge immediately.
 
 The sidebar footer credits the embedded DB-IP Lite data and the Natural Earth
 map geometry. The links are ordinary anchors and are not fetched until the

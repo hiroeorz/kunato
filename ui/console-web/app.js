@@ -313,6 +313,7 @@
   var DAY_MS = 86400000;
   var THREE_HOURS_MS = 3 * GRAIN_MS.hour;
   var MAX_BAR_WIDTH = 12;
+  var COUNTRY_BADGE_VISIBLE_MS = 20000;
 
   function displayGrainMs(rangeMs, buckets) {
     var maxGrain = 0;
@@ -836,20 +837,30 @@
     return latest;
   }
 
-  function updateCountryBadge() {
-    if (!topo.built || !topo.countryBadge || !topo.countryBadge.group) {
+  function hideCountryBadge() {
+    if (!topo.countryBadge) {
       return;
     }
-    var event = topo.mode === "log" ? topo.selected : latestCountryEvent();
-    var label = countryLabel(event && event.country);
-    if (!label) {
+    clearTimeout(topo.countryBadge.timer);
+    topo.countryBadge.timer = null;
+    if (topo.countryBadge.group) {
       topo.countryBadge.group.setAttribute("visibility", "hidden");
       topo.countryBadge.group.classList.remove("is-pulsing");
-      topo.countryBadge.lastKey = null;
+    }
+    topo.countryBadge.lastKey = null;
+  }
+
+  function markCountryBadgeSeen() {
+    if (!topo.countryBadge) {
       return;
     }
+    hideCountryBadge();
+    var latest = latestCountryEvent();
+    topo.countryBadge.lastSequence = latest && latest.sequence !== undefined ? latest.sequence : null;
+  }
+
+  function showCountryBadge(label, key) {
     var width = Math.max(60, Math.min(150, label.length * 5.4 + 18));
-    var key = (event.sequence === undefined ? "" : event.sequence) + ":" + label;
     topo.countryBadge.text.textContent = label;
     topo.countryBadge.bg.setAttribute("x", String(100 - width / 2));
     topo.countryBadge.bg.setAttribute("width", String(width));
@@ -860,6 +871,50 @@
       void topo.countryBadge.group.getBoundingClientRect();
       topo.countryBadge.group.classList.add("is-pulsing");
     }
+  }
+
+  function updateCountryBadge() {
+    if (!topo.built || !topo.countryBadge || !topo.countryBadge.group) {
+      return;
+    }
+    if (topo.mode === "log") {
+      clearTimeout(topo.countryBadge.timer);
+      topo.countryBadge.timer = null;
+      var selected = topo.selected;
+      var label = countryLabel(selected && selected.country);
+      if (!label) {
+        hideCountryBadge();
+        return;
+      }
+      showCountryBadge(
+        label,
+        (selected.sequence === undefined ? "" : selected.sequence) + ":" + label
+      );
+      return;
+    }
+
+    var event = latestCountryEvent();
+    var sequence = event && event.sequence !== undefined ? event.sequence : null;
+    var realtimeLabel = countryLabel(event && event.country);
+    if (!realtimeLabel || sequence === null) {
+      hideCountryBadge();
+      return;
+    }
+    if (
+      topo.countryBadge.lastSequence !== null &&
+      sequence <= topo.countryBadge.lastSequence
+    ) {
+      return;
+    }
+    topo.countryBadge.lastSequence = sequence;
+    showCountryBadge(realtimeLabel, sequence + ":" + realtimeLabel);
+    clearTimeout(topo.countryBadge.timer);
+    topo.countryBadge.timer = setTimeout(function () {
+      if (topo.mode !== "realtime" || topo.countryBadge.lastSequence !== sequence) {
+        return;
+      }
+      hideCountryBadge();
+    }, COUNTRY_BADGE_VISIBLE_MS);
   }
 
   function updateInternetChrome() {
@@ -1173,6 +1228,9 @@
       group: svg.querySelector("#topo-country-badge"),
       bg: svg.querySelector("#topo-country-badge-bg"),
       text: svg.querySelector("#topo-country-badge-text"),
+      timer: null,
+      lastSequence: null,
+      lastKey: null,
     };
     topo.upstream = { group: svg.querySelector("#topo-upstream"), timer: null };
     if (topo.upstream.group) {
@@ -1777,6 +1835,7 @@
       clearTimeout(topo.internetTimer);
       topo.internetTimer = null;
     }
+    hideCountryBadge();
     topo.packetCount = 0;
   }
 
@@ -1957,6 +2016,9 @@
     topo.epoch += 1;
     clearLiveEffects();
     topo.mode = mode;
+    if (mode === "realtime") {
+      markCountryBadgeSeen();
+    }
     if (mode === "log") {
       if (!topo.selected) {
         var latest = latestRetainedEvent();
@@ -2055,6 +2117,7 @@
     topo.lastSequence = null;
     topo.newSinceFocus = 0;
     topo.counts = {};
+    markCountryBadgeSeen();
     updateTopologyModeUI();
     updateNewBadge();
     revealLiveStart();
