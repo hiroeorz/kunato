@@ -27,6 +27,7 @@ use crate::admin_access::{AdminAccessState, Decision as AdminAccessDecision};
 use crate::client_ip::ClientSource;
 use crate::config::{BodyInspection, CompiledConfig, SamlInspection, UploadInspection};
 use crate::error::Error;
+use crate::error_page;
 use crate::geoip::CountryPolicyDecision;
 use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
@@ -1205,12 +1206,16 @@ async fn handle_request_inner(
 
     let config = context.config();
     let (mut parts, body) = request.into_parts();
+    let image_request = error_page::is_image_request(&parts.method, parts.uri.path());
+    let accepts_html = error_page::accepts_html(&parts.headers);
     let resolved = resolve_source(&context, peer, &config, &parts);
     let source = resolved
         .as_ref()
         .copied()
         .unwrap_or_else(|_| ClientSource::direct(peer));
-    let result = if let Err(err) = resolved {
+    let result = if image_request {
+        Ok(error_page::image_response())
+    } else if let Err(err) = resolved {
         Err(err)
     } else if let Some(err) = admission_error(&context, source, &parts, &config) {
         Err(err)
@@ -1256,7 +1261,7 @@ async fn handle_request_inner(
     };
     let mut response = match result {
         Ok(response) => response,
-        Err(err) => rejected(source, &err),
+        Err(err) => rejected(source, &err, accepts_html),
     };
     config.response_headers.apply(response.headers_mut());
     crate::decoy::finalize(&mut response);
@@ -1387,7 +1392,7 @@ pub(crate) fn admission_error(
             }
             CountryPolicyDecision::Reject => {
                 return Some(
-                    HttpError::new(StatusCode::FORBIDDEN, "country policy")
+                    HttpError::new(StatusCode::FORBIDDEN, "Forbidden")
                         .with_reason(crate::console::model::RejectionReason::CountryPolicy),
                 );
             }
@@ -1526,7 +1531,11 @@ pub(crate) fn admin_access_response(
                 parts.uri.path(),
                 Some(function),
             );
-            let mut response = forward::error_response(StatusCode::NOT_FOUND, "not found");
+            let mut response = if error_page::accepts_html(&parts.headers) {
+                error_page::page(StatusCode::NOT_FOUND).expect("admin 404 page")
+            } else {
+                forward::error_response(StatusCode::NOT_FOUND, "not found")
+            };
             response
                 .headers_mut()
                 .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -2052,7 +2061,11 @@ fn graphql_error(violation: crate::graphql::Violation) -> HttpError {
     }
 }
 
-pub(crate) fn rejected(source: ClientSource, err: &HttpError) -> Response<ProxyBody> {
+pub(crate) fn rejected(
+    source: ClientSource,
+    err: &HttpError,
+    accepts_html: bool,
+) -> Response<ProxyBody> {
     if let Some(reason) = err.rejection_reason {
         crate::observations::reject(reason);
     }
@@ -2077,7 +2090,7 @@ pub(crate) fn rejected(source: ClientSource, err: &HttpError) -> Response<ProxyB
             "request rejected"
         );
     }
-    forward::error_response_for(err)
+    forward::error_response_for(err, accepts_html)
 }
 
 pub(crate) async fn process_payload(
@@ -2088,9 +2101,10 @@ pub(crate) async fn process_payload(
     context: &Context,
     inspection: InspectionGuard,
 ) -> Response<ProxyBody> {
+    let accepts_html = error_page::accepts_html(&parts.headers);
     match process(parts, payload, source, config, context, None, inspection).await {
         Ok(response) => response,
-        Err(err) => rejected(source, &err),
+        Err(err) => rejected(source, &err, accepts_html),
     }
 }
 
@@ -2491,6 +2505,7 @@ async fn process_inner(
     upgrade: Option<Upgrade>,
     mut inspection: InspectionGuard,
 ) -> Result<Response<ProxyBody>, HttpError> {
+    let accepts_html = error_page::accepts_html(&parts.headers);
     // The request entry points enforce this before buffering the body. Repeat
     // it here so a direct `process_payload` caller cannot skip the policy.
     if let Some(err) = host_policy_error(context, config, &mut parts, source) {
@@ -3132,7 +3147,7 @@ async fn process_inner(
             parts.uri.path(),
             Some(blocked.category.as_str()),
         );
-        return Ok(forward::block_response(&blocked.response));
+        return Ok(forward::block_response(&blocked.response, accepts_html));
     }
 
     // A matching ALLOW rule explicitly trusts the request, including a body

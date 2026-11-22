@@ -70,7 +70,15 @@ pub fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> 
     response
 }
 
-pub fn error_response_for(error: &HttpError) -> Response<ProxyBody> {
+pub fn error_response_for(error: &HttpError, accepts_html: bool) -> Response<ProxyBody> {
+    if accepts_html && let Some(mut response) = crate::error_page::page(error.status) {
+        if let Some(retry_after) = error.retry_after
+            && let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string())
+        {
+            response.headers_mut().insert("retry-after", value);
+        }
+        return response;
+    }
     let mut response = error_response(error.status, error.message);
     if let Some(retry_after) = error.retry_after
         && let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string())
@@ -80,8 +88,14 @@ pub fn error_response_for(error: &HttpError) -> Response<ProxyBody> {
     response
 }
 
-pub fn block_response(spec: &ResponseSpec) -> Response<ProxyBody> {
+pub fn block_response(spec: &ResponseSpec, accepts_html: bool) -> Response<ProxyBody> {
     let status = StatusCode::from_u16(spec.status).unwrap_or(StatusCode::FORBIDDEN);
+    if accepts_html
+        && spec.body.is_none()
+        && let Some(response) = crate::error_page::page(status)
+    {
+        return response;
+    }
     let body = spec.body.clone().unwrap_or_else(|| "Forbidden".to_owned());
     error_response(status, &body)
 }
@@ -438,6 +452,46 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("203.0.113.7")
         );
+    }
+
+    #[tokio::test]
+    async fn custom_block_body_overrides_the_browser_error_page() {
+        let custom = ResponseSpec {
+            status: 403,
+            body: Some("custom denial".to_owned()),
+        };
+        let response = block_response(&custom, true);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).expect("content type"),
+            "text/plain; charset=utf-8"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(body.as_ref(), b"custom denial");
+    }
+
+    #[tokio::test]
+    async fn default_block_body_uses_the_browser_page() {
+        let default = ResponseSpec {
+            status: 403,
+            body: None,
+        };
+        let response = block_response(&default, true);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).expect("content type"),
+            "text/html; charset=utf-8"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert!(body.windows(5).any(|window| window == b">403<"));
     }
 
     #[test]

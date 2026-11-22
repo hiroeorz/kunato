@@ -307,22 +307,27 @@ async fn handle_request(
     let config = context.config();
     let head_request = request.method() == Method::HEAD;
     let (mut parts, _) = request.into_parts();
+    let image_request = crate::error_page::is_image_request(&parts.method, parts.uri.path());
+    let accepts_html = crate::error_page::accepts_html(&parts.headers);
     let (mut send, mut recv) = stream.split();
     let history = context.observations();
     let mut response = crate::observations::observe(history, async {
+        if image_request {
+            return crate::error_page::image_response();
+        }
         let resolved = server::resolve_source(&context, peer, &config, &parts);
         let source = resolved
             .as_ref()
             .copied()
             .unwrap_or_else(|_| ClientSource::direct(peer));
         if let Err(err) = resolved {
-            server::rejected(source, &err)
+            server::rejected(source, &err, accepts_html)
         } else if let Some(err) = server::admission_error(&context, source, &parts, &config) {
-            server::rejected(source, &err)
+            server::rejected(source, &err, accepts_html)
         } else if let Some(err) = server::host_policy_error(&context, &config, &mut parts, source) {
-            server::rejected(source, &err)
+            server::rejected(source, &err, accepts_html)
         } else if let Some(err) = server::request_head_error(&config, &parts) {
-            server::rejected(source, &err)
+            server::rejected(source, &err, accepts_html)
         } else if let Some(response) = server::maintenance_response(&context, &parts) {
             response
         } else if let Some(response) =
@@ -338,11 +343,11 @@ async fn handle_request(
                     server::process_payload(parts, payload, source, &config, &context, inspection)
                         .await
                 }
-                Err(err) => server::rejected(source, &err),
+                Err(err) => server::rejected(source, &err, accepts_html),
             }
         } else {
             context.record_overloaded();
-            server::rejected(source, &server::inspection_capacity_error())
+            server::rejected(source, &server::inspection_capacity_error(), accepts_html)
         }
     })
     .await;

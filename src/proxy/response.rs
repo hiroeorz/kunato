@@ -308,7 +308,10 @@ pub(crate) async fn inspect(
             status = buffered.parts.status.as_u16(),
             "response blocked"
         );
-        return Ok(forward::block_response(&blocked.response));
+        return Ok(forward::block_response(
+            &blocked.response,
+            crate::error_page::accepts_html(&request.headers),
+        ));
     }
 
     if buffered.truncated {

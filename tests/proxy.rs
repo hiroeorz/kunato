@@ -9069,7 +9069,7 @@ categories:
         ("133.11.0.1", "/open", StatusCode::FORBIDDEN),
         ("133.11.0.1", "/blocked", StatusCode::FORBIDDEN),
     ] {
-        let (status, _) = send_h1_with_host(
+        let (status, body) = send_h1_with_host(
             running.addr,
             Method::GET,
             path,
@@ -9079,7 +9079,61 @@ categories:
         )
         .await;
         assert_eq!(status, expected, "client {ip} path {path}");
+        if ip == "133.11.0.1" {
+            assert_eq!(
+                body, "Forbidden",
+                "country policy body must not disclose the gate"
+            );
+        }
     }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn browser_error_page_uses_the_embedded_mascot_and_image_bypasses_the_gate() {
+    let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+geoip:
+  policy: {{ block: [JP], unknown: allow, action: block }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    let (status, body) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "app.test",
+        &[
+            ("x-forwarded-for", "133.11.0.1"),
+            ("accept", "text/html,application/xhtml+xml"),
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.contains(">403<"), "{body}");
+    assert!(body.contains("/__kunato/error.png"), "{body}");
+    assert!(body.contains("Personal WAF"), "{body}");
+
+    let (status, body) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/__kunato/error.png",
+        "app.test",
+        &[("x-forwarded-for", "133.11.0.1"), ("accept", "image/png")],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("PNG"), "mascot response is not a PNG");
+    assert!(
+        body.len() > 100_000,
+        "mascot response is too short to be the embedded image"
+    );
+    assert!(!body.contains("Personal WAF"));
     running.stop().await;
 }
 

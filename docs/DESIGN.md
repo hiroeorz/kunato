@@ -491,7 +491,9 @@ contract; response rules follow the same contract with the response view.
   nesting guard, and an inline-fragment recursion cap, so neither deep fields nor
   a chain of `...{` can exhaust the analyzer or the worker stack; fragment
   metrics are memoized and fragment cycles are rejected.
-- Default block response: `403 Forbidden`, `text/plain`.
+- Default block response: `403 Forbidden`, `text/plain` for API clients;
+  explicit HTML `Accept` requests receive the embedded Kunato error page (the
+  status code, mascot, generic explanation, and Kunato attribution).
 
 ## 7. DoS / DDoS Protection
 

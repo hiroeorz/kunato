@@ -34,6 +34,7 @@ src/
   main.rs          # Entry point: startup, signal handling, graceful shutdown
   cli.rs           # Command-line argument parsing
   error.rs         # Error types
+  error_page.rs    # Embedded browser-facing 4xx/5xx pages and mascot
   telemetry.rs     # Logging setup
   admin.rs         # Loopback admin listener: /metrics, /maintenance, /admin-access
   admin_access.rs  # Administrative function matching and open/close overrides
