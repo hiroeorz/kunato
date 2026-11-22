@@ -261,6 +261,8 @@
     focusTimer: null,
     panelTimer: null,
     revealTimer: null,
+    forwardTimer: null,
+    stopTimer: null,
   };
 
   function $(id) {
@@ -1460,6 +1462,32 @@
     if (withSpark) {
       burstSpark(layerId, sparkColor(layerId), false);
     }
+    if (topo.mode === "realtime" && layerId !== "upstream") {
+      clearTimeout(topo.forwardTimer);
+      clearTimeout(topo.stopTimer);
+      hideForwardPath();
+      hideStopMarker();
+      if (topo.upstream) {
+        topo.upstream.group.classList.remove("is-reaching", "is-dimmed");
+      }
+      if (isStopped(event)) {
+        showStopMarker(layerId, layerColor(layerId));
+        topo.stopTimer = setTimeout(hideStopMarker, 1500);
+      } else if ((layerId === "rules" || layerId === "guards") && isForwarded(event)) {
+        showForwardPath(layerId);
+        if (topo.upstream) {
+          topo.upstream.group.classList.add("is-reaching");
+        }
+        topo.forwardTimer = setTimeout(function () {
+          hideForwardPath();
+          if (topo.upstream) {
+            topo.upstream.group.classList.remove("is-reaching");
+          }
+        }, 1400);
+      } else if (topo.upstream) {
+        topo.upstream.group.classList.add("is-dimmed");
+      }
+    }
     if (topo.mode === "realtime") {
       updateTopologyMeta();
     }
@@ -1603,7 +1631,7 @@
     });
     var epoch = topo.epoch;
     order.forEach(function (layerId, index) {
-      var event = byLayer[layerId][0];
+      var event = byLayer[layerId][byLayer[layerId].length - 1];
       window.setTimeout(
         function () {
           if (topo.mode !== "realtime" || epoch !== topo.epoch) {
@@ -1715,26 +1743,21 @@
     var x1 = layer.x + layer.width;
     var y1 = layer.y + layer.height / 2;
     var arcY = layer.y < 100 ? 34 : 226;
+    var x2 = Math.min(x1 + 90, 810);
     var d =
       "M" +
       x1 +
       " " +
       y1 +
       " C" +
-      (x1 + 34) +
+      (x1 + 30) +
       " " +
       y1 +
       " " +
-      (x1 + 34) +
+      x2 +
       " " +
       arcY +
-      " " +
-      (x1 + 78) +
-      " " +
-      arcY +
-      " C 790 " +
-      arcY +
-      " 812 130 840 130";
+      " 840 130";
     topo.forward.setAttribute("d", d);
     topo.forward.classList.add("is-visible");
   }
@@ -1828,6 +1851,10 @@
     if (topo.sparks) {
       topo.sparks.textContent = "";
     }
+    clearTimeout(topo.forwardTimer);
+    clearTimeout(topo.stopTimer);
+    topo.forwardTimer = null;
+    topo.stopTimer = null;
     hideStopMarker();
     hideForwardPath();
     if (topo.internet) {

@@ -37,6 +37,8 @@ event table. It reads from the same snapshot and makes no additional requests:
   along the route from the internet globe to the layer derived from its kind,
   reason, and disposition. A colored spark bursts at that layer, the node keeps
   a short colored highlight, and the route edges pulse in the layer color.
+  Forwarded LOG detections at YAML Rules or Payload Guards continue with a
+  dashed path to the upstream; rejected requests show a stop marker instead.
   Multiple events in one update light different layers in their own colors.
   Initial snapshots, backlog, older events, and navigation back to the view do
   not replay the animation.
