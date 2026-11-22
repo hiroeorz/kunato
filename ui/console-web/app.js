@@ -91,7 +91,7 @@
       name: "Decoy Ward",
       title: "DECOY WARD",
       color: "#e88336",
-      x: 220,
+      x: 225,
       y: 162,
       width: 138,
       height: 56,
@@ -102,7 +102,7 @@
       name: "Payload Guards",
       title: "PAYLOAD GUARDS",
       color: "#9a6bb8",
-      x: 418,
+      x: 423,
       y: 162,
       width: 138,
       height: 56,
@@ -113,7 +113,7 @@
       name: "Behavior",
       title: "BEHAVIOR",
       color: "#3c8b70",
-      x: 616,
+      x: 621,
       y: 162,
       width: 138,
       height: 56,
@@ -134,13 +134,13 @@
   var TOPO_EDGES = [
     { id: "ingress-country", d: "M176 130 C198 130 206 70 225 70" },
     { id: "country-admin", d: "M351 70 H363" },
-    { id: "decoy-internet", d: "M220 190 C198 190 188 160 176 130" },
+    { id: "decoy-internet", d: "M176 130 C198 130 206 190 225 190" },
     { id: "admin-rate", d: "M489 70 H501" },
-    { id: "decoy-guards", d: "M358 190 H418" },
+    { id: "decoy-guards", d: "M363 190 H423" },
     { id: "rate-rules", d: "M627 70 H639" },
-    { id: "guards-behavior", d: "M556 190 H616" },
+    { id: "guards-behavior", d: "M561 190 H621" },
     { id: "rules-upstream", d: "M765 70 C800 70 808 130 840 130" },
-    { id: "behavior-upstream", d: "M754 190 C792 190 802 130 840 130" },
+    { id: "behavior-upstream", d: "M759 190 C792 190 802 130 840 130" },
   ];
 
   var TOPO_ROUTES = {
@@ -162,15 +162,15 @@
     },
     decoy: {
       edges: ["decoy-internet"],
-      d: "M176 130 C198 130 210 190 220 190 L289 190",
+      d: "M176 130 C198 130 206 190 225 190 L294 190",
     },
     guards: {
       edges: ["decoy-internet", "decoy-guards"],
-      d: "M176 130 C198 130 210 190 220 190 L289 190 L358 190 L487 190",
+      d: "M176 130 C198 130 206 190 225 190 L294 190 L363 190 L492 190",
     },
     behavior: {
       edges: ["decoy-internet", "decoy-guards", "guards-behavior"],
-      d: "M176 130 C198 130 210 190 220 190 L289 190 L358 190 L487 190 L685 190",
+      d: "M176 130 C198 130 206 190 225 190 L294 190 L363 190 L492 190 L690 190",
     },
     upstream: {
       edges: ["ingress-country", "country-admin", "admin-rate", "rate-rules", "rules-upstream"],
