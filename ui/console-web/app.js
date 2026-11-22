@@ -134,7 +134,7 @@
   var TOPO_EDGES = [
     { id: "ingress-country", d: "M176 130 C198 130 206 70 225 70" },
     { id: "country-admin", d: "M351 70 H363" },
-    { id: "country-decoy", d: "M289 98 L289 162" },
+    { id: "decoy-internet", d: "M220 190 C198 190 188 160 176 130" },
     { id: "admin-rate", d: "M489 70 H501" },
     { id: "decoy-guards", d: "M358 190 H418" },
     { id: "rate-rules", d: "M627 70 H639" },
@@ -161,16 +161,16 @@
       d: "M176 130 C198 130 206 70 225 70 L288 70 L426 70 L564 70 L702 70",
     },
     decoy: {
-      edges: ["ingress-country", "country-decoy"],
-      d: "M176 130 C198 130 206 70 225 70 L288 70 L289 98 L289 190",
+      edges: ["decoy-internet"],
+      d: "M176 130 C198 130 210 190 220 190 L289 190",
     },
     guards: {
-      edges: ["ingress-country", "country-decoy", "decoy-guards"],
-      d: "M176 130 C198 130 206 70 225 70 L288 70 L289 98 L289 190 L358 190 L487 190",
+      edges: ["decoy-internet", "decoy-guards"],
+      d: "M176 130 C198 130 210 190 220 190 L289 190 L358 190 L487 190",
     },
     behavior: {
-      edges: ["ingress-country", "country-decoy", "decoy-guards", "guards-behavior"],
-      d: "M176 130 C198 130 206 70 225 70 L288 70 L289 98 L289 190 L358 190 L487 190 L685 190",
+      edges: ["decoy-internet", "decoy-guards", "guards-behavior"],
+      d: "M176 130 C198 130 210 190 220 190 L289 190 L358 190 L487 190 L685 190",
     },
     upstream: {
       edges: ["ingress-country", "country-admin", "admin-rate", "rate-rules", "rules-upstream"],

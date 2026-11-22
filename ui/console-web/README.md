@@ -118,9 +118,8 @@ WAF-rejected requests in the selected range on a logarithmic scale, separates
 no data from zero, and uses point markers for small countries. When no country
 detail exists, the map still renders with every country in the no-data colour.
 Small islands, territories, and other countries without map geometry remain in
-the top-10 table. A top-10 country table below
-the metrics panels shows request, rejection, and rejection-rate totals for the
-fetched range. Country detail comes from bounded per-minute supplementary
+the top-10 table. A top-10 country table immediately below the map shows
+request, rejection, and rejection-rate totals for the fetched range. Country detail comes from bounded per-minute supplementary
 measurements, so older intervals without it remain explicitly unavailable.
 
 The UI is intentionally smaller than the fictional interaction prototype in
