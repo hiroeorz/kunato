@@ -268,7 +268,7 @@ fn utc_tiers_preserve_all_reasons_totals_extrema_and_distributions() {
             minute(
                 BASE + index * MINUTE_MS,
                 10 + index % 5,
-                RejectionReason::ALL[index as usize % 22],
+                RejectionReason::ALL[index as usize % RejectionReason::ALL.len()],
                 1,
             )
         })
@@ -338,7 +338,7 @@ fn utc_tiers_preserve_all_reasons_totals_extrema_and_distributions() {
             .values()
             .map(|value| value.max_minute.unwrap())
             .sum::<u64>(),
-        22
+        RejectionReason::ALL.len() as u64
     );
     assert_eq!(
         hour.counters[&CountMetric::RejectedRequests].max_minute,
@@ -346,7 +346,7 @@ fn utc_tiers_preserve_all_reasons_totals_extrema_and_distributions() {
     );
     assert_eq!(
         sql_count(&config, "SELECT count(*) FROM rejection_buckets"),
-        124 * 22
+        124 * RejectionReason::ALL.len() as u64
     );
     assert_eq!(
         sql_count(&config, "SELECT count(*) FROM metric_buckets"),
@@ -558,7 +558,7 @@ fn reason_rows_and_child_deletion_roll_back_together() {
     );
     assert_eq!(
         sql_count(&config, "SELECT count(*) FROM rejection_buckets"),
-        110
+        5 * RejectionReason::ALL.len() as u64
     );
     assert_eq!(sql_count(&config, "SELECT count(*) FROM metric_buckets"), 5);
     connection
@@ -571,7 +571,7 @@ fn reason_rows_and_child_deletion_roll_back_together() {
     );
     assert_eq!(
         sql_count(&config, "SELECT count(*) FROM rejection_buckets"),
-        22
+        RejectionReason::ALL.len() as u64
     );
     assert_eq!(sql_count(&config, "SELECT count(*) FROM metric_buckets"), 0);
 }
@@ -634,7 +634,7 @@ fn logical_expiry_precedes_cleanup_and_survives_clock_rollback_and_replay() {
     );
     assert_eq!(
         sql_count(&config, "SELECT count(*) FROM rejection_buckets"),
-        22
+        RejectionReason::ALL.len() as u64
     );
     assert_eq!(sql_count(&config, "SELECT count(*) FROM history_dirty"), 0);
 }
@@ -911,7 +911,7 @@ fn arithmetic_overflow_rolls_back_compaction_instead_of_wrapping() {
     );
     assert_eq!(
         sql_count(&config, "SELECT count(*) FROM rejection_buckets"),
-        44
+        2 * RejectionReason::ALL.len() as u64
     );
     assert_eq!(sql_count(&config, "SELECT count(*) FROM metric_buckets"), 2);
 }
@@ -965,6 +965,7 @@ fn event_expiry_does_not_erase_statistics_and_expired_replay_is_skipped() {
         site: None,
         client: None,
         peer: None,
+        country: None,
         method: None,
         path: None,
         status: None,

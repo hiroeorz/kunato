@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use http::StatusCode;
+use http::{HeaderMap, StatusCode};
 use regex::RegexSet;
 use tokio::time::Instant;
 
@@ -13,6 +14,10 @@ use crate::config::{
     BehaviorAction, BehaviorConfig, Protection, RuleLimit, RuleLimitKey, SequenceConfig,
 };
 use crate::decoding::{normalize_path, percent_decode_forms};
+use crate::geoip::CountryCode;
+
+mod session;
+use session::{SessionEvidence, SessionTracker};
 
 const SHARD_COUNT: usize = 16;
 const STALE_AFTER: Duration = Duration::from_secs(600);
@@ -79,6 +84,7 @@ pub enum SequenceKind {
     StructuralReject,
     AdminGate,
     RateLimitBan,
+    SessionCountryMismatch,
 }
 
 impl SequenceKind {
@@ -90,6 +96,7 @@ impl SequenceKind {
             Self::StructuralReject => "structural-reject",
             Self::AdminGate => "admin-gate",
             Self::RateLimitBan => "rate-limit-ban",
+            Self::SessionCountryMismatch => "session-country-mismatch",
         }
     }
 
@@ -101,6 +108,7 @@ impl SequenceKind {
             Self::StructuralReject => 4.0,
             Self::AdminGate => 3.0,
             Self::RateLimitBan => 6.0,
+            Self::SessionCountryMismatch => 2.0,
         }
     }
 
@@ -172,6 +180,7 @@ pub struct ProtectionState {
     last_rule_failed_evict: Mutex<Option<Instant>>,
     global_requests: Mutex<GlobalWindow>,
     global_auth: Mutex<GlobalAuthWindow>,
+    sessions: SessionTracker,
 }
 
 impl ProtectionState {
@@ -239,11 +248,42 @@ impl ProtectionState {
                 logged: false,
                 blocked_until: None,
             }),
+            sessions: SessionTracker::new(),
         }
     }
 
     pub fn active_connections(&self) -> u64 {
         self.active_connections.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn observe_session_request(
+        &self,
+        host: &str,
+        cookies: &[(Cow<'_, str>, Cow<'_, str>)],
+        country: Option<CountryCode>,
+        config: &Protection,
+    ) -> Option<SessionEvidence> {
+        if !config.enabled || !config.behavior.enabled || !config.behavior.session.enabled {
+            return None;
+        }
+        self.sessions
+            .observe_request(host, cookies, country?, &config.behavior.session)
+    }
+
+    pub(crate) fn observe_session_response(
+        &self,
+        host: &str,
+        headers: &HeaderMap,
+        country: Option<CountryCode>,
+        config: &Protection,
+    ) {
+        if !config.enabled || !config.behavior.enabled || !config.behavior.session.enabled {
+            return;
+        }
+        if let Some(country) = country {
+            self.sessions
+                .observe_response(host, headers, country, &config.behavior.session);
+        }
     }
 
     pub fn check_request(&self, ip: IpAddr, config: &Protection) -> Decision {
@@ -2391,6 +2431,13 @@ mod tests {
                 min_requests: 3,
                 distinct_paths: 2,
             },
+            session: crate::config::SessionConfig {
+                enabled: false,
+                cookies: Vec::new(),
+                baseline_min_observations: 2,
+                baseline_ttl: Duration::from_secs(30 * 24 * 60 * 60),
+                max_tracked: 100,
+            },
             sequence: SequenceConfig {
                 enabled: false,
                 action: BehaviorAction::Log,
@@ -2782,6 +2829,28 @@ mod tests {
             repeat.flag.is_none(),
             "an identical retry stays below the threshold"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_country_mismatch_records_sequence_evidence() {
+        let mut config = config();
+        let mut behavior = sequence_config();
+        behavior.sequence.min_windows = 1;
+        behavior.sequence.threshold = 2.0;
+        behavior.sequence.action = BehaviorAction::Log;
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+        let outcome = state.observe_sequence(
+            ip("10.0.0.1"),
+            &config,
+            SequenceKind::SessionCountryMismatch,
+            "/account",
+            None,
+        );
+        assert!(outcome.recorded);
+        let flag = outcome.flag.expect("session evidence threshold");
+        assert_eq!(flag.kinds & (1 << 6), 1 << 6);
+        assert_eq!(flag.action, BehaviorAction::Log);
     }
 
     #[tokio::test(start_paused = true)]

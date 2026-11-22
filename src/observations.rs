@@ -413,6 +413,7 @@ impl Observations {
             site: event_site(detail.site),
             client: Some(detail.source.client_ip),
             peer: Some(detail.source.peer.ip()),
+            country: current_country(),
             method,
             path,
             status: None,
@@ -763,6 +764,7 @@ fn rejection_reason_class(reason: RejectionReason) -> &'static str {
         RejectionReason::Behavior => "behavior",
         RejectionReason::Protocol => "protocol",
         RejectionReason::ResponseInspection => "response-inspection",
+        RejectionReason::CountryPolicy => "country-policy",
     }
 }
 
@@ -820,6 +822,7 @@ struct RequestMeasurement {
     in_flight_counted: bool,
     client: Option<std::net::IpAddr>,
     peer: Option<std::net::IpAddr>,
+    country: Option<String>,
     reason: Option<RejectionReason>,
     site: String,
     configuration: String,
@@ -858,6 +861,7 @@ impl RequestMeasurement {
             in_flight_counted,
             client: None,
             peer: None,
+            country: None,
             reason: None,
             site: "unattributed".into(),
             configuration: String::new(),
@@ -968,6 +972,28 @@ pub fn identity(source: crate::client_ip::ClientSource) {
             value.peer = Some(source.peer.ip());
         }
     });
+}
+
+/// Store the country resolved for this request so event records can carry it
+/// without repeating a database lookup for every event.
+pub fn country(country: Option<crate::geoip::CountryCode>) {
+    let _ = CURRENT.try_with(|value| {
+        if let Ok(mut value) = value.try_borrow_mut() {
+            value.country = country.map(|country| country.to_string());
+        }
+    });
+}
+
+fn current_country() -> Option<String> {
+    CURRENT
+        .try_with(|value| {
+            value
+                .try_borrow()
+                .ok()
+                .and_then(|value| value.country.clone())
+        })
+        .ok()
+        .flatten()
 }
 
 pub fn request_head(config: &crate::config::CompiledConfig, parts: &http::request::Parts) {
@@ -1101,6 +1127,7 @@ fn reject_detail(reason: RejectionReason, matched: Option<(&str, &str)>) {
                     site: event_site(&value.site),
                     client: value.client,
                     peer: value.peer,
+                    country: value.country.clone(),
                     method: value.method.clone(),
                     path: event_path(&value.path),
                     status: None,
@@ -1157,6 +1184,7 @@ pub fn service_failure(timeout: bool) {
                 site: event_site(&value.site),
                 client: value.client,
                 peer: value.peer,
+                country: value.country.clone(),
                 method: value.method.clone(),
                 path: event_path(&value.path),
                 status: Some(if timeout { 504 } else { 502 }),
@@ -1192,6 +1220,7 @@ pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
                 site: event_site(&value.site),
                 client: value.client,
                 peer: value.peer,
+                country: value.country.clone(),
                 method: value.method.clone(),
                 path: event_path(&value.path),
                 status: None,
@@ -1730,6 +1759,7 @@ mod tests {
                     site: None,
                     client: None,
                     peer: None,
+                    country: None,
                     method: None,
                     path: None,
                     status: None,

@@ -9011,6 +9011,160 @@ categories:
 }
 
 #[tokio::test]
+async fn country_rules_use_the_resolved_client_address() {
+    let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+categories:
+  - name: geo
+    action: BLOCK
+    rules:
+      - name: united-states
+        match: {{ country: [US] }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    for (ip, expected) in [
+        ("8.8.8.8", StatusCode::FORBIDDEN),
+        ("133.11.0.1", StatusCode::OK),
+        ("203.0.113.7", StatusCode::OK),
+    ] {
+        let (status, _) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            "/",
+            "app.test",
+            &[("x-forwarded-for", ip)],
+            "",
+        )
+        .await;
+        assert_eq!(status, expected, "client {ip}");
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn country_policy_rejects_before_rules_and_keeps_admitted_traffic_inspected() {
+    let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+geoip:
+  policy: {{ only: [US], unknown: block }}
+categories:
+  - name: block-admitted-traffic
+    action: BLOCK
+    rules:
+      - name: admitted-country-is-still-inspected
+        match: {{ country: [US], path: ^/blocked$ }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+    for (ip, path, expected) in [
+        ("8.8.8.8", "/open", StatusCode::OK),
+        ("8.8.8.8", "/blocked", StatusCode::FORBIDDEN),
+        ("133.11.0.1", "/open", StatusCode::FORBIDDEN),
+        ("133.11.0.1", "/blocked", StatusCode::FORBIDDEN),
+    ] {
+        let (status, _) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            path,
+            "app.test",
+            &[("x-forwarded-for", ip)],
+            "",
+        )
+        .await;
+        assert_eq!(status, expected, "client {ip} path {path}");
+    }
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn session_country_mismatch_bans_the_new_source_not_the_baseline_session() {
+    let upstream = spawn_cookie_echo_upstream().await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+client_ip: {{ trusted_proxies: [127.0.0.1] }}
+protection:
+  behavior:
+    enabled: true
+    session:
+      enabled: true
+      cookies: [session_id]
+      baseline_min_observations: 2
+      baseline_ttl: 168h
+      max_tracked: 100
+    sequence:
+      enabled: true
+      action: BLOCK
+      threshold: 2
+      min_windows: 1
+      min_dimensions: 1
+      ban: 60s
+"
+    );
+    let running = start_kunato(&yaml).await;
+    let cookie = "session_id=opaque%2Bvalue%3D--signature";
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "app.test",
+        &[("x-forwarded-for", "133.11.0.1"), ("cookie", cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "baseline request");
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "app.test",
+        &[("x-forwarded-for", "8.8.8.8"), ("cookie", cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "evidence request is not interrupted"
+    );
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "app.test",
+        &[("x-forwarded-for", "8.8.8.8"), ("cookie", cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "new source is banned"
+    );
+
+    let (status, _) = send_h1_with_host(
+        running.addr,
+        Method::GET,
+        "/",
+        "app.test",
+        &[("x-forwarded-for", "133.11.0.1"), ("cookie", cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "baseline source remains usable");
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn trusted_proxy_keeps_rate_budgets_separate_and_applies_client_allowlist() {
     let upstream = spawn_upstream(StatusCode::OK, "upstream").await;
     let yaml = format!(

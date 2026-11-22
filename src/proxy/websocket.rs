@@ -381,6 +381,9 @@ async fn pump_upstream_to_client<R, W>(
                 }
                 message_deadline = None;
                 let (_, payload, raw) = message.finish();
+                // Established tunnels follow a hot reload: each message is
+                // evaluated against the configuration current at that moment.
+                let config = live_config.load();
                 let view = RequestView::with_body_decoding(
                     &request.method,
                     &request.uri,
@@ -388,16 +391,14 @@ async fn pump_upstream_to_client<R, W>(
                     b"",
                     source_ip,
                     false,
-                );
+                )
+                .with_country(config.geoip.lookup(source_ip));
                 let response = ResponseView::new(
                     StatusCode::SWITCHING_PROTOCOLS,
                     &response_headers,
                     &payload,
                     false,
                 );
-                // Established tunnels follow a hot reload: each message is
-                // evaluated against the configuration current at that moment.
-                let config = live_config.load();
                 let outcome = evaluate_websocket_response(&config, &view, &response);
                 if let Some(blocked) = outcome.blocked {
                     warn!(
@@ -573,7 +574,8 @@ async fn pump_client_to_upstream<R, W>(
             source_ip,
             decode_body,
         )
-        .with_body_rules_exempt(exempt);
+        .with_body_rules_exempt(exempt)
+        .with_country(config.geoip.lookup(source_ip));
         // Application messages are user traffic: charge the same per-source
         // budget as an HTTP request so a tunnel cannot bypass rate limits and
         // bans by staying open.

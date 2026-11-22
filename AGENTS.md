@@ -48,6 +48,7 @@ src/
   acme/            # RFC 8555 client, TLS-ALPN-01 resolver, and certificate cache
   graphql.rs       # Bounded GraphQL document analysis for the complexity limit
   form.rs          # Origin-facing multipart and URL-encoded resource limits
+  geoip.rs         # Embedded DB-IP Lite country lookup and external MMDB override
   saml.rs          # Bounded SAML decoding and signature-wrapping shape checks
   php.rs           # Opt-in scoped PHP lifecycle and session-cookie mitigations
   upload.rs        # Bounded multipart upload declared-type/content inspection
@@ -72,6 +73,9 @@ lab/               # Isolated WAF lab with fixtures, pinned tools, and sandbox p
   fixtures/        # DVWA bootstrap, the lab-only CVE fixture, and TLS material
   templates/       # Reviewed Nuclei adaptation and the authenticated ZAP plan template
   tool-runner-*.sh # Bounded wrappers for detached lab scanners
+data/
+  dbip-country-lite.mmdb.gz # Embedded DB-IP Lite country database (CC BY 4.0)
+  README.md                 # Source release, checksum, and attribution
 dist/
   rules.yaml       # Managed rule set for daily updates (generated; keep in sync)
   rules.yaml.sha256
@@ -213,6 +217,15 @@ rule-set updates.
   literals are accepted. An empty list or null value is invalid; omit the field
   to disable the check. `kunato init` seeds `--acme-domain` values and accepts
   `--allowed-host`; the installer passes it through.
+- `geoip` replaces the embedded DB-IP Lite country database with an external
+  MMDB or `.mmdb.gz` (`database`) and optionally makes load failure fatal
+  (`strict`). `geoip.policy` is a global admission filter (`only` or `block`,
+  `unknown`, `exempt`, `action: block|log`); an admitted request still passes
+  through all rules and detection, and a rejected request stops before body
+  inspection. Country codes are available to `country` match conditions and
+  event records; `country` cannot be combined with an effective `ALLOW`.
+  The data is CC BY 4.0 and must retain the DB-IP attribution in the console
+  and README files.
 - `client_ip` optionally declares `trusted_proxies` (1..64 IPs/CIDRs) and an
   identity `header` (default `x-forwarded-for`). Only trusted direct peers may
   supply identity; their header is required, bounded to 4096 bytes/16 addresses,
@@ -273,7 +286,13 @@ rule-set updates.
   failures (`401`/`403` on login/token/session/MFA/SSO paths), plus a global
   authentication-failure log for distributed attempts. Per-source signals
   default to `LOG` and accept `action: BLOCK`; the global signal is `LOG` only.
-  It is disabled by `protection.enabled: false` and `--disable-protection`, and
+  `behavior.session` (opt-in) hashes configured cookies, confirms a country
+  baseline from `Set-Cookie` or repeated same-country requests, and adds a
+  low-weight `session-country-mismatch` evidence to the **current source IP's**
+  sequence score; it never blocks the session or its original IP. A single
+  mismatch cannot cross the default `sequence.min_dimensions: 2`; the shipped
+  sequence action is `BLOCK`. State is bounded and in-memory. It is disabled by
+  `protection.enabled: false` and `--disable-protection`, and
   `protection.allowlist` (not an `ALLOW` rule) exempts a source. See
   `docs/behavioral-detection.md`.
 - `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01

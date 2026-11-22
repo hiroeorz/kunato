@@ -45,11 +45,12 @@ Traditional WAF setups often require either paid cloud services or a complex sta
 - **Upload content inspection** — Multipart file parts are checked against their declared type, filename extension, and leading bytes: a part that claims an image, PDF, office, media, or font type must start with that format's signature, so source code renamed to `.jpg` or `.pdf` is rejected together with executable, script, or markup content behind a safe claim, PHP short tags, and raw write bodies sent to an executable or script path. `strict` mode also covers generic binary claims.
 - **Response inspection** — Response-phase categories match upstream responses on status, headers, and body (up to a size limit) and can block, log, or pass them through. The remainder of oversized responses is streamed uninspected.
 - **Response header rewriting** — Removes or replaces identifying response headers such as `Server` and `X-Powered-By` on upstream responses and Kunato's own block/error responses alike.
+- **Country lookup** — Official binaries embed the DB-IP Lite country database and expose ISO country codes to `country` match conditions and the monitoring console. `geoip.policy` can admit or reject at the country gate before inspection; admitted traffic still passes through every rule and detection. An external MMDB or `.mmdb.gz` can replace the embedded copy; invalid data falls back safely unless `geoip.strict` is set.
 
 ### DoS / DDoS & Behavioral Protection
 - **Experimental decoys** — Local configuration lures carry fictional HTTP API credentials whose return can be correlated across source addresses. The shipped and generated configurations enable BLOCK on the owned fake API, without source bans or behavioral scoring. Set the public origin for your site; `allowed_hosts` is optional. Existing configurations without `decoys` keep it disabled. See the [configuration reference](docs/development.md#experimental-decoys).
 - **DoS / DDoS detection and mitigation** — Detects abnormal request patterns and automatically throttles or blocks abusive sources.
-- **Behavioral abuse detection** — Per-source windows over upstream responses flag iterative `404` probing, authentication-failure bursts, and `200`-only crawling, a global window records distributed authentication failures, and a continuity score follows an attacker's progress across requests — including the ones Kunato blocked — before it acts on a return visit with a second evidence kind. The shipped configuration blocks every signal, including at release; the engine default remains observation only and each signal's `action` is configurable.
+- **Behavioral abuse detection** — Per-source windows over upstream responses flag iterative `404` probing, authentication-failure bursts, and `200`-only crawling, a global window records distributed authentication failures, and a continuity score follows an attacker's progress across requests — including the ones Kunato blocked — before it acts on a return visit with a second evidence kind. An opt-in session signal hashes configured cookies, records a country baseline from `Set-Cookie` or repeated same-country requests, and adds a low-weight evidence to the IP that presents a moved session, never to the original session. The shipped configuration blocks every signal, including at release; the engine default remains observation only and each signal's `action` is configurable.
 
 ### Operations & Reliability
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule file are detected at runtime and reloaded on the fly without restarting the process or dropping connections.
@@ -457,6 +458,13 @@ contributing notes live in the
 | [Behavioral Readiness Checklist](docs/behavioral-readiness.md) | Pre-deployment checklist for trusted proxies and authentication observation. |
 | [Security Lab Testing Model](docs/security-lab-testing-model.md) | Isolated container topology, control/evidence model, and verification process. |
 
+## Data attribution
+
+Official Kunato builds embed the DB-IP Lite country database. The data is
+licensed under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/)
+and is attributed as "IP Geolocation by [DB-IP](https://db-ip.com/)". The
+embedded database is a separate work from Kunato's source code.
+
 ## License
 
 Kunato is provided "as is", without warranty of any kind, express or implied,
@@ -474,3 +482,7 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
+
+The embedded DB-IP Lite data remains under CC BY 4.0 and is not relicensed by
+the MIT or Apache-2.0 terms above. Attribution is also shown in the monitoring
+console footer.

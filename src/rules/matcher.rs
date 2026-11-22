@@ -6,6 +6,7 @@ use regex::Regex;
 
 use crate::cidr::IpNet;
 use crate::decoding::percent_decode_forms;
+use crate::geoip::CountryCode;
 use crate::request_view::{RequestView, ResponseView, cookie_pairs};
 
 pub const TARGET_PATH: u8 = 1 << 0;
@@ -124,6 +125,7 @@ pub struct Matcher {
     pub paths: Vec<Regex>,
     pub methods: Option<Vec<Method>>,
     pub source_ips: Option<Vec<IpNet>>,
+    pub countries: Option<Vec<CountryCode>>,
     pub headers: Vec<(HeaderName, Vec<Regex>)>,
     pub cookies: Vec<(String, Vec<Regex>)>,
     pub statuses: Vec<StatusRange>,
@@ -243,6 +245,15 @@ impl Matcher {
                 .any(|network| network.contains(view.source_ip))
         {
             return false;
+        }
+
+        if let Some(countries) = &self.countries {
+            let Some(country) = view.country else {
+                return false;
+            };
+            if !countries.contains(&country) {
+                return false;
+            }
         }
 
         for (name, regexes) in &self.headers {
@@ -452,6 +463,27 @@ mod tests {
             ..Matcher::default()
         };
         assert!(matcher.matches(&view(&method, &uri, &headers, b"")));
+    }
+
+    #[test]
+    fn country_conditions_require_a_resolved_country() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let japan = CountryCode::parse("JP").expect("JP");
+        let matcher = Matcher {
+            countries: Some(vec![japan]),
+            ..Matcher::default()
+        };
+
+        let matching = view(&method, &uri, &headers, b"").with_country(Some(japan));
+        assert!(matcher.matches(&matching));
+
+        let other = view(&method, &uri, &headers, b"").with_country(CountryCode::parse("US"));
+        assert!(!matcher.matches(&other));
+
+        let unresolved = view(&method, &uri, &headers, b"");
+        assert!(!matcher.matches(&unresolved));
     }
 
     #[test]

@@ -248,6 +248,7 @@ a:focus-visible {
 .sidebar-footer {
   display: flex;
   flex-direction: column;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: auto;
   padding: 16px 10px 0;
@@ -260,6 +261,18 @@ a:focus-visible {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.attribution {
+  margin: 0;
+  line-height: 1.5;
+  color: #8f96a3;
+}
+
+.attribution a {
+  color: #c9ced8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .dot {
@@ -1550,6 +1563,39 @@ th.num {
 .topo-internet.is-source .topo-internet-halo {
   stroke: #e4b06b;
   opacity: 0.9;
+}
+
+.topo-country-badge {
+  pointer-events: none;
+}
+
+.topo-country-badge rect {
+  fill: rgba(8, 20, 36, 0.86);
+  stroke: rgba(207, 225, 242, 0.55);
+  stroke-width: 0.7;
+}
+
+.topo-country-badge text {
+  fill: #f2f7ff;
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-anchor: middle;
+}
+
+.topo-country-badge.is-pulsing {
+  animation: topoCountryBadgeIn 0.5s ease;
+}
+
+@keyframes topoCountryBadgeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .topo-upstream {

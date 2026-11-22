@@ -21,6 +21,9 @@ use crate::allowed_hosts::AllowedHosts;
 use crate::cidr::IpNet;
 use crate::client_ip::ClientIp;
 use crate::error::{Error, UNKNOWN_TARGET_ISSUE};
+use crate::geoip::{
+    CountryCode, CountryPolicy, CountryPolicyAction, CountryPolicyMode, UnknownCountryAction,
+};
 use crate::rules::matcher::{
     Matcher, PayloadMatcher, StatusRange, TARGET_BODY, TARGET_COOKIES, TARGET_HEADERS, TARGET_PATH,
     TARGET_QUERY, TARGET_RESPONSE_BODY,
@@ -61,6 +64,8 @@ const MAX_BEHAVIOR_DISTINCT_PATHS: u32 = 256;
 const MAX_SEQUENCE_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_SEQUENCE_DIMENSIONS: u32 = 6;
 const MAX_SEQUENCE_WINDOWS: u32 = 32;
+const MAX_SESSION_COOKIES: usize = 16;
+const MAX_SESSION_TRACKED: usize = 100_000;
 const DEFAULT_AUTH_PATHS: &[&str] = &[
     r"(?i)^/(wp-login\.php|xmlrpc\.php|login|logon|signin|sign_in|sign-in|session)(\.(php|do|jsp|aspx|html))?/?$",
     r"(?i)^/(users/sign_in|admin/login|api(/v[0-9]+)?/(auth|login|token|session|oauth|mfa|otp)|oauth|saml|auth|realms|openid-connect)(/|$)",
@@ -210,6 +215,8 @@ pub struct MatchSpec {
     pub method: Option<Vec<String>>,
     #[serde(default, deserialize_with = "de_opt_string_or_seq")]
     pub source_ip: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "de_opt_country_specs")]
+    pub country: Option<Vec<CountrySpec>>,
     #[serde(default)]
     pub headers: Option<BTreeMap<String, StringOrSeq>>,
     #[serde(default)]
@@ -243,6 +250,23 @@ enum StatusItems {
 pub enum StringOrSeq {
     One(String),
     Many(Vec<String>),
+}
+
+/// A country value as written in YAML. Keeping booleans distinct from strings
+/// lets the loader explain that an unquoted `NO` is a boolean rather than
+/// reporting a generic type error.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum CountrySpec {
+    Text(String),
+    Boolean(bool),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum CountrySpecs {
+    One(CountrySpec),
+    Many(Vec<CountrySpec>),
 }
 
 impl StringOrSeq {
@@ -320,6 +344,38 @@ fn default_client_ip_header() -> String {
     "x-forwarded-for".to_owned()
 }
 
+/// Country lookup and admission policy. Official builds already embed a
+/// verified DB-IP Lite database; `database` replaces it at runtime.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeoIpSpec {
+    #[serde(default)]
+    pub database: Option<PathBuf>,
+    /// Fail configuration loading when `database` cannot be used. Without it,
+    /// Kunato warns and falls back to the embedded database.
+    #[serde(default)]
+    pub strict: bool,
+    /// Optional country admission policy. It rejects before inspection and
+    /// never short-circuits the rule engine.
+    #[serde(default)]
+    pub policy: Option<GeoIpPolicySpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeoIpPolicySpec {
+    #[serde(default, deserialize_with = "de_opt_country_specs")]
+    pub only: Option<Vec<CountrySpec>>,
+    #[serde(default, deserialize_with = "de_opt_country_specs")]
+    pub block: Option<Vec<CountrySpec>>,
+    #[serde(default)]
+    pub unknown: Option<UnknownCountryAction>,
+    #[serde(default)]
+    pub action: Option<CountryPolicyAction>,
+    #[serde(default)]
+    pub exempt: Vec<String>,
+}
+
 /// A request route whose body is authored content (for example, a CMS article
 /// editor) rather than request parameters. Body-targeting rules are skipped for
 /// matching requests; every other target and every other protection stays
@@ -344,6 +400,8 @@ pub struct ConfigSpec {
     pub allowed_hosts: Option<Vec<String>>,
     #[serde(default)]
     pub client_ip: Option<ClientIpSpec>,
+    #[serde(default)]
+    pub geoip: GeoIpSpec,
     #[serde(default)]
     pub content_routes: Vec<ContentRouteSpec>,
     #[serde(default)]
@@ -982,6 +1040,8 @@ pub struct BehaviorSpec {
     #[serde(default)]
     pub scraping: ScrapingSpec,
     #[serde(default)]
+    pub session: SessionSpec,
+    #[serde(default)]
     pub sequence: SequenceSpec,
 }
 
@@ -995,6 +1055,7 @@ impl Default for BehaviorSpec {
             auth: AuthSpec::default(),
             global_auth: GlobalAuthSpec::default(),
             scraping: ScrapingSpec::default(),
+            session: SessionSpec::default(),
             sequence: SequenceSpec::default(),
         }
     }
@@ -1147,6 +1208,62 @@ fn default_scraping_min_requests() -> u32 {
 
 fn default_scraping_distinct_paths() -> u32 {
     40
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSpec {
+    /// Opt-in: session country tracking stores a bounded hash table.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_session_cookies")]
+    pub cookies: Vec<String>,
+    /// A request-side baseline needs this many same-country observations when
+    /// no Set-Cookie baseline was observed. Set-Cookie baselines are confirmed
+    /// immediately from the issuing response.
+    #[serde(default = "default_session_min_observations")]
+    pub baseline_min_observations: u32,
+    #[serde(default = "days30", deserialize_with = "de_duration")]
+    pub baseline_ttl: Duration,
+    #[serde(default = "default_max_tracked_sessions")]
+    pub max_tracked: usize,
+}
+
+impl Default for SessionSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cookies: default_session_cookies(),
+            baseline_min_observations: default_session_min_observations(),
+            baseline_ttl: days30(),
+            max_tracked: default_max_tracked_sessions(),
+        }
+    }
+}
+
+fn default_session_cookies() -> Vec<String> {
+    [
+        "session",
+        "_session_id",
+        "JSESSIONID",
+        "PHPSESSID",
+        "connect.sid",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn default_session_min_observations() -> u32 {
+    2
+}
+
+fn default_max_tracked_sessions() -> usize {
+    10_000
+}
+
+fn days30() -> Duration {
+    Duration::from_secs(30 * 24 * 60 * 60)
 }
 
 fn default_sequence_threshold() -> f64 {
@@ -1880,6 +1997,7 @@ pub struct BehaviorConfig {
     pub auth: AuthConfig,
     pub global_auth: GlobalAuthConfig,
     pub scraping: ScrapingConfig,
+    pub session: SessionConfig,
     pub sequence: SequenceConfig,
 }
 
@@ -1913,6 +2031,13 @@ impl BehaviorConfig {
                 action: BehaviorAction::Log,
                 min_requests: default_scraping_min_requests(),
                 distinct_paths: default_scraping_distinct_paths(),
+            },
+            session: SessionConfig {
+                enabled: false,
+                cookies: Vec::new(),
+                baseline_min_observations: default_session_min_observations(),
+                baseline_ttl: days30(),
+                max_tracked: default_max_tracked_sessions(),
             },
             sequence: SequenceConfig {
                 enabled: false,
@@ -1949,6 +2074,15 @@ pub struct AuthConfig {
     pub action: BehaviorAction,
     pub min_failures: u32,
     pub paths: RegexSet,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    pub enabled: bool,
+    pub cookies: Vec<String>,
+    pub baseline_min_observations: u32,
+    pub baseline_ttl: Duration,
+    pub max_tracked: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2035,6 +2169,8 @@ pub struct CompiledConfig {
     pub upstream: Upstream,
     pub allowed_hosts: Option<AllowedHosts>,
     pub client_ip: ClientIp,
+    pub geoip: Arc<crate::geoip::GeoIp>,
+    pub country_policy: Option<CountryPolicy>,
     pub content_routes: Vec<ContentRoute>,
     pub decoys: crate::decoy::config::Policy,
     pub categories: Vec<CompiledCategory>,
@@ -2281,8 +2417,11 @@ pub fn load_with_rules_candidate(path: &Path, rules: &str) -> Result<CompiledCon
 }
 
 fn load_candidate(path: &Path, candidate: Option<&str>) -> Result<CompiledConfig, Error> {
-    let spec = read_spec(path)?;
+    let mut spec = read_spec(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(database) = spec.geoip.database.as_mut() {
+        *database = resolve_path(base, database);
+    }
     let rules_file = spec
         .rules_file
         .as_deref()
@@ -2309,8 +2448,11 @@ fn load_candidate(path: &Path, candidate: Option<&str>) -> Result<CompiledConfig
 /// `overrides_file`. Used by `kunato update-rules`, which must work before the
 /// managed rules file exists for the first time.
 pub fn load_settings(path: &Path) -> Result<CompiledConfig, Error> {
-    let spec = read_spec(path)?;
+    let mut spec = read_spec(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(database) = spec.geoip.database.as_mut() {
+        *database = resolve_path(base, database);
+    }
     let sources = RulesSources {
         rules_file: spec
             .rules_file
@@ -2457,6 +2599,8 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         &mut issues,
     );
     let client_ip = compile_client_ip(spec.client_ip.as_ref(), &mut issues);
+    let geoip = compile_geoip(&spec.geoip, &mut issues);
+    let country_policy = compile_country_policy(spec.geoip.policy.as_ref(), &mut issues);
     let content_routes = compile_content_routes(&spec.content_routes, &mut issues);
     let admin_access = compile_admin_access(&spec.admin_access, &mut issues);
     let response_headers = compile_response_headers(&spec.response_headers, &mut issues);
@@ -2492,6 +2636,9 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
     let Some(php) = php else {
         return Err(vec!["invalid PHP profile".to_owned()]);
     };
+    let Some(geoip) = geoip else {
+        return Err(vec!["country database is unavailable".to_owned()]);
+    };
 
     let observation_id =
         crate::console::measurements::identity(&format!("{allowed_hosts:?}:{categories:?}"));
@@ -2501,6 +2648,8 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         upstream,
         allowed_hosts,
         client_ip,
+        geoip,
+        country_policy,
         content_routes,
         decoys,
         categories,
@@ -2710,6 +2859,96 @@ pub(crate) fn valid_admin_function_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn compile_geoip(spec: &GeoIpSpec, issues: &mut Vec<String>) -> Option<Arc<crate::geoip::GeoIp>> {
+    let mut embedded = || match crate::geoip::GeoIp::embedded() {
+        Ok(database) => {
+            tracing::info!(
+                source = %database.info().source,
+                database_type = %database.info().database_type,
+                build = %database.info().build_time_label(),
+                "country database loaded"
+            );
+            Some(database)
+        }
+        Err(error) => {
+            issues.push(format!("geoip: embedded country database: {error}"));
+            None
+        }
+    };
+
+    let Some(path) = spec.database.as_deref() else {
+        return embedded();
+    };
+    match crate::geoip::GeoIp::open(path) {
+        Ok(database) => {
+            tracing::info!(
+                source = %database.info().source,
+                database_type = %database.info().database_type,
+                build = %database.info().build_time_label(),
+                "country database loaded"
+            );
+            Some(Arc::new(database))
+        }
+        Err(error) if spec.strict => {
+            issues.push(format!("geoip.database: {error}"));
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "country database rejected; using the embedded database"
+            );
+            embedded()
+        }
+    }
+}
+
+fn compile_country_policy(
+    spec: Option<&GeoIpPolicySpec>,
+    issues: &mut Vec<String>,
+) -> Option<CountryPolicy> {
+    let spec = spec?;
+    let (mode, default_unknown) = match (&spec.only, &spec.block) {
+        (Some(only), None) => {
+            if only.is_empty() {
+                issues.push("geoip.policy.only must not be empty".to_owned());
+            }
+            (
+                CountryPolicyMode::Only(compile_countries(only, "geoip.policy.only", issues)),
+                UnknownCountryAction::Block,
+            )
+        }
+        (None, Some(block)) => {
+            if block.is_empty() {
+                issues.push("geoip.policy.block must not be empty".to_owned());
+            }
+            (
+                CountryPolicyMode::Block(compile_countries(block, "geoip.policy.block", issues)),
+                UnknownCountryAction::Allow,
+            )
+        }
+        (Some(_), Some(_)) => {
+            issues.push("geoip.policy must set exactly one of `only` or `block`".to_owned());
+            return None;
+        }
+        (None, None) => {
+            issues.push("geoip.policy must set exactly one of `only` or `block`".to_owned());
+            return None;
+        }
+    };
+    const MAX_EXEMPT: usize = 64;
+    if spec.exempt.len() > MAX_EXEMPT {
+        issues.push(format!(
+            "geoip.policy.exempt: too many networks (max {MAX_EXEMPT})"
+        ));
+    }
+    let exempt = compile_networks(&spec.exempt, "geoip.policy.exempt", issues);
+    let unknown = spec.unknown.unwrap_or(default_unknown);
+    let action = spec.action.unwrap_or(CountryPolicyAction::Block);
+    Some(CountryPolicy::new(mode, unknown, action, exempt))
 }
 
 fn compile_client_ip(spec: Option<&ClientIpSpec>, issues: &mut Vec<String>) -> ClientIp {
@@ -3799,6 +4038,14 @@ fn compile_protection(spec: &ProtectionSpec, issues: &mut Vec<String>) -> Protec
     }
 }
 
+fn valid_session_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
 fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorConfig {
     if spec.window.is_zero() || spec.window > MAX_BEHAVIOR_WINDOW {
         issues
@@ -3848,6 +4095,42 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
         issues.push(
             "protection.behavior.scraping.distinct_paths must be between 1 and 256".to_owned(),
         );
+    }
+    if spec.session.enabled {
+        if spec.session.cookies.is_empty() {
+            issues.push(
+                "protection.behavior.session.cookies must not be empty when enabled".to_owned(),
+            );
+        }
+        if spec.session.cookies.len() > MAX_SESSION_COOKIES {
+            issues.push(format!(
+                "protection.behavior.session.cookies must not contain more than {MAX_SESSION_COOKIES} entries"
+            ));
+        }
+        for cookie in &spec.session.cookies {
+            if !valid_session_cookie_name(cookie) {
+                issues.push(format!(
+                    "protection.behavior.session.cookies: invalid cookie name `{cookie}`"
+                ));
+            }
+        }
+        if !(1..=32).contains(&spec.session.baseline_min_observations) {
+            issues.push(
+                "protection.behavior.session.baseline_min_observations must be between 1 and 32"
+                    .to_owned(),
+            );
+        }
+        if spec.session.baseline_ttl.is_zero() || spec.session.baseline_ttl > days30() {
+            issues.push(
+                "protection.behavior.session.baseline_ttl must be greater than zero and at most 30d"
+                    .to_owned(),
+            );
+        }
+        if !(1..=MAX_SESSION_TRACKED).contains(&spec.session.max_tracked) {
+            issues.push(format!(
+                "protection.behavior.session.max_tracked must be between 1 and {MAX_SESSION_TRACKED}"
+            ));
+        }
     }
     let sequence = &spec.sequence;
     if sequence.short_window.is_zero()
@@ -3929,6 +4212,13 @@ fn compile_behavior(spec: &BehaviorSpec, issues: &mut Vec<String>) -> BehaviorCo
             action: spec.scraping.action,
             min_requests: spec.scraping.min_requests,
             distinct_paths: spec.scraping.distinct_paths,
+        },
+        session: SessionConfig {
+            enabled: spec.session.enabled,
+            cookies: spec.session.cookies.clone(),
+            baseline_min_observations: spec.session.baseline_min_observations,
+            baseline_ttl: spec.session.baseline_ttl,
+            max_tracked: spec.session.max_tracked,
         },
         sequence: SequenceConfig {
             enabled: spec.sequence.enabled,
@@ -4119,6 +4409,22 @@ fn compile_matcher(
         let networks = compile_networks(values, &format!("{context}: source_ip"), issues);
         if !networks.is_empty() {
             matcher.source_ips = Some(networks);
+        }
+    }
+
+    if let Some(values) = &spec.country {
+        has_condition = true;
+        if values.is_empty() {
+            issues.push(format!("{context}: `country` must not be empty"));
+        }
+        if action == Some(Action::Allow) {
+            issues.push(format!(
+                "{context}: `country` cannot be used with ALLOW; use `geoip.policy` or a BLOCK rule"
+            ));
+        }
+        let countries = compile_countries(values, &format!("{context}: country"), issues);
+        if !countries.is_empty() {
+            matcher.countries = Some(countries);
         }
     }
 
@@ -4334,6 +4640,36 @@ fn compile_regexes<S: AsRef<str>>(
     }
 
     regexes
+}
+
+fn compile_countries(
+    values: &[CountrySpec],
+    context: &str,
+    issues: &mut Vec<String>,
+) -> Vec<CountryCode> {
+    const MAX_COUNTRY_CODES: usize = 256;
+    if values.len() > MAX_COUNTRY_CODES {
+        issues.push(format!(
+            "{context}: too many country codes (max {MAX_COUNTRY_CODES})"
+        ));
+    }
+    let mut countries = Vec::new();
+    for value in values.iter().take(MAX_COUNTRY_CODES) {
+        match value {
+            CountrySpec::Text(value) => match CountryCode::parse(value) {
+                Some(country) => countries.push(country),
+                None => issues.push(format!(
+                    "{context}: invalid ISO 3166-1 alpha-2 country code `{value}`"
+                )),
+            },
+            CountrySpec::Boolean(_) => issues.push(format!(
+                "{context}: country codes must be quoted strings; a YAML boolean is not a country code (quote `NO` as \"NO\")"
+            )),
+        }
+    }
+    countries.sort_unstable();
+    countries.dedup();
+    countries
 }
 
 fn compile_methods(values: &[String], context: &str, issues: &mut Vec<String>) -> Vec<Method> {
@@ -4624,6 +4960,17 @@ where
 {
     let value = Option::<StringOrSeq>::deserialize(deserializer)?;
     Ok(value.map(StringOrSeq::into_vec))
+}
+
+fn de_opt_country_specs<'de, D>(deserializer: D) -> Result<Option<Vec<CountrySpec>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<CountrySpecs>::deserialize(deserializer)?;
+    Ok(value.map(|items| match items {
+        CountrySpecs::One(item) => vec![item],
+        CountrySpecs::Many(items) => items,
+    }))
 }
 
 fn de_opt_statuses<'de, D>(deserializer: D) -> Result<Option<Vec<StatusItem>>, D::Error>
@@ -5231,6 +5578,213 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
     }
 
     #[test]
+    fn parses_and_normalizes_country_matchers() {
+        let config = parse_with(
+            BASE,
+            "categories:
+  - name: geo
+    action: BLOCK
+    rules:
+      - name: country
+        match: { country: [jp, \"NO\"] }
+",
+        )
+        .expect("valid config");
+        let countries = config.categories[0].rules[0]
+            .matcher
+            .countries
+            .as_ref()
+            .expect("countries");
+        assert_eq!(
+            countries,
+            &[
+                CountryCode::parse("JP").expect("JP"),
+                CountryCode::parse("NO").expect("NO")
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_empty_country_matchers() {
+        for (value, expected) in [
+            ("JPN", "invalid ISO 3166-1 alpha-2 country code"),
+            ("1P", "invalid ISO 3166-1 alpha-2 country code"),
+            ("''", "invalid ISO 3166-1 alpha-2 country code"),
+        ] {
+            let error = parse_with(
+                BASE,
+                &format!(
+                    "categories:
+  - name: geo
+    action: BLOCK
+    rules:
+      - name: country
+        match: {{ country: [{value}] }}
+"
+                ),
+            )
+            .expect_err("must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: geo
+    action: BLOCK
+    rules:
+      - name: country
+        match: { country: [] }
+",
+        )
+        .expect_err("must fail");
+        assert!(error.to_string().contains("`country` must not be empty"));
+    }
+
+    #[test]
+    fn rejects_unquoted_boolean_country_values() {
+        for value in ["NO", "no", "false"] {
+            let error = parse_with(
+                BASE,
+                &format!(
+                    "categories:
+  - name: geo
+    action: BLOCK
+    rules:
+      - name: country
+        match: {{ country: [{value}] }}
+"
+                ),
+            )
+            .expect_err("boolean country value must fail");
+            assert!(
+                error.to_string().contains("YAML boolean"),
+                "expected a boolean diagnostic for {value}, got {error}"
+            );
+        }
+
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: geo
+    action: BLOCK
+    rules:
+      - name: country
+        match: { country: NO }
+",
+        )
+        .expect_err("scalar boolean country value must fail");
+        assert!(
+            error.to_string().contains("YAML boolean"),
+            "expected a boolean diagnostic, got {error}"
+        );
+    }
+
+    #[test]
+    fn geoip_external_database_falls_back_or_fails_strictly() {
+        let base = parse_with(BASE, "categories: []\n").expect("embedded database");
+        assert_eq!(
+            base.geoip.info().source,
+            crate::geoip::GeoIpSource::Embedded
+        );
+
+        let fallback = parse_with(
+            BASE,
+            "geoip: { database: /nonexistent/dbip.mmdb }\ncategories: []\n",
+        )
+        .expect("fallback to embedded");
+        assert_eq!(
+            fallback.geoip.info().source,
+            crate::geoip::GeoIpSource::Embedded
+        );
+
+        let error = parse_with(
+            BASE,
+            "geoip: { database: /nonexistent/dbip.mmdb, strict: true }\ncategories: []\n",
+        )
+        .expect_err("strict failure");
+        assert!(error.to_string().contains("geoip.database"), "{error}");
+    }
+
+    #[test]
+    fn parses_country_policy_modes() {
+        let config = parse_with(
+            BASE,
+            "geoip:
+  policy:
+    only: [JP]
+    unknown: block
+    action: log
+    exempt: [127.0.0.1/32, '::1/128']
+",
+        )
+        .expect("allowlist policy");
+        assert!(config.country_policy.is_some());
+
+        let config = parse_with(
+            BASE,
+            "geoip:
+  policy:
+    block: [KP, RU]
+",
+        )
+        .expect("blocklist policy");
+        assert!(config.country_policy.is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_country_policies() {
+        for (rest, expected) in [
+            (
+                "geoip: { policy: { only: [JP], block: [US] } }\n",
+                "exactly one of `only` or `block`",
+            ),
+            (
+                "geoip: { policy: {} }\n",
+                "exactly one of `only` or `block`",
+            ),
+            (
+                "geoip: { policy: { only: [] } }\n",
+                "geoip.policy.only must not be empty",
+            ),
+            (
+                "geoip: { policy: { only: [JP], unknown: maybe } }\n",
+                "unknown variant",
+            ),
+            (
+                "geoip: { policy: { only: [JP], exempt: [not-a-network] } }\n",
+                "invalid IP address",
+            ),
+            ("geoip: { policy: { only: [NO] } }\n", "YAML boolean"),
+        ] {
+            let error = parse_with(BASE, rest).expect_err("must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected `{expected}` in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn country_cannot_be_used_with_allow() {
+        let error = parse_with(
+            BASE,
+            "categories:
+  - name: geo
+    action: ALLOW
+    rules:
+      - name: japan
+        match: { country: [JP] }
+",
+        )
+        .expect_err("country ALLOW must fail");
+        assert!(
+            error.to_string().contains("cannot be used with ALLOW"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_fields() {
         let error = parse_with(BASE, "categories: []\nbogus: true\n").expect_err("must fail");
         assert!(matches!(error, Error::ConfigParse(_)));
@@ -5794,6 +6348,36 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
     }
 
     #[test]
+    fn parses_session_behavior() {
+        let config = parse_with(
+            BASE,
+            "protection:
+  behavior:
+    session:
+      enabled: true
+      cookies: [session, _session_id]
+      baseline_min_observations: 3
+      baseline_ttl: 168h
+      max_tracked: 123
+",
+        )
+        .expect("valid config");
+        let session = &config.protection.behavior.session;
+        assert!(session.enabled);
+        assert_eq!(session.cookies, ["session", "_session_id"]);
+        assert_eq!(session.baseline_min_observations, 3);
+        assert_eq!(session.baseline_ttl, Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(session.max_tracked, 123);
+    }
+
+    #[test]
+    fn session_behavior_is_disabled_by_default() {
+        let config = parse_with(BASE, "protection: { behavior: { enabled: true } }\n")
+            .expect("valid config");
+        assert!(!config.protection.behavior.session.enabled);
+    }
+
+    #[test]
     fn parses_sequence_behavior() {
         let config = parse_with(
             BASE,
@@ -5872,6 +6456,30 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
             (
                 "protection: { behavior: { scraping: { distinct_paths: 0 } } }\n",
                 "scraping.distinct_paths",
+            ),
+            (
+                "protection: { behavior: { session: { enabled: true, cookies: [] } } }\n",
+                "session.cookies",
+            ),
+            (
+                "protection: { behavior: { session: { enabled: true, cookies: ['bad name'] } } }\n",
+                "session.cookies",
+            ),
+            (
+                "protection: { behavior: { session: { enabled: true, cookies: [session], baseline_min_observations: 0 } } }\n",
+                "session.baseline_min_observations",
+            ),
+            (
+                "protection: { behavior: { session: { enabled: true, cookies: [session], baseline_ttl: 0s } } }\n",
+                "session.baseline_ttl",
+            ),
+            (
+                "protection: { behavior: { session: { enabled: true, cookies: [session], baseline_ttl: 744h } } }\n",
+                "session.baseline_ttl",
+            ),
+            (
+                "protection: { behavior: { session: { enabled: true, cookies: [session], max_tracked: 0 } } }\n",
+                "session.max_tracked",
             ),
             (
                 "protection: { behavior: { sequence: { short_window: 0s } } }\n",

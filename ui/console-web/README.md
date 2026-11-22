@@ -24,12 +24,13 @@ event table. It reads from the same snapshot and makes no additional requests:
 
 - A circular blue-gradient **internet globe** marks the untrusted ingress
   side, with the INTERNET / PUBLIC NETWORK labels above the globe icon.
-  Traffic leaves the globe and enters the Admin Gate. Six defense layers
-  (Admin Gate, Rate / Ban, YAML Rules, Decoy Ward, Payload Guards, and
-  Behavior) sit inside a faintly red-washed, dotted defense fabric that marks
-  the inspection boundary, with trusted upstream origins on the right. A
-  right-pointing arrow on the top edge and a left-pointing arrow on the bottom
-  edge mark the request and response directions.
+  Traffic leaves the globe through the **Country Gate** and then enters the
+  Admin Gate or Decoy Ward. Six defense layers (Admin Gate, Rate / Ban, YAML
+  Rules, Decoy Ward, Payload Guards, and Behavior) sit inside a faintly
+  red-washed, dotted defense fabric that marks the inspection boundary, with
+  trusted upstream origins on the right. A right-pointing arrow on the top edge
+  and a left-pointing arrow on the bottom edge mark the request and response
+  directions.
 - **Real-time mode** is the default. Each newly received event sends a packet
   along the route from the internet globe to the layer derived from its kind,
   reason, and disposition. A colored spark bursts at that layer, the node keeps
@@ -68,7 +69,14 @@ separately rather than silently omitted.
 
 The Recent detections table has an Attack type column populated from the same
 classification. Rejected rule events also retain their category and rule name,
-and the topology focus summary shows the attack type with the matched rule.
+and the topology focus summary shows the attack type with the matched rule. The
+Client column is paired with a Country column when the WAF recorded an ISO
+country code for the resolved client address. The globe also shows a country
+badge near its lower half for the selected log event or the latest real-time
+detection, using the browser's English region display names when available.
+
+The sidebar footer credits the embedded DB-IP Lite data. The links are ordinary
+anchors and are not fetched until the operator clicks them.
 
 The Metrics view keeps the terminal-mechanism table and adds an **Attack type
 and cause** table from the retained per-minute class counters. Older intervals

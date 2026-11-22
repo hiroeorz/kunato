@@ -232,7 +232,8 @@ pub(crate) async fn inspect(
         request_body_targets,
     )
     .with_body_truncated(inspected_request.truncated)
-    .with_body_rules_exempt(body_rules_exempt);
+    .with_body_rules_exempt(body_rules_exempt)
+    .with_country(config.geoip.lookup(source.client_ip));
     if !view.body_forms_complete {
         crate::observations::reject(crate::console::model::RejectionReason::ResponseInspection);
         return Err(HttpError::new(

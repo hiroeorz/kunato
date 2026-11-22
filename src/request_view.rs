@@ -9,6 +9,7 @@ use crate::decoding::{
     decoded_body_forms, mask_multipart_file_payloads, normalize_path, percent_decode_forms,
     query_decode_forms,
 };
+use crate::geoip::CountryCode;
 use crate::protection::normalize_ip;
 
 pub struct RequestView<'a> {
@@ -45,6 +46,9 @@ pub struct RequestView<'a> {
     /// targets of the same rule are still evaluated.
     pub body_rules_exempt: bool,
     pub source_ip: IpAddr,
+    /// Country resolved from `source_ip` once per request. `None` means the
+    /// address is not covered by the active country database.
+    pub country: Option<CountryCode>,
 }
 
 impl<'a> RequestView<'a> {
@@ -103,7 +107,13 @@ impl<'a> RequestView<'a> {
             body_truncated: false,
             body_rules_exempt: false,
             source_ip: normalize_ip(source_ip),
+            country: None,
         }
+    }
+
+    pub fn with_country(mut self, country: Option<CountryCode>) -> Self {
+        self.country = country;
+        self
     }
 
     pub fn with_body_truncated(mut self, body_truncated: bool) -> Self {

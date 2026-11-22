@@ -42,10 +42,11 @@ pub enum RejectionReason {
     Behavior,
     Protocol,
     ResponseInspection,
+    CountryPolicy,
 }
 
 impl RejectionReason {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Rule,
         Self::ResponseRule,
         Self::RateLimit,
@@ -68,6 +69,7 @@ impl RejectionReason {
         Self::Behavior,
         Self::Protocol,
         Self::ResponseInspection,
+        Self::CountryPolicy,
     ];
     pub fn phase(self) -> Phase {
         if matches!(
@@ -283,6 +285,9 @@ pub struct EventRecord {
     pub site: Option<String>,
     pub client: Option<IpAddr>,
     pub peer: Option<IpAddr>,
+    /// Country resolved from `client` when the event was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
     pub method: Option<String>,
     /// Redacted path only; query strings and fragments are rejected.
     pub path: Option<String>,
@@ -408,6 +413,11 @@ impl EventRecord {
         timestamp(self.occurred_at_ms)?;
         if let Some(site) = &self.site {
             site_identifier(site, 64)?;
+        }
+        if let Some(country) = &self.country
+            && crate::geoip::CountryCode::parse(country).is_none()
+        {
+            return Err(Error::Invalid("invalid country code"));
         }
         if let Some(method) = &self.method {
             text(method, 32)?;

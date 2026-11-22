@@ -1,8 +1,9 @@
 # Behavioral bot and authentication-abuse detection
 
 Status: Phase 1 and the opt-in `behavior.scraping` / `global_auth.action: BLOCK`
-parts of Phase 3 are implemented; challenges, configurable static exclusions, and
-the remaining Phase 2/3 items are future work.
+parts of Phase 3 are implemented; the experimental session country mismatch
+feeds the existing `sequence` score. Challenges, configurable static
+exclusions, and the remaining Phase 2/3 items are future work.
 
 Related documents:
 
@@ -24,11 +25,15 @@ Related documents:
 - Score **cross-request continuity**: upstream outcomes plus the requests
   Kunato rejects itself accumulate with decay, and the action applies only when
   the source returns in a later window and shows at least two evidence kinds.
+- Add one low-weight evidence kind for a confirmed **session country
+  mismatch**: the source IP presenting a known session from a new country is
+  scored, never the session's original IP or the session itself.
 - Default the engine to `LOG` and allow `BLOCK` per signal; the shipped
   config raises every signal to `BLOCK`. A `BLOCK` flag bans the source
   for subsequent requests and reuses the existing ban escalation.
-- Keep the state fixed-size inside the existing tracked-source table, with no
-  new dependencies and no network calls.
+- Keep per-source state in the existing tracked-source table and session state
+  in a separate fixed-size, in-memory table, with no new dependencies and no
+  network calls.
 
 ## 1. Context
 
@@ -75,8 +80,10 @@ on the YAML rule set.
 ### Non-goals
 
 - JavaScript challenges, CAPTCHAs, or proof-of-work.
-- Per-user, per-session, or cookie-based tracking. The source key is the same
-  IP / IPv6-prefix key used by rate limits and bans.
+- Per-user or per-session blocking. The source key remains the same
+  IP / IPv6-prefix key used by rate limits and bans. The experimental session
+  country signal only adds evidence to that source key; it never blocks the
+  session or the original source.
 - Content classification (spam, comment quality) or business-logic abuse such as
   coupon abuse, inventory hoarding, or mass assignment.
 - Detecting a slow scraper below the configured `behavior.scraping` thresholds
@@ -392,6 +399,31 @@ state is reset so a resumed campaign starts from zero. The ban itself is
 recorded once as `rate-limit-ban` evidence; the requests the source sends while
 banned are not observed again, so it cannot extend its own ban.
 
+### 4.8 Session country mismatch
+
+This is an experimental, opt-in signal. It identifies a session by a configured
+cookie name and a truncated SHA-256 of `Host + cookie name + value`; the raw
+cookie is never stored or logged. Only the first country observed for a session
+is the baseline. A `Set-Cookie` response observed at issuance confirms that
+baseline immediately; a response refresh never moves an established baseline.
+A baseline seen only in requests remains unconfirmed until
+`baseline_min_observations` same-country requests have been observed. If a
+different country appears before confirmation, the session becomes ambiguous
+and is not scored; this avoids choosing an attacker's country as the baseline
+after a WAF restart or state loss.
+
+When a confirmed baseline sees a new country, the evidence is recorded against
+the **requesting source IP only** as `SequenceKind::SessionCountryMismatch`
+(weight 2.0). The original country/IP is not penalized and the session is not
+blocked. A seen country is not scored again. Session state is bounded by
+`session.max_tracked` and expires after `session.baseline_ttl`; state is
+in-memory and resets on restart. Because this is one evidence kind, the default
+`sequence.min_dimensions: 2` means it cannot ban on its own; it contributes to
+the sequence threshold with another kind of evidence. The shipped
+`sequence.action: BLOCK` applies the normal source ban when that threshold is
+reached. See `docs/development.md`, "Behavioral detection", for the
+configuration block.
+
 ## 5. State model
 
 ### 5.1 Per-source state
@@ -524,6 +556,12 @@ protection:
       enabled: true
       window: 60s
       min_failures: 100
+    session:
+      enabled: true
+      cookies: [session, _session_id, JSESSIONID, PHPSESSID]
+      baseline_min_observations: 2
+      baseline_ttl: 720h
+      max_tracked: 10000
     sequence:
       enabled: true
       action: LOG          # LOG (default) or BLOCK
@@ -561,6 +599,14 @@ Semantics:
 - `min_windows: 2` is the smallest value that still expresses continuity: the
   source must appear in at least two short windows. `min_dimensions: 1` turns
   the signal into a burst detector and is not recommended outside a test.
+- `behavior.session` is opt-in and adds `session-country-mismatch` evidence to
+  the source IP that presents a moved session. It requires a configured cookie
+  name, stores only a truncated SHA-256 key, and is bounded by `max_tracked`.
+  A `Set-Cookie` baseline is confirmed immediately; a request-only baseline
+  needs `baseline_min_observations` same-country requests. The default
+  `min_dimensions: 2` means this evidence cannot ban alone; the shipped
+  `sequence.action: BLOCK` applies when the source also has another evidence
+  kind and reaches `sequence.threshold`.
 
 Validation rules:
 
@@ -575,6 +621,10 @@ Validation rules:
 | `sequence.short_window` | `> 0`, at most `long_window` |
 | `sequence.long_window` | `> 0` and at most 7 days |
 | `sequence.half_life` | `> 0`, at most `long_window` |
+| `session.cookies` | non-empty when enabled; at most 16 valid cookie names |
+| `session.baseline_min_observations` | between 1 and 32 |
+| `session.baseline_ttl` | `> 0` and at most 30 days |
+| `session.max_tracked` | between 1 and 100000 |
 | `sequence.threshold` | finite and at least 1 |
 | `sequence.min_windows` | between 1 and 32 |
 | `sequence.min_dimensions` | between 1 and 6 |
@@ -925,7 +975,9 @@ before enabling `BLOCK`. Without it, per-source thresholds aggregate unrelated
 users and a `BLOCK` action bans the proxy's identity. Follow the
 [readiness checklist](behavioral-readiness.md) to verify source separation and
 the application's authentication response semantics. NAT clients still share
-an identity, and trusted proxy support does not add session/account tracking.
+an identity. Trusted proxy support does not add per-user/account tracking; the
+opt-in session signal tracks only a hashed cookie baseline and attributes its
+evidence to the source IP presenting the cookie.
 
 ### 9.2 Evasion
 
@@ -955,10 +1007,18 @@ an identity, and trusted proxy support does not add session/account tracking.
 - **Static-path camouflage.** A scanner can request static assets to dilute the
   enumeration ratio. It must still produce enough distinct `404`s to satisfy the
   distinct-path threshold, and it spends rate budget on the decoy traffic.
+- **Session country evasion.** A stolen session used from the same country, or
+  through a VPN exit in the victim's country, produces no country mismatch. An
+  attacker who uses the cookie before the WAF has a confirmed baseline can
+  become the baseline; an ambiguous pre-confirmation session is intentionally
+  not scored. Rotating the cookie value creates a new session, and a
+  multi-instance deployment does not share in-memory session state.
 
 ### 9.3 Detector as a DoS target
 
-- Per-source state is fixed-size and bounded by `max_tracked_ips`.
+- Per-source state is fixed-size and bounded by `max_tracked_ips`; session
+  state is fixed-size and bounded by `session.max_tracked` with lazy TTL
+  expiry.
 - Observation is O(path length) for hashing and O(1) for counters.
 - Authentication pattern matching runs only on `401`/`403` responses, not every
   request, and the patterns are compiled at load time with size limits under the
@@ -969,8 +1029,11 @@ an identity, and trusted proxy support does not add session/account tracking.
 
 ## 10. Testing
 
-### Unit tests (`src/protection/mod.rs`)
+### Unit tests (`src/protection/mod.rs`, `src/protection/session.rs`)
 
+- Session tests cover Set-Cookie confirmation, request-only baseline
+  confirmation, ambiguity before confirmation, Set-Cookie refresh not moving an
+  established baseline, deletion, expiry, and the `max_tracked` bound.
 - Enumeration flags only after all three conditions are met.
 - A normal mix of `200`s and a few `404`s does not flag.
 - Static-asset `404`s do not count toward the numerator but do count in the

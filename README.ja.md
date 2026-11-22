@@ -44,11 +44,12 @@ Kunato は Web アプリケーションの前段でリバースプロキシと�
 - **アップロードコンテンツ検査** — `multipart/form-data` のファイルパートについて、申告された MIME タイプ・ファイル拡張子・先頭バイト（マジックバイト）を照合します。画像、PDF、Office 文書、メディア、フォントを装ったパートはそのフォーマットのシグネチャで始まっていなければならず、`.jpg` や `.pdf` にリネームされたソースコード、安全なファイル形式を装った実行ファイル・スクリプト・マークアップ、PHP ショートタグ、実行可能パスへの生データの書き込みを拒否します。`strict` モードでは汎用バイナリ申告も検査対象になります。
 - **レスポンス検査** — レスポンスフェーズ (`phase: response`) のカテゴリにより、アップストリームのレスポンスのステータス・ヘッダ・ボディ（サイズ上限まで）を検査し、ブロック・ログ記録・通過を制御できます。上限を超える巨大なレスポンスの残りの部分はそのままストリーミングされます。
 - **レスポンスヘッダの書き換え** — アップストリームのレスポンスおよび Kunato 自身が返すブロック／エラーレスポンスの両方から、`Server` や `X-Powered-By` などの識別ヘッダを削除または置換します。
+- **国判定 (Country lookup)** — 公式バイナリには DB-IP Lite の国データベースを埋め込み、ISO 国コードを `country` マッチ条件と監視コンソールで利用できます。`geoip.policy` は検査前のCountryゲートとして許可・拒否を決定し、許可されたリクエストもすべてのルールと検知を通ります。外部の MMDB または `.mmdb.gz` で置き換え可能で、不正なデータは `geoip.strict` が無効なら安全に埋め込み DB へフォールバックします。
 
 ### DoS / DDoS 防御・振る舞い検知
 - **実験的なデコイ (Experimental decoys)** — ローカルに配置した設定ファイルの囮が架空の HTTP API 資格情報を載せており、それが返ってきたことを送信元アドレスをまたいで相関できます。同梱・生成される設定では、所有する偽 API 上で `BLOCK` を有効にし、送信元 BAN や振る舞いスコアリングは行いません。サイトの公開オリジンを設定してください。`allowed_hosts` は任意です。`decoys` を持たない既存設定では無効のままです。詳細は[設定リファレンス](docs/development.md#experimental-decoys)を参照してください。
 - **DoS / DDoS 検知と自動緩和** — 異常なリクエストパターンを検知し、悪質な送信元を自動的にスロットリングまたはブロック（BAN）します。
-- **振る舞いによる不正利用検知 (Behavioral Abuse Detection)** — アップストリームのレスポンスを送信元ごとの時間窓で集計し、反復的な `404` パス探索（列挙攻撃）、認証失敗のバースト、`200` のみを返すクローリングを検知します。またグローバルな時間窓で分散型の認証失敗を記録し、継続性スコアが、Kunato がブロックしたリクエストも含めた攻撃者の進行状況を追跡して、再訪時に 2 つ目の証拠種別で対処します。同梱設定はリリース時点でもすべてのシグナルをブロックしますが、エンジンのデフォルトは観察のみで、シグナルごとに `action` を設定できます。
+- **振る舞いによる不正利用検知 (Behavioral Abuse Detection)** — アップストリームのレスポンスを送信元ごとの時間窓で集計し、反復的な `404` パス探索（列挙攻撃）、認証失敗のバースト、`200` のみを返すクローリングを検知します。またグローバルな時間窓で分散型の認証失敗を記録し、継続性スコアが、Kunato がブロックしたリクエストも含めた攻撃者の進行状況を追跡して、再訪時に 2 つ目の証拠種別で対処します。オプトインのセッションシグナルは、設定したCookieをハッシュ化し、`Set-Cookie` または同一国の複数リクエストから国のbaselineを記録し、移動したセッションを提示したIPにだけ低い重みの証拠を追加します。同梱設定はリリース時点でもすべてのシグナルをブロックしますが、エンジンのデフォルトは観察のみで、シグナルごとに `action` を設定できます。
 
 ### 運用性・高信頼性
 - **YAML ルールとホットリロード** — ルールは YAML で記述します。ルールファイルの変更は実行中に検知され、プロセスの再起動やコネクションの切断なしに即座にリロードされます。
@@ -354,6 +355,13 @@ scripts/security-lab.sh run --sandbox-suite load
 | [Behavioral Readiness Checklist](docs/behavioral-readiness.md) | 信頼されたプロキシ設定および認証監視を有効化する前のデプロイチェックリスト。 |
 | [Security Lab Testing Model](docs/security-lab-testing-model.md) | 隔離コンテナトポロジ、コントロール／エビデンスモデル、および検証プロセス。 |
 
+## データの帰属 (Data attribution)
+
+Official Kunato builds embed the DB-IP Lite country database. The data is
+licensed under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/)
+and is attributed as "IP Geolocation by [DB-IP](https://db-ip.com/)". The
+embedded database is a separate work from Kunato's source code.
+
 ## ライセンス (License)
 
 Kunato is provided "as is", without warranty of any kind, express or implied,
@@ -371,3 +379,7 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
+
+The embedded DB-IP Lite data remains under CC BY 4.0 and is not relicensed by
+the MIT or Apache-2.0 terms above. Attribution is also shown in the monitoring
+console footer.

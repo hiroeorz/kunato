@@ -22,6 +22,12 @@
   };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
+  var COUNTRY_DISPLAY_NAMES = null;
+  try {
+    COUNTRY_DISPLAY_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
+  } catch (error) {
+    COUNTRY_DISPLAY_NAMES = null;
+  }
 
   var TOPO_LAYERS = [
     {
@@ -90,6 +96,17 @@
       height: 56,
       icon: '<path d="M2 10h3.6l2.1-5 4.1 10 2.1-5H18"/>',
     },
+    {
+      id: "country",
+      name: "Country Gate",
+      title: "COUNTRY GATE",
+      color: "#557a8a",
+      x: 220,
+      y: 108,
+      width: 138,
+      height: 44,
+      icon: '<circle cx="10" cy="10" r="7.2"/><path d="M2.8 10h14.4M10 2.8c2.2 2.2 3.2 4.6 3.2 7.2s-1 5-3.2 7.2C7.8 15 6.8 12.6 6.8 10s1-5 3.2-7.2z"/>',
+    },
   ];
 
   TOPO_LAYERS.forEach(function (layer) {
@@ -103,8 +120,9 @@
   });
 
   var TOPO_EDGES = [
-    { id: "ingress-admin", d: "M176 130 C198 130 204 70 220 70" },
-    { id: "ingress-decoy", d: "M176 130 C198 130 204 190 220 190" },
+    { id: "ingress-country", d: "M176 130 C194 130 202 130 220 130" },
+    { id: "country-admin", d: "M289 108 L289 98" },
+    { id: "country-decoy", d: "M289 152 L289 162" },
     { id: "admin-rate", d: "M358 70 L418 70" },
     { id: "decoy-guards", d: "M358 190 L418 190" },
     { id: "rate-rules", d: "M556 70 L616 70" },
@@ -114,33 +132,37 @@
   ];
 
   var TOPO_ROUTES = {
+    country: {
+      edges: ["ingress-country"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130",
+    },
     admin: {
-      edges: ["ingress-admin"],
-      d: "M176 130 C198 130 204 70 220 70 L289 70",
+      edges: ["ingress-country", "country-admin"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70",
     },
     rate: {
-      edges: ["ingress-admin", "admin-rate"],
-      d: "M176 130 C198 130 204 70 220 70 L358 70 L418 70 L487 70",
+      edges: ["ingress-country", "country-admin", "admin-rate"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70 L358 70 L418 70 L487 70",
     },
     rules: {
-      edges: ["ingress-admin", "admin-rate", "rate-rules"],
-      d: "M176 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L685 70",
+      edges: ["ingress-country", "country-admin", "admin-rate", "rate-rules"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70 L358 70 L418 70 L556 70 L616 70 L685 70",
     },
     decoy: {
-      edges: ["ingress-decoy"],
-      d: "M176 130 C198 130 204 190 220 190 L289 190",
+      edges: ["ingress-country", "country-decoy"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 190",
     },
     guards: {
-      edges: ["ingress-decoy", "decoy-guards"],
-      d: "M176 130 C198 130 204 190 220 190 L358 190 L418 190 L487 190",
+      edges: ["ingress-country", "country-decoy", "decoy-guards"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 190 L358 190 L418 190 L487 190",
     },
     behavior: {
-      edges: ["ingress-decoy", "decoy-guards", "guards-behavior"],
-      d: "M176 130 C198 130 204 190 220 190 L358 190 L418 190 L556 190 L616 190 L685 190",
+      edges: ["ingress-country", "country-decoy", "decoy-guards", "guards-behavior"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 190 L358 190 L418 190 L556 190 L616 190 L685 190",
     },
     upstream: {
-      edges: ["ingress-admin", "admin-rate", "rate-rules", "rules-upstream"],
-      d: "M176 130 C198 130 204 70 220 70 L358 70 L418 70 L556 70 L616 70 L754 70 C792 70 802 130 840 130 L911 130",
+      edges: ["ingress-country", "country-admin", "admin-rate", "rate-rules", "rules-upstream"],
+      d: "M176 130 C194 130 202 130 220 130 L289 130 L289 70 L358 70 L418 70 L556 70 L616 70 L754 70 C792 70 802 130 840 130 L911 130",
     },
   };
 
@@ -160,6 +182,7 @@
     decoy: "#a95d18",
     guards: "#7d4e9b",
     behavior: "#2f7159",
+    country: "#3f6273",
     upstream: "#a34442",
   };
 
@@ -170,6 +193,7 @@
     decoy: "#fb923c",
     guards: "#bd86e0",
     behavior: "#4db392",
+    country: "#7fb7c9",
     upstream: "#f07182",
   };
 
@@ -196,6 +220,7 @@
     jwt: "guards",
     decoy: "decoy",
     behavior: "behavior",
+    countrypolicy: "country",
   };
 
   var topo = {
@@ -210,6 +235,7 @@
     edges: {},
     upstream: null,
     internet: null,
+    countryBadge: null,
     geometry: {},
     routeLength: {},
     packets: null,
@@ -665,6 +691,7 @@
       decoy: 0,
       guards: 0,
       behavior: 0,
+      country: 0,
       upstream: 0,
     };
     state.events.forEach(function (event) {
@@ -727,6 +754,67 @@
     }
   }
 
+  function countryLabel(code) {
+    var normalized = String(code || "").toUpperCase();
+    if (!/^[A-Z]{2}$/.test(normalized)) {
+      return "";
+    }
+    if (normalized === "ZZ") {
+      return "UNKNOWN";
+    }
+    if (COUNTRY_DISPLAY_NAMES) {
+      try {
+        var name = COUNTRY_DISPLAY_NAMES.of(normalized);
+        if (name && name.toUpperCase() !== normalized) {
+          return name.toUpperCase();
+        }
+      } catch (error) {
+        // Fall through to the ISO code for browsers or locales that do not
+        // recognize a region code.
+      }
+    }
+    return normalized;
+  }
+
+  function latestCountryEvent() {
+    var latest = null;
+    state.events.forEach(function (event) {
+      if (!event.country) {
+        return;
+      }
+      if (!latest || event.sequence > latest.sequence) {
+        latest = event;
+      }
+    });
+    return latest;
+  }
+
+  function updateCountryBadge() {
+    if (!topo.built || !topo.countryBadge || !topo.countryBadge.group) {
+      return;
+    }
+    var event = topo.mode === "log" ? topo.selected : latestCountryEvent();
+    var label = countryLabel(event && event.country);
+    if (!label) {
+      topo.countryBadge.group.setAttribute("visibility", "hidden");
+      topo.countryBadge.group.classList.remove("is-pulsing");
+      topo.countryBadge.lastKey = null;
+      return;
+    }
+    var width = Math.max(60, Math.min(150, label.length * 5.4 + 18));
+    var key = (event.sequence === undefined ? "" : event.sequence) + ":" + label;
+    topo.countryBadge.text.textContent = label;
+    topo.countryBadge.bg.setAttribute("x", String(100 - width / 2));
+    topo.countryBadge.bg.setAttribute("width", String(width));
+    topo.countryBadge.group.setAttribute("visibility", "visible");
+    if (topo.countryBadge.lastKey !== key) {
+      topo.countryBadge.lastKey = key;
+      topo.countryBadge.group.classList.remove("is-pulsing");
+      void topo.countryBadge.group.getBoundingClientRect();
+      topo.countryBadge.group.classList.add("is-pulsing");
+    }
+  }
+
   function updateInternetChrome() {
     if (!topo.built || !topo.internet || !topo.internet.group) {
       return;
@@ -734,6 +822,7 @@
     var origin =
       topo.mode === "log" && topo.selected ? topo.selected.client || topo.selected.peer || "" : "";
     topo.internet.group.classList.toggle("is-source", Boolean(origin));
+    updateCountryBadge();
   }
 
   function updateNewBadge() {
@@ -845,7 +934,7 @@
     }
     text(
       $("topo-summary"),
-      "Edge shield topology. Top row request path, bottom row response path. Mode " +
+      "Edge shield topology. Country gate first, then the top request path and bottom response path. Mode " +
         (topo.mode === "log" ? "log" : "real-time") +
         ". Retained events by layer: " +
         parts.join(", ") +
@@ -979,7 +1068,7 @@
       '<path class="topo-phase-arrow" d="M680 249H310" marker-end="url(#topo-phase-arrow)"/>' +
       '<text class="topo-phase-label" x="690" y="252">RESPONSE</text>' +
       '<text class="topo-fabric-label" x="220" y="31">KUNATO DEFENSE FABRIC</text>' +
-      '<text class="topo-fabric-meta" x="758" y="31">SIX LAYERS</text>' +
+      '<text class="topo-fabric-meta" x="758" y="31">COUNTRY GATE + 6 LAYERS</text>' +
       '<g class="topo-internet" id="topo-internet">' +
       '<circle class="topo-internet-halo" cx="100" cy="130" r="80"/>' +
       '<circle class="topo-internet-disk" cx="100" cy="130" r="76"/>' +
@@ -990,6 +1079,10 @@
       '<ellipse cx="0" cy="0" rx="10" ry="24"/>' +
       '<path d="M-24 0H24M-22 -9H22M-22 9H22"/>' +
       '<circle class="topo-globe-dot" cx="16" cy="-13" r="2.3"/>' +
+      "</g>" +
+      '<g class="topo-country-badge" id="topo-country-badge" visibility="hidden" aria-hidden="true">' +
+      '<rect id="topo-country-badge-bg" x="68" y="156" width="64" height="18" rx="9"/>' +
+      '<text id="topo-country-badge-text" x="100" y="168" text-anchor="middle">COUNTRY</text>' +
       "</g>" +
       "</g>" +
       '<g class="topo-edges" aria-hidden="true">' +
@@ -1029,6 +1122,11 @@
     topo.stop = svg.querySelector("#topo-stop");
     topo.forward = svg.querySelector("#topo-forward");
     topo.internet = { group: svg.querySelector("#topo-internet"), timer: null };
+    topo.countryBadge = {
+      group: svg.querySelector("#topo-country-badge"),
+      bg: svg.querySelector("#topo-country-badge-bg"),
+      text: svg.querySelector("#topo-country-badge-text"),
+    };
     topo.upstream = { group: svg.querySelector("#topo-upstream"), timer: null };
     if (topo.upstream.group) {
       topo.upstream.group.style.setProperty("--layer", "#3c8b70");
@@ -1578,7 +1676,7 @@
       parts.push(request);
     }
     if (client) {
-      parts.push("client " + client);
+      parts.push("client " + client + (event.country ? " (" + event.country + ")" : ""));
     }
     if (event.site) {
       parts.push(event.site);
@@ -2223,7 +2321,7 @@
     if (events.length === 0) {
       var empty = document.createElement("tr");
       var cell = document.createElement("td");
-      cell.colSpan = 9;
+      cell.colSpan = 10;
       cell.className = "muted";
       cell.textContent = "No events received yet.";
       empty.appendChild(cell);
@@ -2262,6 +2360,7 @@
       add(event.path);
       add(event.site);
       add(event.client || event.peer);
+      add(event.country);
       row.addEventListener("click", function () {
         selectEvent(event);
       });
@@ -2811,7 +2910,7 @@
     "rule", "response_rule", "rate_limit", "ban", "overload", "client_identity",
     "host", "admin_access", "body", "decode", "form", "upload", "graphql", "saml",
     "php_request", "php_response", "hardening", "jwt", "decoy", "behavior",
-    "protocol", "response_inspection",
+    "protocol", "response_inspection", "country_policy",
   ];
 
   var REJECT_CLASS_LABELS = {
@@ -2865,6 +2964,7 @@
     "decoy": "Decoy",
     "behavior": "Behavior",
     "response-inspection": "Response inspection",
+    "country-policy": "Country gate",
   };
 
   function rejectClassLabel(value) {

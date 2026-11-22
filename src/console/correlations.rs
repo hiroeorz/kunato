@@ -323,6 +323,7 @@ mod tests {
             site: None,
             client: None,
             peer: None,
+            country: None,
             method: None,
             path: None,
             status: None,

@@ -23,6 +23,7 @@ fn event(sequence: u64) -> EventRecord {
         site: Some("personal-blog".into()),
         client: Some("192.0.2.1".parse().unwrap()),
         peer: None,
+        country: None,
         method: Some("GET".into()),
         path: Some("/admin".into()),
         status: Some(403),

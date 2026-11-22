@@ -14,6 +14,7 @@ pub mod decoding;
 pub mod decoy;
 pub mod error;
 mod form;
+pub mod geoip;
 pub mod graphql;
 pub mod hardening;
 pub mod jwt;

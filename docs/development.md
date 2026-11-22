@@ -716,6 +716,7 @@ performed. Body targets are skipped entirely on configured
 | `path`             | Regex(es) matched against the request path.                                                                             |
 | `method`           | One or more HTTP methods (for example `GET` or `[POST, PUT]`); names are case-sensitive, so write them in upper case. |
 | `source_ip`        | IP address(es) or CIDR range(s) the client must come from.                                                              |
+| `country`          | ISO 3166-1 alpha-2 country code(s) resolved from the client IP, for example `[JP, US]`. `ZZ` is the database's unknown marker. |
 | `headers`          | Map of request header name to regex(es); header names are case-insensitive.                                             |
 | `cookies`          | Map of cookie name to regex(es).                                                                                        |
 | `in`               | Parts searched by `regex`: `query`, `body`, `cookies`, `headers`, `path`, or `response_body`. Defaults to `[query, body, cookies]`, or `[response_body]` in a response-phase category. |
@@ -740,8 +741,8 @@ Cross-origin values, `null`, `javascript:`, and malformed values are still
 inspected; other headers carrying the same URL are not exempt.
 
 Response-phase rules may combine request conditions (`path`, `method`, `source_ip`,
-`headers`, `cookies`, and `in` targets) with the response-specific ones, so a rule
-can require a path and a response body signature. `status`, `response_headers`, and
+`country`, `headers`, `cookies`, and `in` targets) with the response-specific
+ones, so a rule can require a path and a response body signature. `status`, `response_headers`, and
 the `response_body` target are rejected in request-phase categories. Response
 bodies with `Content-Encoding: gzip`, `deflate`, `br`, or `zstd` are decompressed
 for matching (all gzip members and concatenated zstd frames, stacked encodings
@@ -1223,6 +1224,75 @@ the binary before adding it to an older installation.
 
 Complete the [behavioral readiness checklist](behavioral-readiness.md) before
 using behavioral `BLOCK` behind a proxy.
+
+### Country lookup
+
+Official binaries embed the DB-IP Lite country database. The database is
+expanded once at startup and every request resolves the country from the same
+trusted client IP used by `source_ip`, per-source limits, and bans. Use it for
+observability and coarse policy, not as a security boundary: VPNs, proxies,
+anycast services, and mobile roaming can make the country wrong.
+
+```yaml
+geoip:
+  database: /var/lib/kunato/dbip-country-lite.mmdb
+  strict: false
+  policy:
+    only: [JP]
+    unknown: block
+    action: log
+    exempt: [127.0.0.1/32, '::1/128']
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `geoip` | omitted | Use the embedded database |
+| `geoip.database` | embedded | Optional external MMDB or `.mmdb.gz`; relative paths resolve against the configuration file |
+| `geoip.strict` | `false` | Fail configuration loading when the external database is unusable instead of falling back to the embedded database |
+| `geoip.policy` | omitted | No country admission filter |
+| `geoip.policy.only` | none | Allow only these country codes; all others are rejected. Mutually exclusive with `block` |
+| `geoip.policy.block` | none | Reject these country codes; all others continue. Mutually exclusive with `only` |
+| `geoip.policy.unknown` | `block` for `only`, `allow` for `block` | Behavior when the database has no country (including `ZZ`) |
+| `geoip.policy.action` | `block` | `block` rejects with `403`; `log` logs the would-be rejection and continues |
+| `geoip.policy.exempt` | empty | Up to 64 IPs or CIDRs exempt from the country gate; they are still fully inspected |
+
+The country policy is an **admission filter**, not an `ALLOW` rule. A request
+admitted by the policy still passes through every request rule, body check,
+rate limit, behavioral signal, and response rule. A rejected request stops
+before body inspection and is counted with the `country_policy` rejection
+reason; `action: log` is useful for a dry run before enforcing a policy.
+`exempt` only skips the country gate, not the rest of the inspection. The
+policy is global; path-specific country allowlists require a `country_not`
+style rule instead (not currently provided).
+
+`only` and `block` accept ISO 3166-1 alpha-2 codes. `ZZ` is treated as unknown
+and is controlled by `unknown`. A country `ALLOW` rule is rejected at load
+time; use `geoip.policy` for an allowlist or `source_ip` for a trusted network.
+
+The external database is bounded, must be a MaxMind DB 2.0 country database
+with `country.iso_code`, and must answer IPv4 and (when it declares
+`ip_version: 6`) IPv6 sample lookups. On failure, Kunato logs the reason and
+uses the embedded database unless `strict` is set. A database update should be
+validated before it is installed; the embedded database's build date is shown
+at startup. Replacing an external database takes effect after a configuration
+reload or restart.
+
+`country` rules require a resolved country. An address with no database record
+has no country and does not match, even when the rule lists `ZZ`. Quote `NO`
+(Norway) in YAML (`country: ["NO"]`): the loader preserves YAML booleans in the
+country list and rejects the configuration with a diagnostic instead of
+treating an unquoted `NO` as a country code. `country` cannot be used with an
+effective `ALLOW` action; the loader rejects that configuration. Use
+`geoip.policy` for a country allowlist or `source_ip` for a trusted network.
+`country` is a rule-set format field: installing it in a shared
+`dist/rules.yaml` requires a release that supports it, and the managed rule
+compatibility gate applies.
+
+The embedded DB-IP Lite data is licensed under CC BY 4.0 and attributed as
+"IP Geolocation by DB-IP" in the console footer and README files. See
+[`data/README.md`](../data/README.md) for the pinned release and checksum. An
+external database is the operator's choice and remains subject to its own
+license; it is not covered by the embedded data's attribution.
 
 ### Upload inspection
 
@@ -2655,6 +2725,30 @@ yet understood.
   windows with activity and `min_dimensions` evidence kinds, so neither a
   single burst nor one noisy signal can ban on its own. State is fixed-size and
   decays lazily; a `BLOCK` bans for `sequence.ban`, escalated like any other ban.
+- **Session country mismatch** (`session`, opt-in) hashes configured cookie
+  values and records the first country seen for each session. A `Set-Cookie`
+  response from the site confirms that baseline immediately (the response is
+  never allowed to move an established baseline); a baseline seen only in
+  requests needs `baseline_min_observations` same-country requests before it can
+  score. When a confirmed session appears from a new country, the evidence is
+  added to the **current source IP's** `sequence` score, never to the original
+  session or its IP. The session state is bounded by `max_tracked` and
+  `baseline_ttl` and holds only a truncated SHA-256 key, never the cookie.
+  A country mismatch alone is one evidence kind, so the default
+  `min_dimensions: 2` prevents it from banning by itself; the shipped
+  `sequence.action: BLOCK` applies when the source reaches the configured
+  threshold with another kind of evidence.
+
+```yaml
+protection:
+  behavior:
+    session:
+      enabled: true
+      cookies: [session, _session_id, JSESSIONID, PHPSESSID]
+      baseline_min_observations: 2
+      baseline_ttl: 720h   # 30 days; duration units are ms/s/m/h
+      max_tracked: 10000
+```
 
 A per-source `BLOCK` flag applies a ban after the current response, using the
 same `ban.duration` and escalation as a rate-limit ban; the next request from
@@ -2664,9 +2758,11 @@ so a resumed attack starts from zero.
 
 `protection.enabled: false` and `--disable-protection` disable behavioral
 detection as well. `protection.allowlist` exempts a source; an `ALLOW` rule,
-including the bundled `trusted-sources` category, does not. The state is inline
-in the existing tracked-source table and remains bounded by `max_tracked_ips`
-(about 7 MB at the default 100 000 sources).
+including the bundled `trusted-sources` category, does not. Per-source state is
+inline in the existing tracked-source table and remains bounded by
+`max_tracked_ips` (about 7 MB at the default 100 000 sources). Session country
+state is a separate bounded table (`behavior.session.max_tracked`, default
+10 000) with lazy TTL expiry and no persistence across restarts.
 
 Limitations:
 

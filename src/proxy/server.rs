@@ -27,6 +27,7 @@ use crate::admin_access::{AdminAccessState, Decision as AdminAccessDecision};
 use crate::client_ip::ClientSource;
 use crate::config::{BodyInspection, CompiledConfig, SamlInspection, UploadInspection};
 use crate::error::Error;
+use crate::geoip::CountryPolicyDecision;
 use crate::maintenance::MaintenanceState;
 use crate::metrics::Metrics;
 use crate::protection::{
@@ -1354,6 +1355,12 @@ pub(crate) fn resolve_source(
             .copied()
             .unwrap_or_else(|_| ClientSource::direct(peer)),
     );
+    crate::observations::country(
+        result
+            .as_ref()
+            .ok()
+            .and_then(|source| config.geoip.lookup(source.client_ip)),
+    );
     result
 }
 
@@ -1366,6 +1373,26 @@ pub(crate) fn admission_error(
     parts: &http::request::Parts,
     config: &CompiledConfig,
 ) -> Option<HttpError> {
+    if let Some(policy) = &config.country_policy {
+        let country = config.geoip.lookup(source.client_ip);
+        match policy.check(source.client_ip, country) {
+            CountryPolicyDecision::Continue => {}
+            CountryPolicyDecision::Log => {
+                info!(
+                    client = %source.client_ip,
+                    country = %country.map(|country| country.to_string()).unwrap_or_else(|| "unknown".to_owned()),
+                    path = %crate::decoy::log_path(parts.uri.path()),
+                    "country policy would reject this client"
+                );
+            }
+            CountryPolicyDecision::Reject => {
+                return Some(
+                    HttpError::new(StatusCode::FORBIDDEN, "country policy")
+                        .with_reason(crate::console::model::RejectionReason::CountryPolicy),
+                );
+            }
+        }
+    }
     if let Some(remaining) =
         context
             .protection
@@ -2287,6 +2314,77 @@ fn record_sequence(
     }
 }
 
+fn session_host(parts: &http::request::Parts) -> String {
+    parts
+        .uri
+        .authority()
+        .cloned()
+        .or_else(|| {
+            parts
+                .headers
+                .get(HOST)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<http::uri::Authority>().ok())
+        })
+        .map(|authority| authority.host().trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn record_session_request(
+    context: &Context,
+    source: ClientSource,
+    parts: &http::request::Parts,
+    config: &CompiledConfig,
+) {
+    if !config.protection.behavior.session.enabled {
+        return;
+    }
+    let cookies = crate::request_view::cookie_pairs(&parts.headers);
+    let country = config.geoip.lookup(source.client_ip);
+    let Some(evidence) = context.protection.observe_session_request(
+        &session_host(parts),
+        &cookies,
+        country,
+        &config.protection,
+    ) else {
+        return;
+    };
+    warn!(
+        client = %source.client_ip, peer = %source.peer,
+        session = %evidence.fingerprint(),
+        from = %evidence.from,
+        to = %evidence.to,
+        path = %crate::decoy::log_path(parts.uri.path()),
+        "session country mismatch recorded as sequence evidence"
+    );
+    record_sequence(
+        context,
+        source,
+        config,
+        SequenceKind::SessionCountryMismatch,
+        parts.uri.path(),
+        None,
+    );
+}
+
+fn record_session_response(
+    context: &Context,
+    source: ClientSource,
+    parts: &http::request::Parts,
+    headers: &HeaderMap,
+    config: &CompiledConfig,
+) {
+    if !config.protection.behavior.session.enabled {
+        return;
+    }
+    context.protection.observe_session_response(
+        &session_host(parts),
+        headers,
+        config.geoip.lookup(source.client_ip),
+        &config.protection,
+    );
+}
+
 fn record_sequence_flag(
     context: &Context,
     source: ClientSource,
@@ -2401,6 +2499,7 @@ async fn process_inner(
     if let Some(err) = request_head_error(config, &parts) {
         return Err(err);
     }
+    record_session_request(context, source, &parts, config);
     if crate::decoy::active(config)
         && parts
             .extensions
@@ -2891,7 +2990,8 @@ async fn process_inner(
         (body_rules && !body_rules_exempt) || config.limits.hardening.ssrf.enabled,
     )
     .with_body_truncated(body_truncated)
-    .with_body_rules_exempt(body_rules_exempt);
+    .with_body_rules_exempt(body_rules_exempt)
+    .with_country(config.geoip.lookup(source.client_ip));
     if !view.body_forms_complete {
         context
             .metrics
@@ -3122,6 +3222,7 @@ async fn process_inner(
             websocket::Handshake::Upgraded(response) => Ok(response),
             websocket::Handshake::Response(response) => {
                 record_behavior(context, source, &parts, response.status(), config);
+                record_session_response(context, source, &parts, response.headers(), config);
                 if !config.has_response_rules() && !php_profile {
                     let (parts, body) = response.into_parts();
                     return Ok(Response::from_parts(
@@ -3195,6 +3296,7 @@ async fn process_inner(
     let response = result?;
     crate::observations::upstream_status(response.status().as_u16());
     record_behavior(context, source, &parts, response.status(), config);
+    record_session_response(context, source, &parts, response.headers(), config);
 
     if !config.has_response_rules() && !php_profile {
         let (parts, body) = response.into_parts();

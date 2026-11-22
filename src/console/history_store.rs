@@ -358,6 +358,11 @@ fn load_bucket(
         .map_err(|_| Error::Invalid("unknown history reason"))?;
         bucket.reasons.insert(reason, decode(&payload)?);
     }
+    // Older rows predate newly added reasons. Treat those reasons as unknown
+    // (zero known minutes) instead of making the whole interval unreadable.
+    for reason in RejectionReason::ALL {
+        bucket.reasons.entry(reason).or_default();
+    }
     if bucket.reasons.len() != RejectionReason::ALL.len() {
         return Err(Error::Busy);
     }

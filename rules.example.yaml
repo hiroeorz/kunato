@@ -26,6 +26,21 @@ upstream: http://127.0.0.1:3000
 #   trusted_proxies: [10.0.0.10/32]
 #   header: x-forwarded-for
 
+# Official builds embed a DB-IP Lite country database. An external MMDB or
+# .mmdb.gz may replace it; invalid external data falls back to the embedded
+# database unless strict is true. The policy is an admission filter: admitted
+# requests still pass through every rule, log, and behavioral check. Country
+# matching is available as `match: { country: [JP, US] }`; a country ALLOW is
+# rejected, and quote NO because unquoted NO is a YAML boolean.
+# geoip:
+#   database: /var/lib/kunato/dbip-country-lite.mmdb
+#   strict: false
+#   policy:
+#     only: [JP]
+#     unknown: block
+#     action: log
+#     exempt: [127.0.0.1/32, '::1/128']
+
 categories:
   # Trusted clients skip the remaining request rules and the strict body-size
   # rejection. Engine limits (header/path size, GraphQL, undecodable bodies) and
@@ -2363,6 +2378,18 @@ protection:
       action: BLOCK
       min_requests: 40
       distinct_paths: 40
+    # Session country mismatch: a bounded, hashed session baseline contributes
+    # one low-weight Sequence evidence when the same cookie is seen from a new
+    # country. It does not block the legitimate baseline IP or the session; the
+    # evidence is applied to the source IP presenting the moved session. A
+    # Set-Cookie baseline is confirmed immediately; a request-only baseline
+    # needs baseline_min_observations same-country requests before it can score.
+    session:
+      enabled: true
+      cookies: [session, _session_id, JSESSIONID, PHPSESSID, connect.sid]
+      baseline_min_observations: 2
+      baseline_ttl: 720h
+      max_tracked: 10000
     # Cross-request continuity: evidence from upstream outcomes and from the
     # requests Kunato rejects itself accumulates with decay, and only a source
     # that returns in a later short window can reach the action.
