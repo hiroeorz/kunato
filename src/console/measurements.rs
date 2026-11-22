@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 pub const MAX_DIMENSIONS: usize = 128;
 pub const MAX_RANKS: usize = 16;
+pub const MAX_COUNTRIES: usize = 64;
 pub const SKETCH_REGISTERS: usize = 64;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,11 +326,40 @@ pub struct OperationalState {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CountryCounts {
+    pub requests: u64,
+    pub rejected: u64,
+}
+
+impl CountryCounts {
+    fn merge(&mut self, other: &Self) -> Result<(), Error> {
+        self.requests = add(self.requests, other.requests)?;
+        self.rejected = add(self.rejected, other.rejected)?;
+        if self.rejected > self.requests {
+            return Err(Error::Invalid("invalid country rejection count"));
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        if self.rejected > self.requests {
+            return Err(Error::Invalid("invalid country rejection count"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdditionalMeasurements {
     pub version: u32,
     pub completed_requests: u64,
     pub dimensions: Vec<DimensionMeasurements>,
     pub dimension_overflow: u64,
+    #[serde(default)]
+    pub countries: BTreeMap<String, CountryCounts>,
+    #[serde(default)]
+    pub country_overflow: u64,
     pub upstream_statuses: BTreeMap<u16, u64>,
     pub reason_latency: BTreeMap<RejectionReason, LatencyMeasurements>,
     pub sources: Ranking,
@@ -381,6 +411,32 @@ impl AdditionalMeasurements {
         }
         Ok(())
     }
+    pub fn country(&mut self, code: &str, rejected: bool) -> Result<(), Error> {
+        if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return Err(Error::Invalid("invalid country code"));
+        }
+        if let Some(counts) = self.countries.get_mut(code) {
+            counts.requests = add(counts.requests, 1)?;
+            if rejected {
+                counts.rejected = add(counts.rejected, 1)?;
+            }
+            return Ok(());
+        }
+        if self.countries.len() >= MAX_COUNTRIES {
+            self.country_overflow = add(self.country_overflow, 1)?;
+            self.incomplete = true;
+            return Ok(());
+        }
+        self.countries.insert(
+            code.to_owned(),
+            CountryCounts {
+                requests: 1,
+                rejected: u64::from(rejected),
+            },
+        );
+        Ok(())
+    }
+
     pub fn merge(&mut self, other: &Self) -> Result<(), Error> {
         other.validate()?;
         self.completed_requests = add(self.completed_requests, other.completed_requests)?;
@@ -393,6 +449,17 @@ impl AdditionalMeasurements {
         self.incomplete |= other.incomplete;
         for value in &other.dimensions {
             self.dimension(value.clone())?;
+        }
+        self.country_overflow = add(self.country_overflow, other.country_overflow)?;
+        for (code, counts) in &other.countries {
+            if let Some(existing) = self.countries.get_mut(code) {
+                existing.merge(counts)?;
+            } else if self.countries.len() < MAX_COUNTRIES {
+                self.countries.insert(code.clone(), counts.clone());
+            } else {
+                self.country_overflow = add(self.country_overflow, counts.requests)?;
+                self.incomplete = true;
+            }
         }
         for (status, count) in &other.upstream_statuses {
             *self.upstream_statuses.entry(*status).or_default() = add(
@@ -452,6 +519,14 @@ impl AdditionalMeasurements {
             self.upstream_statuses.remove(&key);
         } else if let Some(key) = self.reason_latency.keys().next_back().copied() {
             self.reason_latency.remove(&key);
+        } else if let Some((code, counts)) = self
+            .countries
+            .iter()
+            .min_by_key(|(_, counts)| counts.requests)
+            .map(|(code, counts)| (code.clone(), counts.clone()))
+        {
+            self.countries.remove(&code);
+            self.country_overflow = self.country_overflow.saturating_add(counts.requests);
         } else {
             return false;
         }
@@ -462,6 +537,12 @@ impl AdditionalMeasurements {
     pub fn validate(&self) -> Result<(), Error> {
         if self.version != 1
             || self.dimensions.len() > MAX_DIMENSIONS
+            || self.countries.len() > MAX_COUNTRIES
+            || self.countries.iter().any(|(code, counts)| {
+                code.len() != 2
+                    || !code.bytes().all(|byte| byte.is_ascii_uppercase())
+                    || counts.validate().is_err()
+            })
             || self.upstream_statuses.len() > 500
             || self
                 .upstream_statuses
@@ -654,6 +735,39 @@ mod tests {
             }
         }
         assert_eq!(combined.entries[0].key, "dominant");
+    }
+
+    #[test]
+    fn country_counts_merge_validate_and_bound() {
+        let mut values = AdditionalMeasurements::measured();
+        values.country("JP", false).unwrap();
+        values.country("JP", true).unwrap();
+        values.country("US", false).unwrap();
+        assert_eq!(values.countries["JP"].requests, 2);
+        assert_eq!(values.countries["JP"].rejected, 1);
+        assert_eq!(values.countries["US"].requests, 1);
+
+        let mut other = AdditionalMeasurements::measured();
+        other.country("JP", true).unwrap();
+        values.merge(&other).unwrap();
+        assert_eq!(values.countries["JP"].requests, 3);
+        assert_eq!(values.countries["JP"].rejected, 2);
+        values.validate().unwrap();
+
+        for index in 0..=MAX_COUNTRIES {
+            let code = format!(
+                "{}{}",
+                char::from(b'A' + (index / 26) as u8),
+                char::from(b'A' + (index % 26) as u8)
+            );
+            values.country(&code, false).unwrap();
+        }
+        assert_eq!(values.countries.len(), MAX_COUNTRIES);
+        assert!(values.country_overflow > 0);
+        assert!(values.incomplete);
+        values.validate().unwrap();
+        assert!(values.shrink());
+        assert_eq!(values.countries.len(), MAX_COUNTRIES - 1);
     }
 
     #[test]

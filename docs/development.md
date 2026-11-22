@@ -1855,7 +1855,10 @@ reconnects with the latest state.
 
 The console UI shows measured data only. It labels unavailable values instead of
 rendering zero, shows the returned grain and effective bounds, and does not
-replay live arrival effects for backlog. Rejection detail uses the category-based
+replay live arrival effects for backlog. The history payload also carries
+bounded per-minute country request/rejection counts; the Metrics view renders
+them as a country-coloured traffic chart and a top-10 country table, using the
+same embedded DB-IP lookup as request matching. Rejection detail uses the category-based
 attack classes shared with `kunato log`, with built-in guard causes kept separate;
 older intervals without class detail remain unavailable or unrecorded. Historical event
 drill-down, CSV export, comparison periods, and complete journal ingestion remain

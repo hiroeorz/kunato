@@ -102,6 +102,34 @@ async fn http1_and_http2_account_actual_denials_without_log_emission() {
 }
 
 #[tokio::test]
+async fn country_counts_follow_the_resolved_source() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nclient_ip: {{ trusted_proxies: [127.0.0.1] }}\n"
+    ))
+    .await;
+    for (source, path) in [("133.11.0.1", "/jp"), ("8.8.8.8", "/us")] {
+        let (status, _) = send_h1_with_host(
+            running.addr,
+            Method::GET,
+            path,
+            "app.test",
+            &[("x-forwarded-for", source)],
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let snapshot = running.metrics.observations.snapshot(0).unwrap();
+    let values = additional(&snapshot);
+    assert_eq!(values.countries["JP"].requests, 1);
+    assert_eq!(values.countries["JP"].rejected, 0);
+    assert_eq!(values.countries["US"].requests, 1);
+    assert_eq!(values.countries["US"].rejected, 0);
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn http3_uses_the_same_once_per_request_measurements() {
     let upstream = spawn_upstream(StatusCode::OK, "ok").await;
     let dir = tempfile::tempdir().unwrap();

@@ -29,6 +29,13 @@
     COUNTRY_DISPLAY_NAMES = null;
   }
 
+  var COUNTRY_COLORS = [
+    "#3f6f9e", "#c56b47", "#5f8f63", "#9a6aac", "#b79a3f",
+    "#4f9aa4", "#ad5e70", "#7581bb", "#8c6e50", "#4c8d7b",
+    "#b36d9b", "#82904b",
+  ];
+  var COUNTRY_OTHER_COLOR = "#9aa6b2";
+
   var TOPO_LAYERS = [
     {
       id: "admin",
@@ -381,6 +388,17 @@
     target.complete_sum += stats.complete_sum || 0;
   }
 
+  function addCountryCount(target, code, counts) {
+    if (!counts) {
+      return;
+    }
+    if (!target[code]) {
+      target[code] = { requests: 0, rejected: 0 };
+    }
+    target[code].requests += Number(counts.requests) || 0;
+    target[code].rejected += Number(counts.rejected) || 0;
+  }
+
   // Storage grain changes with age; group stored buckets into a range-specific
   // display grain so every bar covers a comparable interval. Never split a
   // stored bucket: the display grain is always at least as wide as storage.
@@ -399,6 +417,10 @@
           grains: {},
           incomplete: false,
           observed_minutes: 0,
+          countries: {},
+          countries_complete: {},
+          country_known: false,
+          country_incomplete: false,
         };
         byStart.set(key, group);
         groups.push(group);
@@ -420,6 +442,26 @@
         }
         addCounter(group.counters[name], counters[name]);
       });
+      var countryCounts = bucket.additional && bucket.additional.countries;
+      if (countryCounts) {
+        var completeCountryData =
+          !(bucket.coverage && bucket.coverage.incomplete) &&
+          !(bucket.additional && bucket.additional.country_overflow);
+        Object.keys(countryCounts).forEach(function (code) {
+          var counts = countryCounts[code];
+          if (!counts) {
+            return;
+          }
+          group.country_known = true;
+          addCountryCount(group.countries, code, counts);
+          if (completeCountryData) {
+            addCountryCount(group.countries_complete, code, counts);
+          }
+        });
+      }
+      if (!bucket.additional || (bucket.additional.country_overflow || 0) > 0) {
+        group.country_incomplete = true;
+      }
     });
     groups.sort(function (a, b) {
       return a.start_ms - b.start_ms;
@@ -2548,10 +2590,13 @@
     meta.push("expiry: " + utc(data.expiry_ms));
     text($("metrics-meta"), meta.join(" | "));
 
-    renderChart(groupBuckets(buckets, displayWidth), displayWidth, data.from_ms, data.until_ms);
+    var grouped = groupBuckets(buckets, displayWidth);
+    renderChart(grouped, displayWidth, data.from_ms, data.until_ms);
+    renderCountryChart(grouped, displayWidth, data.from_ms, data.until_ms);
     renderReasonClasses(buckets, rejected.total || 0);
     renderReasons(buckets);
     renderCorrelations();
+    renderCountryRanking(buckets);
   }
 
   function renderChart(buckets, displayWidth, rangeStart, rangeEnd) {
@@ -2906,6 +2951,457 @@
     host.appendChild(tooltip);
   }
 
+  function countryTotalsFromGroups(groups) {
+    var totals = {};
+    groups.forEach(function (group) {
+      var countries = group.countries || {};
+      Object.keys(countries).forEach(function (code) {
+        addCountryCount(totals, code, countries[code]);
+      });
+    });
+    return totals;
+  }
+
+  function countryOrder(totals) {
+    return Object.keys(totals).sort(function (a, b) {
+      return (totals[b].requests - totals[a].requests) || a.localeCompare(b);
+    });
+  }
+
+  function countryColor(index) {
+    return COUNTRY_COLORS[index % COUNTRY_COLORS.length];
+  }
+
+  function renderCountryChart(groups, displayWidth, rangeStart, rangeEnd) {
+    var host = $("country-chart");
+    host.innerHTML = "";
+    var totals = countryTotalsFromGroups(groups);
+    var codes = countryOrder(totals);
+    if (!groups.length) {
+      host.textContent = "No retained intervals in this range.";
+      host.className = "chart muted";
+      return;
+    }
+    if (!codes.length) {
+      host.textContent = "No country detail in these retained intervals.";
+      host.className = "chart muted";
+      return;
+    }
+    var topCodes = codes.slice(0, 8);
+    var colorByCode = {};
+    topCodes.forEach(function (code, index) {
+      colorByCode[code] = countryColor(index);
+    });
+
+    var max = 0;
+    var hasRate = false;
+    var hasOther = false;
+    var series = groups.map(function (group) {
+      var stats = group.counters && group.counters.requests;
+      var complete = stats ? stats.complete_minutes : 0;
+      var countries = group.countries_complete || {};
+      var requestSegments = [];
+      var rejectedSegments = [];
+      var requestTotal = 0;
+      var rejectedTotal = 0;
+      topCodes.forEach(function (code) {
+        var counts = countries[code];
+        if (!counts) {
+          return;
+        }
+        if (counts.requests) {
+          requestSegments.push({ code: code, value: counts.requests });
+          requestTotal += counts.requests;
+        }
+        if (counts.rejected) {
+          rejectedSegments.push({ code: code, value: counts.rejected });
+          rejectedTotal += counts.rejected;
+        }
+      });
+      var otherRequests = 0;
+      var otherRejected = 0;
+      Object.keys(countries).forEach(function (code) {
+        if (topCodes.indexOf(code) !== -1 || !countries[code]) {
+          return;
+        }
+        otherRequests += countries[code].requests;
+        otherRejected += countries[code].rejected;
+      });
+      if (otherRequests) {
+        requestSegments.push({ code: "OTHER", value: otherRequests });
+        hasOther = true;
+      }
+      if (otherRejected) {
+        rejectedSegments.push({ code: "OTHER", value: otherRejected });
+        hasOther = true;
+      }
+      var requestRate = complete && requestTotal ? requestTotal / complete : null;
+      var rejectedRate = complete && rejectedTotal ? rejectedTotal / complete : null;
+      if (requestRate !== null || rejectedRate !== null) {
+        hasRate = true;
+      }
+      max = Math.max(max, requestRate || 0, rejectedRate || 0);
+      return {
+        group: group,
+        complete: complete,
+        requestRate: requestRate,
+        rejectedRate: rejectedRate,
+        requestTotal: requestTotal,
+        rejectedTotal: rejectedTotal,
+        requestSegments: requestSegments,
+        rejectedSegments: rejectedSegments,
+        countryIncomplete: group.country_incomplete || !group.country_known,
+      };
+    });
+
+    if (!hasRate) {
+      host.textContent = "No complete-minute country detail in this range.";
+      host.className = "chart muted";
+      return;
+    }
+    host.className = "chart";
+    max = Math.max(1, max);
+
+    var width = 960;
+    var height = 244;
+    var left = 48;
+    var right = 12;
+    var bottom = 46;
+    var top = 12;
+    var innerWidth = width - left - right;
+    var innerHeight = height - top - bottom;
+
+    var spanStart = rangeStart;
+    var spanEnd = rangeEnd;
+    if (
+      typeof spanStart !== "number" ||
+      typeof spanEnd !== "number" ||
+      !isFinite(spanStart) ||
+      !isFinite(spanEnd) ||
+      spanEnd <= spanStart
+    ) {
+      spanStart = series[0].group.start_ms;
+      spanEnd = series[series.length - 1].group.end_ms;
+    }
+    var span = Math.max(1, spanEnd - spanStart);
+    function x(ms) {
+      return left + ((ms - spanStart) / span) * innerWidth;
+    }
+
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("tabindex", "0");
+    svg.setAttribute("focusable", "true");
+    svg.setAttribute(
+      "aria-label",
+      "Requests and rejections per minute split by country. Use the left and right arrow keys to inspect intervals."
+    );
+
+    function line(y, label) {
+      var axis = document.createElementNS(ns, "line");
+      axis.setAttribute("x1", left);
+      axis.setAttribute("x2", width - right);
+      axis.setAttribute("y1", y);
+      axis.setAttribute("y2", y);
+      axis.setAttribute("stroke", "#edf0f4");
+      svg.appendChild(axis);
+      var tick = document.createElementNS(ns, "text");
+      tick.setAttribute("x", 4);
+      tick.setAttribute("y", y + 4);
+      tick.textContent = formatRate(label);
+      svg.appendChild(tick);
+    }
+
+    line(top, max);
+    line(top + innerHeight / 2, max / 2);
+    line(top + innerHeight, 0);
+
+    var hoverBand = document.createElementNS(ns, "rect");
+    hoverBand.setAttribute("y", top);
+    hoverBand.setAttribute("height", innerHeight);
+    hoverBand.setAttribute("fill", "#f2f5f9");
+    hoverBand.setAttribute("pointer-events", "none");
+    hoverBand.setAttribute("visibility", "hidden");
+    svg.appendChild(hoverBand);
+
+    function segmentColor(code) {
+      return code === "OTHER" ? COUNTRY_OTHER_COLOR : colorByCode[code] || COUNTRY_OTHER_COLOR;
+    }
+
+    function drawStack(centerX, barWidth, segments, complete, rejected) {
+      if (!complete) {
+        return;
+      }
+      var y = top + innerHeight;
+      segments.forEach(function (segment) {
+        var segmentHeight = ((segment.value / complete) / max) * innerHeight;
+        if (segmentHeight <= 0) {
+          return;
+        }
+        y -= segmentHeight;
+        var rect = document.createElementNS(ns, "rect");
+        rect.setAttribute("x", centerX - barWidth / 2);
+        rect.setAttribute("y", y);
+        rect.setAttribute("width", barWidth);
+        rect.setAttribute("height", Math.max(0, segmentHeight));
+        rect.setAttribute("fill", segmentColor(segment.code));
+        if (rejected) {
+          rect.setAttribute("opacity", "0.68");
+        }
+        svg.appendChild(rect);
+      });
+    }
+
+    series.forEach(function (point) {
+      var x0 = Math.max(left, x(point.group.start_ms));
+      var x1 = Math.min(left + innerWidth, x(point.group.end_ms));
+      if (x1 <= x0 || !point.complete) {
+        return;
+      }
+      var slotWidth = x1 - x0;
+      var barWidth = Math.max(1, Math.min(MAX_BAR_WIDTH, slotWidth * 0.26));
+      drawStack(x0 + slotWidth * 0.30, barWidth, point.requestSegments, point.complete, false);
+      drawStack(x0 + slotWidth * 0.70, barWidth, point.rejectedSegments, point.complete, true);
+    });
+
+    var tooltip = document.createElement("div");
+    tooltip.className = "chart-tooltip";
+    tooltip.hidden = true;
+    var tooltipIndex = -1;
+
+    function addTooltipRow(list, label, value) {
+      var term = document.createElement("dt");
+      term.textContent = label;
+      var detail = document.createElement("dd");
+      detail.textContent = value;
+      list.appendChild(term);
+      list.appendChild(detail);
+    }
+
+    function showTooltip(index, event) {
+      var point = series[index];
+      var x0 = Math.max(left, x(point.group.start_ms));
+      var x1 = Math.min(left + innerWidth, x(point.group.end_ms));
+      hoverBand.setAttribute("x", x0);
+      hoverBand.setAttribute("width", Math.max(1, x1 - x0));
+      hoverBand.setAttribute("visibility", "visible");
+      if (index !== tooltipIndex) {
+        tooltipIndex = index;
+        tooltip.textContent = "";
+        var heading = document.createElement("p");
+        heading.className = "chart-tooltip-time";
+        heading.textContent = displayLabel(point.group);
+        tooltip.appendChild(heading);
+        var list = document.createElement("dl");
+        list.className = "chart-tooltip-list";
+        addTooltipRow(list, "Requests", number(point.requestTotal));
+        addTooltipRow(list, "Requests / min", formatRate(point.requestRate));
+        addTooltipRow(list, "Rejected", number(point.rejectedTotal));
+        addTooltipRow(list, "Rejection rate", percent(point.rejectedTotal, point.requestTotal));
+        addTooltipRow(list, "Rejected / min", formatRate(point.rejectedRate));
+        var byCode = {};
+        point.requestSegments.forEach(function (segment) {
+          byCode[segment.code] = byCode[segment.code] || { requests: 0, rejected: 0 };
+          byCode[segment.code].requests += segment.value;
+        });
+        point.rejectedSegments.forEach(function (segment) {
+          byCode[segment.code] = byCode[segment.code] || { requests: 0, rejected: 0 };
+          byCode[segment.code].rejected += segment.value;
+        });
+        Object.keys(byCode).slice(0, 6).forEach(function (code) {
+          addTooltipRow(
+            list,
+            code === "OTHER" ? "OTHER" : countryLabel(code),
+            number(byCode[code].requests) + " req / " + number(byCode[code].rejected) + " rej"
+          );
+        });
+        tooltip.appendChild(list);
+        if (point.countryIncomplete) {
+          var note = document.createElement("p");
+          note.className = "chart-tooltip-note";
+          note.textContent = "Country detail is incomplete for this interval.";
+          tooltip.appendChild(note);
+        }
+      }
+      tooltip.hidden = false;
+      positionTooltip(index, event);
+    }
+
+    function positionTooltip(index, event) {
+      var frame = host.getBoundingClientRect();
+      var anchorX;
+      var anchorY;
+      if (event) {
+        anchorX = event.clientX - frame.left;
+        anchorY = event.clientY - frame.top;
+      } else {
+        var svgFrame = svg.getBoundingClientRect();
+        var group = series[index].group;
+        var center = (x(group.start_ms) + x(group.end_ms)) / 2;
+        center = Math.max(left, Math.min(left + innerWidth, center));
+        anchorX = svgFrame.left - frame.left + (center / width) * svgFrame.width;
+        anchorY = svgFrame.top - frame.top + ((top + innerHeight / 2) / height) * svgFrame.height;
+      }
+      var tooltipX = anchorX + 14;
+      var y = anchorY - tooltip.offsetHeight - 12;
+      if (tooltipX + tooltip.offsetWidth > host.clientWidth - 8) {
+        tooltipX = anchorX - tooltip.offsetWidth - 14;
+      }
+      if (tooltipX < 8) {
+        tooltipX = 8;
+      }
+      if (y < 8) {
+        y = anchorY + 18;
+      }
+      if (y + tooltip.offsetHeight > host.clientHeight - 8) {
+        y = Math.max(8, host.clientHeight - tooltip.offsetHeight - 8);
+      }
+      tooltip.style.left = tooltipX + "px";
+      tooltip.style.top = y + "px";
+    }
+
+    function hideTooltip() {
+      tooltipIndex = -1;
+      tooltip.hidden = true;
+      hoverBand.setAttribute("visibility", "hidden");
+    }
+
+    function groupAt(ms) {
+      var low = 0;
+      var high = series.length - 1;
+      while (low <= high) {
+        var middle = Math.floor((low + high) / 2);
+        var group = series[middle].group;
+        if (ms < group.start_ms) {
+          high = middle - 1;
+        } else if (ms >= group.end_ms) {
+          low = middle + 1;
+        } else {
+          return middle;
+        }
+      }
+      return -1;
+    }
+
+    function inspectHover(event) {
+      var frame = svg.getBoundingClientRect();
+      if (!frame.width) {
+        return;
+      }
+      var position = ((event.clientX - frame.left) / frame.width) * width;
+      if (position < left || position > left + innerWidth) {
+        hideTooltip();
+        return;
+      }
+      var ms = spanStart + ((position - left) / innerWidth) * span;
+      var index = groupAt(ms);
+      if (index < 0) {
+        hideTooltip();
+        return;
+      }
+      keyboardIndex = index;
+      showTooltip(index, event);
+    }
+
+    var keyboardIndex = series.length - 1;
+
+    svg.addEventListener("pointermove", inspectHover);
+    svg.addEventListener("pointerdown", inspectHover);
+    svg.addEventListener("pointerleave", hideTooltip);
+    svg.addEventListener("pointercancel", hideTooltip);
+    svg.addEventListener("blur", hideTooltip);
+    svg.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        hideTooltip();
+        return;
+      }
+      var next = keyboardIndex;
+      if (event.key === "ArrowLeft") {
+        next -= 1;
+      } else if (event.key === "ArrowRight") {
+        next += 1;
+      } else if (event.key === "Home") {
+        next = 0;
+      } else if (event.key === "End") {
+        next = series.length - 1;
+      } else {
+        return;
+      }
+      event.preventDefault();
+      keyboardIndex = Math.max(0, Math.min(series.length - 1, next));
+      showTooltip(keyboardIndex);
+    });
+
+    var labelGap = displayWidth >= DAY_MS ? 120 : 150;
+    var labelCount = Math.max(2, Math.min(7, Math.floor(innerWidth / labelGap)));
+    for (var slot = 0; slot < labelCount; slot += 1) {
+      var fraction = slot / Math.max(1, labelCount - 1);
+      var labelTime = spanStart + fraction * span;
+      var labelX = x(labelTime);
+      var anchor = "middle";
+      if (slot === 0) {
+        labelX = left;
+        anchor = "start";
+      } else if (slot === labelCount - 1) {
+        labelX = left + innerWidth;
+        anchor = "end";
+        labelTime = spanEnd;
+      } else {
+        labelTime = Math.round(labelTime / displayWidth) * displayWidth;
+        if (labelTime <= spanStart || labelTime >= spanEnd) {
+          continue;
+        }
+        labelX = x(labelTime);
+      }
+      var tick = document.createElementNS(ns, "line");
+      tick.setAttribute("x1", labelX);
+      tick.setAttribute("x2", labelX);
+      tick.setAttribute("y1", top + innerHeight);
+      tick.setAttribute("y2", top + innerHeight + 5);
+      tick.setAttribute("stroke", "#d9dfe7");
+      svg.appendChild(tick);
+      var label = document.createElementNS(ns, "text");
+      label.setAttribute("x", labelX);
+      label.setAttribute("y", top + innerHeight + 20);
+      label.setAttribute("text-anchor", anchor);
+      label.textContent = displayTimeLabel(labelTime, displayWidth);
+      svg.appendChild(label);
+    }
+    var axisTitle = document.createElementNS(ns, "text");
+    axisTitle.setAttribute("x", width - right);
+    axisTitle.setAttribute("y", height - 6);
+    axisTitle.setAttribute("text-anchor", "end");
+    axisTitle.setAttribute("class", "chart-axis-title");
+    axisTitle.textContent = "UTC";
+    svg.appendChild(axisTitle);
+
+    host.appendChild(svg);
+    var legend = document.createElement("div");
+    legend.className = "legend legend-countries";
+    topCodes.forEach(function (code, index) {
+      var entry = document.createElement("span");
+      entry.className = "legend-country";
+      entry.style.setProperty("--bar", colorByCode[code] || COUNTRY_OTHER_COLOR);
+      entry.textContent = countryLabel(code) || code;
+      legend.appendChild(entry);
+    });
+    if (hasOther) {
+      var other = document.createElement("span");
+      other.className = "legend-country";
+      other.style.setProperty("--bar", COUNTRY_OTHER_COLOR);
+      other.textContent = "OTHER";
+      legend.appendChild(other);
+    }
+    var note = document.createElement("span");
+    note.className = "legend-note";
+    note.textContent = "left requests / right rejected";
+    legend.appendChild(note);
+    host.appendChild(legend);
+    host.appendChild(tooltip);
+  }
+
   var REASONS = [
     "rule", "response_rule", "rate_limit", "ban", "overload", "client_identity",
     "host", "admin_access", "body", "decode", "form", "upload", "graphql", "saml",
@@ -3124,6 +3620,80 @@
       add(number(record.occurrence_evidence_count), "num");
       body.appendChild(row);
     });
+  }
+
+  function renderCountryRanking(buckets) {
+    var body = $("country-ranking");
+    body.innerHTML = "";
+    var totals = {};
+    var known = false;
+    var incomplete = false;
+    buckets.forEach(function (bucket) {
+      var countries = bucket.additional && bucket.additional.countries;
+      if (!countries) {
+        if (bucket.counters && bucket.counters.requests && bucket.counters.requests.sum) {
+          incomplete = true;
+        }
+        return;
+      }
+      Object.keys(countries).forEach(function (code) {
+        addCountryCount(totals, code, countries[code]);
+        known = true;
+      });
+      if ((bucket.additional.country_overflow || 0) > 0) {
+        incomplete = true;
+      }
+    });
+    var entries = countryOrder(totals).map(function (code) {
+      return { code: code, counts: totals[code] };
+    });
+    function message(value) {
+      var row = document.createElement("tr");
+      var cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "muted";
+      cell.textContent = value;
+      row.appendChild(cell);
+      body.appendChild(row);
+    }
+    if (!known) {
+      message("Country detail is unavailable for these stored intervals.");
+      return;
+    }
+    if (!entries.length) {
+      message("No country statistics in this range.");
+      return;
+    }
+    entries.slice(0, 10).forEach(function (entry, index) {
+      var row = document.createElement("tr");
+      var rank = document.createElement("td");
+      rank.className = "country-rank";
+      rank.textContent = String(index + 1);
+      row.appendChild(rank);
+      var country = document.createElement("td");
+      var swatch = document.createElement("span");
+      swatch.className = "country-swatch";
+      swatch.style.setProperty("--country-swatch", countryColor(index));
+      country.appendChild(swatch);
+      country.appendChild(document.createTextNode(countryLabel(entry.code) || entry.code));
+      row.appendChild(country);
+      var requests = document.createElement("td");
+      requests.className = "num";
+      requests.textContent = number(entry.counts.requests);
+      row.appendChild(requests);
+      var rejected = document.createElement("td");
+      rejected.className = "num";
+      rejected.textContent = number(entry.counts.rejected);
+      row.appendChild(rejected);
+      var rate = document.createElement("td");
+      rate.className = "num";
+      rate.textContent = percent(entry.counts.rejected, entry.counts.requests);
+      row.appendChild(rate);
+      body.appendChild(row);
+    });
+    if (incomplete) {
+      message("Country detail is incomplete for some intervals in this range.");
+    }
   }
 
   var MAX_HISTORY_PAGES = 64;

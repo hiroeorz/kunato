@@ -105,7 +105,13 @@ keep that width. The time axis always spans the selected range; bars are drawn
 only for intervals that history has retained, so the 30-day view keeps a
 30-day axis even when fewer days are available. The chart is focusable: the
 left and right arrow keys move between intervals, Home and End jump to the
-edges, and Escape hides the tooltip.
+edges, and Escape hides the tooltip. A second chart below it uses the same UTC
+intervals and per-minute rates, with each interval's requests and rejections
+stacked by country; the top eight countries keep stable colours and the rest
+are grouped as OTHER. A top-10 country table below the metrics panels shows
+request, rejection, and rejection-rate totals for the fetched range. Country
+detail comes from bounded per-minute supplementary measurements, so older
+intervals without it remain explicitly unavailable.
 
 The UI is intentionally smaller than the fictional interaction prototype in
 `../console-prototype/`. Table-row arrival flares, pause/resume, scroll

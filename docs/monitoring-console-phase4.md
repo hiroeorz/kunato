@@ -19,6 +19,7 @@ existing atomic source and remain independent of optional detail.
 | Measurement | Meaning |
 | --- | --- |
 | Site | Request endings, including aborts; rejected/logged requests; upstream failures/timeouts; header-decision latency |
+| Country | Bounded per-minute request and rejection counts by resolved source country; unknown lookup results use `ZZ` |
 | Attack class/category/rule | Separate ALLOW, LOG, and BLOCK outcome-match counts, split by request/response phase |
 | Upstream statuses | Status received from the upstream before response rules or PHP response checks replace it; includes WebSocket handshakes |
 | Rejection-reason latency | Count, microsecond sum, exact observed minimum/maximum for requests that produced headers, using their single primary reason |
@@ -59,6 +60,10 @@ Per merged interval the dimension quotas are 16 sites, 24 attack classes,
 32 categories, and 56 rules. Overflow increments `dimension_overflow` and
 marks the contribution incomplete. This is a bounded breakdown, with no
 claim that every configured rule/site is represented under high cardinality.
+Country counts retain at most 64 distinct ISO codes per interval; additional
+codes are counted in `country_overflow`, mark the contribution incomplete, and
+are not presented as exact zero. Pre-instrumentation intervals have no country
+map and remain unavailable.
 
 IP and path frequency summaries retain at most 16 entries each using
 Space-Saving estimates. For a retained key, its captured frequency lies in
@@ -101,6 +106,12 @@ remain intact; missing supplementary fields and old exact extrema remain
 unknown. Mixed old/new history preserves known contributions and marks
 supplementary coverage incomplete. Extrema become unknown when an old
 nonempty contributing latency population lacks them.
+
+Country counts merge by summing request and rejection counts and are trimmed
+last when an oversized record must be shrunk, after the optional dimension,
+ranking, status, and reason-latency detail. The console renders them as a
+country-coloured traffic/rejection chart and a top-10 request table; the
+underlying counts are not decoy-specific.
 
 Additional values travel with absolute minute revisions through the existing
 collector and atomic parent replacement. They use the same UTC 1/5/10/20/60

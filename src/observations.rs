@@ -908,6 +908,7 @@ impl RequestMeasurement {
                 partition: self.partition,
                 site: &self.site,
                 source: self.client,
+                country: self.country.as_deref().unwrap_or("ZZ"),
                 path: self.path.as_deref(),
                 path_hash: self.path_hash.as_ref(),
                 rejected: self.reason,

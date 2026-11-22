@@ -27,6 +27,7 @@ pub(super) struct Request<'a> {
     pub partition: usize,
     pub site: &'a str,
     pub source: Option<std::net::IpAddr>,
+    pub country: &'a str,
     pub path: Option<&'a str>,
     pub path_hash: Option<&'a [u8; 32]>,
     pub rejected: Option<RejectionReason>,
@@ -124,6 +125,7 @@ impl Partition {
                 phase: Phase::Request,
                 counts,
             })?;
+            values.country(request.country, request.rejected.is_some())?;
             if let Some(source) = request.source {
                 let source = source.to_string();
                 values
@@ -419,6 +421,48 @@ mod tests {
         let values = recorder.capture(0).unwrap();
         assert!(values.incomplete);
         assert_eq!(values.missed_updates, None);
+    }
+
+    #[test]
+    fn request_records_the_resolved_country() {
+        let partition = Partition::new();
+        partition.request(
+            0,
+            Request {
+                partition: 0,
+                site: "example",
+                source: None,
+                country: "JP",
+                path: Some("/account"),
+                path_hash: None,
+                rejected: Some(RejectionReason::Rule),
+                logged: false,
+                micros: Some(10),
+                upstream_failure: false,
+                upstream_timeout: false,
+            },
+        );
+        partition.request(
+            0,
+            Request {
+                partition: 0,
+                site: "example",
+                source: None,
+                country: "US",
+                path: Some("/"),
+                path_hash: None,
+                rejected: None,
+                logged: false,
+                micros: Some(10),
+                upstream_failure: false,
+                upstream_timeout: false,
+            },
+        );
+        let values = partition.capture(0).unwrap();
+        assert_eq!(values.countries["JP"].requests, 1);
+        assert_eq!(values.countries["JP"].rejected, 1);
+        assert_eq!(values.countries["US"].requests, 1);
+        assert!(values.incomplete);
     }
 
     #[test]

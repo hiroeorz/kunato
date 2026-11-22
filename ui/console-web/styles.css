@@ -871,7 +871,8 @@ th.num {
 
 .legend {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
   margin-top: 6px;
   color: #8a909b;
   font-size: 11px;
@@ -893,6 +894,30 @@ th.num {
 
 .legend .legend-rejected {
   --bar: #dc9b6c;
+}
+
+.legend .legend-note::before {
+  display: none;
+}
+
+.legend .legend-note {
+  color: #a0a8b3;
+}
+
+.country-swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-right: 0.4rem;
+  border-radius: 2px;
+  vertical-align: -1px;
+  background: var(--country-swatch, #9aa6b2);
+}
+
+.country-rank {
+  color: #a0a8b3;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .level-warn {

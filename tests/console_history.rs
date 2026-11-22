@@ -139,6 +139,8 @@ fn supplementary_history_survives_coarsening_reopen_and_missing_old_measurements
         let mut metric = minute(BASE + index * MINUTE_MS, requests, RejectionReason::Rule, 0);
         let mut additional = AdditionalMeasurements::measured();
         additional.completed_requests = requests;
+        additional.country("JP", index % 2 == 0).unwrap();
+        additional.country("US", false).unwrap();
         additional.upstream_statuses.insert(200, requests);
         additional.unique_sources.insert("source", b"192.0.2.1");
         additional.sources.record("192.0.2.1", false, false);
@@ -173,6 +175,9 @@ fn supplementary_history_survives_coarsening_reopen_and_missing_old_measurements
     let value = bucket.additional.as_ref().unwrap();
     assert_eq!(value.completed_requests, 15);
     assert_eq!(value.upstream_statuses[&200], 15);
+    assert_eq!(value.countries["JP"].requests, 5);
+    assert_eq!(value.countries["JP"].rejected, 3);
+    assert_eq!(value.countries["US"].requests, 5);
     assert_eq!(value.operations[&Operation::RulesUnchanged], 5);
     assert_eq!(value.dimensions[0].counts.latency.mean_us(), Some(1000.0));
     assert!(value.unique_sources.estimate().unwrap() < 1.1);
