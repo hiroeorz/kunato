@@ -283,6 +283,20 @@ impl Partition {
         }
         Some(Box::new(values))
     }
+    pub fn reset(&self, at: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for slot in &mut state.slots {
+            slot.at = u64::MAX;
+            slot.values = AdditionalMeasurements::measured();
+        }
+        self.newest.store(at, Ordering::Release);
+        self.first_missed.store(u64::MAX, Ordering::Release);
+        self.last_missed.store(0, Ordering::Release);
+    }
+
     pub fn missed(&self) -> u64 {
         self.missed.load(Ordering::Relaxed)
     }
@@ -302,6 +316,11 @@ impl Recorder {
             state.state.generation = generation.into();
         }
         result
+    }
+    pub fn reset(&self, at: u64) {
+        for partition in self.partitions.iter() {
+            partition.reset(at);
+        }
     }
     pub fn next_partition(&self) -> usize {
         self.next.fetch_add(1, Ordering::Relaxed) as usize % 8

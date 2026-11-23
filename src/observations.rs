@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -76,6 +76,7 @@ pub(crate) struct DecoyDetail<'a> {
 struct Slot {
     gate: AtomicU64,
     version: AtomicU64,
+    generation: AtomicU64,
     minute: AtomicU64,
     values: [AtomicU64; FIELDS],
 }
@@ -92,6 +93,7 @@ impl Slot {
         Self {
             gate: AtomicU64::new(0),
             version: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
             minute: AtomicU64::new(EMPTY),
             values: array::from_fn(|index| {
                 AtomicU64::new(if index == LATENCY_MIN || index == CONNECTION_MIN {
@@ -102,11 +104,13 @@ impl Slot {
             }),
         }
     }
-    fn pin(&self, minute: u64, initialize: bool) -> Option<Pinned<'_>> {
+    fn pin(&self, generation: u64, minute: u64, initialize: bool) -> Option<Pinned<'_>> {
         let previous = self.gate.fetch_add(1, Ordering::Acquire);
         if previous & EXCLUSIVE == 0 {
             let pinned = Pinned(self);
-            if self.minute.load(Ordering::Acquire) == minute {
+            if self.generation.load(Ordering::Acquire) == generation
+                && self.minute.load(Ordering::Acquire) == minute
+            {
                 return Some(pinned);
             }
             drop(pinned);
@@ -121,8 +125,13 @@ impl Slot {
         {
             return None;
         }
+        let old_generation = self.generation.load(Ordering::Relaxed);
+        if old_generation > generation {
+            self.gate.fetch_sub(EXCLUSIVE, Ordering::Release);
+            return None;
+        }
         let old = self.minute.load(Ordering::Relaxed);
-        if old == EMPTY || old < minute {
+        if old_generation != generation || old == EMPTY || old < minute {
             for (index, value) in self.values.iter().enumerate() {
                 value.store(
                     if index == LATENCY_MIN || index == CONNECTION_MIN {
@@ -134,12 +143,15 @@ impl Slot {
                 );
             }
             self.minute.store(minute, Ordering::Release);
+            self.generation.store(generation, Ordering::Release);
         }
         self.gate.fetch_sub(EXCLUSIVE, Ordering::Release);
         let previous = self.gate.fetch_add(1, Ordering::Acquire);
         if previous & EXCLUSIVE == 0 {
             let pinned = Pinned(self);
-            if self.minute.load(Ordering::Acquire) == minute {
+            if self.generation.load(Ordering::Acquire) == generation
+                && self.minute.load(Ordering::Acquire) == minute
+            {
                 return Some(pinned);
             }
             drop(pinned);
@@ -237,6 +249,10 @@ pub struct Observations {
     source: SourceIdentity,
     started: Instant,
     epoch_ms: u64,
+    clock_offset_ms: AtomicI64,
+    ring_generation: AtomicU64,
+    ring_floor_ms: AtomicU64,
+    clock_transition: AtomicBool,
     slots: Box<[Slot; MINUTE_SLOTS]>,
     cumulative: [AtomicU64; STATUS],
     newest: AtomicU64,
@@ -280,6 +296,10 @@ impl Observations {
             },
             started: Instant::now(),
             epoch_ms,
+            clock_offset_ms: AtomicI64::new(0),
+            ring_generation: AtomicU64::new(0),
+            ring_floor_ms: AtomicU64::new(minute(epoch_ms)),
+            clock_transition: AtomicBool::new(false),
             slots: Box::new(array::from_fn(|_| Slot::new())),
             cumulative: array::from_fn(|_| AtomicU64::new(0)),
             newest: AtomicU64::new(minute(epoch_ms)),
@@ -306,8 +326,14 @@ impl Observations {
     }
 
     pub fn now_ms(&self) -> u64 {
-        self.epoch_ms
-            .saturating_add(self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let base = self.epoch_ms.saturating_add(elapsed);
+        let offset = self.clock_offset_ms.load(Ordering::Acquire);
+        if offset >= 0 {
+            base.saturating_add(offset as u64)
+        } else {
+            base.saturating_sub(offset.unsigned_abs())
+        }
     }
 
     pub fn disabled() -> Self {
@@ -323,31 +349,34 @@ impl Observations {
         self.last_missed.fetch_max(start, Ordering::Relaxed);
     }
 
-    fn update(&self, start: u64, field: usize, value: u64) {
-        self.update_many(start, &[(field, value)]);
+    fn update_for(&self, generation: u64, start: u64, field: usize, value: u64) {
+        self.update_many(generation, start, &[(field, value)]);
     }
 
-    fn update_many(&self, start: u64, updates: &[(usize, u64)]) {
+    fn update_many(&self, generation: u64, start: u64, updates: &[(usize, u64)]) {
         for &(field, value) in updates {
             if field < STATUS {
                 self.cumulative[field].fetch_add(value, Ordering::Relaxed);
             }
         }
-        self.update_slot(start, |slot| {
+        self.update_slot(generation, start, |slot| {
             for &(field, value) in updates {
                 slot.values[field].fetch_add(value, Ordering::Relaxed);
             }
         });
     }
 
-    fn update_slot(&self, start: u64, update: impl FnOnce(&Slot)) {
+    fn update_slot(&self, generation: u64, start: u64, update: impl FnOnce(&Slot)) {
+        if generation != self.ring_generation.load(Ordering::Acquire) {
+            return;
+        }
         let latest = self.newest.fetch_max(start, Ordering::Relaxed).max(start);
         if latest.saturating_sub(start) >= MINUTE_SLOTS as u64 * MINUTE_MS {
             self.lost(start);
             return;
         }
         let slot = &self.slots[(start / MINUTE_MS) as usize % MINUTE_SLOTS];
-        if let Some(pinned) = slot.pin(start, true) {
+        if let Some(pinned) = slot.pin(generation, start, true) {
             update(pinned.0);
         } else {
             self.lost(start);
@@ -355,7 +384,11 @@ impl Observations {
     }
 
     pub fn count(&self, start: u64, count: Count) {
-        self.update(start, count as usize, 1);
+        self.count_for(self.ring_generation.load(Ordering::Acquire), start, count);
+    }
+
+    fn count_for(&self, generation: u64, start: u64, count: Count) {
+        self.update_for(generation, start, count as usize, 1);
     }
 
     pub fn configure(&self, config: &crate::config::CompiledConfig) {
@@ -513,7 +546,33 @@ impl Observations {
             .unwrap_or_default()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
+        self.reconcile_clock(actual);
         self.snapshot_at(self.now_ms(), actual, active_connections)
+    }
+
+    fn reconcile_clock(&self, actual: u64) {
+        let Ok(mut export) = self.export.try_lock() else {
+            return;
+        };
+        let now = self.now_ms();
+        let diff = i128::from(actual) - i128::from(now);
+        if diff.abs() <= 2000 || actual < self.epoch_ms {
+            return;
+        }
+        let Ok(offset) = i64::try_from(diff) else {
+            return;
+        };
+        self.clock_offset_ms.fetch_add(offset, Ordering::AcqRel);
+        self.ring_generation.fetch_add(1, Ordering::AcqRel);
+        let floor = minute(actual);
+        self.additional.reset(floor);
+        self.ring_floor_ms.store(floor, Ordering::Release);
+        self.newest.store(floor, Ordering::Release);
+        self.first_missed.store(EMPTY, Ordering::Release);
+        self.last_missed.store(0, Ordering::Release);
+        self.clock_transition.store(true, Ordering::Release);
+        export.previous.clear();
+        export.gauge = None;
     }
 
     fn snapshot_at(
@@ -529,10 +588,11 @@ impl Observations {
             .checked_add(1)
             .filter(|sequence| *sequence <= i64::MAX as u64)
             .ok_or(Error::Invalid("source sequence exhausted"))?;
+        let generation = self.ring_generation.load(Ordering::Acquire);
+        let floor = self.ring_floor_ms.load(Ordering::Acquire);
         let current = minute(now);
         self.newest.fetch_max(current, Ordering::Relaxed);
-        let start = minute(self.epoch_ms)
-            .max(current.saturating_sub((MINUTE_SLOTS as u64 - 1) * MINUTE_MS));
+        let start = floor.max(current.saturating_sub((MINUTE_SLOTS as u64 - 1) * MINUTE_MS));
         if let Some((previous, value)) = export.gauge
             && now > previous
             && now - previous <= 2000
@@ -541,10 +601,15 @@ impl Observations {
             while at < now {
                 let bucket = minute(at);
                 let end = now.min(bucket.saturating_add(MINUTE_MS));
-                self.update(bucket, CONNECTION_MS, value.saturating_mul(end - at));
-                self.update(bucket, CONNECTION_COVERAGE, end - at);
+                self.update_for(
+                    generation,
+                    bucket,
+                    CONNECTION_MS,
+                    value.saturating_mul(end - at),
+                );
+                self.update_for(generation, bucket, CONNECTION_COVERAGE, end - at);
                 let slot = &self.slots[(bucket / MINUTE_MS) as usize % MINUTE_SLOTS];
-                if let Some(pinned) = slot.pin(bucket, true) {
+                if let Some(pinned) = slot.pin(generation, bucket, true) {
                     pinned.0.values[CONNECTION_MAX].fetch_max(value, Ordering::Relaxed);
                     pinned.0.values[CONNECTION_MIN].fetch_min(value, Ordering::Relaxed);
                 }
@@ -553,7 +618,7 @@ impl Observations {
         }
         export.gauge = Some((now, active_connections));
         if let Some(pinned) =
-            self.slots[(current / MINUTE_MS) as usize % MINUTE_SLOTS].pin(current, true)
+            self.slots[(current / MINUTE_MS) as usize % MINUTE_SLOTS].pin(generation, current, true)
         {
             pinned.0.values[CONNECTION_MAX].fetch_max(active_connections, Ordering::Relaxed);
             pinned.0.values[CONNECTION_MIN].fetch_min(active_connections, Ordering::Relaxed);
@@ -561,7 +626,8 @@ impl Observations {
         } else {
             self.lost(current);
         }
-        let clock_discontinuity = now.abs_diff(actual) > 2000;
+        let clock_discontinuity =
+            self.clock_transition.swap(false, Ordering::AcqRel) || now.abs_diff(actual) > 2000;
         let mut buckets = Vec::with_capacity(MINUTE_SLOTS);
         for i in 0..MINUTE_SLOTS {
             let at = start + i as u64 * MINUTE_MS;
@@ -571,7 +637,7 @@ impl Observations {
             let slot = &self.slots[(at / MINUTE_MS) as usize % MINUTE_SLOTS];
             let mut captured = None;
             for _ in 0..3 {
-                let Some(pinned) = slot.pin(at, true) else {
+                let Some(pinned) = slot.pin(generation, at, true) else {
                     continue;
                 };
                 let version = pinned.0.version.load(Ordering::Acquire);
@@ -610,9 +676,7 @@ impl Observations {
                 buckets.push(bucket);
                 continue;
             };
-            let observed = now
-                .min(at + MINUTE_MS)
-                .saturating_sub(at.max(self.epoch_ms)) as u32;
+            let observed = now.min(at + MINUTE_MS).saturating_sub(at.max(floor)) as u32;
             let omitted = at >= self.first_missed.load(Ordering::Relaxed)
                 && at <= self.last_missed.load(Ordering::Relaxed);
             let mut bucket = MetricBucket {
@@ -818,6 +882,7 @@ fn connection_gauge(values: &[u64; FIELDS]) -> Option<ConnectionGauge> {
 struct RequestMeasurement {
     partition: usize,
     history: Arc<Observations>,
+    generation: u64,
     start: u64,
     began: Instant,
     rejected: bool,
@@ -839,13 +904,14 @@ struct RequestMeasurement {
 }
 impl RequestMeasurement {
     fn new(history: Arc<Observations>) -> Self {
+        let generation = history.ring_generation.load(Ordering::Acquire);
         let start = minute(history.now_ms());
         let partition = history.additional.next_partition();
         history.cumulative[Count::Requests as usize].fetch_add(1, Ordering::Relaxed);
         history.newest.fetch_max(start, Ordering::Relaxed);
         let in_flight_counted = {
             let slot = &history.slots[(start / MINUTE_MS) as usize % MINUTE_SLOTS];
-            if let Some(pinned) = slot.pin(start, true) {
+            if let Some(pinned) = slot.pin(generation, start, true) {
                 pinned.0.values[Count::Requests as usize].fetch_add(1, Ordering::Relaxed);
                 pinned.0.values[IN_FLIGHT].fetch_add(1, Ordering::Relaxed);
                 true
@@ -856,6 +922,7 @@ impl RequestMeasurement {
         };
         Self {
             history,
+            generation,
             partition,
             start,
             began: Instant::now(),
@@ -891,22 +958,26 @@ impl RequestMeasurement {
             .iter()
             .position(|upper| micros <= *upper)
             .unwrap_or(14);
-        self.history.update_slot(self.start, |slot| {
-            for (field, value) in [
-                (STATUS + usize::from(status - 100), 1),
-                (LATENCY_COUNT, 1),
-                (LATENCY_SUM, micros),
-                (LATENCY + bin, 1),
-            ] {
-                slot.values[field].fetch_add(value, Ordering::Relaxed);
-            }
-            slot.values[LATENCY_MIN].fetch_min(micros, Ordering::Relaxed);
-            slot.values[LATENCY_MAX].fetch_max(micros, Ordering::Relaxed);
-        });
+        self.history
+            .update_slot(self.generation, self.start, |slot| {
+                for (field, value) in [
+                    (STATUS + usize::from(status - 100), 1),
+                    (LATENCY_COUNT, 1),
+                    (LATENCY_SUM, micros),
+                    (LATENCY + bin, 1),
+                ] {
+                    slot.values[field].fetch_add(value, Ordering::Relaxed);
+                }
+                slot.values[LATENCY_MIN].fetch_min(micros, Ordering::Relaxed);
+                slot.values[LATENCY_MAX].fetch_max(micros, Ordering::Relaxed);
+            });
         self.record_additional(Some(micros));
     }
 
     fn record_additional(&self, micros: Option<u64>) {
+        if self.generation != self.history.ring_generation.load(Ordering::Acquire) {
+            return;
+        }
         self.history.additional.request(
             self.start,
             additional::Request {
@@ -928,12 +999,15 @@ impl RequestMeasurement {
 impl Drop for RequestMeasurement {
     fn drop(&mut self) {
         if !self.finished {
-            self.history.count(self.start, Count::Aborted);
+            self.history
+                .count_for(self.generation, self.start, Count::Aborted);
             self.record_additional(None);
         }
-        if self.in_flight_counted {
+        if self.in_flight_counted
+            && self.generation == self.history.ring_generation.load(Ordering::Acquire)
+        {
             let slot = &self.history.slots[(self.start / MINUTE_MS) as usize % MINUTE_SLOTS];
-            if let Some(pinned) = slot.pin(self.start, false) {
+            if let Some(pinned) = slot.pin(self.generation, self.start, false) {
                 pinned.0.values[IN_FLIGHT].fetch_sub(1, Ordering::Relaxed);
             } else {
                 self.history.lost(self.start);
@@ -1096,15 +1170,18 @@ fn reject_detail(reason: RejectionReason, matched: Option<(&str, &str)>) {
             let attack_class = rejection_class(reason, category);
             value.rejected = true;
             value.reason = Some(reason);
-            value.history.count(value.start, Count::Rejected);
             value
                 .history
-                .update(value.start, REASONS + reason as usize, 1);
+                .count_for(value.generation, value.start, Count::Rejected);
+            value
+                .history
+                .update_for(value.generation, value.start, REASONS + reason as usize, 1);
             if matches!(
                 reason,
                 RejectionReason::Rule | RejectionReason::ResponseRule
             ) {
-                value.history.update(
+                value.history.update_for(
+                    value.generation,
                     value.start,
                     ATTACK_CLASSES + crate::logs::attack_class_index(category.unwrap_or("")),
                     1,
@@ -1119,7 +1196,9 @@ fn reject_detail(reason: RejectionReason, matched: Option<(&str, &str)>) {
                 _ => None,
             };
             if let Some(counter) = counter {
-                value.history.count(value.start, counter);
+                value
+                    .history
+                    .count_for(value.generation, value.start, counter);
             }
             value
                 .history
@@ -1154,14 +1233,20 @@ fn reject_detail(reason: RejectionReason, matched: Option<(&str, &str)>) {
 pub fn rule_match(phase: Phase, logged: bool) {
     let _ = CURRENT.try_with(|value| {
         if let Ok(mut value) = value.try_borrow_mut() {
-            value.history.count(value.start, Count::Matches);
+            value
+                .history
+                .count_for(value.generation, value.start, Count::Matches);
             if logged && !value.logged {
                 value.logged = true;
-                value.history.count(value.start, Count::Logged);
+                value
+                    .history
+                    .count_for(value.generation, value.start, Count::Logged);
             }
             if logged && phase == Phase::Response && !value.response_logged {
                 value.response_logged = true;
-                value.history.count(value.start, Count::ResponseLogged);
+                value
+                    .history
+                    .count_for(value.generation, value.start, Count::ResponseLogged);
             }
         }
     });
@@ -1172,7 +1257,8 @@ pub fn service_failure(timeout: bool) {
         if let Ok(mut value) = value.try_borrow_mut() {
             value.upstream_failure |= !timeout;
             value.upstream_timeout |= timeout;
-            value.history.count(
+            value.history.count_for(
+                value.generation,
                 value.start,
                 if timeout {
                     Count::UpstreamTimeouts
@@ -1250,8 +1336,69 @@ mod tests {
     fn history() -> Arc<Observations> {
         let mut history = Observations::new();
         history.epoch_ms = 0;
+        history.ring_floor_ms.store(0, Ordering::Relaxed);
         history.newest.store(0, Ordering::Relaxed);
         Arc::new(history)
+    }
+
+    #[test]
+    fn a_new_ring_generation_discards_old_slot_state() {
+        let slot = Slot::new();
+        {
+            let pinned = slot.pin(0, 60_000, true).expect("initial slot");
+            pinned.0.values[Count::Requests as usize].store(7, Ordering::Relaxed);
+        }
+        {
+            let pinned = slot.pin(1, 60_000, true).expect("new generation");
+            assert_eq!(
+                pinned.0.values[Count::Requests as usize].load(Ordering::Relaxed),
+                0
+            );
+        }
+        assert!(slot.pin(0, 60_000, true).is_none());
+    }
+
+    #[test]
+    fn a_forward_clock_step_reanchors_the_ring_and_marks_the_transition() {
+        let history = history();
+        let actual = 10_000_000;
+        history.reconcile_clock(actual);
+        assert!(history.now_ms() >= actual);
+        assert_eq!(history.ring_generation.load(Ordering::Relaxed), 1);
+        assert_eq!(history.ring_floor_ms.load(Ordering::Relaxed), 9_960_000);
+
+        let packet = history.snapshot_at(actual, actual, 0).unwrap();
+        assert!(packet.clock_discontinuity);
+        assert_eq!(packet.buckets[0].start_ms, 9_960_000);
+        assert!(
+            packet
+                .buckets
+                .iter()
+                .all(|bucket| bucket.coverage.incomplete)
+        );
+
+        let next = history
+            .snapshot_at(actual + 61_000, actual + 61_000, 0)
+            .unwrap();
+        assert!(!next.clock_discontinuity);
+        assert!(
+            next.buckets
+                .iter()
+                .any(|bucket| !bucket.coverage.incomplete)
+        );
+    }
+
+    #[test]
+    fn a_backward_clock_step_starts_a_new_ring_generation() {
+        let history = history();
+        history.reconcile_clock(10_000_000);
+        history.reconcile_clock(9_000_000);
+        assert!(history.now_ms() >= 9_000_000);
+        assert_eq!(history.ring_generation.load(Ordering::Relaxed), 2);
+        assert_eq!(history.ring_floor_ms.load(Ordering::Relaxed), 9_000_000);
+        let packet = history.snapshot_at(9_001_000, 9_001_000, 0).unwrap();
+        assert!(packet.clock_discontinuity);
+        assert_eq!(packet.buckets[0].start_ms, 9_000_000);
     }
 
     #[test]
@@ -1650,7 +1797,7 @@ mod tests {
     #[test]
     fn contention_does_not_wait_or_lose_cumulative_counts() {
         let history = history();
-        let pinned = history.slots[0].pin(0, true).unwrap();
+        let pinned = history.slots[0].pin(0, 0, true).unwrap();
         let before = Instant::now();
         history.count(600_000, Count::Requests);
         assert!(before.elapsed() < std::time::Duration::from_millis(50));
@@ -1663,7 +1810,7 @@ mod tests {
     fn busy_minute_and_event_buffers_do_not_stop_live_cumulative_exports() {
         let history = history();
         history.count(0, Count::Requests);
-        let _pinned = history.slots[0].pin(0, true).unwrap();
+        let _pinned = history.slots[0].pin(0, 0, true).unwrap();
         let _detail = history.detail.lock().unwrap();
         let snapshot = history.snapshot_at(1000, 1000, 0).unwrap();
         assert_eq!(snapshot.counters.requests, Some(1));
