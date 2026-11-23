@@ -1860,12 +1860,59 @@ console:
 | `allowed_hosts` | empty | Console `Host` allowlist; required for a non-loopback listener |
 | `auth` | disabled | Operator token authentication; required for a non-loopback listener |
 | `tls` | absent | Console HTTPS; required for a non-loopback listener |
+| `edr.enabled` | `false` | Run the in-memory hourly EDR analysis in the console process |
+| `edr.window` | `1h` | EDR detection window, 1 minute..24 hours |
+| `edr.baseline` | `168h` | Hourly baseline retained before the window, at most 30 days; `0s` disables it |
 
 The console reads its statistics from the admin listener. Enabling it while
 `admin.enabled` is false is accepted with a startup warning: `kunato console`
 logs the reason and exits successfully, so the packaged service stays inactive
 instead of failed. The console's `allowed_clients` and `allowed_hosts` are
 separate from the WAF request policies.
+
+
+#### In-memory EDR in the console
+
+`console.edr` enables an authentication-abuse analysis without a second
+process or a second SQLite connection. The console already receives the WAF
+snapshot every second; the EDR task subscribes to the collector's accepted
+snapshot channel (`Collector::subscribe`), keeps only bounded per-minute
+authentication measurements in memory, and runs the same detection rules as
+`kunato edr` once per hour.
+
+```yaml
+console:
+  enabled: true
+  edr:
+    enabled: true
+    window: 1h          # or 6h for slower sources
+    baseline: 168h
+```
+
+- The task is independent: a slow or failed EDR analysis does not delay
+  collection, the writer, the HTTP API, or SSE. It owns its state, so no lock
+  is shared with the collector or the storage worker.
+- It uses the 1-second accepted stream instead of polling, so the WAF's
+  ten-minute snapshot ring does not introduce a five-minute gap.
+- Findings are written to the journal as `event="edr.finding"` warnings;
+  `kunato log --unit kunato-console` classifies them as the `edr` event. There
+  are no console UI/API fields yet, and no automatic ban or rule change.
+- The state is saved atomically to `<storage_dir>/edr-state.json` (mode 0600)
+  every five minutes, after each hourly report, and on shutdown. On startup the
+  console restores it; a corrupt or oversized file is logged and ignored.
+- The analysis starts empty on a new installation. The baseline becomes useful
+  after about a day; the first hourly report may be incomplete because the
+  task did not observe the whole window.
+- A console restart restores the baseline and retained minutes from the state
+  file, but minutes lost while the console was down remain gaps and are marked
+  incomplete.
+- `console.edr.enabled` requires `console.enabled: true`. The console remains
+  read-only toward the WAF: the EDR task only reads accepted snapshots and
+  writes its own state file.
+
+The first report runs at five minutes past a UTC hour for the preceding full
+hour. If the task was delayed, missed report windows are logged and skipped
+rather than replayed against trimmed state.
 
 #### Loopback access
 
@@ -1986,6 +2033,53 @@ cargo run -- console --config rules.example.yaml
 `rules.example.yaml` leaves the console disabled. Uncomment its `console` block
 (and set a temporary `storage_dir`, because an unprivileged source run usually
 cannot create `/var/lib/kunato/console`) before running the command above.
+
+### Offline authentication-abuse analysis
+
+`kunato edr` reads the console's SQLite history without changing it and reports
+authentication abuse that a per-minute rule cannot see: a source that keeps
+failing slowly, and many sources that each fail a few times on the same
+authentication endpoint.
+
+```sh
+kunato edr --database /var/lib/kunato/console/history.sqlite3 \
+  --window 1h --baseline 168h --format table
+```
+
+- The default window is the last complete UTC hour; `--window 6h` or `24h`
+  catches slower sources at the cost of latency. `--until` accepts a UTC
+  RFC 3339 timestamp and must align to a whole minute.
+- The baseline is the preceding seven days. It uses a median and median
+  absolute deviation so a sustained attack does not become its own normal.
+- `--format json` is the machine-readable form. `--fail-on-findings` exits
+  non-zero when a finding is reported, which a timer can use as an alert
+  boundary.
+- The analyzer never bans, reloads, or writes the database. Findings carry
+  evidence and a recommendation; enforcement remains with the existing
+  behavioral bans and rate limits.
+
+The underlying telemetry is bounded and stored with the existing source-minute
+payload (supplementary measurement version 2): total upstream `401`/`403`
+responses on authentication paths, the top 16 failing sources and paths, and a
+64-register distinct-source sketch. It observes only upstream outcomes after
+forwarding, with the same source-identity, allowlist, and protection boundary
+as behavioral detection. No username, password, request body, or query string
+is stored. Authentication paths come from `protection.behavior.auth.paths`;
+add an application-specific login endpoint there when it is not in the default
+list. Version-1 console records remain readable and are reported as missing
+telemetry rather than zero failures.
+
+The initial defaults are deliberately conservative: at least 6 failures, 4
+active minutes, a 30-minute span, and at most 3 failures per minute for a slow
+source; at least 30 failures, 10 distinct sources, at most 4 failures per
+source, and at least a 50% top-path share for a campaign. A shared NAT or a
+monitoring client can still look like a slow source, so keep findings at LOG
+until the address population is known.
+
+See [the verification report](edr-verification.md) for the measured synthetic
+results, false-positive analysis, and the proposed enforcement path. A
+[separate prototype](edr-live-verification.md) evaluates a resident in-memory
+source fed directly by the WAF snapshot; it is not wired to the CLI yet.
 
 ### Maintenance mode
 

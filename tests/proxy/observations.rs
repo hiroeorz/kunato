@@ -310,3 +310,30 @@ async fn loopback_export_collects_live_then_persists_and_reopens_real_waf_counts
     );
     running.stop().await;
 }
+
+#[tokio::test]
+async fn authentication_failures_are_attributed_to_the_source_minute() {
+    let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\n"
+    ))
+    .await;
+
+    for _ in 0..2 {
+        let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = send(running.addr, Method::POST, "/api/users", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let packet = running.metrics.observations.snapshot(0).unwrap();
+    let values = additional(&packet);
+    assert_eq!(values.version, 2);
+    assert_eq!(values.auth_failures, 2);
+    assert_eq!(values.auth_sources.entries[0].key, "127.0.0.1");
+    assert_eq!(values.auth_sources.entries[0].estimate, 2);
+    assert_eq!(values.auth_paths.entries[0].key, "/login");
+    assert_eq!(values.auth_paths.entries[0].estimate, 2);
+    assert!(values.unique_auth_sources.estimate().unwrap() >= 0.5);
+    running.stop().await;
+}

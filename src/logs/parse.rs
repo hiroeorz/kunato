@@ -45,6 +45,7 @@ impl LogEntry {
                 "request.detected" | "response.detected" => "detect",
                 "request.matched" | "response.matched" => "match",
                 "request.rejected" => "reject",
+                "edr.finding" | "edr.report" => "edr",
                 _ => "service",
             };
         }
@@ -469,6 +470,18 @@ mod tests {
         assert_eq!(entry.action(), Some("BLOCK"));
         assert_eq!(entry.field("enforced"), Some("false"));
         assert_eq!(entry.event(), "detect");
+    }
+
+    #[test]
+    fn parses_console_edr_findings_as_their_own_event() {
+        let line = format!(
+            "{PREFIX}2026-10-21T09:35:17.234772Z  WARN kunato::console::runtime: EDR slow authentication finding event=\"edr.finding\" kind=slow_authentication source=203.0.113.7 failures=10"
+        );
+        let entry = parse_line(&line);
+        assert_eq!(entry.event(), "edr");
+        assert_eq!(entry.field("kind"), Some("slow_authentication"));
+        assert_eq!(entry.client(), None);
+        assert_eq!(entry.field("source"), Some("203.0.113.7"));
     }
 
     #[test]

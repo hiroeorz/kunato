@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use super::{
     AdminAccessAction, AdminAccessArgs, BannerArgs, Cli, Command, DEFAULT_CONFIG_PATH,
-    DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE, DEFAULT_RULES_URL, InitArgs, LogArgs, LogFormat,
-    LogOutputFormat, MaintenanceAction, MaintenanceArgs, MetricsArgs, UpgradeArgs,
+    DEFAULT_EDR_DATABASE, DEFAULT_METRICS_LISTEN, DEFAULT_RULES_FILE, DEFAULT_RULES_URL, EdrArgs,
+    EdrOutputFormat, InitArgs, LogArgs, LogFormat, LogOutputFormat, MaintenanceAction,
+    MaintenanceArgs, MetricsArgs, UpgradeArgs,
 };
 use crate::admin_access::AccessState;
 
@@ -91,6 +92,7 @@ enum Kind {
     Maintenance,
     AdminAccess,
     Console,
+    Edr,
     Banner,
 }
 
@@ -105,6 +107,7 @@ fn kind_from_name(name: &str) -> Option<Kind> {
         "maintenance" => Some(Kind::Maintenance),
         "admin-access" => Some(Kind::AdminAccess),
         "console" => Some(Kind::Console),
+        "edr" => Some(Kind::Edr),
         "banner" => Some(Kind::Banner),
         _ => None,
     }
@@ -184,6 +187,16 @@ struct AdminAccessParseState {
 }
 
 #[derive(Default)]
+struct EdrState {
+    database: Option<PathBuf>,
+    window: Option<Duration>,
+    baseline: Option<Duration>,
+    until_ms: Option<u64>,
+    format: Option<EdrOutputFormat>,
+    fail_on_findings: bool,
+}
+
+#[derive(Default)]
 struct BannerState {
     no_color: bool,
 }
@@ -203,6 +216,7 @@ struct Parser {
     metrics: MetricsState,
     maintenance: MaintenanceState,
     admin_access: AdminAccessParseState,
+    edr: EdrState,
     banner: BannerState,
 }
 
@@ -223,6 +237,7 @@ impl Parser {
             metrics: MetricsState::default(),
             maintenance: MaintenanceState::default(),
             admin_access: AdminAccessParseState::default(),
+            edr: EdrState::default(),
             banner: BannerState::default(),
         }
     }
@@ -306,6 +321,7 @@ impl Parser {
             Some(Kind::Metrics) => self.parse_metrics_long(name, inline),
             Some(Kind::Maintenance) => self.parse_maintenance_long(name, inline),
             Some(Kind::AdminAccess) => self.parse_admin_access_long(name, inline),
+            Some(Kind::Edr) => self.parse_edr_long(name, inline),
             Some(Kind::Banner) => self.parse_banner_long(name, inline),
             Some(Kind::Console | Kind::Validate | Kind::UpdateRules) | None => {
                 Err(self.unexpected(format!("--{name}")))
@@ -392,6 +408,59 @@ impl Parser {
             "allow-downgrade" => {
                 self.no_value(inline, "--allow-downgrade")?;
                 self.upgrade.allow_downgrade = true;
+            }
+            _ => return Err(self.unexpected(format!("--{name}"))),
+        }
+        Ok(())
+    }
+
+    fn parse_edr_long(&mut self, name: &str, inline: Option<&str>) -> Result<(), ParseError> {
+        match name {
+            "database" => {
+                let value = self.value_path(inline, "--database <PATH>")?;
+                set_once(&mut self.edr.database, value, "--database <PATH>")?;
+            }
+            "window" => {
+                let value = self.value_string(inline, "--window <DURATION>")?;
+                let duration = crate::config::parse_duration(&value).map_err(|error| {
+                    ParseError::Message(format!(
+                        "invalid value '{value}' for '--window <DURATION>': {error}"
+                    ))
+                })?;
+                set_once(&mut self.edr.window, duration, "--window <DURATION>")?;
+            }
+            "baseline" => {
+                let value = self.value_string(inline, "--baseline <DURATION>")?;
+                let duration = crate::config::parse_duration(&value).map_err(|error| {
+                    ParseError::Message(format!(
+                        "invalid value '{value}' for '--baseline <DURATION>': {error}"
+                    ))
+                })?;
+                set_once(&mut self.edr.baseline, duration, "--baseline <DURATION>")?;
+            }
+            "until" => {
+                let value = self.value_string(inline, "--until <RFC3339>")?;
+                let timestamp = crate::edr::parse_utc(&value).map_err(|error| {
+                    ParseError::Message(format!(
+                        "invalid value '{value}' for '--until <RFC3339>': {error}"
+                    ))
+                })?;
+                set_once(&mut self.edr.until_ms, timestamp, "--until <RFC3339>")?;
+            }
+            "format" => {
+                let value = self.value_string(inline, "--format <FORMAT>")?;
+                let format = match value.to_ascii_lowercase().as_str() {
+                    "table" => EdrOutputFormat::Table,
+                    "json" => EdrOutputFormat::Json,
+                    _ => {
+                        return Err(invalid_value(&value, "--format <FORMAT>", "table or json"));
+                    }
+                };
+                set_once(&mut self.edr.format, format, "--format <FORMAT>")?;
+            }
+            "fail-on-findings" => {
+                self.no_value(inline, "--fail-on-findings")?;
+                self.edr.fail_on_findings = true;
             }
             _ => return Err(self.unexpected(format!("--{name}"))),
         }
@@ -753,6 +822,42 @@ impl Parser {
                 }))
             }
             Some(Kind::Console) => Some(Command::Console),
+            Some(Kind::Edr) => {
+                let window = self.edr.window.unwrap_or(Duration::from_secs(60 * 60));
+                let baseline = self
+                    .edr
+                    .baseline
+                    .unwrap_or(Duration::from_secs(7 * 24 * 60 * 60));
+                let window_ms = u64::try_from(window.as_millis())
+                    .map_err(|_| ParseError::Message("EDR window is too large".to_owned()))?;
+                if window_ms == 0 || window_ms % 60_000 != 0 {
+                    return Err(ParseError::Message(
+                        "EDR window must be a positive whole number of minutes".to_owned(),
+                    ));
+                }
+                if window_ms > 30 * 24 * 60 * 60 * 1000 {
+                    return Err(ParseError::Message(
+                        "EDR window must not exceed 30 days".to_owned(),
+                    ));
+                }
+                let baseline_ms = u64::try_from(baseline.as_millis()).unwrap_or(u64::MAX);
+                if baseline_ms > 30 * 24 * 60 * 60 * 1000 {
+                    return Err(ParseError::Message(
+                        "EDR baseline must not exceed 30 days".to_owned(),
+                    ));
+                }
+                Some(Command::Edr(Box::new(EdrArgs {
+                    database: self
+                        .edr
+                        .database
+                        .unwrap_or_else(|| PathBuf::from(DEFAULT_EDR_DATABASE)),
+                    window,
+                    baseline,
+                    until_ms: self.edr.until_ms,
+                    format: self.edr.format.unwrap_or(EdrOutputFormat::Table),
+                    fail_on_findings: self.edr.fail_on_findings,
+                })))
+            }
             Some(Kind::Banner) => Some(Command::Banner(BannerArgs {
                 no_color: self.banner.no_color,
             })),
@@ -1012,6 +1117,7 @@ fn help_for(kind: Option<Kind>) -> String {
         Some(Kind::Maintenance) => maintenance_help(),
         Some(Kind::AdminAccess) => admin_access_help(),
         Some(Kind::Console) => console_help(),
+        Some(Kind::Edr) => edr_help(),
         Some(Kind::Banner) => banner_help(),
     }
 }
@@ -1032,6 +1138,7 @@ Commands:
   maintenance   Enter or leave maintenance mode through the admin listener
   admin-access  Open, close, or list administrative access through the admin listener
   console       Run the optional monitoring console process
+  edr           Analyze authentication abuse in the offline console history
   banner        Print the Kunato banner
   help          Print this message or the help of the given subcommand(s)
 
@@ -1211,6 +1318,37 @@ Usage: kunato console [OPTIONS]
     )
 }
 
+fn edr_help() -> String {
+    format!(
+        r#"Analyze authentication abuse in the console's offline SQLite history.
+
+The analysis reads `history.sqlite3` directly and never changes it. It looks
+for a source that keeps failing authentication slowly (below the login
+throttle's burst limit) and for many distinct sources that each fail a few
+times on the same authentication endpoint (a distributed reverse-brute-force
+campaign). It reports evidence and recommendations; it does not ban or change
+the WAF configuration.
+
+The default window is the last complete hour and the default baseline is the
+previous seven days of hourly history. Run it from a timer to compare each hour
+with the retained baseline.
+
+Usage: kunato edr [OPTIONS]
+
+Options:
+      --database <PATH>      Console SQLite database [default: {}]
+      --window <DURATION>    Analysis window ending at --until [default: 1h]
+      --until <RFC3339>      UTC end, for example 2026-11-23T15:00:00Z
+                             [default: the last complete hour]
+      --baseline <DURATION>  Baseline before the window; 0s disables it [default: 168h]
+      --format <FORMAT>      Output format [default: table] [possible values: table, json]
+      --fail-on-findings     Exit with an error when any finding is reported
+
+{}"#,
+        DEFAULT_EDR_DATABASE, GLOBAL_OPTIONS
+    )
+}
+
 fn banner_help() -> String {
     format!(
         r#"Print the Kunato logo banner: the wordmark, tagline, and version in
@@ -1320,6 +1458,50 @@ mod tests {
         assert_eq!(args.unit, "kunato-test");
         assert_eq!(args.statuses, vec![429, 403]);
         assert_eq!(args.actions, vec!["block".to_owned(), "LOG".to_owned()]);
+    }
+
+    #[test]
+    fn parses_edr_window_and_explicit_utc_end() {
+        let cli = parse(&[
+            "kunato",
+            "edr",
+            "--database",
+            "/tmp/history.sqlite3",
+            "--window",
+            "6h",
+            "--baseline",
+            "24h",
+            "--until",
+            "2026-11-23T15:00:00Z",
+            "--format",
+            "json",
+            "--fail-on-findings",
+        ])
+        .expect("parse");
+        let Some(Command::Edr(args)) = cli.command else {
+            panic!("expected the edr command");
+        };
+        assert_eq!(args.database, PathBuf::from("/tmp/history.sqlite3"));
+        assert_eq!(args.window, Duration::from_secs(6 * 3600));
+        assert_eq!(args.baseline, Duration::from_secs(24 * 3600));
+        assert_eq!(args.until_ms, Some(1_795_446_000_000));
+        assert_eq!(args.format, EdrOutputFormat::Json);
+        assert!(args.fail_on_findings);
+    }
+
+    #[test]
+    fn edr_rejects_a_window_that_is_not_whole_minutes() {
+        let error = parse(&["kunato", "edr", "--window", "90s"]).expect_err("window");
+        assert!(error.to_string().contains("whole number of minutes"));
+    }
+
+    #[test]
+    fn edr_help_documents_the_offline_read() {
+        let error = parse(&["kunato", "help", "edr"]).expect_err("help");
+        let text = error.to_string();
+        assert!(text.contains("Usage: kunato edr"), "{text}");
+        assert!(text.contains("never changes it"), "{text}");
+        assert!(text.contains(DEFAULT_EDR_DATABASE), "{text}");
     }
 
     #[test]

@@ -134,7 +134,7 @@ fn write_table(out: &mut impl Write, entry: &LogEntry, color: bool) -> io::Resul
             "block" | "ban" => "\x1b[31m",
             "detect" | "rate-limit" | "reject" => "\x1b[33m",
             "match" => "\x1b[32m",
-            "behavior" => "\x1b[35m",
+            "behavior" | "edr" => "\x1b[35m",
             _ => "",
         };
         if !code.is_empty() {

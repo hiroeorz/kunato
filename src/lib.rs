@@ -12,6 +12,7 @@ pub mod config;
 pub mod console;
 pub mod decoding;
 pub mod decoy;
+pub mod edr;
 pub mod error;
 pub mod error_page;
 mod form;

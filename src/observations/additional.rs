@@ -32,6 +32,7 @@ pub(super) struct Request<'a> {
     pub path_hash: Option<&'a [u8; 32]>,
     pub rejected: Option<RejectionReason>,
     pub logged: bool,
+    pub auth_failure: bool,
     pub micros: Option<u64>,
     pub upstream_failure: bool,
     pub upstream_timeout: bool,
@@ -126,6 +127,19 @@ impl Partition {
                 counts,
             })?;
             values.country(request.country, request.rejected.is_some())?;
+            if request.auth_failure {
+                values.auth_failures = values.auth_failures.saturating_add(1);
+                if let Some(source) = request.source {
+                    let source = source.to_string();
+                    values.auth_sources.record(&source, false, false);
+                    values
+                        .unique_auth_sources
+                        .insert("auth-source-ip-v1", source.as_bytes());
+                }
+                if let Some(path) = request.path {
+                    values.auth_paths.record(path, false, false);
+                }
+            }
             if let Some(source) = request.source {
                 let source = source.to_string();
                 values
@@ -456,6 +470,7 @@ mod tests {
                 path_hash: None,
                 rejected: Some(RejectionReason::Rule),
                 logged: false,
+                auth_failure: false,
                 micros: Some(10),
                 upstream_failure: false,
                 upstream_timeout: false,
@@ -472,6 +487,7 @@ mod tests {
                 path_hash: None,
                 rejected: None,
                 logged: false,
+                auth_failure: false,
                 micros: Some(10),
                 upstream_failure: false,
                 upstream_timeout: false,
@@ -482,6 +498,37 @@ mod tests {
         assert_eq!(values.countries["JP"].rejected, 1);
         assert_eq!(values.countries["US"].requests, 1);
         assert!(values.incomplete);
+    }
+
+    #[test]
+    fn authentication_failures_keep_bounded_source_and_path_evidence() {
+        let partition = Partition::new();
+        for _ in 0..2 {
+            partition.request(
+                0,
+                Request {
+                    partition: 0,
+                    site: "example",
+                    source: Some("203.0.113.7".parse().unwrap()),
+                    country: "JP",
+                    path: Some("/login"),
+                    path_hash: None,
+                    rejected: None,
+                    logged: false,
+                    auth_failure: true,
+                    micros: Some(10),
+                    upstream_failure: false,
+                    upstream_timeout: false,
+                },
+            );
+        }
+        let values = partition.capture(0).unwrap();
+        values.validate().unwrap();
+        assert_eq!(values.auth_failures, 2);
+        assert_eq!(values.auth_sources.entries[0].key, "203.0.113.7");
+        assert_eq!(values.auth_sources.entries[0].estimate, 2);
+        assert_eq!(values.auth_paths.entries[0].key, "/login");
+        assert!(values.unique_auth_sources.estimate().unwrap() >= 0.5);
     }
 
     #[test]

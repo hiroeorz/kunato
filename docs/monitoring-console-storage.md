@@ -33,6 +33,7 @@ one-second live collection/publication recommendation and its measurement limits
 | WAF process | Atomic request/protection counters, current runtime gauges, and a fixed-size minute ring | In memory only; counters and minute ring reset on WAF restart |
 | Optional console process | Collection positions, observed samples, time buckets, recorded events, and correlation summaries | Embedded SQLite; collection works in the development runner, deployment remains future work |
 | Browser | Displayed subset, filters, chart data, and bounded live/replay state | Transient; reload must be able to query server-retained history |
+| Optional console EDR task | Bounded per-minute authentication measurements and hourly baseline | In memory plus `<storage_dir>/edr-state.json`, mode 0600; never writes `history.sqlite3` |
 | systemd journal | Existing emitted WAF logs | Governed by the host's journal policy, separately from console retention |
 
 The proposed deployed console storage directory is `/var/lib/kunato/console/`;
@@ -304,6 +305,32 @@ or unique-source totals after the supporting data expires.
 Prefer bounded category/rule/mechanism dimensions for long-term statistics.
 Do not retain an unlimited IP/path/token-ID time series. The schema and any
 approximation algorithm remain open; adding a dependency requires justification.
+
+### 4.3 Authentication-failure measurements
+
+Supplementary measurements version 2 adds a bounded authentication-failure
+section to each source-minute: the total upstream `401`/`403` count on
+configured authentication paths, the top 16 failing sources, the top 16 failing
+paths with an omission bound, and a 64-register distinct-source sketch. The WAF
+currently writes the source-global bucket; splitting these fields per site
+would require separate buckets. The observation
+point is the existing behavioral hook after forwarding, so local rule blocks,
+rate-limit responses, maintenance pages, and upstream failures are not counted.
+Source identity is the resolved client IP; no username, password, token,
+request body, or query string is stored.
+
+The fields live in the existing `metric_buckets`/`history_buckets` JSON payload;
+there is no new table and no schema-version bump. Version-1 records parse with
+empty values and are reported as missing telemetry by the offline analyzer
+rather than as zero failures. The top-16 ranking bounds the per-minute cost and
+matches the existing source/path ranking policy. When the supplementary record
+exceeds its byte budget, authentication sources are the last optional detail
+dropped, after legacy dimensions, paths, sources, statuses, latency, and
+country detail.
+
+`kunato edr` reads this section read-only for the hourly slow-authentication
+and distributed-campaign analysis described in
+[the EDR verification](edr-verification.md).
 
 ## 5. Adopted statistics retention policy
 

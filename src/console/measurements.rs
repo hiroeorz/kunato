@@ -203,18 +203,7 @@ impl Ranking {
             entry.observed_logged = entry.observed_logged.saturating_add(u64::from(logged));
             return;
         }
-        let error = if self.entries.len() >= MAX_RANKS {
-            let index = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.estimate)
-                .map_or(0, |(index, _)| index);
-            self.replacements = self.replacements.saturating_add(1);
-            self.entries.swap_remove(index).estimate
-        } else {
-            self.omitted_upper_bound
-        };
+        let error = self.make_room();
         self.entries.push(RankingEntry {
             key: key.into(),
             estimate: error.saturating_add(1),
@@ -222,6 +211,40 @@ impl Ranking {
             observed_rejected: u64::from(rejected),
             observed_logged: u64::from(logged),
         });
+    }
+
+    /// Add an already-counted observation. Used when merging bounded minute
+    /// evidence into an hourly aggregate without replaying every failure.
+    pub fn add(&mut self, key: &str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
+            entry.estimate = entry.estimate.saturating_add(count);
+            return;
+        }
+        let error = self.make_room();
+        self.entries.push(RankingEntry {
+            key: key.into(),
+            estimate: error.saturating_add(count),
+            error,
+            observed_rejected: 0,
+            observed_logged: 0,
+        });
+    }
+
+    fn make_room(&mut self) -> u64 {
+        if self.entries.len() < MAX_RANKS {
+            return self.omitted_upper_bound;
+        }
+        let index = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.estimate)
+            .map_or(0, |(index, _)| index);
+        self.replacements = self.replacements.saturating_add(1);
+        self.entries.swap_remove(index).estimate
     }
     fn minimum_when_full(&self) -> u64 {
         (if self.entries.len() == MAX_RANKS {
@@ -360,6 +383,18 @@ pub struct AdditionalMeasurements {
     pub countries: BTreeMap<String, CountryCounts>,
     #[serde(default)]
     pub country_overflow: u64,
+    /// Authentication-path `401`/`403` responses observed for this source-minute.
+    #[serde(default)]
+    pub auth_failures: u64,
+    /// Top failing sources; omitted sources are bounded by `omitted_upper_bound`.
+    #[serde(default)]
+    pub auth_sources: Ranking,
+    /// Top failing paths, used to distinguish one login endpoint from broad probing.
+    #[serde(default)]
+    pub auth_paths: Ranking,
+    /// Estimated distinct failing sources, merged across minutes.
+    #[serde(default)]
+    pub unique_auth_sources: DistinctSketch,
     pub upstream_statuses: BTreeMap<u16, u64>,
     pub reason_latency: BTreeMap<RejectionReason, LatencyMeasurements>,
     pub sources: Ranking,
@@ -377,7 +412,7 @@ pub struct AdditionalMeasurements {
 impl AdditionalMeasurements {
     pub fn measured() -> Self {
         Self {
-            version: 1,
+            version: 2,
             missed_updates: Some(0),
             ..Self::default()
         }
@@ -439,6 +474,7 @@ impl AdditionalMeasurements {
 
     pub fn merge(&mut self, other: &Self) -> Result<(), Error> {
         other.validate()?;
+        self.version = self.version.max(other.version);
         self.completed_requests = add(self.completed_requests, other.completed_requests)?;
         self.dimension_overflow = add(self.dimension_overflow, other.dimension_overflow)?;
         self.missed_updates = match (self.missed_updates, other.missed_updates) {
@@ -461,6 +497,10 @@ impl AdditionalMeasurements {
                 self.incomplete = true;
             }
         }
+        self.auth_failures = add(self.auth_failures, other.auth_failures)?;
+        self.auth_sources.merge(&other.auth_sources)?;
+        self.auth_paths.merge(&other.auth_paths)?;
+        self.unique_auth_sources.merge(&other.unique_auth_sources)?;
         for (status, count) in &other.upstream_statuses {
             *self.upstream_statuses.entry(*status).or_default() = add(
                 self.upstream_statuses.get(status).copied().unwrap_or(0),
@@ -527,6 +567,12 @@ impl AdditionalMeasurements {
         {
             self.countries.remove(&code);
             self.country_overflow = self.country_overflow.saturating_add(counts.requests);
+        } else if let Some(entry) = self.auth_paths.entries.pop() {
+            self.auth_paths.omitted_upper_bound =
+                self.auth_paths.omitted_upper_bound.max(entry.estimate);
+        } else if let Some(entry) = self.auth_sources.entries.pop() {
+            self.auth_sources.omitted_upper_bound =
+                self.auth_sources.omitted_upper_bound.max(entry.estimate);
         } else {
             return false;
         }
@@ -535,7 +581,7 @@ impl AdditionalMeasurements {
         true
     }
     pub fn validate(&self) -> Result<(), Error> {
-        if self.version != 1
+        if !(1..=2).contains(&self.version)
             || self.dimensions.len() > MAX_DIMENSIONS
             || self.countries.len() > MAX_COUNTRIES
             || self.countries.iter().any(|(code, counts)| {
@@ -565,6 +611,17 @@ impl AdditionalMeasurements {
         for value in self.reason_latency.values() {
             value.validate()?;
         }
+        if self.auth_failures > self.completed_requests
+            || !ranking_fits(&self.auth_sources, self.auth_failures)
+            || !ranking_fits(&self.auth_paths, self.auth_failures)
+        {
+            return Err(Error::Invalid(
+                "invalid authentication-failure measurements",
+            ));
+        }
+        self.auth_sources.validate()?;
+        self.auth_paths.validate()?;
+        self.unique_auth_sources.validate()?;
         self.sources.validate()?;
         self.paths.validate()?;
         self.unique_sources.validate()?;
@@ -597,6 +654,16 @@ impl AdditionalMeasurements {
         }
         Ok(())
     }
+}
+
+fn ranking_fits(ranking: &Ranking, total: u64) -> bool {
+    ranking.omitted_upper_bound <= total
+        && ranking
+            .entries
+            .iter()
+            .map(|entry| entry.estimate)
+            .try_fold(0_u64, u64::checked_add)
+            .is_some_and(|sum| sum <= total)
 }
 
 fn hash_id(value: &str) -> Result<(), Error> {
@@ -747,6 +814,45 @@ mod tests {
             }
         }
         assert_eq!(combined.entries[0].key, "dominant");
+    }
+
+    #[test]
+    fn authentication_measurements_merge_keep_the_newest_version_and_survive_shrink() {
+        let mut first = AdditionalMeasurements::measured();
+        first.completed_requests = 3;
+        first.auth_failures = 2;
+        first.auth_sources.record("203.0.113.7", false, false);
+        first.auth_sources.record("203.0.113.7", false, false);
+        first.auth_paths.record("/login", false, false);
+        first.auth_paths.record("/login", false, false);
+        first
+            .unique_auth_sources
+            .insert("auth-source-ip-v1", b"203.0.113.7");
+        first.validate().unwrap();
+
+        let mut second = AdditionalMeasurements::measured();
+        second.completed_requests = 2;
+        second.auth_failures = 1;
+        second.auth_sources.record("198.51.100.9", false, false);
+        second.auth_paths.record("/oauth/token", false, false);
+        second
+            .unique_auth_sources
+            .insert("auth-source-ip-v1", b"198.51.100.9");
+        second.validate().unwrap();
+
+        first.merge(&second).unwrap();
+        first.validate().unwrap();
+        assert_eq!(first.version, 2);
+        assert_eq!(first.auth_failures, 3);
+        assert_eq!(first.auth_sources.entries.len(), 2);
+        assert_eq!(first.auth_paths.entries.len(), 2);
+        assert!(first.unique_auth_sources.estimate().unwrap() >= 1.5);
+
+        while first.shrink() {}
+        first.validate().unwrap();
+        assert_eq!(first.auth_failures, 3);
+        assert!(first.auth_sources.entries.is_empty());
+        assert!(first.auth_sources.omitted_upper_bound > 0);
     }
 
     #[test]

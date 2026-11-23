@@ -55,6 +55,8 @@ src/
   upload.rs        # Bounded multipart upload declared-type/content inspection
   request_view.rs  # Borrowed request representation for the rule engine
   decoy/           # Site-scoped local lures, HMAC tokens, bounded correlation
+  edr.rs           # Offline authentication-abuse analysis and `kunato edr`
+  edr/live.rs      # Prototype resident in-memory EDR state
   snapshot.rs      # Immutable config and runtime snapshots
   yaml/            # In-tree YAML parser and serde deserializer
   config/
@@ -90,6 +92,8 @@ docs/
   attack-coverage.md  # Attack-coverage tracker (covered / partial / gap per attack class)
   behavioral-detection.md # Behavioral bot and authentication-abuse detection
   behavioral-readiness.md # Deployment and authentication observation checklist
+  edr-verification.md # Offline EDR method, evaluation, limits, and operation
+  edr-live-verification.md # Live in-memory EDR source prototype evaluation
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   engine-gaps.md      # Engine changes the daily CVE intake could not cover with a rule
   next-version-ai-defense.md # Next-version concept for defending home servers against AI-assisted attacks

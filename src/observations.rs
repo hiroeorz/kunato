@@ -768,6 +768,17 @@ impl Default for Observations {
     }
 }
 
+/// Attribute the current request's upstream authentication failure to its
+/// source-minute. The proxy calls this only after observing a `401`/`403` on a
+/// configured authentication path.
+pub fn auth_failure() {
+    let _ = CURRENT.try_with(|cell| {
+        if let Ok(mut value) = cell.try_borrow_mut() {
+            value.auth_failure = true;
+        }
+    });
+}
+
 fn counters(load: impl Fn(usize) -> u64) -> Counters {
     Counters {
         rejection_classes: Some(rejection_classes(
@@ -888,6 +899,7 @@ struct RequestMeasurement {
     rejected: bool,
     logged: bool,
     response_logged: bool,
+    auth_failure: bool,
     finished: bool,
     in_flight_counted: bool,
     client: Option<std::net::IpAddr>,
@@ -929,6 +941,7 @@ impl RequestMeasurement {
             rejected: false,
             logged: false,
             response_logged: false,
+            auth_failure: false,
             finished: false,
             in_flight_counted,
             client: None,
@@ -989,6 +1002,7 @@ impl RequestMeasurement {
                 path_hash: self.path_hash.as_ref(),
                 rejected: self.reason,
                 logged: self.logged,
+                auth_failure: self.auth_failure,
                 micros,
                 upstream_failure: self.upstream_failure,
                 upstream_timeout: self.upstream_timeout,

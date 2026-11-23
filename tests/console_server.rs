@@ -710,6 +710,84 @@ async fn spawn_snapshot_source(
 }
 
 #[tokio::test]
+async fn runtime_runs_the_console_edr_task_and_saves_its_state() {
+    use kunato::edr::live::{LiveConfig, LiveEdr};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let history = Arc::new(Observations::new());
+    requests(&history, 2, false).await;
+    let packet = history.snapshot(0).expect("snapshot");
+    let (source, source_task) = spawn_snapshot_source(packet).await;
+    let storage = temp.path().join("console");
+
+    let yaml = format!(
+        "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+admin: {{ listen: 127.0.0.1:9090 }}
+console:
+  enabled: true
+  listen: 127.0.0.1:0
+  source: {source}
+  instance: runtime-edr-test
+  storage_dir: {}
+  edr:
+    enabled: true
+    window: 1h
+    baseline: 1h
+",
+        storage.display()
+    );
+    let console = kunato::config::parse(&yaml).expect("config").console;
+    let runtime = ConsoleRuntime::start(console).await.expect("runtime");
+    let address = runtime.address;
+    let client = client();
+
+    let mut connected = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (status, body, _) =
+            request(&client, address, Method::GET, "/api/v1/health", &[], None).await;
+        if status == StatusCode::OK {
+            let value: serde_json::Value = serde_json::from_str(&body).expect("health");
+            if value["collection"]["connected"] == true {
+                connected = true;
+                break;
+            }
+        }
+    }
+    assert!(connected, "console did not connect to the snapshot source");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    runtime.shutdown().await.expect("shutdown");
+    source_task.abort();
+
+    let state_path = storage.join("edr-state.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&state_path)
+                .expect("EDR state file")
+                .mode()
+                & 0o077,
+            0,
+            "EDR state must not be group/world accessible"
+        );
+    }
+    let state = LiveEdr::load(
+        &state_path,
+        LiveConfig {
+            window: Duration::from_secs(3600),
+            baseline: Duration::from_secs(3600),
+            poll_interval: Duration::from_secs(1),
+            ring: Duration::from_secs(720),
+            thresholds: Default::default(),
+        },
+    )
+    .expect("load state")
+    .expect("saved state");
+    assert!(state.retained_minutes() > 0);
+}
+#[tokio::test]
 async fn runtime_collects_from_the_loopback_snapshot_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let history = Arc::new(Observations::new());

@@ -2194,6 +2194,7 @@ fn record_behavior(
             .metrics
             .behavior_auth_failures
             .fetch_add(1, Ordering::Relaxed);
+        crate::observations::auth_failure();
     }
     if outcome.observed_sequence {
         context

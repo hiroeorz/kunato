@@ -3,7 +3,7 @@
 Status of common WAF attack classes against the bundled set shipped with Kunato
 (`rules.example.yaml`, mirrored by `dist/rules.yaml`) and the mechanisms in
 `src/` (rule engine, protocol/resource limits, protection). Snapshot date:
-2026-11-21; the managed set carries 592 rules.
+2026-11-23; the managed set carries 592 rules.
 
 This file is a living tracker: update the verdicts and evidence whenever the
 bundled rules or the engine capabilities change (see the "Attack Coverage
@@ -131,9 +131,9 @@ tests exercise these paths without adding attack signatures or changing verdicts
 
 | Attack | Status | Evidence / notes |
 | --- | --- | --- |
-| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. Protection also flags per-source `401`/`403` bursts on authentication paths (`protection.behavior.auth`) and aggregates global bursts for distributed attempts; the continuity score adds rule blocks, structural rejections, and encoded retries across windows; the shipped config sets these signals to `BLOCK` (engine default is LOG). The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once) |
+| Brute Force | 🔶 | `login-throttle.login-attempts` bundles a per-source `limit` (10 requests/60s) over the common login paths (`wp-login.php`, `xmlrpc.php`, `users/sign_in`, `admin/login`, `login`, `logon`, `signin`, `sign_in`, `sign-in`, `session`); transparent within budget, then BLOCK plus ban escalation. Protection also flags per-source `401`/`403` bursts on authentication paths (`protection.behavior.auth`) and aggregates global bursts for distributed attempts; the continuity score adds rule blocks, structural rejections, and encoded retries across windows; the shipped config sets these signals to `BLOCK` (engine default is LOG). The limit's firing is covered by unit tests, not `blocked.txt` (the harness runs with protection disabled and sends each request once). The offline `kunato edr` analysis and the opt-in `console.edr` live task read bounded per-source authentication-failure telemetry and flag a source whose failures are spread across an hour below the throttle; the synthetic evaluation caught a 10-failure/hour source in all six attack hours and reported one shared-egress false positive. Both report evidence and do not block automatically |
 | Password Spraying | 🔶 | Same throttle, bans, and per-source auth-failure flags slow a single source; `protection.behavior.global_auth` aggregates failures across sources and, with `action: BLOCK`, rejects subsequent auth requests for `ban`. The engine default remains LOG and the shipped config blocks both signals plus continuity; attacker source diversity is not otherwise modeled |
-| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs, and, with the shipped `action: BLOCK`, mitigates subsequent attempts globally; continuity adds repeat-offender weight across windows, but individual stolen credentials cannot be identified |
+| Credential Stuffing | 🔶 | Same as brute force; the global auth-failure window records credential lists rotated across many source IPs, and, with the shipped `action: BLOCK`, mitigates subsequent attempts globally; continuity adds repeat-offender weight across windows, but individual stolen credentials cannot be identified. The hourly `kunato edr` analysis also aggregates a bounded distinct-source sketch and flags a many-source, few-failures-per-source campaign on one authentication path; the synthetic 60-source campaign was detected in its hour, with a 64-register estimate of 48 sources |
 | Account / Login Enumeration | 🔶 | `response-leaks.login-enumeration-message` blocks common "user not found"/"invalid username" error text on authentication paths; application-specific wording needs a local response rule |
 | MFA Flooding | 🔶 | Rate limits only |
 | OTP Brute Force | 🔶 | Rate limits only |
@@ -372,7 +372,7 @@ attribution or effectiveness against adaptive AI agents. See
 | XXE / RCE payloads | ✅ |
 | Malicious file upload | 🔶 (script, binary, and server-config filename rules, MSL/MVG/PostScript/AviSynth coder scripts, plus declared-type/content check) |
 | HTTP Protocol Abuse | 🔶 (mostly protocol-layer strictness) |
-| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, a global auth block shipped in BLOCK mode, and continuity across retries) |
+| Credential Stuffing / Brute Force | 🔶 (bundled login throttle, per-IP rate limits, bans, per-source auth-failure flags, a global auth block shipped in BLOCK mode, continuity across retries, and offline hourly analysis of bounded per-source failures) |
 | Bot | 🔶 (User-Agent signatures plus behavioral probing, auth-failure, 200-only scraping, and continuity flags; no JS challenge) |
 | API Abuse | 🔶 (GraphQL depth/complexity is capped; introspection and API-docs discovery are logged; schema and business logic uncovered) |
 | Known CVE Exploits | ✅ (daily virtual patching) |

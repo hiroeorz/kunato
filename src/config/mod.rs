@@ -825,6 +825,7 @@ pub struct ConsoleSpec {
     pub allowed_hosts: Vec<String>,
     pub auth: ConsoleAuthSpec,
     pub tls: Option<ConsoleTlsSpec>,
+    pub edr: ConsoleEdrSpec,
 }
 
 impl Default for ConsoleSpec {
@@ -841,6 +842,28 @@ impl Default for ConsoleSpec {
             allowed_hosts: Vec::new(),
             auth: ConsoleAuthSpec::default(),
             tls: None,
+            edr: ConsoleEdrSpec::default(),
+        }
+    }
+}
+
+/// Optional in-memory EDR analysis fed by the console's accepted snapshots.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsoleEdrSpec {
+    pub enabled: bool,
+    #[serde(deserialize_with = "de_duration")]
+    pub window: Duration,
+    #[serde(deserialize_with = "de_duration")]
+    pub baseline: Duration,
+}
+
+impl Default for ConsoleEdrSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window: Duration::from_secs(60 * 60),
+            baseline: Duration::from_secs(168 * 60 * 60),
         }
     }
 }
@@ -1984,6 +2007,7 @@ pub struct Console {
     pub allowed_hosts: Option<AllowedHosts>,
     pub auth: Option<ConsoleAuth>,
     pub tls: Option<ConsoleTls>,
+    pub edr: ConsoleEdr,
 }
 
 impl Console {
@@ -1999,6 +2023,13 @@ impl Console {
     pub fn tls_enabled(&self) -> bool {
         self.tls.is_some()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleEdr {
+    pub enabled: bool,
+    pub window: Duration,
+    pub baseline: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3977,6 +4008,17 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
     {
         issues.push("console.event_retention must be between 1 ms and 30 days".to_owned());
     }
+    if spec.edr.enabled && !spec.enabled {
+        issues.push("console.edr.enabled requires console.enabled".to_owned());
+    }
+    if spec.edr.window < Duration::from_secs(60)
+        || spec.edr.window > Duration::from_secs(24 * 60 * 60)
+    {
+        issues.push("console.edr.window must be between 1 minute and 24 hours".to_owned());
+    }
+    if spec.edr.baseline > Duration::from_secs(30 * 24 * 60 * 60) {
+        issues.push("console.edr.baseline must not exceed 30 days".to_owned());
+    }
     if spec.allowed_clients.len() > MAX_CONSOLE_CLIENTS {
         issues.push(format!(
             "console.allowed_clients must not contain more than {MAX_CONSOLE_CLIENTS} entries"
@@ -4067,6 +4109,11 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
         allowed_hosts,
         auth,
         tls,
+        edr: ConsoleEdr {
+            enabled: spec.edr.enabled,
+            window: spec.edr.window,
+            baseline: spec.edr.baseline,
+        },
     }
 }
 
@@ -8275,6 +8322,38 @@ categories:
         assert!(config.console.allowed_hosts.is_none());
         assert!(config.console.auth.is_none());
         assert!(config.console.tls.is_none());
+        assert!(!config.console.edr.enabled);
+        assert_eq!(config.console.edr.window, Duration::from_secs(3600));
+        assert_eq!(config.console.edr.baseline, Duration::from_secs(168 * 3600));
+    }
+
+    #[test]
+    fn console_edr_parses_and_validates_its_window() {
+        let config = parse_with(
+            BASE,
+            "console: { enabled: true, edr: { enabled: true, window: 6h, baseline: 24h } }
+",
+        )
+        .expect("valid console EDR");
+        assert!(config.console.edr.enabled);
+        assert_eq!(config.console.edr.window, Duration::from_secs(6 * 3600));
+        assert_eq!(config.console.edr.baseline, Duration::from_secs(24 * 3600));
+
+        let error = parse_with(
+            BASE,
+            "console: { enabled: true, edr: { enabled: true, window: 25h } }
+",
+        )
+        .expect_err("oversized window");
+        assert!(error.to_string().contains("console.edr.window"), "{error}");
+
+        let error = parse_with(
+            BASE,
+            "console: { edr: { enabled: true } }
+",
+        )
+        .expect_err("disabled console");
+        assert!(error.to_string().contains("console.edr.enabled"), "{error}");
     }
 
     #[test]

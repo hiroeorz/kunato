@@ -21,6 +21,9 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/kunato/kunato.yaml";
 pub const DEFAULT_METRICS_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9090));
 
+/// Default console database read by the offline EDR analysis.
+pub const DEFAULT_EDR_DATABASE: &str = "/var/lib/kunato/console/history.sqlite3";
+
 #[derive(Debug)]
 pub struct Cli {
     /// Path to the YAML configuration file (used by server/config modes).
@@ -77,6 +80,9 @@ pub enum Command {
     /// Run the optional monitoring console process.
     Console,
 
+    /// Analyze authentication abuse in the console's offline SQLite history.
+    Edr(Box<EdrArgs>),
+
     /// Print the Kunato banner.
     Banner(BannerArgs),
 }
@@ -99,6 +105,23 @@ pub struct UpgradeArgs {
 
     /// Allow installing a release older than the running binary.
     pub allow_downgrade: bool,
+}
+
+#[derive(Debug)]
+pub struct EdrArgs {
+    pub database: PathBuf,
+    pub window: Duration,
+    pub baseline: Duration,
+    /// Explicit UTC end of the analysis window; the last complete hour when absent.
+    pub until_ms: Option<u64>,
+    pub format: EdrOutputFormat,
+    pub fail_on_findings: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdrOutputFormat {
+    Table,
+    Json,
 }
 
 #[derive(Debug)]

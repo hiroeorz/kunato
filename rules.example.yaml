@@ -2442,6 +2442,12 @@ admin:
 # it; the console stays off otherwise.
 # console:
 #   enabled: true
+#   # Optional in-memory EDR analysis fed by the console's accepted snapshots.
+#   # Findings are journald warnings; no SQLite table or WAF ban is created.
+#   edr:
+#     enabled: false
+#     window: 1h
+#     baseline: 168h
 
 # Optional administrative functions with a configurable default state.
 # `default: open` (the shipped default) keeps normal access and lets `close`

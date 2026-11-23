@@ -54,6 +54,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             Command::Maintenance(args) => kunato::admin_client::run_maintenance(args).await,
             Command::AdminAccess(args) => kunato::admin_client::run_admin_access(args).await,
             Command::Console => kunato::console::runtime::run(&cli.config).await,
+            Command::Edr(args) => kunato::edr::run(*args),
             Command::Banner(args) => kunato::banner::run(args),
         };
     }
