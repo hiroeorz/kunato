@@ -287,10 +287,13 @@ not a reason to introduce unbounded per-thread state.
   correct, report the missing minute attribution, and expose incomplete
   coverage. Do not recreate an expired ring slot or charge it to the current
   minute.
-- Clock discontinuities require an explicit clock epoch/gap policy. Never
-  overwrite a different minute merely because a modulo slot or wall-clock
-  label matches. Implement and test the rotation protocol before claiming
-  exact minute values.
+- Clock discontinuities use an explicit clock epoch/gap policy. When the wall
+  clock and the monotonic source time diverge by more than two seconds, the
+  source re-anchors its UTC minute labels, starts a new ring generation, resets
+  the supplementary minute recorder, and marks the transition incomplete.
+  Updates admitted under the previous generation are dropped instead of
+  overwriting a new minute. A backward step that would precede the process
+  start is not re-anchored; its buckets remain incomplete.
 
 This provides measured minute counts when instrumentation/coverage is complete.
 It does not claim that a provisional atomic snapshot is a simultaneous view
