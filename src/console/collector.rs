@@ -88,6 +88,7 @@ pub struct CollectorHealth {
     pub source_omitted_events: u64,
     pub source_gap: Option<(u64, u64)>,
     pub storage_error: Option<Error>,
+    pub batch_error: Option<Error>,
     pub checkpoint_error: Option<Error>,
     pub source_error: Option<Error>,
 }
@@ -628,6 +629,16 @@ impl Collector {
                                 state.buckets.remove(start);
                             }
                         }
+                        self.health.batch_error = None;
+                    }
+                    Err(error) if batch_failure(&error) => {
+                        self.health.batch_error = Some(error);
+                        self.health.omitted_metric_minutes = self
+                            .health
+                            .omitted_metric_minutes
+                            .saturating_add(state.buckets.len() as u64);
+                        state.buckets.clear();
+                        state.committed = flight.checkpoint.sequence;
                     }
                     Err(error) => self.health.storage_error = Some(error),
                 }
@@ -637,7 +648,19 @@ impl Collector {
                 && let Some(result) = flight.receipt.try_result()
             {
                 match result {
-                    Ok(_) => state.event_committed = flight.checkpoint.sequence,
+                    Ok(_) => {
+                        state.event_committed = flight.checkpoint.sequence;
+                        self.health.batch_error = None;
+                    }
+                    Err(error) if batch_failure(&error) => {
+                        self.health.batch_error = Some(error);
+                        self.health.omitted_events = self
+                            .health
+                            .omitted_events
+                            .saturating_add(state.events.len() as u64);
+                        state.events.clear();
+                        state.event_committed = flight.checkpoint.sequence;
+                    }
                     Err(error) => self.health.storage_error = Some(error),
                 }
                 state.event_flight = None;
@@ -707,6 +730,13 @@ impl Collector {
 }
 
 const SOURCE_GAP_MS: u64 = 2 * MINUTE_MS;
+
+fn batch_failure(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Conflict | Error::CompactedInput | Error::Invalid(_)
+    )
+}
 
 fn note_gap(health: &mut CollectorHealth, from: u64, until: u64) {
     if from == 0 || until <= from.saturating_add(SOURCE_GAP_MS) {

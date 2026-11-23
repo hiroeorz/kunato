@@ -179,7 +179,8 @@ Common behavior:
     "omitted_metric_minutes": 0, "omitted_events": 0,
     "source_missed_updates": 0, "source_additional_missed_updates": 0,
     "source_omitted_events": 0, "source_gap": null,
-    "source_error": null, "storage_error": null
+    "source_error": null, "storage_error": null,
+    "batch_error": null, "checkpoint_error": null
   },
   "writer": {"state": "running", "queued_items": 0, "outstanding_bytes": 0,
              "committed_batches": 12, "failed_batches": 0},

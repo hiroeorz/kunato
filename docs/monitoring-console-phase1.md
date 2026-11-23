@@ -102,9 +102,12 @@ identities must be unique, and higher bucket revisions replace prior values.
 Replaying the same checkpoint and fingerprint succeeds without duplication.
 Conflicting content at the current position fails. Older checkpoints are
 reported as stale and skipped entirely. Several queued submissions may share
-one transaction; any failing submission rolls back the entire group, including
-its checkpoints. Producers must never advance their durable progress merely
-because queue admission succeeded.
+one transaction. A batch-specific failure (conflict, compacted input, or an
+invalid record) rolls back only that submission through a savepoint, fails only
+its receipt, and leaves the writer running for other sources. A transaction-level
+failure (busy, timeout, capacity, or I/O) still rolls back the whole group.
+Producers must never advance their durable progress merely because queue
+admission succeeded.
 
 `Store::checkpoint` restores committed source state. `events` and `metrics`
 require a source, an inclusive start, an exclusive end, and 1..256 records.

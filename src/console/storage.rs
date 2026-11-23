@@ -296,61 +296,47 @@ impl Store {
 
     pub fn write_batch(&mut self, batch: &WriteBatch) -> Result<WriteReport, Error> {
         let prepared = PreparedBatch::new(batch)?;
-        self.write_many(&[prepared])?
-            .pop()
-            .ok_or(Error::Invalid("empty write result"))
+        match self.write_many(&[prepared])?.pop() {
+            Some(Ok(report)) => Ok(report),
+            Some(Err(error)) => Err(error),
+            None => Err(Error::Invalid("empty write result")),
+        }
     }
 
     pub(crate) fn write_many(
         &mut self,
         batches: &[PreparedBatch],
-    ) -> Result<Vec<WriteReport>, Error> {
+    ) -> Result<Vec<Result<WriteReport, Error>>, Error> {
         self.guarded(|store| {
             check_files(&store.config)?;
             let cancel = store.cancel.clone();
             let deadline = Instant::now() + store.config.operation_timeout;
-            let transaction = store.connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction = store
+                .connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let now = (store.config.clock)();
-            let (expiry,event_expiry) = super::history_store::advance_expiry(&transaction,now,store.config.event_retention)?;
+            let (expiry, event_expiry) = super::history_store::advance_expiry(
+                &transaction,
+                now,
+                store.config.event_retention,
+            )?;
             check_deadline(&cancel, deadline)?;
             let mut reports = Vec::with_capacity(batches.len());
             for prepared in batches {
                 check_deadline(&cancel, deadline)?;
-                let batch: WriteBatch = decode_batch(&prepared.payload)?;
-                let source = &batch.checkpoint.source;
-                let previous: Option<(i64, Vec<u8>)> = transaction.query_row(
-                    "SELECT sequence, fingerprint FROM checkpoints WHERE source = ?1 AND generation = ?2",
-                    params![source.instance, source.generation], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-                let mut report = WriteReport::default();
-                if let Some((sequence, fingerprint)) = &previous {
-                    if *sequence > batch.checkpoint.sequence as i64 { report.stale = true; reports.push(report); continue; }
-                    if *sequence == batch.checkpoint.sequence as i64 {
-                        if *fingerprint != prepared.fingerprint { return Err(Error::Conflict); }
-                        report.replayed = true; reports.push(report); continue;
+                transaction.execute_batch("SAVEPOINT kunato_batch")?;
+                match apply_prepared(&transaction, prepared, now, expiry, event_expiry) {
+                    Ok(report) => {
+                        transaction.execute_batch("RELEASE kunato_batch")?;
+                        reports.push(Ok(report));
                     }
+                    Err(error) if isolated_batch_error(&error) => {
+                        transaction
+                            .execute_batch("ROLLBACK TO kunato_batch; RELEASE kunato_batch")?;
+                        reports.push(Err(error));
+                    }
+                    Err(error) => return Err(error),
                 }
-                let old_sequence = previous.map_or(0, |(sequence, _)| sequence);
-                for event in &batch.events {
-                    if event.sequence as i64 <= old_sequence { continue; }
-                    if event.occurred_at_ms < event_expiry { report.expired_events += 1; continue; }
-                    transaction.execute("INSERT INTO events(source,generation,sequence,event_id,occurred_at,payload) VALUES (?1,?2,?3,?4,?5,?6)",
-                        params![source.instance, source.generation, event.sequence as i64, event.id, event.occurred_at_ms as i64, bounded_json(event)?])?;
-                    report.events_inserted += 1;
-                    super::correlations::record(&transaction, source, event, expiry)?;
-                }
-                for metric in &batch.metrics {
-                    if metric.revision as i64 <= old_sequence { continue; }
-                    if metric.start_ms < expiry { report.expired_metrics += 1; continue; }
-                    let site = metric.site.as_deref().unwrap_or("");
-                    if super::history_store::compacted(&transaction,&source.instance,site,metric.start_ms)? { return Err(Error::CompactedInput); }
-                    report.metrics_written += transaction.execute("INSERT INTO metric_buckets(source,generation,site,start_ms,revision,payload) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(source,generation,site,start_ms) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision > metric_buckets.revision",
-                        params![source.instance, source.generation, metric.site.as_deref().unwrap_or(""), metric.start_ms as i64, metric.revision as i64, bounded_json(metric)?])?;
-                    transaction.execute("INSERT INTO history_dirty(source,site,start_ms) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",params![source.instance,site,metric.start_ms as i64])?;
-                }
-                transaction.execute("INSERT INTO checkpoints(source,generation,sequence,payload,fingerprint) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(source,generation) DO UPDATE SET sequence=excluded.sequence,payload=excluded.payload,fingerprint=excluded.fingerprint",
-                    params![source.instance, source.generation, batch.checkpoint.sequence as i64, bounded_json(&batch.checkpoint)?, prepared.fingerprint])?;
-                transaction.execute("INSERT INTO history_sources(source,generation,seen_ms) VALUES(?1,?2,?3) ON CONFLICT(source,generation) DO UPDATE SET seen_ms=max(seen_ms,excluded.seen_ms)",params![source.instance,source.generation,now as i64])?;
-                reports.push(report);
             }
             check_deadline(&cancel, deadline)?;
             transaction.commit()?;
@@ -491,6 +477,111 @@ pub(super) fn decode_record<T: DeserializeOwned>(json: &str) -> Result<T, Error>
 
 fn decode_batch(json: &[u8]) -> Result<WriteBatch, Error> {
     serde_json::from_slice(json).map_err(|_| Error::Invalid("invalid prepared observation batch"))
+}
+
+fn apply_prepared(
+    connection: &Connection,
+    prepared: &PreparedBatch,
+    now: u64,
+    expiry: u64,
+    event_expiry: u64,
+) -> Result<WriteReport, Error> {
+    let batch: WriteBatch = decode_batch(&prepared.payload)?;
+    let source = &batch.checkpoint.source;
+    let previous: Option<(i64, Vec<u8>)> = connection
+        .query_row(
+            "SELECT sequence, fingerprint FROM checkpoints WHERE source = ?1 AND generation = ?2",
+            params![source.instance, source.generation],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let mut report = WriteReport::default();
+    if let Some((sequence, fingerprint)) = &previous {
+        if *sequence > batch.checkpoint.sequence as i64 {
+            report.stale = true;
+            return Ok(report);
+        }
+        if *sequence == batch.checkpoint.sequence as i64 {
+            if *fingerprint != prepared.fingerprint {
+                return Err(Error::Conflict);
+            }
+            report.replayed = true;
+            return Ok(report);
+        }
+    }
+    let old_sequence = previous.map_or(0, |(sequence, _)| sequence);
+    for event in &batch.events {
+        if event.sequence as i64 <= old_sequence {
+            continue;
+        }
+        if event.occurred_at_ms < event_expiry {
+            report.expired_events += 1;
+            continue;
+        }
+        connection.execute(
+            "INSERT INTO events(source,generation,sequence,event_id,occurred_at,payload) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                source.instance,
+                source.generation,
+                event.sequence as i64,
+                event.id,
+                event.occurred_at_ms as i64,
+                bounded_json(event)?
+            ],
+        )?;
+        report.events_inserted += 1;
+        super::correlations::record(connection, source, event, expiry)?;
+    }
+    for metric in &batch.metrics {
+        if metric.revision as i64 <= old_sequence {
+            continue;
+        }
+        if metric.start_ms < expiry {
+            report.expired_metrics += 1;
+            continue;
+        }
+        let site = metric.site.as_deref().unwrap_or("");
+        if super::history_store::compacted(connection, &source.instance, site, metric.start_ms)? {
+            return Err(Error::CompactedInput);
+        }
+        report.metrics_written += connection.execute(
+            "INSERT INTO metric_buckets(source,generation,site,start_ms,revision,payload) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(source,generation,site,start_ms) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision > metric_buckets.revision",
+            params![
+                source.instance,
+                source.generation,
+                site,
+                metric.start_ms as i64,
+                metric.revision as i64,
+                bounded_json(metric)?
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO history_dirty(source,site,start_ms) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
+            params![source.instance, site, metric.start_ms as i64],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO checkpoints(source,generation,sequence,payload,fingerprint) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(source,generation) DO UPDATE SET sequence=excluded.sequence,payload=excluded.payload,fingerprint=excluded.fingerprint",
+        params![
+            source.instance,
+            source.generation,
+            batch.checkpoint.sequence as i64,
+            bounded_json(&batch.checkpoint)?,
+            prepared.fingerprint
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO history_sources(source,generation,seen_ms) VALUES(?1,?2,?3) ON CONFLICT(source,generation) DO UPDATE SET seen_ms=max(seen_ms,excluded.seen_ms)",
+        params![source.instance, source.generation, now as i64],
+    )?;
+    Ok(report)
+}
+
+fn isolated_batch_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Conflict | Error::CompactedInput | Error::Invalid(_)
+    )
 }
 
 fn prepare_directory(path: &Path) -> Result<(), Error> {

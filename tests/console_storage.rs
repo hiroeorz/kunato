@@ -649,11 +649,12 @@ async fn pending_and_committed_states_differ_and_shutdown_flushes() {
 }
 
 #[tokio::test]
-async fn count_trigger_commits_all_or_none_and_reports_failure() {
+async fn a_conflicting_batch_fails_only_its_own_submission() {
     let temp = tempfile::tempdir().unwrap();
     let config = storage(&temp);
     let options = WriterConfig {
         max_batch_records: 6,
+        event_flush: Duration::from_millis(10),
         ..slow_writer()
     };
     let writer = Writer::start(config.clone(), options).await.unwrap();
@@ -661,26 +662,45 @@ async fn count_trigger_commits_all_or_none_and_reports_failure() {
     let mut conflicting = batch(2);
     conflicting.events[0].id = "event-1".into();
     let second = submit(&writer, conflicting).await;
+    let third = submit(&writer, batch(3)).await;
+    writer.request_flush();
+
     assert_eq!(
-        first.wait(Duration::from_secs(2)).await,
-        Err(Error::Conflict)
+        first
+            .wait(Duration::from_secs(2))
+            .await
+            .unwrap()
+            .events_inserted,
+        1
     );
     assert_eq!(
         second.wait(Duration::from_secs(2)).await,
         Err(Error::Conflict)
     );
+    assert_eq!(
+        third
+            .wait(Duration::from_secs(2))
+            .await
+            .unwrap()
+            .events_inserted,
+        1
+    );
     let health = writer.health();
-    assert_eq!(health.failed_batches, 2);
-    assert_eq!(health.committed_batches, 0);
-    assert_eq!(health.state, WriterState::Failed);
-    assert!(matches!(
-        writer.try_submit(batch(3)),
-        Err(SubmitError::Closed)
-    ));
+    assert_eq!(health.failed_batches, 1);
+    assert_eq!(health.committed_batches, 2);
+    assert_eq!(health.state, WriterState::Running);
+    assert!(writer.try_submit(batch(4)).is_ok());
     writer.shutdown(Duration::from_secs(1)).await.unwrap();
     let mut store = Store::open(config).unwrap();
-    assert!(store.checkpoint(&source()).unwrap().is_none());
-    assert!(store.events(&source(), window()).unwrap().is_empty());
+    assert_eq!(store.checkpoint(&source()).unwrap().unwrap().sequence, 4);
+    let events = store.events(&source(), window()).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        ["event-1", "event-3", "event-4"]
+    );
 }
 
 #[tokio::test]

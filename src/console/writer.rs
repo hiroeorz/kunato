@@ -512,7 +512,7 @@ fn run(shared: &Shared, store: &mut Store) {
             queue.bytes = queue.bytes.saturating_sub(batch.bytes);
         }
         match result {
-            Ok(reports) => {
+            Ok(outcomes) => {
                 maintenance_pending = true;
                 maintenance_due = Instant::now() + shared.config.min_commit_interval;
                 queue.health.last_persisted_at_ms = Some(
@@ -522,15 +522,25 @@ fn run(shared: &Shared, store: &mut Store) {
                         .as_millis()
                         .min(u128::from(u64::MAX)) as u64,
                 );
-                for (completion, report) in completions.into_iter().zip(reports) {
-                    if report.replayed || report.stale {
-                        queue.health.replayed_batches =
-                            queue.health.replayed_batches.saturating_add(1);
-                    } else {
-                        queue.health.committed_batches =
-                            queue.health.committed_batches.saturating_add(1);
+                for (completion, outcome) in completions.into_iter().zip(outcomes) {
+                    match outcome {
+                        Ok(report) => {
+                            if report.replayed || report.stale {
+                                queue.health.replayed_batches =
+                                    queue.health.replayed_batches.saturating_add(1);
+                            } else {
+                                queue.health.committed_batches =
+                                    queue.health.committed_batches.saturating_add(1);
+                            }
+                            let _ = completion.send(Ok(report));
+                        }
+                        Err(error) => {
+                            queue.health.failed_batches =
+                                queue.health.failed_batches.saturating_add(1);
+                            queue.health.last_error = Some(error.clone());
+                            let _ = completion.send(Err(error));
+                        }
                     }
-                    let _ = completion.send(Ok(report));
                 }
             }
             Err(error) => {

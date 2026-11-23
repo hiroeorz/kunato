@@ -78,6 +78,7 @@ fn collection_json(health: &crate::console::collector::CollectorHealth) -> Value
         "source_gap": health.source_gap.map(|(start, end)| json!([start, end])),
         "source_error": health.source_error.as_ref().map(ToString::to_string),
         "storage_error": health.storage_error.as_ref().map(ToString::to_string),
+        "batch_error": health.batch_error.as_ref().map(ToString::to_string),
         "checkpoint_error": health.checkpoint_error.as_ref().map(ToString::to_string),
     })
 }
