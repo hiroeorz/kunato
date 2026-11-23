@@ -216,9 +216,35 @@ where
     }
 }
 
+fn journalctl_override_allowed(path: &str, root: bool, override_set: bool) -> bool {
+    !root || path == "journalctl" || override_set
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn running_as_root() -> bool {
+    false
+}
+
 fn journal_args(args: &LogArgs) -> Result<Vec<String>, Error> {
     if args.journalctl.trim().is_empty() {
         return Err(Error::Message("--journalctl must not be empty".to_owned()));
+    }
+    if !journalctl_override_allowed(
+        &args.journalctl,
+        running_as_root(),
+        std::env::var_os("KUNATO_ALLOW_JOURNALCTL_OVERRIDE").is_some(),
+    ) {
+        return Err(Error::Message(
+            "--journalctl is restricted while running as root; set \
+             KUNATO_ALLOW_JOURNALCTL_OVERRIDE only for a trusted installation"
+                .to_owned(),
+        ));
     }
     if args.unit.trim().is_empty()
         || args.unit.starts_with('-')
@@ -333,6 +359,15 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--since", "1 hour ago"])
         );
+    }
+
+    #[test]
+    fn only_root_requires_an_override_for_a_non_default_journalctl() {
+        assert!(journalctl_override_allowed("journalctl", false, false));
+        assert!(journalctl_override_allowed("/opt/journalctl", false, false));
+        assert!(journalctl_override_allowed("journalctl", true, false));
+        assert!(!journalctl_override_allowed("/tmp/journalctl", true, false));
+        assert!(journalctl_override_allowed("/tmp/journalctl", true, true));
     }
 
     #[test]

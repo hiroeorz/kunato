@@ -1114,7 +1114,7 @@ Options:
       --format <FORMAT>      Viewer output format [default: raw] [possible values: raw, table, json]
       --no-color             Disable ANSI colors in table output
   -u, --unit <UNIT>          systemd unit name to read [default: kunato]
-      --journalctl <PATH>    journalctl executable to run [default: journalctl]
+      --journalctl <PATH>    journalctl executable [default: journalctl; restricted as root]
       --list-attacks         List supported attack types and exit
 
 {}"#,

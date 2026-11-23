@@ -247,6 +247,14 @@ async fn serves_history_live_state_and_assets() {
     );
 
     let path = format!(
+        "/api/v1/history?from_ms={minute_start}&until_ms={}&site=default",
+        packet.observed_at_ms + 60_000
+    );
+    let (status, body, _) = request(&client, running.address, Method::GET, &path, &[], None).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(body.contains("per-site"), "{body}");
+
+    let path = format!(
         "/api/v1/correlations?from_ms={minute_start}&until_ms={}",
         packet.observed_at_ms + 60_000
     );

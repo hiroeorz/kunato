@@ -345,10 +345,15 @@ async fn history(request: Request<Incoming>, connection: &Connection) -> Respons
         Ok(value) => value,
         Err(message) => return bad_request(message),
     };
-    let site = params.get("site").map(|value| (*value).to_owned());
+    if params.contains_key("site") {
+        return error_json(
+            StatusCode::NOT_IMPLEMENTED,
+            "per-site primary history is not implemented",
+        );
+    }
     let query = HistoryQuery {
         instance: connection.context.console.instance.clone(),
-        site,
+        site: None,
         from_ms,
         until_ms,
         limit,

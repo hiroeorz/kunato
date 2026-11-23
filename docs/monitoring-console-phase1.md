@@ -176,13 +176,15 @@ The budget is not a filesystem quota, does not count unrelated files or
 filesystem allocation overhead, and assumes exclusive ownership of the
 directory. Do not run concurrent writers or place unrelated data there.
 
-SQLite deadlines can stop SQL execution and bound busy waits. An OS-level
-blocked read/write/fsync cannot be forcibly canceled safely. Shutdown stops
-admission, requests cancellation when its deadline expires, and returns without
-joining a still-running storage thread. Such a thread can finish later; its
-in-flight commit outcome must be resolved by reopening the database after it
-exits. Never start a second writer over a timed-out worker still using the same
-directory. `Drop` requests shutdown and does not wait for SQLite or join.
+SQLite deadlines can stop SQL execution and bound busy waits; the writer also
+cancels SQLite busy waits in 10 ms steps when shutdown starts. An OS-level
+blocked read/write/fsync still cannot be forcibly canceled safely. Shutdown
+stops admission, requests cancellation when its deadline expires, and joins the
+worker within a 100 ms grace when it exits. A worker still blocked in an OS call
+after that grace is detached; its in-flight commit outcome must be resolved by
+reopening the database after it exits. Never start a second writer over a
+timed-out worker still using the same directory. `Drop` requests shutdown and
+does not wait for SQLite or join.
 
 An abrupt process exit can lose all uncommitted queue data. EXTRA requests
 stronger filesystem synchronization but does not guarantee faulty hardware,

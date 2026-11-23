@@ -1854,7 +1854,7 @@ copy; the console does not widen the ACME cache permissions.
 | GET | `/` | Console UI |
 | GET | `/login`, `/login.js`, `/styles.css`, `/favicon.svg` | Public login and static assets |
 | GET | `/api/v1/health` | Collection, writer, and storage health |
-| GET | `/api/v1/history?from_ms=&until_ms=[&limit=][&site=][&revision=]` | Bounded UTC history page |
+| GET | `/api/v1/history?from_ms=&until_ms=[&limit=][&revision=]` | Bounded UTC history page (no per-site primary history yet) |
 | GET | `/api/v1/correlations?from_ms=&until_ms=[&limit=][&credential_id=]` | Compact decoy evidence |
 | GET | `/api/v1/live` | SSE stream of the latest state |
 | GET/POST/DELETE | `/api/v1/session` | Session status, login, logout |
@@ -2274,11 +2274,12 @@ kunato log --since '1 hour ago'
 
 Reading the system journal normally requires root or membership in the
 `systemd-journal` group, so use `sudo kunato log` on a default install.
-`--journalctl` is a trusted operator override for non-standard installations:
-a restricted sudoers rule for `kunato log` must not allow arbitrary
-`--journalctl` paths, because the option names the executable that runs with
-the invoking privileges. The unit is read by name only; glob patterns are
-rejected.
+`--journalctl` is a trusted operator override for non-standard installations.
+When the command runs as root, a non-default path is rejected unless
+`KUNATO_ALLOW_JOURNALCTL_OVERRIDE=1` is set; a restricted sudoers rule for
+`kunato log` must not allow arbitrary `--journalctl` paths, because the option
+names the executable that runs with the invoking privileges. The unit is read
+by name only; glob patterns are rejected.
 
 Options:
 

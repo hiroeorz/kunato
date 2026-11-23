@@ -32,6 +32,7 @@ fn run_log(args: &[&str]) -> std::process::Output {
         .arg("log")
         .arg("--journalctl")
         .arg(journal)
+        .env("KUNATO_ALLOW_JOURNALCTL_OVERRIDE", "1")
         .args(args)
         .output()
         .expect("run kunato log");

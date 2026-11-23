@@ -347,10 +347,16 @@ impl Writer {
             self.shared.cancel.store(true, Ordering::Release);
             self.shared.wake.notify_all();
         }
-        if let Some(thread) = self.thread.take()
-            && thread.is_finished()
-        {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take() {
+            if timed_out {
+                let grace = Instant::now() + Duration::from_millis(100);
+                while !thread.is_finished() && Instant::now() < grace {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
         }
         Ok(ShutdownReport {
             timed_out,

@@ -192,18 +192,17 @@ Unavailable values are `null`; the UI must not render them as zero.
 
 ### 5.2 History query
 
-`GET /api/v1/history?from_ms=<u64>&until_ms=<u64>[&limit=24][&site=<name>][&revision=<u64>]`
+`GET /api/v1/history?from_ms=<u64>&until_ms=<u64>[&limit=24][&revision=<u64>]`
 
 - `from_ms` is inclusive, `until_ms` exclusive, both UTC Unix milliseconds.
 - `limit` is 1..128, default 24. The response is additionally bounded by 4 MiB
   of encoded buckets; a cut response reports `truncated: true` and the next
   available start.
-- `site` is reserved for the Phase 4 host-policy site scope. Primary minute
-  buckets are currently recorded globally with an empty site, so this parameter
-  only matches explicitly site-scoped rows and normally returns an empty page.
-  Per-site primary history remains [remaining work](monitoring-console-remaining.md).
-  A site value follows the stored identifier charset; wildcard host-policy
-  names are not valid query values.
+- Per-site primary history is not implemented yet. Primary minute buckets are
+  recorded globally with an empty site, and a `site` query parameter is rejected
+  with `501` rather than returning an empty page. Site-scoped supplementary
+  measurements remain in each bucket's `additional` payload; per-site primary
+  history is [remaining work](monitoring-console-remaining.md).
 - `revision` continues a paginated read from a previous response; a changed
   history returns `409` so a caller does not mix revisions.
 - The instance always comes from the console configuration, never the client.

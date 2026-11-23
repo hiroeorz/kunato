@@ -172,11 +172,12 @@ impl Store {
         let path = config.directory.join("history.sqlite3");
         prepare_database_file(&path)?;
         check_files(&config)?;
-        let connection = Connection::open_with_flags(
+        let mut connection = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         connection.busy_timeout(config.busy_timeout)?;
+        install_busy_handler(&mut connection, config.busy_timeout, Arc::clone(&cancel))?;
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         connection.set_db_config(
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA,
@@ -447,6 +448,29 @@ impl Store {
         }
         result
     }
+}
+
+const BUSY_STEP: Duration = Duration::from_millis(10);
+
+fn install_busy_handler(
+    connection: &mut Connection,
+    timeout: Duration,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), Error> {
+    let total_ms = timeout.as_millis().min(u128::from(u32::MAX)) as u64;
+    connection.busy_handler(Some(move |count: i32| {
+        if cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        let slept = (count.max(0) as u64).saturating_mul(BUSY_STEP.as_millis() as u64);
+        if slept >= total_ms {
+            return false;
+        }
+        let remaining = total_ms - slept;
+        std::thread::sleep(BUSY_STEP.min(Duration::from_millis(remaining)));
+        true
+    }))?;
+    Ok(())
 }
 
 pub(super) fn check_deadline(cancel: &AtomicBool, deadline: Instant) -> Result<(), Error> {

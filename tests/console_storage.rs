@@ -821,7 +821,8 @@ async fn disk_lock_keeps_inflight_work_bounded_and_shutdown_has_a_deadline() {
     let shutdown = writer.shutdown(Duration::from_millis(10)).await.unwrap();
     assert!(shutdown.timed_out);
     assert!(before.elapsed() < Duration::from_millis(200));
-    assert_eq!(shutdown.health.in_flight_items, 1);
+    assert_eq!(shutdown.health.in_flight_items, 0);
+    assert!(shutdown.health.state == WriterState::Failed);
     blocker.execute_batch("ROLLBACK").unwrap();
     // The SQLite lock wait is bounded separately. Cancellation prevents later statements.
     assert!(matches!(
