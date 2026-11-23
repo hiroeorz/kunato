@@ -2359,7 +2359,10 @@ CVE signatures living in a non-CVE category (for example `ci-cd-servers` or
 #### Output
 
 `raw` prints the `journalctl --output=short-iso` line with control characters
-sanitized, including the local-time prefix. `table` prints one normalized row per matching event:
+sanitized, including the local-time prefix. Text messages escape `=` and
+backslashes, and the viewer decodes those escapes only in the message, so a
+peer-derived message cannot become a structured field. `table` prints one
+normalized row per matching event:
 
 ```text
 TIME                      LEVEL EVENT      ACTION ATTACK         CLIENT                    METHOD PATH                           STATUS RULE                          DETAIL

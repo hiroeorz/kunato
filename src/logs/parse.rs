@@ -134,7 +134,7 @@ fn parse_text(raw: &str, journal_timestamp: Option<String>, input: &str) -> LogE
         timestamp,
         level,
         target,
-        message,
+        message: decode_message(&message),
         fields,
     }
 }
@@ -254,6 +254,30 @@ fn split_fields(input: &str) -> (String, BTreeMap<String, String>) {
         return (input.to_owned(), BTreeMap::new());
     };
     (message, fields)
+}
+
+/// Decode the message framing written by `telemetry::format`. Only the `=`
+/// escape and the backslash escape are decoded in messages; control escapes stay
+/// readable as `\n`, `\t`, and `\xNN`.
+fn decode_message(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(position) = rest.find('\\') {
+        output.push_str(&rest[..position]);
+        let tail = &rest[position + 1..];
+        if let Some(after) = tail.strip_prefix('\\') {
+            output.push('\\');
+            rest = after;
+        } else if let Some(after) = tail.strip_prefix("x3d") {
+            output.push('=');
+            rest = after;
+        } else {
+            output.push('\\');
+            rest = tail;
+        }
+    }
+    output.push_str(rest);
+    output
 }
 
 fn first_field_start(input: &str) -> Option<usize> {
@@ -428,6 +452,17 @@ mod tests {
         let entry = parse_line(&line);
         assert_eq!(entry.field("reason"), Some("line\nnext\tx\u{1b}[31m"));
         assert_eq!(entry.message, "request rejected");
+    }
+
+    #[test]
+    fn decodes_escaped_field_markers_in_a_message() {
+        let line = format!(
+            "{PREFIX}2026-10-21T09:35:17.234772Z  WARN kunato::proxy::server: x category\\x3dxss client=203.0.113.9"
+        );
+        let entry = parse_line(&line);
+        assert_eq!(entry.message, "x category=xss");
+        assert_eq!(entry.field("client"), Some("203.0.113.9"));
+        assert_eq!(entry.field("category"), None);
     }
 
     #[test]

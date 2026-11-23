@@ -145,12 +145,14 @@ fn write_text(
 }
 
 /// Event messages are static literals in Kunato, but a `log` record forwarded
-/// by the bridge may carry peer-derived text. Escape control characters and
-/// line terminators without quoting ordinary spaces so the message stays
-/// readable and can never inject a fake log line or terminal escape.
+/// by the bridge may carry peer-derived text. Escape control characters, line
+/// terminators, backslashes, and `=` so the message stays readable and can
+/// never inject a fake log line, field, or terminal escape.
 fn write_text_message(writer: &mut dyn io::Write, value: &str) -> io::Result<()> {
     for ch in value.chars() {
         match ch {
+            '\\' => write!(writer, "\\\\")?,
+            '=' => write!(writer, "\\x3d")?,
             '\n' => write!(writer, "\\n")?,
             '\r' => write!(writer, "\\r")?,
             '\t' => write!(writer, "\\t")?,
@@ -296,6 +298,31 @@ mod tests {
             String::from_utf8(output).expect("utf-8"),
             "1970-01-01T00:00:00.000000Z  INFO kunato::proxy: request blocked answer=42 action=\"BLOCK\" rate_limited=false\n"
         );
+    }
+
+    #[test]
+    fn text_message_escapes_field_markers_and_backslashes() {
+        let fields = Fields {
+            message: Some("x category=xss path=\\admin".to_owned()),
+            values: Vec::new(),
+        };
+        let mut output = Vec::new();
+        write(
+            &mut output,
+            LogFormat::Text,
+            timestamp(0, 0),
+            Level::WARN,
+            "kunato::proxy",
+            &fields,
+            false,
+        )
+        .expect("write text");
+        let text = String::from_utf8(output).expect("utf-8");
+        assert!(
+            text.contains("x category\\x3dxss path\\x3d\\\\admin"),
+            "{text}"
+        );
+        assert!(!text.contains(" category=xss"), "{text}");
     }
 
     #[test]
