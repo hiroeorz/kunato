@@ -470,6 +470,12 @@ impl HistoryBucket {
                 .saturating_sub(u32::from(child.outcomes.is_some()));
         }
         result.coverage.incomplete |= result.coverage.complete_minutes != result.expected_minutes();
+        if children
+            .iter()
+            .any(|child| child.outcomes.is_none() && child.coverage.represented_minutes != 0)
+        {
+            result.coverage.incomplete = true;
+        }
         if let Some(additional) = &mut result.additional {
             additional.incomplete |= result.coverage.incomplete
                 || children.iter().any(|child| child.additional.is_none());

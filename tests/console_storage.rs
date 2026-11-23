@@ -561,6 +561,33 @@ fn data_files_are_private_and_symlinks_are_refused() {
 }
 
 #[test]
+fn minimum_capacity_covers_schema_initialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = storage(&temp);
+    config.max_bytes = 256 * 1024;
+    assert!(matches!(Store::open(config), Err(Error::Invalid(_))));
+
+    let mut config = storage(&temp);
+    config.max_bytes = 512 * 1024;
+    drop(Store::open(config).unwrap());
+}
+
+#[test]
+fn open_refuses_a_database_missing_a_history_table() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = storage(&temp);
+    drop(Store::open(config.clone()).unwrap());
+    let path = config.directory.join("history.sqlite3");
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE history_dirty;")
+            .unwrap();
+    }
+    assert!(Store::open(config).is_err());
+}
+
+#[test]
 fn capacity_failure_preserves_committed_history_and_stays_within_budget() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = storage(&temp);

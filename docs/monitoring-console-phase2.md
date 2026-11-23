@@ -10,7 +10,7 @@ delivery; [Phase 6](monitoring-console-phase6.md) adds remote access.
 Packaging remains future work.
 The subsequent [Phase 3](monitoring-console-phase3.md) implements the adopted
 [UTC, reason-separated aggregation and 30-day retention policy](monitoring-console-storage.md#4-aggregation-rules).
-Phase 2 itself exports the 22 primary-reason counts inside minute buckets;
+Phase 2 itself exports the 23 primary-reason counts inside minute buckets;
 separate reason rows, wider grains, and expiry belong to Phase 3. The rationale
 below describes this phase's source contract.
 The [update-cadence evaluation](monitoring-console-cadence.md) recommends
@@ -41,7 +41,7 @@ described below; browser/SSE integration remains future work.
 | Schema | Version 2; transactional migration from application-owned version 1, preserving old rows and unknown fields as unavailable |
 
 New rejection totals are independently incremented once per request. The
-new primary-reason map uses 22 fixed terminal reasons; existing diagnostic
+new primary-reason map uses 23 fixed terminal reasons; existing diagnostic
 subsets may overlap and must not be added to infer the overall total. LOG
 requests in this contract are the request/response union, counted once, with
 a separate response-LOG subset. Rule matches count effective LOG/BLOCK/ALLOW

@@ -37,8 +37,10 @@ const MAX_JOURNAL_LINE_BYTES: usize = 64 * 1024;
 /// this command only parses, filters, and renders its lines.
 pub async fn run(args: LogArgs) -> Result<(), Error> {
     if args.list_attacks {
-        print!("{}", attack::list());
-        return Ok(());
+        return match io::stdout().write_all(attack::list().as_bytes()) {
+            Ok(()) => Ok(()),
+            Err(error) => handle_write_error(error),
+        };
     }
 
     let filters = Filters::from_args(&args)?;
@@ -183,27 +185,34 @@ where
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let take = newline.map_or(available.len(), |index| index + 1);
-        if line.len() + take > MAX_JOURNAL_LINE_BYTES {
-            let room = MAX_JOURNAL_LINE_BYTES.saturating_sub(line.len());
-            line.extend_from_slice(&available[..room.min(take)]);
-            reader.consume(take);
-            truncated = true;
-            if newline.is_some() {
+        if let Some(content) = newline {
+            // The newline is only a terminator: a line whose content is exactly
+            // the cap is complete, and the newline is kept for the caller.
+            if line.len() + content > MAX_JOURNAL_LINE_BYTES {
+                let room = MAX_JOURNAL_LINE_BYTES.saturating_sub(line.len());
+                line.extend_from_slice(&available[..room.min(content)]);
+                reader.consume(take);
                 return Ok(ReadLine {
                     bytes: line.len(),
-                    truncated,
+                    truncated: true,
                 });
             }
-            continue;
-        }
-        line.extend_from_slice(&available[..take]);
-        reader.consume(take);
-        if newline.is_some() {
+            line.extend_from_slice(&available[..take]);
+            reader.consume(take);
             return Ok(ReadLine {
                 bytes: line.len(),
                 truncated,
             });
         }
+        if line.len() + take > MAX_JOURNAL_LINE_BYTES {
+            let room = MAX_JOURNAL_LINE_BYTES.saturating_sub(line.len());
+            line.extend_from_slice(&available[..room.min(take)]);
+            reader.consume(take);
+            truncated = true;
+            continue;
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
     }
 }
 
@@ -211,9 +220,12 @@ fn journal_args(args: &LogArgs) -> Result<Vec<String>, Error> {
     if args.journalctl.trim().is_empty() {
         return Err(Error::Message("--journalctl must not be empty".to_owned()));
     }
-    if args.unit.trim().is_empty() || args.unit.starts_with('-') {
+    if args.unit.trim().is_empty()
+        || args.unit.starts_with('-')
+        || args.unit.contains(['*', '?', '['])
+    {
         return Err(Error::Message(
-            "--unit must be a unit name, not an option".to_owned(),
+            "--unit must be a single unit name, not an option or glob".to_owned(),
         ));
     }
     for (name, value) in [("--since", &args.since), ("--until", &args.until)] {
@@ -330,8 +342,41 @@ mod tests {
         assert!(journal_args(&args).is_err());
 
         let mut args = base();
+        args.unit = "sshd*".to_owned();
+        assert!(journal_args(&args).is_err());
+
+        let mut args = base();
         args.since = Some("--all".to_owned());
         assert!(journal_args(&args).is_err());
+    }
+
+    #[test]
+    fn a_broken_pipe_is_not_an_error() {
+        assert!(handle_write_error(io::Error::from(io::ErrorKind::BrokenPipe)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_line_at_the_exact_bound_is_complete() {
+        let content = "a".repeat(MAX_JOURNAL_LINE_BYTES);
+        let input = format!("{content}\n");
+        let mut reader = BufReader::new(input.as_bytes());
+        let mut line = Vec::new();
+        let read = read_capped_line(&mut reader, &mut line)
+            .await
+            .expect("exact line");
+        assert!(!read.truncated);
+        assert_eq!(line.len(), MAX_JOURNAL_LINE_BYTES + 1);
+        assert_eq!(line.last(), Some(&b'\n'));
+
+        let content = "a".repeat(MAX_JOURNAL_LINE_BYTES + 1);
+        let input = format!("{content}\n");
+        let mut reader = BufReader::new(input.as_bytes());
+        let mut line = Vec::new();
+        let read = read_capped_line(&mut reader, &mut line)
+            .await
+            .expect("oversized line");
+        assert!(read.truncated);
+        assert_eq!(line.len(), MAX_JOURNAL_LINE_BYTES);
     }
 
     #[tokio::test]

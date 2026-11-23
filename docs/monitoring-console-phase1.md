@@ -162,8 +162,9 @@ Phase 1 selects DELETE rollback journaling, `synchronous=EXTRA`, in-memory
 SQLite temporary storage, and disabled cache spilling. This avoids introducing
 a growing WAL/checkpoint lifecycle before reader and retention workers exist.
 The default combined database/journal budget is 1 GiB, configurable from
-256 KiB to 1 TiB. `max_page_count` conservatively allocates approximately half
-the budget to the database, reserving space for one rollback copy of its pages,
+512 KiB to 1 TiB (raised from 256 KiB after schema version 4).
+`max_page_count` conservatively allocates approximately half the budget to the
+database, reserving space for one rollback copy of its pages,
 per-page journal overhead, and 64 KiB of journal/header margin. Fixed database
 and journal/WAL/SHM file sizes are checked before writes. Reaching the page
 limit rolls back the current transaction; saved history is retained and the

@@ -24,7 +24,7 @@ impl IpMatcher {
         if value.contains('/') {
             value
                 .parse::<IpNet>()
-                .map(Self::Network)
+                .map(|network| Self::Network(network.to_ipv4_mapped().unwrap_or(network)))
                 .map_err(|_| "invalid CIDR range".to_owned())
         } else {
             value
@@ -216,10 +216,10 @@ impl Filters {
 }
 
 fn client_address(entry: &LogEntry) -> Option<IpAddr> {
-    entry
-        .client()
-        .and_then(parse_ip_value)
-        .or_else(|| entry.peer().and_then(parse_ip_value))
+    if let Some(client) = entry.client() {
+        return parse_ip_value(client);
+    }
+    entry.peer().and_then(parse_ip_value)
 }
 
 fn parse_ip_value(value: &str) -> Option<IpAddr> {
@@ -310,6 +310,27 @@ mod tests {
         let filters = filters(args);
         assert!(filters.matches(&entry(&[("peer", "[2001:db8::1]:443")])));
         assert!(!filters.matches(&entry(&[("peer", "[2001:db8::2]:443")])));
+    }
+
+    #[test]
+    fn ip_filter_normalizes_mapped_cidrs() {
+        let mut args = base_args();
+        args.ips = vec!["::ffff:203.0.113.0/120".to_owned()];
+        let filters = filters(args);
+        assert!(filters.matches(&entry(&[("client", "203.0.113.9")])));
+        assert!(!filters.matches(&entry(&[("client", "198.51.100.9")])));
+    }
+
+    #[test]
+    fn an_unparseable_client_does_not_fall_back_to_the_peer() {
+        let mut args = base_args();
+        args.ips = vec!["203.0.113.9".to_owned()];
+        let filters = filters(args);
+        assert!(!filters.matches(&entry(&[
+            ("client", "unattributed"),
+            ("peer", "203.0.113.9:443"),
+        ])));
+        assert!(filters.matches(&entry(&[("peer", "203.0.113.9:443")])));
     }
 
     #[test]

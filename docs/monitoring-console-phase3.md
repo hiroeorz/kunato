@@ -30,7 +30,7 @@ merge inputs, gauges, and compatible status/latency distributions.
 `src/console/history_store.rs` owns SQL materialization, coarsening, reads, and
 expiry. No new dependency or WAF request-path measurement is introduced.
 
-Overall totals and the existing 22 primary rejection reasons are independent
+Overall totals and the existing 23 primary rejection reasons are independent
 series. A rejection contributes to its single terminal mechanism, not every
 matching rule. Attack classes, arbitrary site/rule dimensions, and reason-specific
 latency are not inferred from detail events.
@@ -143,7 +143,7 @@ input as coarsening succeeds and also filters logically expired data.
 ## Verification and review
 
 `tests/console_history.rs` exercises all grains and exact promotion edges,
-22 reasons, independent overall/reason peaks, zero/unknown/partial values,
+23 reasons, independent overall/reason peaks, zero/unknown/partial values,
 weighted means, status/histogram/gauge merging, absolute revision replay,
 generation contributions, restart, schema migration, pagination, logical versus
 physical expiry, clock rollback, expired replay, transactional rollback,

@@ -88,6 +88,7 @@ pub struct CollectorHealth {
     pub source_omitted_events: u64,
     pub source_gap: Option<(u64, u64)>,
     pub storage_error: Option<Error>,
+    pub checkpoint_error: Option<Error>,
     pub source_error: Option<Error>,
 }
 
@@ -234,6 +235,7 @@ pub struct Collector {
     reader: HistoryReader,
     writer: Option<Writer>,
     states: Vec<State>,
+    dropped_minute_until: Option<u64>,
     live: watch::Sender<Option<Arc<StatisticsSnapshot>>>,
     health: CollectorHealth,
 }
@@ -273,6 +275,7 @@ impl Collector {
             reader,
             writer: Some(writer),
             states: Vec::new(),
+            dropped_minute_until: None,
             live,
             health: CollectorHealth::default(),
         })
@@ -331,8 +334,29 @@ impl Collector {
         let index = match self.states.iter().position(|state| state.source == source) {
             Some(index) => index,
             None => {
-                // A storage lookup must not delay publication of a valid new generation.
-                self.live.send_replace(Some(Arc::new(packet.clone())));
+                let baseline = match self.reader.checkpoint(source.clone()).await {
+                    Ok(checkpoint) => checkpoint,
+                    Err(error) => {
+                        self.health.checkpoint_error = Some(error);
+                        return Ok(());
+                    }
+                };
+                let event_source = event_source(&source);
+                let event_baseline = match self.reader.checkpoint(event_source).await {
+                    Ok(checkpoint) => checkpoint,
+                    Err(error) => {
+                        self.health.checkpoint_error = Some(error);
+                        return Ok(());
+                    }
+                };
+                self.health.checkpoint_error = None;
+                if let Some(previous) = self.states.last() {
+                    let first = packet
+                        .buckets
+                        .first()
+                        .map_or(packet.observed_at_ms, |bucket| bucket.start_ms);
+                    note_gap(&mut self.health, previous.at, first);
+                }
                 if self.states.len() >= self.config.max_generations {
                     let removable = self.states.iter().position(|state| {
                         state.buckets.is_empty()
@@ -344,28 +368,10 @@ impl Collector {
                         self.states.remove(index);
                     } else {
                         self.tick(true);
-                        self.health.omitted_metric_minutes = self
-                            .health
-                            .omitted_metric_minutes
-                            .saturating_add(packet.buckets.len() as u64);
+                        self.note_dropped_packet(&packet);
                         return Ok(());
                     }
                 }
-                let baseline = match self.reader.checkpoint(source.clone()).await {
-                    Ok(checkpoint) => checkpoint,
-                    Err(error) => {
-                        self.health.storage_error = Some(error);
-                        None
-                    }
-                };
-                let event_source = event_source(&source);
-                let event_baseline = match self.reader.checkpoint(event_source).await {
-                    Ok(checkpoint) => checkpoint,
-                    Err(error) => {
-                        self.health.storage_error = Some(error);
-                        None
-                    }
-                };
                 if let Some(checkpoint) = &baseline
                     && let Some(snapshot) = &checkpoint.snapshot
                 {
@@ -373,9 +379,7 @@ impl Collector {
                         .buckets
                         .first()
                         .map_or(packet.observed_at_ms, |bucket| bucket.start_ms);
-                    if first > snapshot.observed_at_ms.saturating_add(MINUTE_MS) {
-                        self.health.source_gap = Some((snapshot.observed_at_ms, first));
-                    }
+                    note_gap(&mut self.health, snapshot.observed_at_ms, first);
                 }
                 self.states.push(State {
                     committed_at_ms: baseline
@@ -408,6 +412,7 @@ impl Collector {
                     event_flight: None,
                     submitted: Instant::now(),
                 });
+                self.live.send_replace(Some(Arc::new(packet.clone())));
                 self.states.len() - 1
             }
         };
@@ -426,6 +431,13 @@ impl Collector {
             }
             self.health.stale_snapshots = self.health.stale_snapshots.saturating_add(1);
             return Ok(());
+        }
+        if state.at != 0 {
+            let first = packet
+                .buckets
+                .first()
+                .map_or(packet.observed_at_ms, |bucket| bucket.start_ms);
+            note_gap(&mut self.health, state.at, first);
         }
         if packet.observed_at_ms < state.at || counters_decreased(&state.counters, &packet.counters)
         {
@@ -638,6 +650,28 @@ impl Collector {
         self.health.source_error = Some(error);
     }
 
+    fn note_dropped_packet(&mut self, packet: &StatisticsSnapshot) {
+        let Some(first) = packet.buckets.first().map(|bucket| bucket.start_ms) else {
+            return;
+        };
+        let last = packet
+            .buckets
+            .last()
+            .map_or(first, |bucket| bucket.start_ms);
+        let counted = self.dropped_minute_until.unwrap_or(0);
+        let fresh = packet
+            .buckets
+            .iter()
+            .filter(|bucket| bucket.start_ms > counted)
+            .count();
+        self.health.omitted_metric_minutes = self
+            .health
+            .omitted_metric_minutes
+            .saturating_add(fresh as u64);
+        self.dropped_minute_until = Some(last.max(counted));
+        note_gap(&mut self.health, first, last.saturating_add(MINUTE_MS));
+    }
+
     pub async fn shutdown(mut self, timeout: Duration) -> Result<super::ShutdownReport, Error> {
         super::validate_duration(timeout, Duration::from_secs(30))?;
         let end = Instant::now() + timeout;
@@ -670,6 +704,18 @@ impl Collector {
         report.timed_out |= timed_out;
         Ok(report)
     }
+}
+
+const SOURCE_GAP_MS: u64 = 2 * MINUTE_MS;
+
+fn note_gap(health: &mut CollectorHealth, from: u64, until: u64) {
+    if from == 0 || until <= from.saturating_add(SOURCE_GAP_MS) {
+        return;
+    }
+    health.source_gap = Some(match health.source_gap {
+        Some((start, end)) => (start.min(from), end.max(until)),
+        None => (from, until),
+    });
 }
 
 fn event_source(source: &SourceIdentity) -> SourceIdentity {

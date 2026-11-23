@@ -548,7 +548,7 @@ impl AdditionalMeasurements {
                 .upstream_statuses
                 .keys()
                 .any(|status| !(100..=599).contains(status))
-            || self.reason_latency.len() > 22
+            || self.reason_latency.len() > RejectionReason::ALL.len()
             || self.operations.len() > 11
         {
             return Err(Error::Invalid("invalid supplementary measurements"));
@@ -674,6 +674,18 @@ mod tests {
         a.validate().unwrap();
         a.sum_us = 0;
         assert!(a.validate().is_err());
+    }
+
+    #[test]
+    fn every_rejection_reason_fits_the_supplementary_latency_map() {
+        let mut values = AdditionalMeasurements::measured();
+        for reason in RejectionReason::ALL {
+            let mut latency = LatencyMeasurements::default();
+            latency.record(1);
+            values.reason_latency.insert(reason, latency);
+        }
+        assert_eq!(values.reason_latency.len(), RejectionReason::ALL.len());
+        values.validate().unwrap();
     }
 
     #[test]

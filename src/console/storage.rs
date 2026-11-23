@@ -72,7 +72,7 @@ impl StorageConfig {
             return Err(Error::Invalid("event retention is below clock resolution"));
         }
         if self.directory.as_os_str().is_empty()
-            || !(256 * 1024..=1024_u64.pow(4)).contains(&self.max_bytes)
+            || !(512 * 1024..=1024_u64.pow(4)).contains(&self.max_bytes)
         {
             return Err(Error::Invalid("invalid storage directory or capacity"));
         }
@@ -284,6 +284,13 @@ impl Store {
             .prepare("SELECT payload FROM decoy_correlations WHERE source=?1 AND first_seen>=?2")?;
         self.connection
             .prepare("SELECT evictions FROM correlation_state WHERE singleton=1")?;
+        self.connection.prepare(
+            "SELECT grain_ms,payload FROM history_buckets WHERE source=?1 AND site=?2 AND start_ms>=?3 LIMIT 1",
+        )?;
+        self.connection
+            .prepare("SELECT source,site,start_ms FROM history_dirty WHERE start_ms>=?1 LIMIT 1")?;
+        self.connection
+            .prepare("SELECT source,generation FROM history_sources WHERE seen_ms>=?1 LIMIT 1")?;
         Ok(())
     }
 

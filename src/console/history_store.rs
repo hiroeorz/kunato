@@ -344,7 +344,7 @@ fn load_bucket(
     if bucket.start_ms != start || bucket.grain != Grain::from_milliseconds(grain)? {
         return Err(Error::Invalid("history key mismatch"));
     }
-    let mut statement = connection.prepare("SELECT reason,payload FROM rejection_buckets WHERE source=?1 AND site=?2 AND start_ms=?3 ORDER BY reason LIMIT 23")?;
+    let mut statement = connection.prepare("SELECT reason,payload FROM rejection_buckets WHERE source=?1 AND site=?2 AND start_ms=?3 ORDER BY reason")?;
     let raw = statement
         .query_map(params![source, site, start as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

@@ -340,9 +340,10 @@ fn parse_fields(input: &str) -> Option<BTreeMap<String, String>> {
                                 }
                                 index += 3;
                             }
-                            byte => {
-                                value.push(byte as char);
-                                index += 1;
+                            _ => {
+                                let ch = input[index..].chars().next()?;
+                                value.push(ch);
+                                index += ch.len_utf8();
                             }
                         }
                     }
@@ -427,6 +428,15 @@ mod tests {
         let entry = parse_line(&line);
         assert_eq!(entry.field("reason"), Some("line\nnext\tx\u{1b}[31m"));
         assert_eq!(entry.message, "request rejected");
+    }
+
+    #[test]
+    fn parses_a_backslash_before_a_multibyte_character_without_panicking() {
+        let line = format!(
+            "{PREFIX}2026-10-21T09:35:17.234772Z  WARN kunato::proxy::server: request rejected reason=\"\\é\\😀\""
+        );
+        let entry = parse_line(&line);
+        assert_eq!(entry.field("reason"), Some("é😀"));
     }
 
     #[test]

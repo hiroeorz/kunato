@@ -114,7 +114,7 @@ Keep configured policy denial, service overload, and attack classification
 distinguishable even when the HTTP status is similar.
 
 Persist a separate statistics series per supported primary terminal reason,
-using the 22 fixed identifiers defined in `RejectionReason`. Each rejected
+using the 23 fixed identifiers defined in `RejectionReason`. Each rejected
 request contributes once to one reason. Preserve independently measured
 overall totals and the same UTC precision/expiry policy for every reason.
 Show reason rejection rate against all matching requests separately from

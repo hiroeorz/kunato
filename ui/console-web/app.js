@@ -2436,6 +2436,9 @@
       if (collection.source_error) {
         row("source error", collection.source_error, "level-bad");
       }
+      if (collection.checkpoint_error) {
+        row("checkpoint error", collection.checkpoint_error, "level-warn");
+      }
       if (collection.storage_error) {
         row("storage error", collection.storage_error, "level-bad");
       }

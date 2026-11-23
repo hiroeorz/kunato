@@ -1776,7 +1776,7 @@ console:
 | `source` | `admin.listen` | Loopback admin listener serving `/console/snapshot`; must be loopback with a nonzero port |
 | `instance` | `local-waf` | History scope name, 1..120 bytes of `[A-Za-z0-9._:/-]`; changing it starts a new history scope |
 | `storage_dir` | `/var/lib/kunato/console` | Private SQLite directory; created 0700 on Unix |
-| `max_bytes` | `1073741824` | Database plus rollback journal budget, 256 KiB..1 TiB |
+| `max_bytes` | `1073741824` | Database plus rollback journal budget, 512 KiB..1 TiB |
 | `event_retention` | `168h` | Selected detail retention, 1 ms..30 days; statistics use the fixed 30-day policy |
 | `allowed_clients` | empty | IPv4/IPv6 CIDRs; empty permits loopback peers only |
 | `allowed_hosts` | empty | Console `Host` allowlist; required for a non-loopback listener |
@@ -1876,8 +1876,9 @@ them as a country-coloured traffic chart, a world map of WAF-rejected requests,
 and a top-10 country table, using the same embedded DB-IP lookup as request
 matching. The map geometry is embedded Natural Earth 1:50m data (public
 domain). Rejection detail uses the category-based
-attack classes shared with `kunato log`, with built-in guard causes kept separate;
-older intervals without class detail remain unavailable or unrecorded. Historical event
+attack classes shared with `kunato log`, plus built-in guard causes. A cause
+whose stable class name collides with an attack class (for example `jwt`,
+`protocol`, or `malicious-upload`) is summed under that class. Older intervals without class detail remain unavailable or unrecorded. Historical event
 drill-down, CSV export, comparison periods, and complete journal ingestion remain
 future work;
 see [remaining work](monitoring-console-remaining.md).
@@ -2273,6 +2274,11 @@ kunato log --since '1 hour ago'
 
 Reading the system journal normally requires root or membership in the
 `systemd-journal` group, so use `sudo kunato log` on a default install.
+`--journalctl` is a trusted operator override for non-standard installations:
+a restricted sudoers rule for `kunato log` must not allow arbitrary
+`--journalctl` paths, because the option names the executable that runs with
+the invoking privileges. The unit is read by name only; glob patterns are
+rejected.
 
 Options:
 
@@ -2292,7 +2298,7 @@ Options:
 | `--path REGEX` | Match the recorded `path` with a Rust regular expression. |
 | `--format raw\|table\|json` | Output format. `raw` is the default. |
 | `--no-color` | Disable ANSI colors in table output. |
-| `-u`, `--unit UNIT` | systemd unit name (default `kunato`). |
+| `-u`, `--unit UNIT` | systemd unit name (default `kunato`); globs are rejected. |
 | `--journalctl PATH` | journalctl executable (default `journalctl`). |
 | `--list-attacks` | Print the supported attack classes and exit. |
 
@@ -2352,8 +2358,8 @@ CVE signatures living in a non-CVE category (for example `ci-cd-servers` or
 
 #### Output
 
-`raw` prints the `journalctl --output=short-iso` line unchanged, including the
-local-time prefix. `table` prints one normalized row per matching event:
+`raw` prints the `journalctl --output=short-iso` line with control characters
+sanitized, including the local-time prefix. `table` prints one normalized row per matching event:
 
 ```text
 TIME                      LEVEL EVENT      ACTION ATTACK         CLIENT                    METHOD PATH                           STATUS RULE                          DETAIL

@@ -448,14 +448,14 @@ impl Observations {
         if !self.enabled {
             return;
         }
-        let sequence = self
-            .event_sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
         let Ok(mut detail) = self.detail.try_lock() else {
             self.detail_omitted.fetch_add(1, Ordering::Relaxed);
             return;
         };
+        let sequence = self
+            .event_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
         let second = self.now_ms() / 1000;
         if detail.second != second {
             detail.second = second;
@@ -466,7 +466,7 @@ impl Observations {
             self.detail_omitted.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        // Invalid metadata still consumes its admission slot before allocation/validation.
+        // Invalid metadata still consumes its admission slot before validation.
         detail.emitted += 1;
         if !priority {
             detail.ordinary_emitted += 1;
@@ -620,13 +620,7 @@ impl Observations {
                 site: None,
                 revision: sequence,
                 counters: counters(|index| values[index]),
-                connections: (values[CONNECTION_COVERAGE] != 0 || values[CONNECTION_SAMPLES] != 0)
-                    .then_some(ConnectionGauge {
-                        connection_milliseconds: values[CONNECTION_MS],
-                        observed_ms: values[CONNECTION_COVERAGE].min(MINUTE_MS) as u32,
-                        observed_max: values[CONNECTION_MAX],
-                        observed_min: Some(values[CONNECTION_MIN]),
-                    }),
+                connections: connection_gauge(&values),
                 coverage: Coverage {
                     observed_ms: observed,
                     incomplete: observed != MINUTE_MS as u32
@@ -808,6 +802,17 @@ fn rejection_classes(
 
 fn minute(time: u64) -> u64 {
     time / MINUTE_MS * MINUTE_MS
+}
+
+fn connection_gauge(values: &[u64; FIELDS]) -> Option<ConnectionGauge> {
+    (values[CONNECTION_COVERAGE] != 0 || values[CONNECTION_SAMPLES] != 0).then_some(
+        ConnectionGauge {
+            connection_milliseconds: values[CONNECTION_MS],
+            observed_ms: values[CONNECTION_COVERAGE].min(MINUTE_MS) as u32,
+            observed_max: values[CONNECTION_MAX],
+            observed_min: (values[CONNECTION_MIN] != u64::MAX).then_some(values[CONNECTION_MIN]),
+        },
+    )
 }
 
 struct RequestMeasurement {
@@ -1247,6 +1252,16 @@ mod tests {
         history.epoch_ms = 0;
         history.newest.store(0, Ordering::Relaxed);
         Arc::new(history)
+    }
+
+    #[test]
+    fn an_unset_connection_minimum_is_not_exported_as_a_value() {
+        let mut values = [0_u64; FIELDS];
+        values[CONNECTION_COVERAGE] = 1_000;
+        values[CONNECTION_MAX] = 3;
+        values[CONNECTION_MIN] = u64::MAX;
+        let gauge = connection_gauge(&values).expect("covered minute");
+        assert_eq!(gauge.observed_min, None);
     }
 
     #[tokio::test]

@@ -376,6 +376,17 @@ async fn auth_session_flow_and_bearer_access() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
+    let (status, _, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/live",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
     let token_path = temp.path().join("console-token");
     let token = std::fs::read_to_string(&token_path).expect("token file");
     let token = token.trim();
@@ -585,6 +596,8 @@ async fn tls_serves_a_combined_key_and_chain_bundle() {
         &format!(
             "  tls:
     cert_file: {}
+  auth:
+    enabled: true
 ",
             bundle.display()
         ),
@@ -611,6 +624,48 @@ async fn tls_serves_a_combined_key_and_chain_bundle() {
     let response = String::from_utf8_lossy(&response);
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("\"tls\":true"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("strict-transport-security: max-age=31536000"),
+        "{response}"
+    );
+
+    let token = std::fs::read_to_string(temp.path().join("console-token")).expect("token file");
+    let body = format!("{{\"token\":\"{}\"}}", token.trim());
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(certified.cert.der().clone())
+        .expect("trust anchor");
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let stream = TcpStream::connect(running.address).await.expect("connect");
+    let mut stream = connector.connect(name, stream).await.expect("handshake");
+    stream
+        .write_all(
+            format!(
+                "POST /api/v1/session HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write login");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.expect("read login");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.contains("set-cookie: __Host-kunato_console="),
+        "{response}"
+    );
+    for attribute in ["Secure", "HttpOnly", "SameSite=Strict"] {
+        assert!(response.contains(attribute), "{attribute}: {response}");
+    }
 
     running.stop().await;
     drop(tx);

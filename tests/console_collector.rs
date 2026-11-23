@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kunato::console::collector::{Collector, CollectorConfig};
-use kunato::console::model::{RejectionReason, SourceIdentity};
+use kunato::console::model::{MINUTE_MS, RejectionReason, SourceIdentity};
 use kunato::console::{Error, ReadWindow, StorageConfig, Store, WriterConfig};
 use kunato::observations::{self, Observations, StatisticsSnapshot};
 
@@ -308,6 +308,71 @@ async fn locked_database_does_not_wait_in_tick_or_stop_live_statistics() {
     let mut store = Store::open(storage).unwrap();
     let packet = history.snapshot(0).unwrap();
     assert!(store.checkpoint(&source(&packet)).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_failed_checkpoint_read_is_retried_without_disabling_persistence() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::new(temp.path().join("history"));
+    let mut collector =
+        Collector::start(storage.clone(), fast_writer(), CollectorConfig::default())
+            .await
+            .unwrap();
+    let history = Arc::new(Observations::new());
+    requests(&history, 1, false).await;
+    let first = history.snapshot(0).unwrap();
+    let admin = rusqlite::Connection::open(storage.directory.join("history.sqlite3")).unwrap();
+    admin
+        .execute_batch("ALTER TABLE checkpoints RENAME TO checkpoints_offline;")
+        .unwrap();
+    collector.receive(first).await.unwrap();
+    assert!(collector.health().checkpoint_error.is_some());
+    assert!(collector.health().storage_error.is_none());
+
+    admin
+        .execute_batch("ALTER TABLE checkpoints_offline RENAME TO checkpoints;")
+        .unwrap();
+    requests(&history, 1, false).await;
+    let next = history.snapshot(0).unwrap();
+    collector.receive(next.clone()).await.unwrap();
+    assert!(collector.health().checkpoint_error.is_none());
+    committed(&mut collector).await;
+    collector.shutdown(Duration::from_secs(1)).await.unwrap();
+    let mut store = Store::open(storage).unwrap();
+    assert_eq!(
+        store.checkpoint(&source(&next)).unwrap().unwrap().sequence,
+        next.sequence
+    );
+}
+
+#[tokio::test]
+async fn a_paused_collector_reports_the_missing_minutes_as_a_source_gap() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::new(temp.path().join("history"));
+    let mut collector = Collector::start(storage, fast_writer(), CollectorConfig::default())
+        .await
+        .unwrap();
+    let history = Arc::new(Observations::new());
+    requests(&history, 1, false).await;
+    let first = history.snapshot(0).unwrap();
+    collector.receive(first.clone()).await.unwrap();
+    committed(&mut collector).await;
+    assert!(collector.health().source_gap.is_none());
+
+    let shift = 15 * MINUTE_MS;
+    let mut later = first.clone();
+    later.sequence += 1;
+    later.observed_at_ms += shift;
+    for bucket in &mut later.buckets {
+        bucket.start_ms += shift;
+    }
+    for event in &mut later.events {
+        event.occurred_at_ms += shift;
+    }
+    later.validate().unwrap();
+    collector.receive(later).await.unwrap();
+    assert!(collector.health().source_gap.is_some());
+    collector.shutdown(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]

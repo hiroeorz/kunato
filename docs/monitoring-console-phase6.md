@@ -120,8 +120,8 @@ most 4 KiB:
 - A wrong token returns `401 {"error":"authentication failed"}` with no
   distinction between missing and incorrect input.
 - More than 5 failures from one address within 60 seconds return `429` with
-  `Retry-After: 60`. The limiter holds at most 1,024 addresses; expired entries
-  are pruned first.
+  `Retry-After` set to the remaining seconds of the 60-second window. The
+  limiter holds at most 1,024 addresses; expired entries are pruned first.
 - Query parameters, other content types, malformed JSON, and oversized bodies
   are rejected with `400`, `413`, or `415`.
 - Login is not available when authentication is disabled; the session endpoint

@@ -213,12 +213,13 @@ replacement. Phase 3 records pending materialization durably and commits
 coarser replacement together with child deletion.
 Do not create a database per reason or a row per rejected request.
 
-The current `RejectionReason` model supplies 22 stable reason identifiers:
+The current `RejectionReason` model supplies 23 stable reason identifiers:
 
 - `rule`, `response_rule`, `rate_limit`, `ban`, `overload`.
 - `client_identity`, `host`, `admin_access`, `body`, `decode`.
 - `form`, `upload`, `graphql`, `saml`, `php_request`, `php_response`.
 - `hardening`, `jwt`, `decoy`, `behavior`, `protocol`, `response_inspection`.
+- `country_policy`.
 
 These are terminal mechanisms, not attack classes or arbitrary YAML rule names.
 For example, SQL injection and XSS can both terminate as `rule`; a separate
@@ -238,7 +239,7 @@ pages, and ordinary decoy lure responses do not create rejection-reason counts.
 Existing overlapping diagnostic counters are not additional primary reasons.
 
 Keep overall request and rejection totals independently. For a complete, stable
-interval, the sum of the 22 reason counts must equal its overall rejection
+interval, the sum of the 23 reason counts must equal its overall rejection
 count. A provisional/non-atomic snapshot can differ transiently; missing
 attribution can also make a minute incomplete. Preserve that state, suppress
 unsupported ratios, and never force equality by changing measured values.
@@ -485,7 +486,7 @@ Before release, validate:
 - Requests with overlapping rule/LOG/response outcomes and distinct decoy
   contexts.
 - Correct ratios, weighted gauges, peaks, histograms, and unique-count limits.
-- Reason-separated replay, all 22 stable identifiers, supported zero versus
+- Reason-separated replay, all 23 stable identifiers, supported zero versus
   unknown, and the primary-reason sum invariant on complete stable intervals.
 - Overall extrema versus reason extrema with peaks in different minutes, and
   a source restart within one base minute before rollup.

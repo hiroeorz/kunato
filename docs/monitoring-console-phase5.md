@@ -90,7 +90,7 @@ console:
 | `source` | `admin.listen` when the admin listener is enabled | Must be a loopback address with a nonzero port |
 | `instance` | `local-waf` | History scope name, 1..120 bytes of `[A-Za-z0-9._:/-]`; changing it starts a new history scope |
 | `storage_dir` | `/var/lib/kunato/console` | Private SQLite directory; created 0700 on Unix |
-| `max_bytes` | 1 GiB | Database plus rollback journal budget, 256 KiB..1 TiB |
+| `max_bytes` | 1 GiB | Database plus rollback journal budget, 512 KiB..1 TiB |
 | `event_retention` | `168h` (7 days) | Selected detail retention, 1 ms..30 days |
 | `allowed_clients` | empty | Phase 6 allowlist; empty means loopback peers only |
 | `allowed_hosts` | empty | Phase 6 Host validation; required for a non-loopback listener |
@@ -181,7 +181,7 @@ Common behavior:
     "source_omitted_events": 0, "source_gap": null,
     "source_error": null, "storage_error": null
   },
-  "writer": {"state": "running", "pending_items": 0, "pending_bytes": 0,
+  "writer": {"state": "running", "queued_items": 0, "outstanding_bytes": 0,
              "committed_batches": 12, "failed_batches": 0},
   "now_ms": 1763312401000
 }
@@ -197,7 +197,12 @@ Unavailable values are `null`; the UI must not render them as zero.
 - `limit` is 1..128, default 24. The response is additionally bounded by 4 MiB
   of encoded buckets; a cut response reports `truncated: true` and the next
   available start.
-- `site` filters the Phase 4 host-policy site scope.
+- `site` is reserved for the Phase 4 host-policy site scope. Primary minute
+  buckets are currently recorded globally with an empty site, so this parameter
+  only matches explicitly site-scoped rows and normally returns an empty page.
+  Per-site primary history remains [remaining work](monitoring-console-remaining.md).
+  A site value follows the stored identifier charset; wildcard host-policy
+  names are not valid query values.
 - `revision` continues a paginated read from a previous response; a changed
   history returns `409` so a caller does not mix revisions.
 - The instance always comes from the console configuration, never the client.
@@ -238,7 +243,7 @@ retry: 3000
 
 event: state
 id: <generation>:<sequence>
-data: {"version":1,"replayed":true,"snapshot":{...},"health":{...}}
+data: {"version":1,"replayed":true,"snapshot":{...},"collection":{...},"writer":{...}}
 
 : keepalive
 ```
@@ -257,9 +262,9 @@ data: {"version":1,"replayed":true,"snapshot":{...},"health":{...}}
   a disconnection.
 - At most 16 streams are served. Frames are admitted with a nonblocking send
   into a small bounded channel; a slow browser skips intermediate states
-  instead of growing memory or delaying collection. A subscriber that stays
-  more than 120 seconds behind is disconnected and reconnects with the latest
-  state.
+  instead of growing memory or delaying collection. A subscriber whose bounded
+  channel stays full for more than 120 seconds is disconnected and reconnects
+  with the latest state.
 - A generation change is visible in the payload; the client must not add counts
   across generations.
 

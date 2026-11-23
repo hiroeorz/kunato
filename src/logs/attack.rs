@@ -171,6 +171,7 @@ const ATTACK_CLASSES: &[AttackClass] = &[
             "spring-actuator",
             "ai-service-management",
             "ci-cd-servers",
+            "installer-endpoints",
         ],
     },
     AttackClass {
@@ -352,6 +353,11 @@ mod tests {
                 category.name
             );
         }
+    }
+
+    #[test]
+    fn installer_endpoints_are_classified_even_while_the_category_is_disabled() {
+        assert_eq!(attack_name("installer-endpoints"), "exposure");
     }
 
     #[test]

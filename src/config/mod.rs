@@ -3908,8 +3908,8 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
     if spec.storage_dir.as_os_str().is_empty() {
         issues.push("console.storage_dir must not be empty".to_owned());
     }
-    if !(256 * 1024..=1024_u64.pow(4)).contains(&spec.max_bytes) {
-        issues.push("console.max_bytes must be between 256 KiB and 1 TiB".to_owned());
+    if !(512 * 1024..=1024_u64.pow(4)).contains(&spec.max_bytes) {
+        issues.push("console.max_bytes must be between 512 KiB and 1 TiB".to_owned());
     }
     if spec.event_retention < Duration::from_millis(1)
         || spec.event_retention > Duration::from_millis(crate::console::history::RETENTION_MS)
@@ -8257,6 +8257,13 @@ console: { enabled: true }
         )
         .expect_err("invalid instance");
         assert!(error.to_string().contains("console.instance"), "{error}");
+    }
+
+    #[test]
+    fn console_refuses_a_capacity_below_schema_initialization() {
+        let error = parse_with(BASE, "console: { enabled: true, max_bytes: 262144 }\n")
+            .expect_err("capacity below the schema minimum");
+        assert!(error.to_string().contains("512 KiB"), "{error}");
     }
 
     #[test]

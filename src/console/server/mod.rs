@@ -38,6 +38,7 @@ use super::runtime::LiveState;
 use auth::{Auth, Login, session_cookie_name};
 
 const MAX_CONNECTIONS: usize = 128;
+const MAX_DENIED_CONNECTIONS: usize = 16;
 const MAX_LIVE_STREAMS: usize = 16;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_GRACE: Duration = Duration::from_secs(5);
@@ -126,6 +127,7 @@ impl ConsoleServer {
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let denied = Arc::new(Semaphore::new(MAX_DENIED_CONNECTIONS));
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
@@ -138,8 +140,13 @@ impl ConsoleServer {
                     match accepted {
                         Ok((stream, peer)) => {
                             if !peer_allowed(&self.context.console, peer.ip()) {
+                                let Ok(permit) = Arc::clone(&denied).try_acquire_owned() else {
+                                    drop(stream);
+                                    continue;
+                                };
                                 warn!(client = %peer, "console client denied by the source allowlist");
                                 tokio::spawn(async move {
+                                    let _permit = permit;
                                     let mut stream = stream;
                                     // Drain part of the request first: closing
                                     // with unread input would reset the
@@ -227,7 +234,8 @@ async fn handle(
     request: Request<Incoming>,
     connection: Connection,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    Ok(secure(route(request, connection).await))
+    let tls = connection.tls;
+    Ok(secure(route(request, connection).await, tls))
 }
 
 async fn route(request: Request<Incoming>, connection: Connection) -> Response<ProxyBody> {
@@ -570,36 +578,33 @@ fn live(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBo
         Some(auth) => {
             let bearer_ok =
                 bearer(request.headers()).is_some_and(|token| auth.token_matches(token.as_bytes()));
-            let name = session_cookie_name(connection.tls);
-            let session = if bearer_ok {
-                None
-            } else {
-                session_cookie(request.headers(), name)
-            };
-            match session {
-                Some(session) => {
-                    let Some(expiry) = auth.session_expiry(session, Instant::now()) else {
-                        return error_json(StatusCode::UNAUTHORIZED, "authentication required");
-                    };
-                    (
-                        SessionGuard {
-                            auth: Some(Arc::clone(auth)),
-                            session: Some(session.to_owned()),
-                            expiry: Some(expiry),
-                        },
-                        Some(auth.subscribe_revocations()),
-                    )
-                }
+            if bearer_ok {
                 // The operator token authenticates without a session. It has
                 // no server-side expiry to enforce.
-                None => (
+                (
                     SessionGuard {
                         auth: None,
                         session: None,
                         expiry: None,
                     },
                     None,
-                ),
+                )
+            } else {
+                let name = session_cookie_name(connection.tls);
+                let Some(session) = session_cookie(request.headers(), name) else {
+                    return error_json(StatusCode::UNAUTHORIZED, "authentication required");
+                };
+                let Some(expiry) = auth.session_expiry(session, Instant::now()) else {
+                    return error_json(StatusCode::UNAUTHORIZED, "authentication required");
+                };
+                (
+                    SessionGuard {
+                        auth: Some(Arc::clone(auth)),
+                        session: Some(session.to_owned()),
+                        expiry: Some(expiry),
+                    },
+                    Some(auth.subscribe_revocations()),
+                )
             }
         }
         None => (
@@ -1041,7 +1046,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn secure(mut response: Response<ProxyBody>) -> Response<ProxyBody> {
+fn secure(mut response: Response<ProxyBody>, tls: bool) -> Response<ProxyBody> {
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -1056,6 +1061,12 @@ fn secure(mut response: Response<ProxyBody>) -> Response<ProxyBody> {
         HeaderValue::from_static("no-referrer"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    if tls {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000"),
+        );
+    }
     response
 }
 
