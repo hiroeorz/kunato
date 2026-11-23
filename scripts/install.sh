@@ -429,6 +429,7 @@ initialize_configuration() {
         "$BIN_PATH" init "$@"
         chown root:kunato "$CONFIG_PATH"
         chmod 0640 "$CONFIG_PATH"
+        log "the generated configuration uses mode: detection: BLOCK rules and behavioral/decoy blocks are logged but not enforced. Review the audit log, add exclusions, then set mode: blocking to enforce."
     fi
 
     if [ "$had_rules" -eq 0 ] || [ ! -f "$RULES_FILE.update-state" ]; then

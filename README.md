@@ -40,6 +40,7 @@ Traditional WAF setups often require either paid cloud services or a complex sta
 
 ### Threat Detection & Deep Inspection
 - **Categorized rule sets** — Rules are grouped into named categories (for example `sql-injection` or `xss`). Each category defines a default action, and individual rules can override it.
+- **Detection-only rollout** — New installations start with `mode: detection`, which keeps each rule's BLOCK/LOG designation but records BLOCK matches (and behavioral/decoy would-be blocks) in the audit log while forwarding the traffic. Review `sudo kunato log --action BLOCK`, add minimal exclusions (a scoped `ALLOW` rule or `overrides_file`), then set `mode: blocking`. Availability controls such as rate limits and body limits stay enforced throughout. See [Detection-only rollout](docs/development.md#detection-only-rollout).
 - **Daily CVE-driven rule updates** — An optional updater automatically refreshes the managed rule set once a day with signatures for the latest exploited CVEs, using conditional requests, SHA256 verification, and full validation before an atomic swap.
 - **Encoded body inspection** — Bodies compressed with gzip, deflate, brotli, or zstd are decompressed for matching, and request bodies are additionally decoded by content type (`application/x-www-form-urlencoded` and JSON escapes). Forwarded traffic is never modified.
 - **Upload content inspection** — Multipart file parts are checked against their declared type, filename extension, and leading bytes: a part that claims an image, PDF, office, media, or font type must start with that format's signature, so source code renamed to `.jpg` or `.pdf` is rejected together with executable, script, or markup content behind a safe claim, PHP short tags, and raw write bodies sent to an executable or script path. `strict` mode also covers generic binary claims.
@@ -81,6 +82,8 @@ Client ──────►  ┌───────────────�
 5. If no rule matches, the request is forwarded to the upstream (pass-through).
 6. Response-phase categories run on the upstream response the same way. `BLOCK` replaces the upstream response with the configured response; `ALLOW` stops response evaluation and passes the response through unchanged.
 
+With `mode: detection`, a `BLOCK` match is recorded as a detection and evaluation continues; the request or response is forwarded instead of rejected. `ALLOW` and `LOG` keep their usual meaning. This is the default for new installations, and switching to `mode: blocking` enforces the rules without restarting.
+
 ## Getting Started
 
 ### 1. Install on a Linux Server
@@ -119,9 +122,13 @@ another name or an IP address (for example a health check), add it with
 [Host allowlist](docs/development.md#host-allowlist)).
 
 The service starts automatically; the first start orders the certificate in
-the background, so allow a few seconds before TLS works. A successful install
-or `kunato upgrade` ends with a colored logo banner; `--no-banner` on the
-installer (or `KUNATO_NO_BANNER`) suppresses it, and `NO_COLOR` prints it
+the background, so allow a few seconds before TLS works. `kunato init` writes
+`mode: detection` for a new installation: BLOCK rules, behavioral signals, and
+decoy reuse are recorded in the audit log but not enforced, so you can review
+false positives before enabling blocking. Edit `/etc/kunato/kunato.yaml`, set
+`mode: blocking`, and the watcher applies it without a restart. A successful
+install or `kunato upgrade` ends with a colored logo banner; `--no-banner` on
+the installer (or `KUNATO_NO_BANNER`) suppresses it, and `NO_COLOR` prints it
 without colors.
 
 ### 2. Inspect Status, Logs, and Metrics

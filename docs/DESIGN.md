@@ -123,8 +123,9 @@ Components:
    bounded local responses on every method, including local fallback during
    quota/entropy failures; they never contact the upstream. A returned HMAC
    credential is observed with fixed work/byte limits; optional BLOCK affects
-   only exact authentication on the owned API. There is no decoy source ban or
-   continuity-score contribution. A shared runtime retains the signing key and
+   only exact authentication on the owned API, and under `mode: detection` it
+   records the reuse while leaving the sink at `401`. There is no decoy source
+   ban or continuity-score contribution. A shared runtime retains the signing key and
    quotas across reloads. See [decoy design](decoy-design.md).
 5. **Buffer body prefix** — read up to `limits.max_body_bytes` into a bounded
    prefix. With the default `body_inspection: strict`, the prefix is evaluated
@@ -394,6 +395,7 @@ struct CompiledConfig {
     categories: Vec<CompiledCategory>,
     upstream: Upstream,
     allowed_hosts: Option<AllowedHosts>,
+    mode: EnforcementMode,              // blocking (default) | detection
     protection: ProtectionConfig,
     timeouts: Timeouts,
     limits: Limits,
@@ -449,6 +451,17 @@ blocked/log record names the last matching rule.
 response: pass through unchanged); `BLOCK` responds and stops; `LOG` records and
 continues. No match means pass-through. See AGENTS.md invariant 1 for the request
 contract; response rules follow the same contract with the response view.
+
+The global `mode` overrides enforcement, not the rule action. In
+`mode: detection` a matching `BLOCK` is appended to the evaluation outcome as a
+detection and evaluation continues, so request traffic is forwarded and a
+response-phase match leaves the upstream response intact. `ALLOW` still
+short-circuits, `LOG` is unchanged, and a rate-limited rule records
+`rate_limited=true`. Availability, protocol, and admission controls outside
+the rule engine (rate limits, connection caps, body/form/upload/SAML/GraphQL/
+PHP checks, hardening, country policy, host policy, and `admin_access`) remain
+enforced. See `docs/development.md`,
+"Detection-only rollout".
 
 ### Matching semantics
 
@@ -539,6 +552,8 @@ Protection is automatic and independent of the rule set. It consists of:
    to `BLOCK` so the ban path is exercised; the global signal with `BLOCK`
    rejects authentication paths only for sources that contributed a recent
    failure. A `BLOCK` flag applies a normal ban after the current response.
+   Under the global `mode: detection`, a `BLOCK` flag is recorded with
+   `blocked=false` and applies neither a ban nor a global authentication block.
    State is inline in the tracked-source entry, and no
    path contents are stored. See
    [the design and operations notes](behavioral-detection.md) for the signal

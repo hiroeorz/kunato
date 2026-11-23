@@ -177,6 +177,8 @@ pub struct Policy {
     pub enabled: bool,
     pub token_ttl: Duration,
     pub on_reuse: Action,
+    /// Effective reuse rejection: `on_reuse: BLOCK` in blocking mode only.
+    pub block_reuse: bool,
     pub issuance: Issuance,
     pub verification: Verification,
     pub observation: Observation,
@@ -189,6 +191,7 @@ impl Policy {
         spec: &Spec,
         allowed: Option<&AllowedHosts>,
         protection: bool,
+        enforce_blocks: bool,
         issues: &mut Vec<String>,
     ) -> Self {
         let mut error = |reason: &str| issues.push(format!("decoys: {reason}"));
@@ -321,6 +324,7 @@ impl Policy {
             enabled: spec.enabled,
             token_ttl: spec.token_ttl,
             on_reuse: spec.on_reuse,
+            block_reuse: enforce_blocks && spec.on_reuse == Action::Block,
             issuance: spec.issuance,
             verification: spec.verification,
             observation: spec.observation,

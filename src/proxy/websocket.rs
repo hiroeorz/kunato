@@ -421,6 +421,17 @@ async fn pump_upstream_to_client<R, W>(
                         "WebSocket response payload logged"
                     );
                 }
+                for record in outcome.detections {
+                    warn!(
+                        client = %source_ip,
+                        direction = "server_to_client",
+                        category = %record.category,
+                        rule = %record.rule,
+                        action = record.action.as_str(),
+                        enforced = false,
+                        "WebSocket response payload would be blocked (detection-only mode)"
+                    );
+                }
                 for part in raw {
                     if writer.write_all(&part).await.is_err() {
                         return;
@@ -649,6 +660,16 @@ async fn pump_client_to_upstream<R, W>(
                 category = %record.category,
                 rule = %record.rule,
                 "WebSocket application payload logged"
+            );
+        }
+        for record in outcome.detections {
+            warn!(
+                client = %source_ip,
+                category = %record.category,
+                rule = %record.rule,
+                action = record.action.as_str(),
+                enforced = false,
+                "WebSocket application payload would be blocked (detection-only mode)"
             );
         }
         for part in raw {

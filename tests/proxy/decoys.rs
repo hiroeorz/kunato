@@ -219,6 +219,31 @@ async fn decoy_without_host_allowlisting_keeps_other_sites_on_normal_routing() {
 }
 
 #[tokio::test]
+async fn decoy_reuse_detection_mode_does_not_reject_the_sink() {
+    let (upstream, count) = receipts().await;
+    let config = decoy_config(upstream).replace("protection:", "mode: detection\nprotection:");
+    let running = start_kunato(&config).await;
+    let (status, body, _) = request(running.addr, Method::GET, "/.env", &[], &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = extract_token(&body);
+
+    let (status, _, _) = request(
+        running.addr,
+        Method::GET,
+        SINK,
+        &[("x-api-key", &token)],
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(count.load(Ordering::Relaxed), 0);
+    assert_eq!(running.metrics.decoys.blocked.load(Ordering::Relaxed), 0);
+    assert_eq!(running.metrics.decoys.detected.load(Ordering::Relaxed), 1);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn decoy_cross_source_credentials_block_only_the_owned_sink() {
     let (upstream, count) = receipts().await;
     let running = start_kunato(&decoy_config(upstream)).await;

@@ -290,6 +290,8 @@ fn install_with_stamps(
         .map(|category| category.rules.len())
         .sum();
     let body_inspection_warning = new_config.body_inspection_warning();
+    let detection_warning = new_config.detection_warning();
+    let mode = new_config.mode();
     let allowed_hosts_warning = new_config.allowed_hosts_warning();
     let admin_access_warning = new_config.admin_access_warning();
     let decoy_warnings = new_config.decoy_warnings();
@@ -307,6 +309,9 @@ fn install_with_stamps(
     if let Some(warning) = body_inspection_warning {
         warn!("{warning}");
     }
+    if let Some(warning) = detection_warning {
+        warn!("{warning}");
+    }
     if let Some(warning) = allowed_hosts_warning {
         warn!("{warning}");
     }
@@ -319,7 +324,12 @@ fn install_with_stamps(
     for route in decoy_routes {
         info!("{route}");
     }
-    info!(categories, rules, "configuration reloaded");
+    info!(
+        categories,
+        rules,
+        mode = mode.as_str(),
+        "configuration reloaded"
+    );
     Some(sources)
 }
 

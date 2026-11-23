@@ -13,6 +13,15 @@
 listen: 127.0.0.1:8080
 upstream: http://127.0.0.1:3000
 
+# Global enforcement mode. `blocking` (the default when omitted) enforces BLOCK
+# rules, behavioral bans, and decoy reuse rejection. `detection` records those
+# decisions in the audit log and forwards the traffic, which lets a new
+# installation remove false positives first; `kunato init` generates a
+# detection-only configuration for that rollout. Availability limits (rate
+# limits, connection caps, body/form/upload limits, host policy) stay enforced
+# in both modes. Switch to `blocking` after reviewing the audit log.
+# mode: detection
+
 # Optional Host/authority allowlist. Uncomment and list every name and IP
 # address clients use to reach this server; other Host headers are rejected
 # with 421 before rule evaluation. `kunato init` seeds this from --acme-domain.

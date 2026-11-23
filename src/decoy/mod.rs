@@ -180,10 +180,12 @@ pub(crate) fn dispatch(
             bump(&metrics.decoys.limited[3]);
             return Some(fallback(StatusCode::SERVICE_UNAVAILABLE));
         }
-        let blocked = credential && policy.on_reuse == Action::Block;
+        let blocked = credential && policy.block_reuse;
         if blocked {
             bump(&metrics.decoys.blocked);
             crate::observations::reject(crate::console::model::RejectionReason::Decoy);
+        } else if credential && policy.on_reuse == Action::Block {
+            bump(&metrics.decoys.detected);
         }
         bump(&metrics.decoys.responses[1]);
         response::response(

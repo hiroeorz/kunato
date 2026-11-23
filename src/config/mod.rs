@@ -89,6 +89,42 @@ impl Action {
     }
 }
 
+/// Global enforcement policy for decisions that can reject traffic.
+///
+/// `blocking` applies `BLOCK` actions, behavioral bans, and decoy reuse
+/// rejection. `detection` records those decisions in the audit log and lets the
+/// traffic continue, which lets a new installation tune exclusions before it
+/// starts enforcing. Resource, protocol, and admission controls (rate limits,
+/// connection caps, body/form/upload/SAML/GraphQL/PHP checks, hardening,
+/// country policy, host policy, and the administrative gate) stay enforced in
+/// both modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnforcementMode {
+    /// Record `BLOCK` decisions without enforcing them.
+    Detection,
+    /// Enforce `BLOCK` decisions (the default when `mode` is omitted).
+    #[default]
+    Blocking,
+}
+
+impl EnforcementMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Detection => "detection",
+            Self::Blocking => "blocking",
+        }
+    }
+
+    pub fn is_blocking(self) -> bool {
+        matches!(self, Self::Blocking)
+    }
+
+    pub fn is_detection(self) -> bool {
+        matches!(self, Self::Detection)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
@@ -393,6 +429,9 @@ pub struct ContentRouteSpec {
 pub struct ConfigSpec {
     pub listen: SocketAddr,
     pub upstream: String,
+    /// Enforce or only record `BLOCK` decisions. Omitted means `blocking`.
+    #[serde(default)]
+    pub mode: EnforcementMode,
     /// Host names and IP literals clients may use to reach this server. When
     /// absent, host checking is disabled; an empty list or null value is
     /// rejected.
@@ -1976,6 +2015,7 @@ pub struct ConsoleTls {
 #[derive(Debug, Clone)]
 pub struct Protection {
     pub enabled: bool,
+    pub mode: EnforcementMode,
     pub allowlist: Vec<IpNet>,
     pub max_connections_per_ip: u32,
     pub max_connections: u32,
@@ -2190,6 +2230,26 @@ pub struct CompiledConfig {
 }
 
 impl CompiledConfig {
+    /// Global enforcement policy. Detection mode records `BLOCK` decisions
+    /// without enforcing them; availability controls remain active.
+    pub fn mode(&self) -> EnforcementMode {
+        self.protection.mode
+    }
+
+    /// Warning to log while rule and policy blocks are recorded but not
+    /// enforced, so an operator cannot mistake detection for protection.
+    pub fn detection_warning(&self) -> Option<String> {
+        self.mode().is_detection().then(|| {
+            "mode is `detection`: BLOCK rule matches, behavioral bans, and decoy \
+             credential rejection are recorded but not enforced, so matching traffic is \
+             forwarded. Resource, protocol, and admission controls (rate limits, \
+             connection caps, body/form/upload/SAML/GraphQL/PHP checks, hardening, \
+             country policy, host policy, and administrative access) remain enforced. \
+             Review the audit log, add minimal exclusions, then set `mode: blocking`."
+                .to_owned()
+        })
+    }
+
     pub fn decoy_routes(&self) -> Vec<String> {
         if !self.decoys.enabled {
             return Vec::new();
@@ -2586,7 +2646,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
 
     validate_limits(&spec.limits, &mut issues);
     validate_timeouts(&spec.timeouts, &mut issues);
-    let protection = compile_protection(&spec.protection, &mut issues);
+    let protection = compile_protection(&spec.protection, spec.mode, &mut issues);
     validate_admin(&spec.admin, &mut issues);
     let console = compile_console(&spec.console, &spec.admin, &mut issues);
     validate_tls(&spec.tls, &mut issues);
@@ -2596,6 +2656,7 @@ fn compile(spec: ConfigSpec, sources: RulesSources) -> Result<CompiledConfig, Ve
         &spec.decoys,
         allowed_hosts.as_ref(),
         protection.enabled,
+        spec.mode.is_blocking(),
         &mut issues,
     );
     let client_ip = compile_client_ip(spec.client_ip.as_ref(), &mut issues);
@@ -4009,11 +4070,16 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
     }
 }
 
-fn compile_protection(spec: &ProtectionSpec, issues: &mut Vec<String>) -> Protection {
+fn compile_protection(
+    spec: &ProtectionSpec,
+    mode: EnforcementMode,
+    issues: &mut Vec<String>,
+) -> Protection {
     validate_protection(spec, issues);
     let behavior = compile_behavior(&spec.behavior, issues);
     Protection {
         enabled: spec.enabled,
+        mode,
         allowlist: spec
             .allowlist
             .as_deref()
@@ -5782,6 +5848,28 @@ tls: { acme: { enabled: true, domains: [example.com, www.example.com] } }
             error.to_string().contains("cannot be used with ALLOW"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn enforcement_mode_defaults_to_blocking() {
+        let config = parse_with(BASE, "categories: []\n").expect("valid config");
+        assert_eq!(config.mode(), EnforcementMode::Blocking);
+        assert!(config.detection_warning().is_none());
+    }
+
+    #[test]
+    fn enforcement_mode_accepts_detection() {
+        let config = parse_with(BASE, "mode: detection\ncategories: []\n").expect("valid config");
+        assert_eq!(config.mode(), EnforcementMode::Detection);
+        assert!(config.protection.mode.is_detection());
+        let warning = config.detection_warning().expect("detection warning");
+        assert!(warning.contains("not enforced"), "{warning}");
+    }
+
+    #[test]
+    fn rejects_an_unknown_enforcement_mode() {
+        let error = parse_with(BASE, "mode: monitor\ncategories: []\n").expect_err("must fail");
+        assert!(matches!(error, Error::ConfigParse(_)));
     }
 
     #[test]

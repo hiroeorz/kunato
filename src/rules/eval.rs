@@ -8,6 +8,8 @@ pub struct MatchRecord {
     pub rule: String,
     pub action: Action,
     pub phase: Phase,
+    /// The match was past the rule's own per-source budget.
+    pub rate_limited: bool,
 }
 
 #[derive(Debug)]
@@ -27,6 +29,9 @@ pub struct EvalOutcome {
     /// request" when a body could not be inspected completely.
     pub allowed: Option<MatchRecord>,
     pub logs: Vec<MatchRecord>,
+    /// BLOCK matches recorded without enforcement in the global detection
+    /// mode. Traffic is forwarded, but every entry is audited.
+    pub detections: Vec<MatchRecord>,
 }
 
 /// How a phase is evaluated. The WebSocket variants only apply the payload
@@ -125,6 +130,7 @@ fn evaluate_phase(
     mode: Mode,
 ) -> EvalOutcome {
     let mut outcome = EvalOutcome::default();
+    let detection = config.mode().is_detection();
 
     for category in config
         .categories
@@ -147,6 +153,15 @@ fn evaluate_phase(
             };
 
             match category.action {
+                Some(Action::Block) if detection => {
+                    outcome.detections.push(MatchRecord {
+                        category: category.name.clone(),
+                        rule: last.name.clone(),
+                        action: Action::Block,
+                        phase,
+                        rate_limited: false,
+                    });
+                }
                 Some(Action::Block) => {
                     outcome.blocked = Some(Blocked {
                         category: category.name.clone(),
@@ -162,6 +177,7 @@ fn evaluate_phase(
                     rule: last.name.clone(),
                     action: Action::Log,
                     phase,
+                    rate_limited: false,
                 }),
                 _ => {}
             }
@@ -174,6 +190,7 @@ fn evaluate_phase(
                 continue;
             }
 
+            let mut rate_limited = false;
             if let Some(limit) = &rule.limit {
                 let within = limits.is_some_and(|check| {
                     check.permit(&rule.limit_key, view.source_ip, limit, &config.protection)
@@ -181,6 +198,7 @@ fn evaluate_phase(
                 if within {
                     continue;
                 }
+                rate_limited = true;
             }
 
             let Some(action) = rule.action.or(category.action) else {
@@ -194,8 +212,18 @@ fn evaluate_phase(
                         rule: rule.name.clone(),
                         action,
                         phase,
+                        rate_limited: false,
                     });
                     return outcome;
+                }
+                Action::Block if detection => {
+                    outcome.detections.push(MatchRecord {
+                        category: category.name.clone(),
+                        rule: rule.name.clone(),
+                        action,
+                        phase,
+                        rate_limited,
+                    });
                 }
                 Action::Block => {
                     let response = rule
@@ -208,7 +236,7 @@ fn evaluate_phase(
                         rule: rule.name.clone(),
                         response,
                         phase,
-                        rate_limited: rule.limit.is_some(),
+                        rate_limited,
                     });
                     return outcome;
                 }
@@ -217,6 +245,7 @@ fn evaluate_phase(
                     rule: rule.name.clone(),
                     action,
                     phase,
+                    rate_limited: false,
                 }),
             }
         }
@@ -383,6 +412,76 @@ mod tests {
         assert!(outcome.blocked.is_some());
     }
 
+    #[test]
+    fn detection_mode_records_blocks_and_keeps_evaluating() {
+        let yaml = format!(
+            "{BASE}mode: detection
+categories:
+  - name: catch-all
+    action: BLOCK
+    rules:
+      - name: everything
+        match: {{ path: ^/ }}
+  - name: logging
+    action: LOG
+    rules:
+      - name: every-request
+        match: {{ path: ^/ }}
+"
+        );
+        let outcome = evaluate_request(&yaml, "/anything");
+        assert!(outcome.blocked.is_none());
+        assert_eq!(outcome.detections.len(), 1);
+        assert_eq!(outcome.detections[0].rule, "everything");
+        assert_eq!(outcome.detections[0].action, Action::Block);
+        assert_eq!(outcome.logs.len(), 1);
+    }
+
+    #[test]
+    fn detection_mode_keeps_allow_short_circuit() {
+        let yaml = format!(
+            "{BASE}mode: detection
+categories:
+  - name: catch-all
+    action: BLOCK
+    rules:
+      - name: everything
+        match: {{ path: ^/ }}
+  - name: trusted
+    action: ALLOW
+    rules:
+      - name: local
+        match: {{ path: ^/ }}
+"
+        );
+        let outcome = evaluate_request(&yaml, "/anything");
+        assert!(outcome.blocked.is_none());
+        assert_eq!(outcome.detections.len(), 1);
+        assert_eq!(outcome.allowed.expect("allow short-circuits").rule, "local");
+    }
+
+    #[test]
+    fn detection_mode_records_threshold_category() {
+        let yaml = format!(
+            "{BASE}mode: detection
+categories:
+  - name: anomaly
+    action: BLOCK
+    threshold: 2
+    rules:
+      - name: weak-one
+        match: {{ path: ^/x$ }}
+      - name: weak-two
+        match: {{ regex: beta }}
+"
+        );
+        let outcome = evaluate_request(&yaml, "/x?q=beta");
+        assert!(outcome.blocked.is_none());
+        assert_eq!(outcome.detections.len(), 1);
+        assert_eq!(outcome.detections[0].category, "anomaly");
+        assert_eq!(outcome.detections[0].rule, "weak-two");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rule_limit_is_transparent_until_exceeded() {
         use crate::protection::ProtectionState;
@@ -416,6 +515,43 @@ mod tests {
         let outcome = evaluate(&config, &view, Some(&state));
         let blocked = outcome.blocked.expect("blocked");
         assert!(blocked.rate_limited);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn detection_mode_rule_limit_records_instead_of_blocking() {
+        use crate::protection::ProtectionState;
+
+        let yaml = format!(
+            "{BASE}mode: detection
+categories:
+  - name: brute-force
+    action: BLOCK
+    rules:
+      - name: many-logins
+        limit: {{ requests: 1, window: 60s }}
+        match: {{ path: ^/login }}
+"
+        );
+        let config = config::parse(&yaml).expect("valid test config");
+        let state = ProtectionState::new();
+        let method = Method::POST;
+        let uri: Uri = "/login".parse().expect("valid URI");
+        let headers = HeaderMap::new();
+        let view = RequestView::new(
+            &method,
+            &uri,
+            &headers,
+            b"",
+            "127.0.0.1".parse().expect("valid IP"),
+        );
+
+        let outcome = evaluate(&config, &view, Some(&state));
+        assert!(outcome.detections.is_empty());
+
+        let outcome = evaluate(&config, &view, Some(&state));
+        assert!(outcome.blocked.is_none());
+        assert_eq!(outcome.detections.len(), 1);
+        assert!(outcome.detections[0].rate_limited);
     }
 
     #[test]
@@ -588,6 +724,26 @@ mod tests {
 
         let outcome = evaluate_response_for(&yaml, StatusCode::OK, b"nothing to see");
         assert!(outcome.blocked.is_none());
+    }
+
+    #[test]
+    fn detection_mode_response_records_without_replacing_it() {
+        let yaml = format!(
+            "{BASE}mode: detection
+categories:
+  - name: response-leak
+    phase: response
+    action: BLOCK
+    rules:
+      - name: leak
+        match: {{ regex: secret }}
+"
+        );
+        let outcome = evaluate_response_for(&yaml, StatusCode::OK, b"the secret is out");
+        assert!(outcome.blocked.is_none());
+        assert_eq!(outcome.detections.len(), 1);
+        assert_eq!(outcome.detections[0].phase, config::Phase::Response);
+        assert_eq!(outcome.detections[0].rule, "leak");
     }
 
     #[test]

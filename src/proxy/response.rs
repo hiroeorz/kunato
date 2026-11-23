@@ -258,7 +258,7 @@ pub(crate) async fn inspect(
             crate::config::Action::Allow,
         );
     }
-    if !outcome.logs.is_empty() {
+    if !outcome.logs.is_empty() || !outcome.detections.is_empty() {
         metrics.response_logged.fetch_add(1, Ordering::Relaxed);
     }
     for record in &outcome.logs {
@@ -273,6 +273,7 @@ pub(crate) async fn inspect(
             crate::console::model::Phase::Response,
             &record.category,
             &record.rule,
+            crate::console::model::Disposition::Log,
         );
         info!(
             phase = record.phase.as_str(),
@@ -282,6 +283,38 @@ pub(crate) async fn inspect(
             client = %source.client_ip, peer = %source.peer,
             status = buffered.parts.status.as_u16(),
             "response rule matched"
+        );
+    }
+
+    if !outcome.detections.is_empty() {
+        metrics.response_detected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    for record in &outcome.detections {
+        crate::observations::rule_match(crate::console::model::Phase::Response, true);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Response,
+            &record.category,
+            &record.rule,
+            crate::config::Action::Log,
+        );
+        crate::observations::rule_detail(
+            crate::console::model::Phase::Response,
+            &record.category,
+            &record.rule,
+            crate::console::model::Disposition::Observe,
+        );
+        info!(
+            event = "response.detected",
+            phase = record.phase.as_str(),
+            category = %record.category,
+            rule = %record.rule,
+            action = record.action.as_str(),
+            enforced = false,
+            rate_limited = record.rate_limited,
+            client = %source.client_ip, peer = %source.peer,
+            status = buffered.parts.status.as_u16(),
+            "response would be blocked (detection-only mode)"
         );
     }
 

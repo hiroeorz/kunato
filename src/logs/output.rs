@@ -132,7 +132,7 @@ fn write_table(out: &mut impl Write, entry: &LogEntry, color: bool) -> io::Resul
     if color {
         let code = match event {
             "block" | "ban" => "\x1b[31m",
-            "rate-limit" | "reject" => "\x1b[33m",
+            "detect" | "rate-limit" | "reject" => "\x1b[33m",
             "match" => "\x1b[32m",
             "behavior" => "\x1b[35m",
             _ => "",

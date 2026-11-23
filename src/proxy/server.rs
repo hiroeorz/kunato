@@ -2280,16 +2280,18 @@ fn record_behavior(
             .metrics
             .behavior_global_auth_flags
             .fetch_add(1, Ordering::Relaxed);
+        let blocked =
+            flag.action == crate::config::BehaviorAction::Block && config.mode().is_blocking();
         warn!(
             failures = flag.failures,
             window_secs = flag.window.as_secs(),
             threshold = config.protection.behavior.global_auth.min_failures,
             action = flag.action.as_str(),
-            blocked = flag.action == crate::config::BehaviorAction::Block,
-            ban_seconds = flag.ban.as_secs(),
+            blocked,
+            ban_seconds = if blocked { flag.ban.as_secs() } else { 0 },
             "behavioral global authentication abuse detected"
         );
-        if flag.action == crate::config::BehaviorAction::Block {
+        if blocked {
             context
                 .metrics
                 .behavior_blocked
@@ -3079,7 +3081,7 @@ async fn process_inner(
             crate::config::Action::Allow,
         );
     }
-    if !outcome.logs.is_empty() {
+    if !outcome.logs.is_empty() || !outcome.detections.is_empty() {
         context.metrics.logged.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -3095,6 +3097,7 @@ async fn process_inner(
             crate::console::model::Phase::Request,
             &record.category,
             &record.rule,
+            crate::console::model::Disposition::Log,
         );
         info!(
             category = %record.category,
@@ -3104,6 +3107,38 @@ async fn process_inner(
             method = %parts.method,
             path = %crate::decoy::log_path(parts.uri.path()),
             "rule matched"
+        );
+    }
+
+    if !outcome.detections.is_empty() {
+        context.metrics.detected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    for record in &outcome.detections {
+        crate::observations::rule_match(crate::console::model::Phase::Request, true);
+        crate::observations::dimension_match(
+            crate::console::model::Phase::Request,
+            &record.category,
+            &record.rule,
+            crate::config::Action::Log,
+        );
+        crate::observations::rule_detail(
+            crate::console::model::Phase::Request,
+            &record.category,
+            &record.rule,
+            crate::console::model::Disposition::Observe,
+        );
+        info!(
+            event = "request.detected",
+            category = %record.category,
+            rule = %record.rule,
+            action = record.action.as_str(),
+            enforced = false,
+            rate_limited = record.rate_limited,
+            client = %source.client_ip, peer = %source.peer,
+            method = %parts.method,
+            path = %crate::decoy::log_path(parts.uri.path()),
+            "request would be blocked (detection-only mode)"
         );
     }
 

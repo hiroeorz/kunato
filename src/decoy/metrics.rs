@@ -7,6 +7,7 @@ pub struct Metrics {
     pub issued: AtomicU64,
     pub reuse: [AtomicU64; 2],
     pub blocked: AtomicU64,
+    pub detected: AtomicU64,
     pub limited: [AtomicU64; 5],
     pub incomplete: [AtomicU64; 7],
     pub invalid: [AtomicU64; 4],
@@ -87,6 +88,7 @@ impl Metrics {
         for (name, count) in [
             ("tokens_issued", &self.issued),
             ("blocked", &self.blocked),
+            ("detected", &self.detected),
             ("token_errors", &self.errors),
         ] {
             let _ = writeln!(

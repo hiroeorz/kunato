@@ -42,6 +42,7 @@ struct State {
     metrics: Arc<Metrics>,
     protection: Arc<ProtectionState>,
     block: bool,
+    reuse_block_configured: bool,
     _inspection: Option<crate::proxy::server::InspectionGuard>,
 }
 
@@ -259,7 +260,8 @@ impl Drop for State {
         }
         tracing::info!(site=%self.name, token_id=%evidence.id, client=%self.source.client_ip,peer=%self.source.peer,
             age_seconds=evidence.age,context=if evidence.credential {"credential"} else {"occurrence"},
-            location=evidence.location,action=if self.block && evidence.credential {"BLOCK"}else{"LOG"},
+            location=evidence.location,action=if self.reuse_block_configured && evidence.credential {"BLOCK"}else{"LOG"},
+            enforced=self.block && evidence.credential,
             incomplete=self.incomplete!=0,"decoy credential returned");
     }
 }
@@ -316,7 +318,8 @@ impl Observation {
             source_key: key,
             metrics,
             protection,
-            block: policy.on_reuse == super::config::Action::Block,
+            block: policy.block_reuse,
+            reuse_block_configured: policy.on_reuse == super::config::Action::Block,
             _inspection: inspection,
         })))
     }

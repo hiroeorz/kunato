@@ -380,6 +380,16 @@ impl InitArgs {
         out.push_str(&format!("upstream: {}\n", yaml_scalar(&self.upstream)));
 
         out.push_str(
+            "\n# Detection-only rollout. BLOCK rules, behavioral bans, and decoy credential\n\
+             # rejection are recorded in the audit log but not enforced, so a new\n\
+             # installation can remove false positives first. Review\n\
+             # `kunato log --action BLOCK`, add minimal exclusions to overrides_file, then\n\
+             # change this to `blocking`. Availability limits (rate limits, connection\n\
+             # caps, body/form/upload limits, host policy) stay enforced in both modes.\n\
+             mode: detection\n",
+        );
+
+        out.push_str(
             "\n# Loopback admin listener for metrics, maintenance, and administrative\n\
              # access controls. It is enabled by default even when this block is\n\
              # omitted; set `enabled: false` to turn it off.\n\
@@ -635,6 +645,15 @@ mod tests {
             compiled.overrides_file.as_deref(),
             Some(std::path::Path::new("/etc/kunato/overrides.yaml"))
         );
+    }
+
+    #[test]
+    fn generated_configuration_starts_in_detection_mode() {
+        let text = args().render().expect("render");
+        assert!(text.contains("\nmode: detection\n"));
+        let compiled = config::parse(&text).expect("generated config must be valid");
+        assert_eq!(compiled.mode(), config::EnforcementMode::Detection);
+        assert!(compiled.detection_warning().is_some());
     }
 
     #[test]

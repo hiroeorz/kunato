@@ -42,6 +42,7 @@ impl LogEntry {
                 "protection.rate_limit" => "rate-limit",
                 "protection.ban" => "ban",
                 "request.blocked" | "response.blocked" => "block",
+                "request.detected" | "response.detected" => "detect",
                 "request.matched" | "response.matched" => "match",
                 "request.rejected" => "reject",
                 _ => "service",
@@ -49,6 +50,15 @@ impl LogEntry {
         }
         if self.field("signal").is_some() || self.message.starts_with("behavior") {
             return "behavior";
+        }
+        if self
+            .action()
+            .is_some_and(|action| action.eq_ignore_ascii_case("BLOCK"))
+            && self
+                .field("enforced")
+                .is_some_and(|value| value.eq_ignore_ascii_case("false"))
+        {
+            return "detect";
         }
         match self.action() {
             Some(action) if action.eq_ignore_ascii_case("BLOCK") => "block",
@@ -430,6 +440,35 @@ mod tests {
         assert_eq!(entry.category(), Some("scanners-and-bots"));
         assert_eq!(entry.client(), Some("216.73.217.12"));
         assert_eq!(entry.field("path"), Some("/robots.txt"));
+    }
+
+    #[test]
+    fn parses_a_detection_only_rule_match() {
+        let line = format!(
+            "{PREFIX}2026-10-21T09:35:17.234772Z  INFO kunato::proxy::server: request would be blocked (detection-only mode) event=\"request.detected\" category=sql-injection rule=union-select action=\"BLOCK\" enforced=false client=203.0.113.9 method=GET path=/search"
+        );
+        let entry = parse_line(&line);
+        assert_eq!(
+            entry.message,
+            "request would be blocked (detection-only mode)"
+        );
+        assert_eq!(entry.action(), Some("BLOCK"));
+        assert_eq!(entry.category(), Some("sql-injection"));
+        assert_eq!(entry.field("rule"), Some("union-select"));
+        assert_eq!(entry.field("path"), Some("/search"));
+        assert_eq!(entry.field("enforced"), Some("false"));
+        assert_eq!(entry.event(), "detect");
+    }
+
+    #[test]
+    fn infers_a_detection_from_an_unenforced_block_action() {
+        let line = format!(
+            "{PREFIX}2026-10-21T09:35:17.234772Z  INFO kunato::decoy::scan: decoy credential returned site=blog token_id=abc client=203.0.113.9 action=\"BLOCK\" enforced=false"
+        );
+        let entry = parse_line(&line);
+        assert_eq!(entry.action(), Some("BLOCK"));
+        assert_eq!(entry.field("enforced"), Some("false"));
+        assert_eq!(entry.event(), "detect");
     }
 
     #[test]

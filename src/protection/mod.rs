@@ -494,7 +494,8 @@ impl ProtectionState {
                     content: entry.behavior.content,
                     ban: None,
                 };
-                if behavior.enumeration.action == BehaviorAction::Block {
+                if behavior.enumeration.action == BehaviorAction::Block && config.mode.is_blocking()
+                {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
                     entry.sequence.reset(now);
@@ -518,7 +519,7 @@ impl ProtectionState {
                     content: entry.behavior.content,
                     ban: None,
                 };
-                if behavior.auth.action == BehaviorAction::Block {
+                if behavior.auth.action == BehaviorAction::Block && config.mode.is_blocking() {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
                     entry.sequence.reset(now);
@@ -542,7 +543,7 @@ impl ProtectionState {
                     content: entry.behavior.content,
                     ban: None,
                 };
-                if behavior.scraping.action == BehaviorAction::Block {
+                if behavior.scraping.action == BehaviorAction::Block && config.mode.is_blocking() {
                     flag.ban = Some(apply_behavior_ban(entry, config, now));
                     entry.behavior.reset(now);
                     entry.sequence.reset(now);
@@ -592,7 +593,9 @@ impl ProtectionState {
         window.failures = window.failures.saturating_add(1);
         if !window.logged && window.failures >= config.behavior.global_auth.min_failures {
             window.logged = true;
-            if config.behavior.global_auth.action == BehaviorAction::Block {
+            if config.behavior.global_auth.action == BehaviorAction::Block
+                && config.mode.is_blocking()
+            {
                 window.blocked_until = Some(now + config.behavior.global_auth.ban);
             }
             outcome.global = Some(GlobalAuthFlag {
@@ -666,6 +669,7 @@ impl ProtectionState {
             || !config.behavior.enabled
             || !config.behavior.global_auth.enabled
             || config.behavior.global_auth.action != BehaviorAction::Block
+            || !config.mode.is_blocking()
             || is_allowlisted(normalize_ip(ip), &config.allowlist)
             || !auth_path_matches(&config.behavior.auth.paths, path)
         {
@@ -1404,7 +1408,7 @@ fn apply_sequence(
         action: sequence.action,
         ban: None,
     };
-    if sequence.action == BehaviorAction::Block {
+    if sequence.action == BehaviorAction::Block && config.mode.is_blocking() {
         flag.ban = Some(apply_sequence_ban(entry, config, now));
     }
     Some(flag)
@@ -1703,6 +1707,7 @@ mod tests {
     fn config() -> Protection {
         Protection {
             enabled: true,
+            mode: crate::config::EnforcementMode::Blocking,
             allowlist: Vec::new(),
             max_connections_per_ip: 32,
             max_connections: 1024,

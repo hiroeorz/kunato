@@ -114,7 +114,12 @@ async fn run(cli: Cli) -> Result<(), Error> {
     let protection = server.protection();
     let maintenance = server.maintenance();
     let admin_access = server.admin_access();
-    info!(addr = %server.local_addr()?, config = %cli.config.display(), "kunato started");
+    info!(
+        addr = %server.local_addr()?,
+        config = %cli.config.display(),
+        mode = config.load().mode().as_str(),
+        "kunato started"
+    );
 
     let server_task = tokio::spawn(server.run(shutdown_rx.clone()));
     let watcher_task = tokio::spawn(watcher::watch(
@@ -192,6 +197,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
 fn warn_configuration(config: &CompiledConfig) {
     for route in config.decoy_routes() {
         info!("{route}");
+    }
+    if let Some(warning) = config.detection_warning() {
+        warn!("{warning}");
     }
     for warning in config.decoy_warnings() {
         warn!("{warning}");

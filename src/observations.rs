@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::console::Error;
 use crate::console::model::{
-    ConnectionGauge, Counters, Coverage, EventRecord, LATENCY_BOUNDS_US, MINUTE_MS, MetricBucket,
-    Outcomes, Phase, RejectionReason, SourceIdentity,
+    ConnectionGauge, Counters, Coverage, Disposition, EventRecord, LATENCY_BOUNDS_US, MINUTE_MS,
+    MetricBucket, Outcomes, Phase, RejectionReason, SourceIdentity,
 };
 mod additional;
 
@@ -1299,7 +1299,7 @@ pub fn service_failure(timeout: bool) {
     });
 }
 
-pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
+pub fn rule_detail(phase: Phase, category: &str, rule: &str, disposition: Disposition) {
     let _ = CURRENT.try_with(|value| {
         if let Ok(value) = value.try_borrow() {
             value.history.event_with(|sequence, time| EventRecord {
@@ -1307,7 +1307,7 @@ pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
                 sequence,
                 occurred_at_ms: time,
                 kind: crate::console::model::EventKind::RuleMatch,
-                disposition: crate::console::model::Disposition::Log,
+                disposition,
                 phase,
                 site: event_site(&value.site),
                 client: value.client,
@@ -1319,7 +1319,8 @@ pub fn rule_detail(phase: Phase, category: &str, rule: &str) {
                 category: (category.len() <= 128).then(|| category.into()),
                 rule: (rule.len() <= 128).then(|| rule.into()),
                 attack_class: Some(crate::logs::observation_attack_name(category).to_owned()),
-                reason: None,
+                reason: (disposition == Disposition::Observe)
+                    .then(|| "detection-only BLOCK".to_owned()),
                 decoy: None,
                 gap: None,
                 incomplete: true,
@@ -1636,7 +1637,7 @@ mod tests {
             identity(crate::client_ip::ClientSource::direct(
                 "192.0.2.10:4321".parse().unwrap(),
             ));
-            rule_detail(Phase::Request, "probe", "admin-probe");
+            rule_detail(Phase::Request, "probe", "admin-probe", Disposition::Log);
             service_failure(false);
             reject(RejectionReason::Rule);
             Response::builder().status(403).body(()).unwrap()
@@ -1669,7 +1670,7 @@ mod tests {
                 .unwrap()
                 .into_parts();
             request_head(&config, &parts);
-            rule_detail(Phase::Request, "probe", "admin-probe");
+            rule_detail(Phase::Request, "probe", "admin-probe", Disposition::Log);
             Response::new(())
         })
         .await;

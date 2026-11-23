@@ -154,6 +154,16 @@ rule-set updates.
   in-tree parser and deserializer live in `src/yaml/`.
 - The YAML config uses a two-level model: `categories` → `rules`. A category's
   `action` and `response` are defaults that individual rules may override.
+- `mode` is the global enforcement policy. `blocking` (the default when omitted)
+  enforces `BLOCK` actions, behavioral bans, and decoy reuse rejection.
+  `detection` records those decisions in the audit log and forwards the traffic;
+  `kunato init` writes `mode: detection` for new installations. Availability
+  controls (rate limits, connection caps, body/form/upload/SAML/GraphQL/PHP
+  checks, hardening, country policy, host policy, `admin_access`, and
+  maintenance) remain enforced in both modes. Detection
+  records are `request.detected`/`response.detected` with `action=BLOCK` and
+  `enforced=false`; behavioral flags log `blocked=false`; decoy reuse returns
+  `401`. This is a configuration field only, never a managed rule-set field.
 - Rules can also come from `rules_file` (managed, refreshed by `rules_update`)
   and `overrides_file` (local exceptions plus `disabled_rules`). Evaluation order
   is overrides → inline categories → rules file; the external files are
@@ -277,8 +287,9 @@ rule-set updates.
   generated configurations enable the dotenv, git-config, and wordpress-backup
   presets with `on_reuse: BLOCK`. Omitting the block keeps decoys disabled;
   omitting its action keeps `LOG`. `BLOCK` changes only qualified
-  Bearer/X-Api-Key presentations
-  on the owned API to `403`. Other token occurrences remain passive. Decoys add
+  Bearer/X-Api-Key presentations on the owned API to `403`; under
+  `mode: detection` it records the reuse and keeps the sink at `401`. Other
+  token occurrences remain passive. Decoys add
   no source bans or Sequence scores. Keys survive valid reloads and reset on
   restart. See `docs/development.md`, "Experimental decoys", and
   `docs/decoy-design.md` for the token protocol and limits.
@@ -287,6 +298,8 @@ rule-set updates.
   failures (`401`/`403` on login/token/session/MFA/SSO paths), plus a global
   authentication-failure log for distributed attempts. Per-source signals
   default to `LOG` and accept `action: BLOCK`; the global signal is `LOG` only.
+  Under `mode: detection`, `BLOCK` records the flag without banning or
+  blocking authentication paths.
   `behavior.session` (opt-in) hashes configured cookies, confirms a country
   baseline from `Set-Cookie` or repeated same-country requests, and adds a
   low-weight `session-country-mismatch` evidence to the **current source IP's**
@@ -386,8 +399,10 @@ explicit reason.
    the threshold is reached). `ALLOW` stops
    evaluation within its phase (`request`: forward; `response`: pass the upstream
    response through unchanged); `BLOCK` responds and stops; `LOG` records the
-   match and continues evaluation. If no rule matches, the request or response
-   is passed through. Match conditions are combined with logical AND, while list
+   match and continues evaluation. Under the global `mode: detection`, a
+   `BLOCK` match is recorded as a detection and evaluation continues; this
+   changes enforcement only, never the rule's configured action or order. If no
+   rule matches, the request or response is passed through. Match conditions are combined with logical AND, while list
    values are ORed within a field.
 2. **Hot reload safety:** A new configuration must be parsed and validated before it
    replaces the active one. Apply it atomically. If it is invalid, keep the last

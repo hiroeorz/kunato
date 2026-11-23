@@ -31,6 +31,11 @@ Related documents:
 - Default the engine to `LOG` and allow `BLOCK` per signal; the shipped
   config raises every signal to `BLOCK`. A `BLOCK` flag bans the source
   for subsequent requests and reuses the existing ban escalation.
+- Under the global `mode: detection`, a configured `BLOCK` is recorded as a
+  detection (`blocked=false`) without a per-source ban or global
+  authentication block. Thresholds, windows, and evidence still update, and
+  rate-limit/ban enforcement from `protection` remains active. See
+  `docs/development.md`, "Detection-only rollout".
 - Keep per-source state in the existing tracked-source table and session state
   in a separate fixed-size, in-memory table, with no new dependencies and no
   network calls.
@@ -122,6 +127,8 @@ on the YAML rule set.
   A per-source `BLOCK` applies a ban to the source; the current response is
   still forwarded. The global signal with `BLOCK` rejects authentication paths
   for `global_auth.ban` only for sources that contributed a recent failure.
+  Under the global `mode: detection`, `BLOCK` is recorded without applying a
+  ban or global block.
 - **F6 — Exemptions.** `protection.enabled: false`, `--disable-protection`, and
   sources in `protection.allowlist` skip all behavior observation. Static asset
   paths are excluded from the enumeration numerator.
@@ -339,7 +346,11 @@ For `BLOCK`, the flag applies a ban and then resets the behavior window. This
 ensures the source is not re-banned repeatedly within the same window and that
 the next window starts after the ban, so a resumed attack is evaluated from
 zero. The current response is forwarded unchanged; the next request is rejected
-by the existing ban check with `429` and `Retry-After`.
+by the existing ban check with `429` and `Retry-After`. Under
+`mode: detection`, no ban is applied and the window keeps its counts; the flag
+is logged once with `blocked=false`. Existing flags are kept; switching to
+`blocking` does not ban retroactively, and enforcement applies to the next flag
+raised after the relevant window rolls over.
 
 The global window has a single `logged` bit; it emits at most one log line and
 one flag metric per global window.

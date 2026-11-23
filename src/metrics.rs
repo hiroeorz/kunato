@@ -10,8 +10,10 @@ pub struct Metrics {
     pub requests: AtomicU64,
     pub blocked: AtomicU64,
     pub logged: AtomicU64,
+    pub detected: AtomicU64,
     pub response_blocked: AtomicU64,
     pub response_logged: AtomicU64,
+    pub response_detected: AtomicU64,
     pub response_truncated: AtomicU64,
     pub request_truncated: AtomicU64,
     pub request_body_rejected: AtomicU64,
@@ -99,8 +101,10 @@ impl Metrics {
             requests: AtomicU64::new(0),
             blocked: AtomicU64::new(0),
             logged: AtomicU64::new(0),
+            detected: AtomicU64::new(0),
             response_blocked: AtomicU64::new(0),
             response_logged: AtomicU64::new(0),
+            response_detected: AtomicU64::new(0),
             response_truncated: AtomicU64::new(0),
             request_truncated: AtomicU64::new(0),
             request_body_rejected: AtomicU64::new(0),
@@ -193,8 +197,14 @@ impl Metrics {
         counter(
             &mut out,
             "kunato_logged_total",
-            "Requests with at least one LOG rule match.",
+            "Requests with at least one LOG rule match or a detection-only BLOCK match.",
             self.logged.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_detected_total",
+            "Requests with at least one BLOCK rule match recorded in detection-only mode.",
+            self.detected.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -205,8 +215,14 @@ impl Metrics {
         counter(
             &mut out,
             "kunato_response_logged_total",
-            "Responses with at least one LOG rule match.",
+            "Responses with at least one LOG rule match or a detection-only BLOCK match.",
             self.response_logged.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut out,
+            "kunato_response_detected_total",
+            "Upstream responses with at least one BLOCK rule match recorded in detection-only mode.",
+            self.response_detected.load(Ordering::Relaxed),
         );
         counter(
             &mut out,
@@ -553,6 +569,8 @@ mod tests {
         assert!(text.contains("# TYPE kunato_requests_total counter"));
         assert!(text.contains("kunato_requests_total 2"));
         assert!(text.contains("kunato_blocked_total 1"));
+        assert!(text.contains("kunato_detected_total 0"));
+        assert!(text.contains("kunato_response_detected_total 0"));
         assert!(text.contains("kunato_upload_inspection_active 1"));
         assert!(text.contains("kunato_acme_issued_total 1"));
         assert!(text.contains("kunato_acme_last_success_timestamp_seconds 0"));

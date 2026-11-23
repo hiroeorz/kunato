@@ -521,10 +521,13 @@ budget refill.
 ## 8. Actions and behavioral isolation
 
 `on_reuse: LOG` has no additional enforcement effect. `BLOCK` changes only the
-qualified sink response from `401` to `403`. A valid occurrence outside that
-context always remains log-only, including on a real API's Authorization field.
-Existing rules, rate limits, and bans can still act on those requests for their
-own reasons.
+qualified sink response from `401` to `403`. Under the global
+`mode: detection`, `BLOCK` keeps the sink at `401`, records
+`action=BLOCK enforced=false` in the reuse log line, and increments
+`kunato_decoy_detected_total`; other decoy limits still apply. A valid
+occurrence outside that context always remains log-only, including on a real
+API's Authorization field. Existing rules, rate limits, and bans can still act
+on those requests for their own reasons.
 
 No `SequenceKind::DecoyToken` is added in the first release. Current continuity
 requires score, dimension, and window thresholds and has independent action
@@ -637,6 +640,7 @@ Proposed metrics use fixed labels only:
 | `kunato_decoy_tokens_issued_total` | Tokens minted for GET responses |
 | `kunato_decoy_reuse_total` | `context=credential\|occurrence`; at most one count per context per request |
 | `kunato_decoy_blocked_total` | Qualified sink requests rejected by BLOCK |
+| `kunato_decoy_detected_total` | Qualified sink requests that would be rejected by BLOCK in detection-only mode |
 | `kunato_decoy_limited_total` | `reason=global-issuance\|source-issuance\|tracking\|verification\|inspection` |
 | `kunato_decoy_scan_incomplete_total` | `reason=bytes\|candidates\|body-prefix\|encoding\|verification\|ambiguous\|inspection` |
 | `kunato_decoy_invalid_tokens_total` | `reason=syntax\|mac\|expired\|scope`; bounded candidate counts |

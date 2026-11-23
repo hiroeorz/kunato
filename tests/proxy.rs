@@ -2436,6 +2436,59 @@ categories:
 }
 
 #[tokio::test]
+async fn detection_mode_forwards_matching_request_and_counts_it() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+mode: detection
+categories:
+  - name: protected
+    action: BLOCK
+    rules:
+      - name: secret
+        match: {{ path: ^/secret }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/secret", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "hello");
+    assert_eq!(running.metrics.blocked.load(Ordering::Relaxed), 0);
+    assert_eq!(running.metrics.detected.load(Ordering::Relaxed), 1);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn detection_mode_forwards_matching_response_unchanged() {
+    let upstream = spawn_upstream(StatusCode::OK, "the secret is out").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+mode: detection
+categories:
+  - name: response-leak
+    phase: response
+    action: BLOCK
+    rules:
+      - name: leak
+        match: {{ regex: secret }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    let (status, body) = send(running.addr, Method::GET, "/", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "the secret is out");
+    assert_eq!(running.metrics.response_blocked.load(Ordering::Relaxed), 0);
+    assert_eq!(running.metrics.response_detected.load(Ordering::Relaxed), 1);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn allow_marker_cannot_be_shadowed_by_duplicate_header_values() {
     let upstream = spawn_upstream(StatusCode::OK, "hello").await;
     let yaml = format!(
@@ -4163,6 +4216,40 @@ protection:
 }
 
 #[tokio::test]
+async fn behavior_enumeration_detection_mode_does_not_ban() {
+    let upstream = spawn_upstream(StatusCode::NOT_FOUND, "missing").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+mode: detection
+protection:
+  behavior:
+    min_requests: 1
+    enumeration: {{ enabled: true, action: BLOCK, not_found_ratio: 0.0, distinct_paths: 1 }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: false }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for path in ["/missing-one", "/missing-two"] {
+        let (status, _) = send(running.addr, Method::GET, path, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        running
+            .metrics
+            .behavior_enumeration_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 0);
+    assert_eq!(running.metrics.banned.load(Ordering::Relaxed), 0);
+
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn behavior_auth_block_bans_the_source() {
     let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
     let yaml = format!(
@@ -4223,6 +4310,42 @@ protection:
 
     let (status, _) = send(running.addr, Method::POST, "/login", "").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = send(running.addr, Method::GET, "/index", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn behavior_global_auth_detection_mode_does_not_block_auth_paths() {
+    let upstream = spawn_upstream(StatusCode::UNAUTHORIZED, "denied").await;
+    let yaml = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+mode: detection
+protection:
+  behavior:
+    enumeration: {{ enabled: false }}
+    auth: {{ enabled: false }}
+    global_auth: {{ enabled: true, min_failures: 2, action: BLOCK, ban: 60s }}
+"
+    );
+    let running = start_kunato(&yaml).await;
+
+    for _ in 0..3 {
+        let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        running
+            .metrics
+            .behavior_global_auth_flags
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(running.metrics.behavior_blocked.load(Ordering::Relaxed), 0);
+    assert_eq!(running.metrics.banned.load(Ordering::Relaxed), 0);
 
     let (status, _) = send(running.addr, Method::GET, "/index", "").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -4638,6 +4761,42 @@ protection:
             .load(Ordering::Relaxed),
         1
     );
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn enforcement_mode_hot_reload_switches_without_restart() {
+    let upstream = spawn_upstream(StatusCode::OK, "hello").await;
+    let detection = format!(
+        "listen: 127.0.0.1:0
+upstream: http://{upstream}
+mode: detection
+categories:
+  - name: protected
+    action: BLOCK
+    rules:
+      - name: secret
+        match: {{ path: ^/secret }}
+"
+    );
+    let running = start_kunato(&detection).await;
+
+    let (status, _) = send(running.addr, Method::GET, "/secret", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let blocking = detection.replace("mode: detection", "mode: blocking");
+    running
+        .config
+        .store(Arc::new(config::parse(&blocking).expect("valid reload")));
+    let (status, _) = send(running.addr, Method::GET, "/secret", "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    running
+        .config
+        .store(Arc::new(config::parse(&detection).expect("valid reload")));
+    let (status, _) = send(running.addr, Method::GET, "/secret", "").await;
+    assert_eq!(status, StatusCode::OK);
 
     running.stop().await;
 }
