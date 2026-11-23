@@ -2182,6 +2182,15 @@ fn record_behavior(
         status,
         &config.protection,
     );
+    if context.protection.auth_success(
+        source.client_ip,
+        &parts.method,
+        parts.uri.path(),
+        status,
+        &config.protection,
+    ) {
+        crate::observations::auth_success();
+    }
 
     if outcome.observed_not_found {
         context

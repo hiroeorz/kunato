@@ -1,22 +1,25 @@
 //! Offline authentication-abuse analysis over the console's SQLite history.
 //!
 //! The analyzer is deliberately read-only and independent of forwarding. It
-//! looks for two patterns that per-minute rules miss:
+//! looks for patterns that per-minute rules miss:
 //!
 //! * a source that keeps failing authentication slowly enough to stay below
-//!   the login throttle's burst limit, and
+//!   the login throttle's burst limit,
 //! * many distinct sources that each fail a few times on the same
-//!   authentication endpoint (a distributed reverse-brute-force campaign).
+//!   authentication endpoint (a distributed reverse-brute-force campaign),
+//! * a source that succeeds after sustained failures, or a distributed
+//!   campaign with a successful response, both of which need the configured
+//!   authentication-success outcome.
 
 pub mod live;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::console::history::{CountMetric, HOUR_MS, HistoryBucket};
 use crate::console::measurements::{AdditionalMeasurements, DistinctSketch, Ranking};
@@ -31,7 +34,7 @@ const DEFAULT_BASELINE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_REPORTED_PATHS: usize = 5;
 
 /// One analysis window. Times are UTC milliseconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     pub from_ms: u64,
     pub until_ms: u64,
@@ -60,6 +63,13 @@ pub struct Thresholds {
     pub reverse_min_top_path_share: f64,
     pub reverse_baseline_excess: f64,
     pub reverse_baseline_z: f64,
+    pub success_min_failures: u64,
+    pub success_failure_window_minutes: u32,
+    pub success_max_gap_minutes: u32,
+    pub campaign_success_min_failures: u64,
+    pub campaign_success_min_sources: f64,
+    pub campaign_success_max_mean_per_source: f64,
+    pub campaign_success_max_gap_minutes: u32,
 }
 
 impl Default for Thresholds {
@@ -79,6 +89,13 @@ impl Default for Thresholds {
             reverse_min_top_path_share: 0.5,
             reverse_baseline_excess: 15.0,
             reverse_baseline_z: 3.0,
+            success_min_failures: 6,
+            success_failure_window_minutes: 60,
+            success_max_gap_minutes: 15,
+            campaign_success_min_failures: 30,
+            campaign_success_min_sources: 10.0,
+            campaign_success_max_mean_per_source: 4.0,
+            campaign_success_max_gap_minutes: 15,
         }
     }
 }
@@ -102,7 +119,7 @@ impl Options {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TelemetryState {
     /// The window contains records written with the authentication fields.
@@ -113,7 +130,7 @@ pub enum TelemetryState {
     Partial,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Low,
@@ -121,20 +138,22 @@ pub enum Severity {
     High,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     SlowAuthentication,
     ReverseBruteForce,
+    AuthSuccessAfterFailures,
+    CampaignSuccess,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathCount {
     pub path: String,
     pub count: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Summary {
     pub buckets: usize,
     pub minutes_covered: u64,
@@ -142,6 +161,7 @@ pub struct Summary {
     pub coarse: bool,
     pub requests: u64,
     pub auth_failures: u64,
+    pub auth_successes: u64,
     pub distinct_auth_sources: Option<u64>,
     pub status_401: u64,
     pub status_403: u64,
@@ -149,22 +169,26 @@ pub struct Summary {
     pub baseline_hours: u32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SlowEvidence {
     pub failures: u64,
     pub active_buckets: u32,
     pub span_minutes: u64,
+    pub first_failure_ms: u64,
+    pub last_failure_ms: u64,
     pub max_failures_per_minute: u64,
     pub gap_cv: Option<f64>,
     pub baseline_failures_per_hour: Option<f64>,
     pub baseline_z: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReverseEvidence {
     pub failures: u64,
     pub distinct_sources: f64,
     pub mean_failures_per_source: f64,
+    pub first_failure_ms: u64,
+    pub last_failure_ms: u64,
     pub top_path: Option<String>,
     pub top_path_share: f64,
     pub active_buckets: u32,
@@ -172,14 +196,43 @@ pub struct ReverseEvidence {
     pub baseline_z: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthSuccessEvidence {
+    /// Failures by the source in the configured window before the success.
+    pub failures: u64,
+    pub active_buckets: u32,
+    pub first_failure_ms: u64,
+    pub last_failure_ms: u64,
+    pub success_ms: u64,
+    /// Successful authentication responses from the source in the analysis window.
+    pub successes: u64,
+    /// Failures from the source in the analysis window.
+    pub total_failures: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CampaignSuccessEvidence {
+    pub failures: u64,
+    pub distinct_sources: f64,
+    pub mean_failures_per_source: f64,
+    pub first_failure_ms: u64,
+    pub last_failure_ms: u64,
+    pub success_source: Option<IpAddr>,
+    pub success_ms: u64,
+    pub source_failures: u64,
+    pub source_last_failure_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Evidence {
     SlowAuthentication(SlowEvidence),
     ReverseBruteForce(ReverseEvidence),
+    AuthSuccessAfterFailures(AuthSuccessEvidence),
+    CampaignSuccess(CampaignSuccessEvidence),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Finding {
     pub kind: FindingKind,
     pub severity: Severity,
@@ -189,13 +242,14 @@ pub struct Finding {
     pub recommendation: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Report {
     pub generated_at_ms: u64,
     pub database: String,
     pub site: Option<String>,
     pub window: Window,
     pub telemetry: TelemetryState,
+    pub success_telemetry: TelemetryState,
     pub summary: Summary,
     pub findings: Vec<Finding>,
     pub notes: Vec<String>,
@@ -251,6 +305,11 @@ pub fn analyze(options: &Options) -> Result<Report, Error> {
     if let Some(finding) = window.reverse_finding(&baseline, &options.thresholds) {
         findings.push(finding);
     }
+    let (success_findings, flagged_sources) = window.auth_success_findings(&options.thresholds);
+    findings.extend(success_findings);
+    if let Some(finding) = window.campaign_success_finding(&flagged_sources, &options.thresholds) {
+        findings.push(finding);
+    }
     findings.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
@@ -259,7 +318,8 @@ pub fn analyze(options: &Options) -> Result<Report, Error> {
     });
 
     let telemetry = window.telemetry_state();
-    let mut notes = window.notes(&baseline, telemetry);
+    let success_telemetry = window.success_telemetry_state();
+    let mut notes = window.notes(&baseline, telemetry, success_telemetry);
     if findings.is_empty() {
         notes.push(
             "No candidate exceeded the configured thresholds; this is not proof that no attack occurred."
@@ -272,6 +332,7 @@ pub fn analyze(options: &Options) -> Result<Report, Error> {
         site: None,
         window: options.window,
         telemetry,
+        success_telemetry,
         summary: window.summary(&baseline),
         findings,
         notes,
@@ -436,6 +497,8 @@ struct BucketRecord {
     auth_sources: Vec<(String, u64, u64)>,
     auth_paths: Vec<(String, u64, u64)>,
     auth_sketch: Option<DistinctSketch>,
+    auth_successes: u64,
+    auth_success_sources: Vec<(String, u64, u64)>,
     status_401: u64,
     status_403: u64,
     observed_ms: u64,
@@ -456,6 +519,8 @@ impl BucketRecord {
             auth_sources: fields.auth_sources,
             auth_paths: fields.auth_paths,
             auth_sketch: fields.auth_sketch,
+            auth_successes: fields.auth_successes,
+            auth_success_sources: fields.auth_success_sources,
             status_401,
             status_403,
             observed_ms: u64::from(bucket.coverage.observed_ms),
@@ -480,6 +545,8 @@ impl BucketRecord {
             auth_sources: fields.auth_sources,
             auth_paths: fields.auth_paths,
             auth_sketch: fields.auth_sketch,
+            auth_successes: fields.auth_successes,
+            auth_success_sources: fields.auth_success_sources,
             status_401,
             status_403,
             observed_ms: bucket.coverage.observed_ms,
@@ -494,6 +561,8 @@ struct AdditionalFields {
     auth_sources: Vec<(String, u64, u64)>,
     auth_paths: Vec<(String, u64, u64)>,
     auth_sketch: Option<DistinctSketch>,
+    auth_successes: u64,
+    auth_success_sources: Vec<(String, u64, u64)>,
     telemetry_version: Option<u32>,
     incomplete: bool,
 }
@@ -505,6 +574,8 @@ fn additional_fields(additional: Option<&AdditionalMeasurements>) -> AdditionalF
             auth_sources: Vec::new(),
             auth_paths: Vec::new(),
             auth_sketch: None,
+            auth_successes: 0,
+            auth_success_sources: Vec::new(),
             telemetry_version: None,
             incomplete: true,
         };
@@ -514,6 +585,8 @@ fn additional_fields(additional: Option<&AdditionalMeasurements>) -> AdditionalF
         auth_sources: ranking_entries(&additional.auth_sources),
         auth_paths: ranking_entries(&additional.auth_paths),
         auth_sketch: Some(additional.unique_auth_sources.clone()),
+        auth_successes: additional.auth_successes,
+        auth_success_sources: ranking_entries(&additional.auth_success_sources),
         telemetry_version: Some(additional.version),
         incomplete: additional.incomplete
             || additional.auth_sources.omitted_upper_bound != 0
@@ -562,6 +635,10 @@ struct SourceSeries {
     buckets: BTreeMap<u64, (u64, u64)>,
     total: u64,
     error: u64,
+    /// Bucket start to (success count, grain milliseconds).
+    successes: BTreeMap<u64, (u64, u64)>,
+    success_total: u64,
+    success_error: u64,
 }
 
 struct WindowData {
@@ -573,6 +650,9 @@ struct WindowData {
     coarse: bool,
     records: usize,
     telemetry_present: usize,
+    success_telemetry_present: usize,
+    auth_successes: u64,
+    success_omitted: u64,
     status_401: u64,
     status_403: u64,
     paths: BTreeMap<String, u64>,
@@ -591,6 +671,9 @@ impl WindowData {
             coarse: false,
             records: 0,
             telemetry_present: 0,
+            success_telemetry_present: 0,
+            auth_successes: 0,
+            success_omitted: 0,
             status_401: 0,
             status_403: 0,
             paths: BTreeMap::new(),
@@ -655,8 +738,24 @@ impl WindowData {
                 .or_insert(count);
             self.path_omitted = self.path_omitted.saturating_add(error);
         }
+        for (source, count, error) in record.auth_success_sources {
+            let series = self.sources.entry(source).or_default();
+            let entry = series
+                .successes
+                .entry(record.start_ms)
+                .or_insert((0, record.grain_ms));
+            entry.0 = entry.0.saturating_add(count);
+            entry.1 = entry.1.max(record.grain_ms);
+            series.success_total = series.success_total.saturating_add(count);
+            series.success_error = series.success_error.saturating_add(error);
+            self.success_omitted = self.success_omitted.saturating_add(error);
+        }
+        self.auth_successes = self.auth_successes.saturating_add(record.auth_successes);
         if record.telemetry_version.is_some_and(|version| version >= 2) {
             self.telemetry_present += 1;
+        }
+        if record.telemetry_version.is_some_and(|version| version >= 3) {
+            self.success_telemetry_present += 1;
         }
     }
 
@@ -665,6 +764,20 @@ impl WindowData {
             return TelemetryState::Missing;
         }
         if self.telemetry_present == self.records && !self.incomplete {
+            TelemetryState::Present
+        } else {
+            TelemetryState::Partial
+        }
+    }
+
+    fn success_telemetry_state(&self) -> TelemetryState {
+        if self.records == 0 || self.success_telemetry_present == 0 {
+            return TelemetryState::Missing;
+        }
+        if self.success_telemetry_present == self.records
+            && !self.incomplete
+            && self.success_omitted == 0
+        {
             TelemetryState::Present
         } else {
             TelemetryState::Partial
@@ -723,6 +836,7 @@ impl WindowData {
             coarse: self.coarse,
             requests: self.requests,
             auth_failures: self.buckets.values().map(|value| value.auth_failures).sum(),
+            auth_successes: self.auth_successes,
             distinct_auth_sources: distinct,
             status_401: self.status_401,
             status_403: self.status_403,
@@ -731,7 +845,12 @@ impl WindowData {
         }
     }
 
-    fn notes(&self, baseline: &Baseline, telemetry: TelemetryState) -> Vec<String> {
+    fn notes(
+        &self,
+        baseline: &Baseline,
+        telemetry: TelemetryState,
+        success_telemetry: TelemetryState,
+    ) -> Vec<String> {
         let mut notes = Vec::new();
         match telemetry {
             TelemetryState::Present => {}
@@ -744,6 +863,29 @@ impl WindowData {
                     .to_owned(),
             ),
         }
+        match success_telemetry {
+            TelemetryState::Present => {}
+            TelemetryState::Missing => notes.push(
+                "No authentication-success telemetry was found; records predate version 3 of the supplementary measurements, the window is empty, or protection.behavior.auth.success is not configured. Success findings are unavailable, which is not proof that no login succeeded."
+                    .to_owned(),
+            ),
+            TelemetryState::Partial => notes.push(
+                "Authentication-success telemetry is incomplete for this window; success findings are a lower bound. Check console coverage, collection gaps, and the record telemetry version."
+                    .to_owned(),
+            ),
+        }
+        if success_telemetry == TelemetryState::Present && self.auth_successes == 0 {
+            notes.push(
+                "No successful authentication responses were recorded. Confirm protection.behavior.auth.success covers the endpoint's method and terminal success statuses; a 200 error page is not a success unless it is configured as one."
+                    .to_owned(),
+            );
+        }
+        if self.window.minutes() < 60 {
+            notes.push(
+                "The analysis window is shorter than the one-hour authentication-failure window used by the success rule; a success early in the window may lack enough preceding failures. Use a longer --window for full coverage."
+                    .to_owned(),
+            );
+        }
         if self.coarse {
             notes.push(
                 "Some records are coarser than one minute; activity and gap estimates are conservative."
@@ -754,6 +896,12 @@ impl WindowData {
             notes.push(format!(
                 "{} authentication-path observations were outside the bounded ranking; path concentration may be understated.",
                 self.path_omitted
+            ));
+        }
+        if self.success_omitted != 0 {
+            notes.push(format!(
+                "{} authentication-success observations were outside the bounded ranking; success findings may be understated.",
+                self.success_omitted
             ));
         }
         if baseline.hours() < 24 {
@@ -826,6 +974,8 @@ impl WindowData {
                     failures: series.total,
                     active_buckets: active,
                     span_minutes,
+                    first_failure_ms: series.buckets.keys().next().copied().unwrap_or(0),
+                    last_failure_ms: series.buckets.keys().next_back().copied().unwrap_or(0),
                     max_failures_per_minute: max_rate,
                     gap_cv: cv,
                     baseline_failures_per_hour: baseline_stats.as_ref().map(|stats| stats.center),
@@ -872,6 +1022,7 @@ impl WindowData {
             return None;
         }
         let active = self.buckets.len() as u32;
+        let (first_failure_ms, last_failure_ms) = failure_range(&self.buckets);
         Some(Finding {
             kind: FindingKind::ReverseBruteForce,
             severity: if failures >= 100 && distinct >= 30.0 {
@@ -885,6 +1036,8 @@ impl WindowData {
                 failures,
                 distinct_sources: distinct,
                 mean_failures_per_source: mean,
+                first_failure_ms,
+                last_failure_ms,
                 top_path: Some(top_path),
                 top_path_share: share,
                 active_buckets: active,
@@ -895,6 +1048,188 @@ impl WindowData {
                 .to_owned(),
         })
     }
+
+    fn auth_success_findings(&self, thresholds: &Thresholds) -> (Vec<Finding>, BTreeSet<String>) {
+        if self.success_telemetry_state() == TelemetryState::Missing {
+            return (Vec::new(), BTreeSet::new());
+        }
+        let mut findings = Vec::new();
+        let mut flagged = BTreeSet::new();
+        for (source, series) in &self.sources {
+            let Some(qualified) = first_qualifying_success(series, thresholds) else {
+                continue;
+            };
+            flagged.insert(source.clone());
+            findings.push(Finding {
+                kind: FindingKind::AuthSuccessAfterFailures,
+                severity: Severity::High,
+                source: source.parse::<IpAddr>().ok(),
+                title: "authentication success after sustained failures".to_owned(),
+                evidence: Evidence::AuthSuccessAfterFailures(AuthSuccessEvidence {
+                    failures: qualified.failures,
+                    active_buckets: qualified.active_buckets,
+                    first_failure_ms: qualified.first_failure_ms,
+                    last_failure_ms: qualified.last_failure_ms,
+                    success_ms: qualified.success_ms,
+                    successes: series.success_total,
+                    total_failures: series.total,
+                }),
+                recommendation: "Review the application's authentication log for this source and time range. Treat this as a possible credential compromise, force a password reset or step-up challenge where the application supports it, and do not ban the source automatically: a legitimate user who retried a password produces the same shape."
+                    .to_owned(),
+            });
+        }
+        (findings, flagged)
+    }
+
+    fn campaign_success_finding(
+        &mut self,
+        flagged: &BTreeSet<String>,
+        thresholds: &Thresholds,
+    ) -> Option<Finding> {
+        if self.success_telemetry_state() == TelemetryState::Missing {
+            return None;
+        }
+        let failures: u64 = self.buckets.values().map(|value| value.auth_failures).sum();
+        let distinct = self.distinct_sources()?;
+        if failures < thresholds.campaign_success_min_failures
+            || distinct < thresholds.campaign_success_min_sources
+        {
+            return None;
+        }
+        let mean = failures as f64 / distinct.max(1.0);
+        if mean > thresholds.campaign_success_max_mean_per_source {
+            return None;
+        }
+        let mut selected: Option<(&String, u64, u64, u64)> = None;
+        for (source, series) in &self.sources {
+            if flagged.contains(source) {
+                continue;
+            }
+            let Some((success_ms, source_failures, last_failure_ms)) =
+                first_success_after_failure(series, thresholds.campaign_success_max_gap_minutes)
+            else {
+                continue;
+            };
+            if selected.is_none_or(|(_, at, _, _)| success_ms < at) {
+                selected = Some((source, success_ms, source_failures, last_failure_ms));
+            }
+        }
+        let (source, success_ms, source_failures, last_failure_ms) = selected?;
+        let (first_failure_ms, campaign_last_failure_ms) = failure_range(&self.buckets);
+        Some(Finding {
+            kind: FindingKind::CampaignSuccess,
+            severity: Severity::High,
+            source: None,
+            title: "distributed authentication campaign with a successful response".to_owned(),
+            evidence: Evidence::CampaignSuccess(CampaignSuccessEvidence {
+                failures,
+                distinct_sources: distinct,
+                mean_failures_per_source: mean,
+                first_failure_ms,
+                last_failure_ms: campaign_last_failure_ms,
+                success_source: source.parse::<IpAddr>().ok(),
+                success_ms,
+                source_failures,
+                source_last_failure_ms: last_failure_ms,
+            }),
+            recommendation: "Treat this as a campaign that may have succeeded, not as proof that a specific account was compromised. Review the application's authentication log around the reported source and time, and consider a bounded global throttle that still requires a recent source-local failure."
+                .to_owned(),
+        })
+    }
+}
+
+struct QualifyingSuccess {
+    failures: u64,
+    active_buckets: u32,
+    first_failure_ms: u64,
+    last_failure_ms: u64,
+    success_ms: u64,
+}
+
+/// The strict per-source rule: the source failed at least `success_min_failures`
+/// times in the configured window and then succeeded within the maximum gap.
+fn first_qualifying_success(
+    series: &SourceSeries,
+    thresholds: &Thresholds,
+) -> Option<QualifyingSuccess> {
+    let failure_window =
+        u64::from(thresholds.success_failure_window_minutes).saturating_mul(MINUTE_MS);
+    let max_gap = u64::from(thresholds.success_max_gap_minutes).saturating_mul(MINUTE_MS);
+    for (success_ms, (count, _)) in &series.successes {
+        if *count == 0 {
+            continue;
+        }
+        let window_start = success_ms.saturating_sub(failure_window);
+        let mut failures = 0_u64;
+        let mut active = 0_u32;
+        let mut first = None;
+        let mut last = None;
+        for (failure_ms, (failure_count, _)) in series.buckets.range(window_start..=*success_ms) {
+            if *failure_count == 0 {
+                continue;
+            }
+            failures = failures.saturating_add(*failure_count);
+            active = active.saturating_add(1);
+            first.get_or_insert(*failure_ms);
+            last = Some(*failure_ms);
+        }
+        let (Some(first_failure_ms), Some(last_failure_ms)) = (first, last) else {
+            continue;
+        };
+        if failures < thresholds.success_min_failures
+            || success_ms.saturating_sub(last_failure_ms) > max_gap
+        {
+            continue;
+        }
+        return Some(QualifyingSuccess {
+            failures,
+            active_buckets: active,
+            first_failure_ms,
+            last_failure_ms,
+            success_ms: *success_ms,
+        });
+    }
+    None
+}
+
+/// The campaign rule: a success from a source that contributed at least one
+/// failure, within the maximum gap after that source's last failure.
+fn first_success_after_failure(
+    series: &SourceSeries,
+    max_gap_minutes: u32,
+) -> Option<(u64, u64, u64)> {
+    let max_gap = u64::from(max_gap_minutes).saturating_mul(MINUTE_MS);
+    for (success_ms, (count, _)) in &series.successes {
+        if *count == 0 {
+            continue;
+        }
+        let Some((last_failure_ms, (failures, _))) =
+            series.buckets.range(..=*success_ms).next_back()
+        else {
+            continue;
+        };
+        if *failures == 0 || success_ms.saturating_sub(*last_failure_ms) > max_gap {
+            continue;
+        }
+        return Some((*success_ms, series.total, *last_failure_ms));
+    }
+    None
+}
+
+/// First and last minute with at least one authentication failure.
+fn failure_range(buckets: &BTreeMap<u64, BucketAggregate>) -> (u64, u64) {
+    let first = buckets
+        .iter()
+        .find(|(_, aggregate)| aggregate.auth_failures > 0)
+        .map(|(start, _)| *start)
+        .unwrap_or(0);
+    let last = buckets
+        .iter()
+        .rev()
+        .find(|(_, aggregate)| aggregate.auth_failures > 0)
+        .map(|(start, _)| *start)
+        .unwrap_or(0);
+    (first, last)
 }
 
 fn activity(series: &SourceSeries) -> (u64, u64, u64) {
@@ -1064,6 +1399,8 @@ impl FindingKind {
         match self {
             Self::SlowAuthentication => "slow_authentication",
             Self::ReverseBruteForce => "reverse_brute_force",
+            Self::AuthSuccessAfterFailures => "auth_success_after_failures",
+            Self::CampaignSuccess => "campaign_success",
         }
     }
 }
@@ -1239,9 +1576,15 @@ pub fn render_table(report: &Report) -> String {
     );
     let _ = writeln!(
         output,
-        "requests: {}  auth_failures: {}  distinct_sources: {}  baseline_hours: {}",
+        "success telemetry: {}",
+        report.success_telemetry.as_str()
+    );
+    let _ = writeln!(
+        output,
+        "requests: {}  auth_failures: {}  auth_successes: {}  distinct_sources: {}  baseline_hours: {}",
         report.summary.requests,
         report.summary.auth_failures,
+        report.summary.auth_successes,
         report
             .summary
             .distinct_auth_sources
@@ -1282,10 +1625,12 @@ pub fn render_table(report: &Report) -> String {
                 Evidence::SlowAuthentication(evidence) => {
                     let _ = writeln!(
                         output,
-                        "  failures={} active={} span={}m max/min={} gap_cv={} baseline/h={} z={}",
+                        "  failures={} active={} span={}m first={} last={} max/min={} gap_cv={} baseline/h={} z={}",
                         evidence.failures,
                         evidence.active_buckets,
                         evidence.span_minutes,
+                        format_utc(evidence.first_failure_ms),
+                        format_utc(evidence.last_failure_ms),
                         evidence.max_failures_per_minute,
                         evidence
                             .gap_cv
@@ -1301,10 +1646,12 @@ pub fn render_table(report: &Report) -> String {
                 Evidence::ReverseBruteForce(evidence) => {
                     let _ = writeln!(
                         output,
-                        "  failures={} distinct_sources={} mean/source={} top_path={} share={:.2} baseline/h={} z={}",
+                        "  failures={} distinct_sources={} mean/source={} first={} last={} top_path={} share={:.2} baseline/h={} z={}",
                         evidence.failures,
                         evidence.distinct_sources.round(),
                         evidence.mean_failures_per_source,
+                        format_utc(evidence.first_failure_ms),
+                        format_utc(evidence.last_failure_ms),
                         evidence.top_path.as_deref().unwrap_or("n/a"),
                         evidence.top_path_share,
                         evidence
@@ -1313,6 +1660,36 @@ pub fn render_table(report: &Report) -> String {
                         evidence
                             .baseline_z
                             .map_or_else(|| "n/a".to_owned(), |value| format!("{value:.1}"))
+                    );
+                }
+                Evidence::AuthSuccessAfterFailures(evidence) => {
+                    let _ = writeln!(
+                        output,
+                        "  failures={} active={} first_failure={} last_failure={} success={} successes={} total_failures={}",
+                        evidence.failures,
+                        evidence.active_buckets,
+                        format_utc(evidence.first_failure_ms),
+                        format_utc(evidence.last_failure_ms),
+                        format_utc(evidence.success_ms),
+                        evidence.successes,
+                        evidence.total_failures
+                    );
+                }
+                Evidence::CampaignSuccess(evidence) => {
+                    let _ = writeln!(
+                        output,
+                        "  failures={} distinct_sources={} mean/source={} first={} last={} success_source={} success={} source_failures={} source_last_failure={}",
+                        evidence.failures,
+                        evidence.distinct_sources.round(),
+                        evidence.mean_failures_per_source,
+                        format_utc(evidence.first_failure_ms),
+                        format_utc(evidence.last_failure_ms),
+                        evidence
+                            .success_source
+                            .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                        format_utc(evidence.success_ms),
+                        evidence.source_failures,
+                        format_utc(evidence.source_last_failure_ms)
                     );
                 }
             }
@@ -1398,12 +1775,39 @@ mod tests {
             auth_sources: vec![(source.to_owned(), failures, 0)],
             auth_paths: vec![(path.to_owned(), failures, 0)],
             auth_sketch: None,
+            auth_successes: 0,
+            auth_success_sources: Vec::new(),
             status_401: failures,
             status_403: 0,
             observed_ms: MINUTE_MS,
             incomplete: false,
-            telemetry_version: Some(2),
+            telemetry_version: Some(3),
         }
+    }
+
+    fn success_record(
+        start: u64,
+        failures: u64,
+        successes: u64,
+        source: &str,
+        path: &str,
+    ) -> BucketRecord {
+        let mut record = record(start, failures, source, path);
+        record.requests = failures.saturating_add(successes);
+        if failures == 0 {
+            // A success-only minute carries no failure ranking entry; keeping a
+            // zero-count entry would hide the previous failure minute.
+            record.auth_sources.clear();
+            record.auth_paths.clear();
+            record.status_401 = 0;
+        }
+        record.auth_successes = successes;
+        record.auth_success_sources = if successes == 0 {
+            Vec::new()
+        } else {
+            vec![(source.to_owned(), successes, 0)]
+        };
+        record
     }
 
     #[test]
@@ -1417,6 +1821,7 @@ mod tests {
                 until_ms: HOUR_MS,
             },
             telemetry: TelemetryState::Present,
+            success_telemetry: TelemetryState::Present,
             summary: Summary {
                 buckets: 60,
                 minutes_covered: 60,
@@ -1424,6 +1829,7 @@ mod tests {
                 coarse: false,
                 requests: 120,
                 auth_failures: 10,
+                auth_successes: 0,
                 distinct_auth_sources: Some(1),
                 status_401: 10,
                 status_403: 0,
@@ -1443,6 +1849,8 @@ mod tests {
                         failures: 10,
                         active_buckets: 10,
                         span_minutes: 55,
+                        first_failure_ms: 0,
+                        last_failure_ms: 55 * MINUTE_MS,
                         max_failures_per_minute: 1,
                         gap_cv: Some(0.0),
                         baseline_failures_per_hour: None,
@@ -1459,6 +1867,8 @@ mod tests {
                         failures: 60,
                         distinct_sources: 48.0,
                         mean_failures_per_source: 1.25,
+                        first_failure_ms: 0,
+                        last_failure_ms: HOUR_MS - MINUTE_MS,
                         top_path: Some("/login".into()),
                         top_path_share: 1.0,
                         active_buckets: 60,
@@ -1599,6 +2009,218 @@ mod tests {
         assert!(
             data.reverse_finding(&Baseline::default(), &Thresholds::default())
                 .is_none()
+        );
+    }
+
+    fn success_window() -> Window {
+        Window {
+            from_ms: 1_700_000_000_000,
+            until_ms: 1_700_000_000_000 + HOUR_MS,
+        }
+    }
+
+    #[test]
+    fn sustained_failures_then_success_are_reported() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        for offset in [0, 5, 10, 15, 20, 25] {
+            data.add(record(
+                window.from_ms + offset * MINUTE_MS,
+                1,
+                "203.0.113.7",
+                "/login",
+            ));
+        }
+        data.add(success_record(
+            window.from_ms + 31 * MINUTE_MS,
+            0,
+            1,
+            "203.0.113.7",
+            "/login",
+        ));
+        assert_eq!(data.success_telemetry_state(), TelemetryState::Present);
+        let (findings, flagged) = data.auth_success_findings(&Thresholds::default());
+        assert_eq!(findings.len(), 1);
+        assert!(flagged.contains("203.0.113.7"));
+        match &findings[0].evidence {
+            Evidence::AuthSuccessAfterFailures(evidence) => {
+                assert_eq!(evidence.failures, 6);
+                assert_eq!(evidence.active_buckets, 6);
+                assert_eq!(evidence.successes, 1);
+                assert_eq!(evidence.success_ms, window.from_ms + 31 * MINUTE_MS);
+            }
+            other => panic!("unexpected evidence: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_user_who_retries_twice_then_succeeds_is_not_reported() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        for offset in [0, 2] {
+            data.add(record(
+                window.from_ms + offset * MINUTE_MS,
+                1,
+                "203.0.113.7",
+                "/login",
+            ));
+        }
+        data.add(success_record(
+            window.from_ms + 4 * MINUTE_MS,
+            0,
+            1,
+            "203.0.113.7",
+            "/login",
+        ));
+        let (findings, flagged) = data.auth_success_findings(&Thresholds::default());
+        assert!(findings.is_empty());
+        assert!(flagged.is_empty());
+    }
+
+    #[test]
+    fn success_outside_the_gap_after_failures_is_not_reported() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        for offset in 0..8 {
+            data.add(record(
+                window.from_ms + offset * MINUTE_MS,
+                1,
+                "203.0.113.7",
+                "/login",
+            ));
+        }
+        data.add(success_record(
+            window.from_ms + 40 * MINUTE_MS,
+            0,
+            1,
+            "203.0.113.7",
+            "/login",
+        ));
+        let (findings, _) = data.auth_success_findings(&Thresholds::default());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn distributed_campaign_with_a_success_is_reported_once() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        for index in 0..39_u64 {
+            data.add(record(
+                window.from_ms + index * MINUTE_MS,
+                1,
+                &format!("192.0.2.{}", index + 1),
+                "/login",
+            ));
+        }
+        data.add(record(
+            window.from_ms + 35 * MINUTE_MS,
+            1,
+            "198.51.100.50",
+            "/login",
+        ));
+        data.add(success_record(
+            window.from_ms + 40 * MINUTE_MS,
+            0,
+            1,
+            "198.51.100.50",
+            "/login",
+        ));
+        let (findings, flagged) = data.auth_success_findings(&Thresholds::default());
+        assert!(
+            findings.is_empty(),
+            "one failure is not a sustained pattern"
+        );
+        let campaign = data
+            .campaign_success_finding(&flagged, &Thresholds::default())
+            .expect("campaign success finding");
+        match &campaign.evidence {
+            Evidence::CampaignSuccess(evidence) => {
+                assert_eq!(evidence.failures, 40);
+                assert!(evidence.distinct_sources >= 39.0);
+                assert_eq!(
+                    evidence.success_source,
+                    Some("198.51.100.50".parse().unwrap())
+                );
+                assert_eq!(evidence.source_failures, 1);
+            }
+            other => panic!("unexpected evidence: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn campaign_success_does_not_duplicate_a_per_source_finding() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        for index in 0..39_u64 {
+            data.add(record(
+                window.from_ms + index * MINUTE_MS,
+                1,
+                &format!("192.0.2.{}", index + 1),
+                "/login",
+            ));
+        }
+        for offset in [30, 31, 32, 33, 34, 35] {
+            data.add(record(
+                window.from_ms + offset * MINUTE_MS,
+                1,
+                "198.51.100.50",
+                "/login",
+            ));
+        }
+        data.add(success_record(
+            window.from_ms + 40 * MINUTE_MS,
+            0,
+            1,
+            "198.51.100.50",
+            "/login",
+        ));
+        let (findings, flagged) = data.auth_success_findings(&Thresholds::default());
+        assert_eq!(findings.len(), 1);
+        assert!(
+            data.campaign_success_finding(&flagged, &Thresholds::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn success_findings_require_version_three_telemetry() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        let mut legacy = success_record(
+            window.from_ms + 30 * MINUTE_MS,
+            8,
+            1,
+            "203.0.113.7",
+            "/login",
+        );
+        legacy.telemetry_version = Some(2);
+        data.add(legacy);
+        assert_eq!(data.success_telemetry_state(), TelemetryState::Missing);
+        let (findings, _) = data.auth_success_findings(&Thresholds::default());
+        assert!(findings.is_empty());
+        assert!(
+            data.campaign_success_finding(&BTreeSet::new(), &Thresholds::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_success_telemetry_is_reported_as_a_note_not_a_clean_result() {
+        let window = success_window();
+        let mut data = WindowData::new(window);
+        let mut legacy = record(window.from_ms, 8, "203.0.113.7", "/login");
+        legacy.telemetry_version = Some(2);
+        data.add(legacy);
+        let notes = data.notes(
+            &Baseline::default(),
+            data.telemetry_state(),
+            data.success_telemetry_state(),
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("No authentication-success telemetry")),
+            "{notes:?}"
         );
     }
 }

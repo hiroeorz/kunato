@@ -1,11 +1,13 @@
-# Offline EDR verification: slow authentication and reverse brute force
+# Offline EDR verification: authentication abuse and success outcomes
 
 Date: 2026-11-23
 
-Status: Offline proof of concept implemented and evaluated. The analyzer
-(`kunato edr`) reads the console's `history.sqlite3` read-only, reports
-evidence, and never bans or changes the WAF configuration. Automatic blocking
-is not implemented; Section 8 explains the safe integration options.
+Status: Offline proof of concept implemented and evaluated, including the
+opt-in authentication-success extension. The analyzer (`kunato edr`) reads the
+console's `history.sqlite3` read-only, reports evidence, and never bans or
+changes the WAF configuration. Automatic blocking is not implemented; Section 8
+explains the safe integration options. The success detector is described in
+Sections 4.1, 5.5, 6.1, and 7.
 
 ## 1. Question
 
@@ -13,7 +15,7 @@ The console already stores rule detections, rejections, and minute aggregates
 in SQLite. Can an hourly investigation of that history detect attack classes
 that a per-request rule cannot see?
 
-Two classes were selected:
+Two classes were selected first:
 
 1. **Slow authentication attempts.** One source sends a few login failures per
    hour, spread across the hour, so the bundled `login-throttle`
@@ -22,6 +24,13 @@ Two classes were selected:
 2. **Reverse brute force / distributed spraying.** Many distinct sources each
    try a small number of credentials against the same authentication endpoint,
    so no source-local threshold is reached.
+
+A third class was added after the failure analysis: **success after sustained
+failures**. The failure detectors can show that a campaign is happening, but
+they cannot show that it succeeded. A source that fails six or more times and
+then receives a configured success response, or a distributed campaign with one
+successful response, is the compromise signal this extension reports. It is
+opt-in because Kunato cannot infer application success semantics.
 
 ## 2. Verdict
 
@@ -57,11 +66,12 @@ not retain the source/path of an ordinary authentication failure.
 ## 4. Added telemetry
 
 `AdditionalMeasurements` now has an authentication-failure section. The
-payload version is 2; version-1 records remain readable and are reported as
-missing telemetry, never as zero failures. A binary that predates version 2
-cannot decode new records (`deny_unknown_fields`), so upgrade the WAF and
-console together and do not downgrade a console that has written version-2
-rows.
+payload version is 3; version-1 records remain readable and are reported as
+missing failure telemetry, never as zero failures. Version-2 records carry the
+failure section but no success section and are reported as missing success
+telemetry. A binary that predates the current version cannot decode new records
+(`deny_unknown_fields`), so upgrade the WAF and console together and do not
+downgrade a console that has written newer rows.
 
 | Field | Meaning | Bound |
 | --- | --- | --- |
@@ -70,6 +80,24 @@ rows.
 | `auth_paths` | Top failing paths with counts and an omission bound | 16 entries per source-minute |
 | `unique_auth_sources` | Mergeable distinct-source estimate | 64-register HyperLogLog, 64 bytes |
 
+### 4.1 Authentication-success measurements
+
+Version 3 adds an opt-in success side. It is empty unless
+`protection.behavior.auth.success` names at least one endpoint:
+
+| Field | Meaning | Bound |
+| --- | --- | --- |
+| `auth_successes` | Upstream responses matching a configured endpoint, method, and terminal status in this source-minute | One `u64` |
+| `auth_success_sources` | Top sources with successful responses and an omission bound | 16 entries per source-minute |
+
+The success classifier reuses the decoded/normalized path forms, matrix-parameter
+stripping, resolved client identity, allowlist, and `protection.enabled`
+boundary of the failure signals. It accepts only `200`..`399` statuses, requires
+`auth.enabled` or `global_auth.enabled`, and never feeds bans, sequence scores,
+or rules. A `200` error page is recorded as a success only when the operator
+explicitly configures `200` for that endpoint; the documentation requires
+confirming the terminal success status first.
+
 The observation point is the existing behavioral hook after forwarding:
 
 ```text
@@ -77,6 +105,12 @@ upstream response 401/403
   -> behavior.auth / behavior.global_auth path matching
   -> observations::auth_failure()
   -> source-minute additional measurement
+  -> console snapshot, SQLite metric bucket, coarsened history
+
+upstream response matching auth.success
+  -> endpoint/method/terminal-status match after path normalization
+  -> observations::auth_success()
+  -> source-minute success counters and top-success-source ranking
   -> console snapshot, SQLite metric bucket, coarsened history
 ```
 
@@ -105,9 +139,23 @@ Consequences and limits:
 - The top-16 rankings bound storage and CPU. A campaign with more than 16
   distinct failing sources per minute under-counts individual sources; the
   total and the distinct sketch still describe the campaign.
+- Success observation is opt-in and per endpoint. An endpoint that is not
+  listed, or whose method/status pair does not match, produces no success
+  telemetry. The analyzer reports missing success telemetry as a note; it does
+  not interpret absent success data as "no successful login".
+- A `200` error page, a `302` MFA challenge, and a successful login can share a
+  status. Kunato cannot distinguish them without application knowledge, so an
+  ambiguous endpoint must stay unconfigured (or be excluded from `auth.paths`)
+  rather than guessed. The readiness checklist records the expected intermediate
+  statuses for this decision.
+- The success side rotates through the same top-16 source ranking. A successful
+  source that is absent from the per-minute top 16 is under-counted; the total
+  `auth_successes` still records the response.
 - When a record exceeds the 16 KiB supplementary budget, the shrink order drops
-  legacy dimension/path/source detail before it drops authentication sources,
-  so the EDR evidence is the last optional detail to go.
+  authentication success sources first, then authentication paths, then
+  authentication sources, after legacy dimension/path/source detail. Failure
+  evidence therefore survives longer than success evidence on a saturated
+  record.
 
 ## 5. Analyzer
 
@@ -150,7 +198,9 @@ Then one of:
 The rate ceiling deliberately stays below the bundled 10/60 s login throttle:
 the detector is looking for behavior that the throttle is designed not to
 punish. A source that bursts faster is expected to be handled by the existing
-throttle, rate limiter, and behavioral signals.
+throttle, rate limiter, and behavioral signals. The finding evidence includes
+the first and last failing minute in the window as well as the span, so an
+operator can place the activity on a clock.
 
 ### 5.3 Reverse-brute-force rule
 
@@ -167,7 +217,8 @@ hourly failures at least 15 above the baseline median and z >= 3
 The path-share condition distinguishes a campaign aimed at one login endpoint
 from broad probing. The per-source mean condition distinguishes many sources
 with one or two attempts from one noisy source; the latter is handled by the
-slow rule or the existing throttle.
+slow rule or the existing throttle. The finding evidence includes the first and
+last failing minute across the campaign.
 
 ### 5.4 Output
 
@@ -181,7 +232,44 @@ kunato edr --database /var/lib/kunato/console/history.sqlite3 \
 ```
 
 `--fail-on-findings` exits non-zero when at least one finding is reported, so a
-systemd timer or cron wrapper can raise an alert.
+systemd timer or cron wrapper can raise an alert. The table prints both the
+failure and success telemetry states, and the JSON report carries
+`success_telemetry` and `summary.auth_successes`. The same live report feeds the
+console's read-only EDR view; see [the EDR view](monitoring-console-edr.md).
+
+### 5.5 Success-after-failures rules
+
+Both rules use per-source failure minutes from the `auth_sources` ranking and
+per-source success minutes from `auth_success_sources`. They only run when the
+window contains version-3 success telemetry; a version-2 window produces a note,
+never a finding.
+
+Per-source compromise signal:
+
+```text
+failures in the 60 minutes up to and including the success minute >= 6
+success within 15 minutes after the source's last failure minute
+-> HIGH severity, source-scoped, LOG only
+```
+
+Campaign-success signal, evaluated after the per-source findings so the same
+event is not reported twice:
+
+```text
+window failures >= 30
+distinct failing sources >= 10
+mean failures per source <= 4
+a non-flagged source with at least one failure succeeds within 15 minutes
+after its last failure
+-> HIGH severity, campaign-scoped, LOG only
+```
+
+Both findings recommend reviewing the application's authentication log for the
+reported source and time range, a password reset or step-up challenge where the
+application supports it, and no automatic ban. The per-source finding is the
+stronger one: a legitimate user who mistypes several passwords and then succeeds
+has the same shape. The campaign rule requires the campaign volume conditions in
+addition to the proximity of the success.
 
 ## 6. Synthetic evaluation
 
@@ -244,6 +332,29 @@ The two tests finish in about one second on the development machine,
 including creating and reading the 1,440-row database. The analyzer performs
 24 separate hourly reads in that run.
 
+### 6.1 Success-after-failures evaluation
+
+`tests/edr_evaluation.rs` adds four deterministic scenarios over the same real
+`Store` path:
+
+| Scenario | Shape | Expected |
+| --- | --- | --- |
+| Sustained failures then success | 6 failures over 25 minutes, success 6 minutes after the last failure | one source-scoped HIGH finding |
+| Benign retry | 2 failures, then a success | no finding |
+| Distributed campaign success | 40 sources fail once; one fails at minute 35 and succeeds at minute 40 | one campaign HIGH finding, no per-source finding |
+| Version-2 records | the sustained-failure scenario written without success fields | missing success telemetry note, no finding |
+
+A user who retries twice and succeeds is not reported because the six-failure
+minimum is not met. A success more than 15 minutes after the last failure is not
+reported; the unit tests cover that boundary. The campaign case uses the
+64-register distinct-source estimate, so the test asserts that the estimate
+clears the campaign floor rather than an exact source count.
+
+The unit tests in `src/edr.rs` and `src/edr/live.rs` cover the same rules over
+in-memory bucket records and the console's live state. `tests/proxy` covers the
+upstream observation: a configured method and status produce `auth_successes`,
+while a different method or an unlisted path does not.
+
 ## 7. What is still not detected
 
 - **Sub-threshold slow sources.** One failure every 15 minutes is invisible to
@@ -257,14 +368,25 @@ including creating and reading the 1,440-row database. The analyzer performs
   reverse brute force is inferred from source diversity and endpoint
   concentration. A single source trying one password against many accounts
   looks like ordinary brute force and is handled by the existing throttle.
-- **Successful logins.** The telemetry counts failures only. A campaign that
-  succeeds on the first attempt leaves no failure trail. Application-side
-  authentication success/failure correlation is out of scope.
-- **Application status semantics.** The telemetry counts `401`/`403` only. A
-  login form that returns `200` with an error message, or `302` back to the
-  form, produces no authentication-failure evidence. Confirm the application's
-  failure status before relying on the analyzer, or add a response rule that
-  normalizes the failure shape where that is safe.
+- **First-attempt compromise.** The success rules need a failure trail. A
+  campaign that succeeds on its first attempt against a source with no earlier
+  failures leaves no success-after-failure signal, even with success telemetry
+  configured. The failure detectors remain the only evidence in that case.
+- **Application status semantics.** The failure telemetry counts `401`/`403`
+  only. A login form that returns `200` with an error message, or `302` back to
+  the form, produces no failure evidence. The success side is explicit: `200`
+  is counted as a success only when the operator configures it, so a
+  misconfigured success status can produce a false compromise finding. Confirm
+  both sides per endpoint before relying on the analyzer.
+- **Ambiguous multi-step flows.** A redirect to an MFA challenge and a
+  successful login can share a status. If the endpoint cannot separate them,
+  leave it out of `auth.success`; a finding that treats an MFA challenge as a
+  success would be misleading.
+- **Unconfigured success endpoints.** Success telemetry is opt-in per endpoint.
+  An endpoint that is missing from `auth.success` produces no success data, and
+  the analyzer reports missing success telemetry as a note rather than as a
+  clean result. The same applies to version-2 history retained across an
+  upgrade.
 - **Shared egress and automated clients.** A NAT, office egress, or monitoring
   client can produce a regular failure pattern. The evaluation shows this
   explicitly. Keep the finding at LOG until the address population is known,
@@ -303,6 +425,12 @@ The analyzer does not call any of them. A safe sequence is:
    against shared NAT users. Prefer the existing global authentication block
    (which still requires a source-local failure), a step-up challenge, or an
    operator-approved short ban for the highest-volume sources only.
+   A realized success is different from an attempt: a ban cannot undo it. A
+   success finding is an incident-response trigger, not a ban trigger. Review
+   the application's authentication log for the reported source and time,
+   revoke the session or force a password reset where the application supports
+   it, and keep success findings out of any automatic ban policy. A later ban
+   may reduce follow-up activity, but it is not containment.
 4. **Optional control-plane integration.** If automatic enforcement is needed
    later, add a loopback-only admin command that accepts a bounded list of
    source addresses, an expiry, and an allowlist check, and records who applied
@@ -353,12 +481,16 @@ another user.
 
 ```sh
 cargo test --lib edr::tests
+cargo test --lib edr::live::tests
 cargo test --test edr
+cargo test --test edr_live
 cargo test --test proxy authentication_failures_are_attributed_to_the_source_minute
+cargo test --test proxy authentication_successes_need_the_configured_method_and_status
 cargo test --test edr_evaluation -- --nocapture
 ```
 
-The last command prints the per-hour table and summary used in Section 6.
+The last command prints the per-hour table and summary used in Section 6 and
+runs the success scenarios from Section 6.1.
 
 For a real database, the analyzer opens `history.sqlite3` read-only and can run
 while the console is collecting. If you need a stable file copy, stop the
@@ -370,23 +502,33 @@ kunato edr --database /var/lib/kunato/console/history.sqlite3 \
   --window 1h --format table
 ```
 
-A version-1 database (before the telemetry change) reports `telemetry:
-missing`; run the updated WAF and console for at least one hour before
-expecting findings.
+A version-1 database reports failure telemetry as `missing`; a version-2
+database reports success telemetry as `missing`. Run the updated WAF and
+console for at least one hour before expecting findings, and configure
+`protection.behavior.auth.success` before expecting success findings.
 
 ## 11. Recommendation
 
-A separate [live in-memory source verification](edr-live-verification.md)
-evaluates keeping the state in memory and feeding it from the WAF snapshot
-directly. The chosen implementation is an opt-in console task that subscribes
-to the console's one-second accepted stream, so it has no polling gap and no
-second SQLite connection. A standalone poller remains a four-minute-cadence
-option because a five-minute poll has no one-missed-poll margin against the
-WAF's ten-minute snapshot ring.
-
 Adopt the offline analyzer as a LOG-only investigation tool and keep the
 existing behavioral and rate-limit controls as the enforcement layer. The
-synthetic evidence supports detection of the two target patterns, but the
-shared-egress false positive and the bounded distinct-source estimate mean
-that automatic blocking is not justified yet. Re-evaluate after collecting a
-week of real findings alongside the application's authentication logs.
+synthetic evidence supports detection of the failure patterns and of success
+after sustained failures, but the shared-egress false positive, the bounded
+distinct-source estimate, and the application-specific success semantics mean
+that automatic blocking is not justified. Success findings are HIGH severity
+and must stay LOG: they trigger an incident review, not a ban. Re-evaluate
+after collecting a week of real findings alongside the application's
+authentication logs.
+
+## 12. Related work
+
+- [EDR detection candidates](edr-detection-candidates.md) records future
+  detection classes, their data requirements, and the proposed phasing.
+- [The console EDR view](monitoring-console-edr.md) documents the lamp board,
+  the bounded view API, the finding ring, and the country presentation.
+- [Live in-memory source verification](edr-live-verification.md) evaluates
+  keeping the state in memory and feeding it from the WAF snapshot directly.
+  The chosen implementation is an opt-in console task that subscribes to the
+  console's one-second accepted stream, so it has no polling gap and no second
+  SQLite connection. A standalone poller remains a four-minute-cadence option
+  because a five-minute poll has no one-missed-poll margin against the WAF's
+  ten-minute snapshot ring.

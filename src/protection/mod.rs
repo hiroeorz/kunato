@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use http::{HeaderMap, StatusCode};
-use regex::RegexSet;
+use http::{HeaderMap, Method, StatusCode};
+use regex::{Regex, RegexSet};
 use tokio::time::Instant;
 
 use crate::cidr::IpNet;
@@ -395,6 +395,34 @@ impl ProtectionState {
         log.last_at = Some(now);
         log.last_was_ban = kind == ThrottleKind::Ban;
         Some(ThrottleReport { suppressed })
+    }
+
+    /// Whether this upstream response matches a configured authentication
+    /// success outcome. This is independent of enforcement: it only feeds the
+    /// bounded success measurement used by the EDR, and it honors the same
+    /// protection and allowlist boundary as the failure signals.
+    pub(crate) fn auth_success(
+        &self,
+        ip: IpAddr,
+        method: &Method,
+        path: &str,
+        status: StatusCode,
+        config: &Protection,
+    ) -> bool {
+        let behavior = &config.behavior;
+        if !config.enabled
+            || !behavior.enabled
+            || is_allowlisted(normalize_ip(ip), &config.allowlist)
+            || behavior.auth.success.is_empty()
+            || !(behavior.auth.enabled || behavior.global_auth.enabled)
+        {
+            return false;
+        }
+        let status = status.as_u16();
+        behavior.auth.success.iter().any(|endpoint| {
+            endpoint.accepts_outcome(method, status)
+                && auth_success_path_matches(&endpoint.path, path)
+        })
     }
 
     /// Observe an upstream response for the behavioral signals. The returned
@@ -1510,21 +1538,31 @@ fn mix64(mut value: u64) -> u64 {
 }
 
 fn auth_path_matches(paths: &RegexSet, path: &str) -> bool {
+    path_forms_match(path, |candidate| paths.is_match(candidate))
+}
+
+fn auth_success_path_matches(pattern: &Regex, path: &str) -> bool {
+    path_forms_match(path, |candidate| pattern.is_match(candidate))
+}
+
+/// Try every decoded and normalized form of the path that a container might
+/// route to the same handler.
+fn path_forms_match(path: &str, matches: impl Fn(&str) -> bool) -> bool {
     for form in percent_decode_forms(path) {
         let normalized = normalize_path(form.as_ref());
         let candidate = normalized.as_deref().unwrap_or(form.as_ref());
-        if paths.is_match(candidate) {
+        if matches(candidate) {
             return true;
         }
         // Servlet containers accept matrix parameters (`/login;jsessionid=...`)
         // and route them to the same handler, so the login regexes must see
         // the path without them.
         let stripped = without_matrix_params(candidate);
-        if paths.is_match(&stripped) {
+        if matches(&stripped) {
             return true;
         }
         if let Some(normalized_stripped) = normalize_path(&stripped)
-            && paths.is_match(&normalized_stripped)
+            && matches(&normalized_stripped)
         {
             return true;
         }
@@ -2422,6 +2460,7 @@ mod tests {
                 action: BehaviorAction::Log,
                 min_failures: 2,
                 paths: auth_paths(&[r"^/login$"]),
+                success: Vec::new(),
             },
             global_auth: GlobalAuthConfig {
                 enabled: false,
@@ -2585,6 +2624,79 @@ mod tests {
         let duplicate_slash =
             state.observe_response(ip("10.0.0.1"), "//login", StatusCode::UNAUTHORIZED, &config);
         assert!(duplicate_slash.source.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_success_matches_configured_method_status_and_normalized_path() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.auth.enabled = true;
+        behavior.auth.success = vec![crate::config::AuthSuccessEndpoint {
+            path: Regex::new(r"^/login$").expect("valid regex"),
+            methods: vec!["POST".to_owned()],
+            statuses: vec![302],
+        }];
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+        let source = ip("10.0.0.1");
+
+        assert!(state.auth_success(source, &Method::POST, "/login", StatusCode::FOUND, &config));
+        assert!(state.auth_success(
+            source,
+            &Method::POST,
+            "/%6cogin",
+            StatusCode::FOUND,
+            &config
+        ));
+        assert!(state.auth_success(
+            source,
+            &Method::POST,
+            "/login;jsessionid=abc",
+            StatusCode::FOUND,
+            &config
+        ));
+        assert!(!state.auth_success(source, &Method::GET, "/login", StatusCode::FOUND, &config));
+        assert!(!state.auth_success(source, &Method::POST, "/login", StatusCode::OK, &config));
+        assert!(!state.auth_success(
+            source,
+            &Method::POST,
+            "/api/users",
+            StatusCode::FOUND,
+            &config
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auth_success_honors_the_protection_and_allowlist_boundary() {
+        let mut config = config();
+        let mut behavior = behavior_config();
+        behavior.auth.enabled = true;
+        behavior.auth.success = vec![crate::config::AuthSuccessEndpoint {
+            path: Regex::new(r"^/login$").expect("valid regex"),
+            methods: vec!["POST".to_owned()],
+            statuses: vec![200],
+        }];
+        config.behavior = behavior;
+        let state = behavior_state(&config);
+        let source = ip("10.0.0.1");
+
+        let mut allowlisted = config.clone();
+        allowlisted.allowlist = vec!["10.0.0.0/8".parse().expect("valid CIDR")];
+        assert!(!state.auth_success(
+            source,
+            &Method::POST,
+            "/login",
+            StatusCode::OK,
+            &allowlisted
+        ));
+
+        let mut disabled = config.clone();
+        disabled.enabled = false;
+        assert!(!state.auth_success(source, &Method::POST, "/login", StatusCode::OK, &disabled));
+
+        let mut no_success = config;
+        no_success.behavior.auth.success.clear();
+        assert!(!state.auth_success(source, &Method::POST, "/login", StatusCode::OK, &no_success));
     }
 
     #[tokio::test(start_paused = true)]

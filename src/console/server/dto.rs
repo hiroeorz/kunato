@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use crate::config::Console;
 use crate::console::HistoryPage;
 use crate::console::correlations::CorrelationPage;
+use crate::console::edr::{EdrView, REPORT_DELAY_MS};
 use crate::console::writer::WriterState;
 
 use super::super::runtime::LiveState;
@@ -13,6 +14,9 @@ use super::super::runtime::LiveState;
 pub const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// Bounded encoded correlation page size.
 pub const MAX_CORRELATION_BYTES: usize = 1024 * 1024;
+/// Bound for the EDR view. The view itself caps findings and notes; this is the
+/// outer response guard.
+pub const MAX_EDR_BYTES: usize = 1024 * 1024;
 
 pub fn health(
     console: &Console,
@@ -55,6 +59,82 @@ pub fn state(
         "collection": collection_json(&state.health),
         "writer": state.health.writer.as_ref().map(writer_json),
     }))
+}
+
+/// Encode the read-only EDR view. Disabled EDR still returns its schedule so the
+/// page can explain why no lamp can be evaluated.
+pub fn edr(
+    console: &Console,
+    view: Option<&EdrView>,
+    now_ms: u64,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let config = json!({
+        "window_ms": millis(console.edr.window),
+        "baseline_ms": millis(console.edr.baseline),
+        "report_delay_ms": REPORT_DELAY_MS,
+    });
+    let stale = view.is_some_and(|value| edr_stale(value, now_ms));
+    let value = if !console.edr.enabled {
+        json!({
+            "version": 1,
+            "now_ms": now_ms,
+            "enabled": false,
+            "stale": false,
+            "config": config,
+            "view": null,
+        })
+    } else {
+        json!({
+            "version": 1,
+            "now_ms": now_ms,
+            "enabled": true,
+            "stale": stale,
+            "config": config,
+            "view": view,
+        })
+    };
+    serde_json::to_vec(&value)
+}
+
+const HOUR_MS: u64 = 60 * 60 * 1000;
+const STALE_GRACE_MS: u64 = 15 * 60 * 1000;
+
+/// The window end that should have been reported at `now_ms`. Reports run five
+/// minutes after each UTC hour, so before :05 the expected end is the previous
+/// hour end.
+fn expected_report_window_end(now_ms: u64) -> u64 {
+    let hour_end = now_ms / HOUR_MS * HOUR_MS;
+    if now_ms >= hour_end.saturating_add(REPORT_DELAY_MS) {
+        hour_end
+    } else {
+        hour_end.saturating_sub(HOUR_MS)
+    }
+}
+
+/// Whether the view no longer describes the window the operator expects. This
+/// is true when the task missed an evaluation or a restored report is older
+/// than the expected hourly window.
+fn edr_stale(view: &EdrView, now_ms: u64) -> bool {
+    let schedule = &view.schedule;
+    let Some(last) = schedule.last_evaluated_at_ms else {
+        return false;
+    };
+    let Some(window) = schedule.last_window else {
+        return true;
+    };
+    let age_limit = schedule
+        .window_ms
+        .saturating_add(schedule.report_delay_ms)
+        .saturating_add(STALE_GRACE_MS);
+    now_ms > last.saturating_add(age_limit)
+        || window.until_ms < expected_report_window_end(now_ms.saturating_sub(STALE_GRACE_MS))
+        || schedule
+            .next_evaluation_at_ms
+            .is_some_and(|next| now_ms > next.saturating_add(STALE_GRACE_MS))
+}
+
+fn millis(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn collection_json(health: &crate::console::collector::CollectorHealth) -> Value {
@@ -176,6 +256,83 @@ pub fn correlations(page: &CorrelationPage) -> Result<Vec<u8>, serde_json::Error
 mod tests {
     use super::*;
     use crate::console::history::{Grain, HistoryBucket};
+
+    #[test]
+    fn expected_report_window_end_follows_the_five_minute_delay() {
+        let hour = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        assert_eq!(expected_report_window_end(hour), hour - HOUR_MS);
+        assert_eq!(
+            expected_report_window_end(hour + 4 * 60 * 1000),
+            hour - HOUR_MS
+        );
+        assert_eq!(expected_report_window_end(hour + 5 * 60 * 1000), hour);
+        assert_eq!(expected_report_window_end(hour + 59 * 60 * 1000), hour);
+    }
+
+    #[test]
+    fn stale_view_detection_uses_the_last_window_and_next_evaluation() {
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nconsole: { enabled: true, listen: 127.0.0.1:0, source: 127.0.0.1:9090, edr: { enabled: true } }\n",
+        )
+        .expect("config");
+        let hour = 1_700_000_000_000 / HOUR_MS * HOUR_MS;
+        let mut view = crate::console::edr::failed(config.console.edr, "test");
+        assert!(!edr_stale(&view, hour));
+        view.state = crate::console::edr::TaskState::Running;
+        view.schedule.last_evaluated_at_ms = Some(hour + 5 * 60 * 1000);
+        view.schedule.last_window = Some(crate::edr::Window {
+            from_ms: hour - HOUR_MS,
+            until_ms: hour,
+        });
+        view.schedule.next_evaluation_at_ms = Some(hour + HOUR_MS + 5 * 60 * 1000);
+        assert!(!edr_stale(&view, hour + 20 * 60 * 1000));
+        // A report at :05 is not instantly stale while the task is running.
+        assert!(!edr_stale(&view, hour + 5 * 60 * 1000 + 30_000));
+        // The next report was missed.
+        assert!(edr_stale(&view, hour + HOUR_MS + 20 * 60 * 1000));
+        // A restored report from before the expected window is stale even
+        // while the next evaluation is still in the future.
+        view.schedule.last_window = Some(crate::edr::Window {
+            from_ms: hour - 2 * HOUR_MS,
+            until_ms: hour - HOUR_MS,
+        });
+        view.schedule.last_evaluated_at_ms = Some(hour - HOUR_MS + 5 * 60 * 1000);
+        assert!(edr_stale(&view, hour + 20 * 60 * 1000));
+    }
+
+    #[test]
+    fn edr_disabled_response_includes_the_schedule_without_a_view() {
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nconsole: { enabled: true, listen: 127.0.0.1:0, source: 127.0.0.1:9090 }\n",
+        )
+        .expect("config");
+        let bytes = edr(&config.console, None, 1234).expect("encode");
+        let value: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["enabled"], false);
+        assert_eq!(value["view"], Value::Null);
+        assert_eq!(value["now_ms"], 1234);
+        assert!(value["config"]["window_ms"].as_u64().expect("window") > 0);
+        assert!(value["config"]["baseline_ms"].as_u64().expect("baseline") > 0);
+    }
+
+    #[test]
+    fn edr_view_encoding_keeps_the_failed_state_and_bounded_shape() {
+        let config = crate::config::parse(
+            "listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\nconsole: { enabled: true, listen: 127.0.0.1:0, source: 127.0.0.1:9090, edr: { enabled: true } }\n",
+        )
+        .expect("config");
+        let view = crate::console::edr::failed(config.console.edr, "test failure");
+        let bytes = edr(&config.console, Some(&view), 99).expect("encode");
+        assert!(bytes.len() <= MAX_EDR_BYTES);
+        let value: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["now_ms"], 99);
+        assert_eq!(value["view"]["state"], "failed");
+        assert_eq!(value["view"]["error"], "test failure");
+        assert_eq!(value["view"]["detectors"].as_array().map(Vec::len), Some(4));
+        assert_eq!(value["view"]["findings"].as_array().map(Vec::len), Some(0));
+    }
 
     #[test]
     fn history_encoding_is_bounded_and_reports_the_cut() {

@@ -1,6 +1,6 @@
 # Monitoring console: remaining work
 
-Date: 2026-11-16
+Date: 2026-11-23
 
 Status: Tracking document for the work not covered by the implemented
 [Phase 1](monitoring-console-phase1.md) through
@@ -27,6 +27,7 @@ Related: [console design](monitoring-console.md),
 | Correlation | Compact decoy evidence with 30-day/4,096-record bounds |
 | Console runtime | `kunato console`: collector loop, health publication, bounded shutdown, independent process |
 | Web delivery | Read-only HTTP API, bounded SSE, embedded real-data UI |
+| EDR view | Read-only lamp board, latest hourly findings, telemetry states, GeoIP country, and the persisted finding ring |
 | Remote access | CIDR allowlist, Host validation, token login with server-side sessions, TLS, fail-closed validation |
 | Packaging | `kunato-console.service`, installer enablement, and the multi-unit hardening check |
 | Tests | Config, auth, allowlist, Host, TLS, history, SSE, runtime, and slow-consumer behavior |
@@ -65,6 +66,7 @@ unit disabled, so it runs only after both are explicitly enabled.
 | M-07 | Site dimension completeness beyond the `allowed_hosts` policy | phase 4 |
 | M-08 | Card/row arrival flares in the delivered UI (prototype-only today); event-age backgrounds and topology packet/spark effects are implemented | LIVE-09, LIVE-10 |
 | M-09 | Scroll-position preservation and pause/resume in the delivered UI (prototype-only today) | LIVE-06, LIVE-07 |
+| M-10 | EDR finding history browsing, filters, acknowledge/mute, and source drill-down; the current view shows the latest window with ring age/recurrence only | [EDR view](monitoring-console-edr.md) 9 |
 
 ### 2.3 Open design decisions
 

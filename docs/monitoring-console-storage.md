@@ -306,7 +306,7 @@ Prefer bounded category/rule/mechanism dimensions for long-term statistics.
 Do not retain an unlimited IP/path/token-ID time series. The schema and any
 approximation algorithm remain open; adding a dependency requires justification.
 
-### 4.3 Authentication-failure measurements
+### 4.3 Authentication-outcome measurements
 
 Supplementary measurements version 2 adds a bounded authentication-failure
 section to each source-minute: the total upstream `401`/`403` count on
@@ -319,18 +319,34 @@ rate-limit responses, maintenance pages, and upstream failures are not counted.
 Source identity is the resolved client IP; no username, password, token,
 request body, or query string is stored.
 
+Version 3 adds the opt-in success side used by the success findings:
+
+| Field | Meaning | Bound |
+| --- | --- | --- |
+| `auth_successes` | Upstream responses matching `protection.behavior.auth.success` in this source-minute | One `u64` |
+| `auth_success_sources` | Top sources with successful authentication responses and an omission bound | 16 entries per source-minute |
+
+The success section is empty when `auth.success` is not configured. The success
+classification is a pure outcome match (normalized path, method, terminal
+status); it never scores, flags, or bans. A local Kunato response never reaches
+the hook, so only upstream outcomes are recorded.
+
 The fields live in the existing `metric_buckets`/`history_buckets` JSON payload;
 there is no new table and no schema-version bump. Version-1 records parse with
-empty values and are reported as missing telemetry by the offline analyzer
-rather than as zero failures. The top-16 ranking bounds the per-minute cost and
-matches the existing source/path ranking policy. When the supplementary record
-exceeds its byte budget, authentication sources are the last optional detail
-dropped, after legacy dimensions, paths, sources, statuses, latency, and
-country detail.
+empty values and version-2 records parse with an empty success side; the
+offline analyzer reports missing telemetry rather than zero failures or zero
+successes. The top-16 rankings bound the per-minute cost and match the existing
+source/path ranking policy. When the supplementary record exceeds its byte
+budget, authentication success sources are dropped first, then authentication
+paths, then authentication sources, after legacy dimensions, paths, sources,
+statuses, latency, and country detail.
 
-`kunato edr` reads this section read-only for the hourly slow-authentication
-and distributed-campaign analysis described in
-[the EDR verification](edr-verification.md).
+`kunato edr` reads this section read-only for the slow-authentication,
+distributed-campaign, and authentication-success analysis described in
+[the EDR verification](edr-verification.md). The console EDR view keeps its
+latest report and a 7-day/256-record finding ring in a separate bounded
+`<storage_dir>/edr-state.json` (16 MiB guard); that file is not part of the
+SQLite page budget. See [the EDR view](monitoring-console-edr.md).
 
 ## 5. Adopted statistics retention policy
 

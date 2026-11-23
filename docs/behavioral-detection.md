@@ -318,6 +318,12 @@ Each pattern is validated at configuration load time with the same pattern-size
 and regex-size limits as rule patterns, and the validated list is then compiled
 into a `RegexSet`. A `401` on `/api/v1/users` (an expired token on a
 normal API call) therefore does not count; a `401` on `/api/v1/token` does.
+
+The opt-in EDR success side (`protection.behavior.auth.success`) reuses the same
+path normalization, resolved client identity, allowlist, and `protection`
+boundary, but records successful outcomes separately. It does not contribute to
+`auth_failures`, `global_auth_failures`, sequence scores, or bans; see
+[the EDR verification](edr-verification.md).
 Matching normalizes each candidate form (the raw path and up to two
 percent-decoded forms) for dot segments and duplicate slashes, mirroring rule
 path handling, so `/lo%67in` and `//login` are still counted. Operators can

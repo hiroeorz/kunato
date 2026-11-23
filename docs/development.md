@@ -1895,11 +1895,15 @@ console:
 - It uses the 1-second accepted stream instead of polling, so the WAF's
   ten-minute snapshot ring does not introduce a five-minute gap.
 - Findings are written to the journal as `event="edr.finding"` warnings;
-  `kunato log --unit kunato-console` classifies them as the `edr` event. There
-  are no console UI/API fields yet, and no automatic ban or rule change.
+  `kunato log --unit kunato-console` classifies them as the `edr` event. The
+  same hourly report feeds the read-only **EDR** view described below; there is
+  no automatic ban or rule change.
 - The state is saved atomically to `<storage_dir>/edr-state.json` (mode 0600)
   every five minutes, after each hourly report, and on shutdown. On startup the
-  console restores it; a corrupt or oversized file is logged and ignored.
+  console restores it; a corrupt or oversized file is logged and ignored. The
+  file also stores the latest report for the UI and a bounded finding ring
+  (7 days, 256 records); state version 2 accepts version-1 files with an empty
+  view history.
 - The analysis starts empty on a new installation. The baseline becomes useful
   after about a day; the first hourly report may be incomplete because the
   task did not observe the whole window.
@@ -1913,6 +1917,37 @@ console:
 The first report runs at five minutes past a UTC hour for the preceding full
 hour. If the task was delayed, missed report windows are logged and skipped
 rather than replayed against trimmed state.
+
+##### EDR view
+
+The console UI adds **EDR** under **Observe**. The page is read-only and shows
+the latest hourly report:
+
+- four lamp cards (`slow_authentication`, `reverse_brute_force`,
+  `auth_success_after_failures`, `campaign_success`). A finding in the latest
+  evaluated window turns a lamp red; a complete evaluation with no finding
+  leaves it gray; a detector that cannot be evaluated is amber (`unknown`) and
+  says why. The success lamps are `unknown` unless
+  `protection.behavior.auth.success` is configured, because absence of success
+  data is not evidence of no successful login.
+- the last evaluation and data window, the next evaluation, and the configured
+  window/baseline;
+- the latest findings with severity, source and GeoIP country, first/last
+  failure times, occurrence/episode counts from the ring, structured evidence,
+  and the analyzer recommendation;
+- failure/success telemetry states, the window summary, task retention, and
+  analyzer notes.
+
+The browser reads `GET /api/v1/edr` when the view opens, when the tab becomes
+visible, and every 60 seconds while visible. The response is bounded to 50
+findings, 20 notes, and four detectors, with a 1 MiB outer guard. The server
+marks the response `stale` when the last data window is older than the expected
+hourly window, the next evaluation is more than 15 minutes overdue, or a
+restored report is past the window plus delay plus grace; the lamps then switch
+to `unknown` while the last findings remain visible with a note. Country codes come from the
+console's GeoIP database at view-build time; they are geolocation, not
+attribution. See [the EDR view](monitoring-console-edr.md) for the API shape,
+state model, and limits.
 
 #### Loopback access
 
@@ -1981,6 +2016,7 @@ copy; the console does not widen the ACME cache permissions.
 | GET | `/api/v1/health` | Collection, writer, and storage health |
 | GET | `/api/v1/history?from_ms=&until_ms=[&limit=][&revision=]` | Bounded UTC history page (no per-site primary history yet) |
 | GET | `/api/v1/correlations?from_ms=&until_ms=[&limit=][&credential_id=]` | Compact decoy evidence |
+| GET | `/api/v1/edr` | Bounded latest EDR report, detector lamps, telemetry, and finding ring metadata |
 | GET | `/api/v1/live` | SSE stream of the latest state |
 | GET/POST/DELETE | `/api/v1/session` | Session status, login, logout |
 
@@ -2038,8 +2074,9 @@ cannot create `/var/lib/kunato/console`) before running the command above.
 
 `kunato edr` reads the console's SQLite history without changing it and reports
 authentication abuse that a per-minute rule cannot see: a source that keeps
-failing slowly, and many sources that each fail a few times on the same
-authentication endpoint.
+failing slowly, many sources that each fail a few times on the same
+authentication endpoint, a source that succeeds after sustained failures, and a
+distributed campaign with a successful response.
 
 ```sh
 kunato edr --database /var/lib/kunato/console/history.sqlite3 \
@@ -2057,17 +2094,47 @@ kunato edr --database /var/lib/kunato/console/history.sqlite3 \
 - The analyzer never bans, reloads, or writes the database. Findings carry
   evidence and a recommendation; enforcement remains with the existing
   behavioral bans and rate limits.
+- Success findings are `HIGH` severity and always `LOG`: the analyzer never
+  bans a source because it logged in. A success is only observed for endpoints
+  listed in `protection.behavior.auth.success`; an unconfigured endpoint
+  produces no success telemetry and therefore no success finding.
 
 The underlying telemetry is bounded and stored with the existing source-minute
-payload (supplementary measurement version 2): total upstream `401`/`403`
-responses on authentication paths, the top 16 failing sources and paths, and a
-64-register distinct-source sketch. It observes only upstream outcomes after
-forwarding, with the same source-identity, allowlist, and protection boundary
-as behavioral detection. No username, password, request body, or query string
-is stored. Authentication paths come from `protection.behavior.auth.paths`;
-add an application-specific login endpoint there when it is not in the default
-list. Version-1 console records remain readable and are reported as missing
-telemetry rather than zero failures.
+payload (supplementary measurement version 3): total upstream `401`/`403`
+responses on authentication paths, the top 16 failing sources and paths, a
+64-register distinct-source sketch, and the opt-in success side — the total
+configured success outcomes and the top 16 successful sources. It observes only
+upstream outcomes after forwarding, with the same source-identity, allowlist,
+and protection boundary as behavioral detection. No username, password,
+request body, or query string is stored. Authentication paths come from
+`protection.behavior.auth.paths`; add an application-specific login endpoint
+there when it is not in the default list. Version-1 and version-2 console
+records remain readable and the success side is reported as missing telemetry
+rather than zero successes.
+
+Success outcomes are opt-in because a `200` error page and a `302` MFA
+challenge are indistinguishable from a successful login without application
+knowledge. Configure each endpoint's terminal success statuses and methods:
+
+```yaml
+protection:
+  behavior:
+    auth:
+      paths: ['(?i)^/login$', '(?i)^/api/v1/auth/token$']
+      success:
+        - path: '(?i)^/login$'
+          methods: [POST]
+          statuses: [302]
+        - path: '(?i)^/api/v1/auth/token$'
+          methods: [POST]
+          statuses: [200]
+```
+
+`statuses` accepts only `200`..`399` and `methods` defaults to `[POST]`. Leave
+`success` out until the endpoint semantics are confirmed. The
+[behavioral readiness checklist](behavioral-readiness.md) records the success
+status, wrong-credential status, and any intermediate redirect per endpoint;
+that inventory is the source for this block.
 
 The initial defaults are deliberately conservative: at least 6 failures, 4
 active minutes, a 30-minute span, and at most 3 failures per minute for a slow
@@ -2921,6 +2988,12 @@ yet understood.
   `auth.paths` when the application uses different endpoints. Paths are
   normalized and percent-decoded before matching, so `//login` and `%6cogin`
   are still recognized.
+- **Authentication success outcomes** (opt-in) record an upstream response that
+  matches a configured endpoint, method, and terminal status in
+  `auth.success`. They do not score, flag, or ban; the EDR compares them with
+  the failure counts to report a success after sustained failures or a
+  distributed campaign success. The observation is subject to the same
+  allowlist and `protection.enabled` boundary as the failure signals.
 - **Global authentication abuse** sums `401`/`403` authentication failures
   across all sources. This is the signal for distributed spraying where each
   source stays below the per-source threshold. With `action: BLOCK` it rejects

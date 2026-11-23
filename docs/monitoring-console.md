@@ -53,7 +53,7 @@ The following distinctions apply throughout these documents:
 
 | Area | Direction | Status |
 | --- | --- | --- |
-| Navigation | One console with a left sidebar and two views: Metrics and Real-time monitor | Implemented in the delivered UI (minimal read-only views) |
+| Navigation | One console with a left sidebar: Real-time monitor and Metrics under Observe, plus an EDR view | Implemented in the delivered UI (minimal read-only views) |
 | Runtime boundary | An optional console process separate from the WAF process | Implemented as `kunato console` |
 | Distribution | Initially one repository and one executable with a separate console subcommand | Implemented as a subcommand and a packaged `kunato-console.service` unit |
 | Live transport | SSE from the console to the browser; ordinary HTTP APIs for queries and operations | Implemented with coalesced 1-second state and bounded subscribers |
@@ -65,6 +65,7 @@ The following distinctions apply throughout these documents:
 | Retention | 1/5/10/20/60-minute precision tiers, hourly history through 30 days, then expiry | Phase 3 logical expiry and bounded cleanup implemented |
 | Writes | Bounded buffering and batched writes, independent of request forwarding | Implemented in the console runtime; WAF request path unchanged |
 | Decoys | Treat credential-use attempts as a first-class signal in both views | Counted, persisted, correlated, and shown in the UI |
+| EDR | Hourly authentication-abuse analysis with explicit detector lamps, latest findings, and telemetry state | Implemented as `console.edr` plus the read-only EDR view and `GET /api/v1/edr`; see [the EDR view](monitoring-console-edr.md) |
 | Live emphasis | Brief arrival effects plus persistent event-age backgrounds | Event-age backgrounds and live topology packet/spark effects implemented; card/row arrival flares remain prototype-only |
 | Reading position | Preserve the same visible events during updates, including horizontal position | Prototype-only; the delivered event list renders newest first |
 
@@ -288,6 +289,7 @@ References: [Let's Encrypt challenges](https://letsencrypt.org/docs/challenge-ty
 | Host/class/category/rule measurements | Implemented with quotas and omission metadata | Bounded match/request breakdowns; incomplete populations must be labeled |
 | Status distributions and header-decision latency | Client/upstream statuses, reason latency, and exact observed extrema implemented | Header decisions; full-body duration remains unavailable |
 | Restart identity and observation completeness | Process generation, source revisions, missed attribution, and gap metadata implemented | Bounded recovery; no promise of lossless history |
+| EDR findings and ring | `console.edr` hourly report plus a 7-day/256-record ring in `edr-state.json` | Latest-window view; limited to the four implemented detectors and the capped view findings. Country is GeoIP geolocation, not attribution |
 
 Current logs do not record ALLOW rule matches, request query strings, headers,
 or bodies. Classification is category-based. Do not imply that the console can

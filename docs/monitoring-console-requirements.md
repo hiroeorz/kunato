@@ -27,7 +27,7 @@ coalesced live statistics updates with independent ten-second persistence.
 
 | ID | Requirement |
 | --- | --- |
-| UI-01 | Use one application shell with a left sidebar switching between Metrics and Real-time monitor. Both views belong to the same optional console. |
+| UI-01 | Use one application shell with a left sidebar switching between Real-time monitor, Metrics, and EDR. All views belong to the same optional console. |
 | UI-02 | Show WAF state, collection/connection state, and the latest data-update time separately. A disconnected collector must not look like zero traffic or prove the WAF has stopped. |
 | UI-03 | Use UTC for initial reporting and show UTC, the selected site, effective time range, and aggregation grain. Make the scope of event-only filters distinct from whole-view request totals. |
 | UI-04 | Keep browser navigation and display pause independent of server collection, storage, aggregation, and expiry. |
@@ -351,7 +351,26 @@ erasing the age color.
   omitted observations.
 - Maintain readable/interactive controls during high activity.
 
-## 4. Shared decoy requirements
+## 4. EDR view
+
+Purpose: show the console's hourly EDR report without implying more certainty
+or freshness than the data supports. The detailed design and limits are in
+[the EDR view](monitoring-console-edr.md).
+
+| ID | Requirement |
+| --- | --- |
+| EDR-01 | Show one card for each implemented detector: slow authentication, reverse brute force, success after failures, and campaign success. |
+| EDR-02 | A card with a finding in the latest evaluated window is detected (red). A complete evaluation with no finding is quiet (gray). A detector that could not be evaluated is unknown (amber, dashed, with a reason). Unknown must never render as quiet. |
+| EDR-03 | The success detectors are unknown when authentication-success telemetry is missing or incomplete, including an unconfigured `protection.behavior.auth.success`. Absence of success data is not evidence of no successful login. |
+| EDR-04 | Show the last evaluation time, the data window, the next evaluation, and the configured window/baseline. State that the analysis is hourly and that a red lamp is not a live alarm. |
+| EDR-05 | Mark every lamp unknown when the API reports the view stale (last window older than expected, next evaluation overdue, or a restored report past the window plus delay plus grace) while keeping the last findings visible with a note. |
+| EDR-06 | Show the latest findings with severity, detector kind, source and GeoIP country where available, first/last failure times, occurrence and episode counts from the persisted ring, structured evidence, and the recommendation. |
+| EDR-07 | Label country as geolocation, not attribution; a shared NAT, VPN, or proxy can make it misleading. |
+| EDR-08 | Bound the finding list and keep detector counts exact; disclose truncation. Do not expose usernames, passwords, bodies, query strings, or account identity. |
+| EDR-09 | Keep the view read-only. Do not add controls that change thresholds, run the analyzer, acknowledge findings, or ban sources. |
+| EDR-10 | Show missing telemetry as unavailable or unknown, never as zero, and keep the four lamp meanings (detected, quiet, unknown) available as text. |
+
+## 5. Shared decoy requirements
 
 Decoy credential-use attempts are a first-release console requirement, not a
 secondary optional visualization. They can indicate that issued information
@@ -375,7 +394,7 @@ records must not make an expired or restart-invalidated token valid again.
 Logging/inspection limits can leave an incomplete trail. See the
 [decoy design](decoy-design.md) for the authoritative enforcement semantics.
 
-## 5. Measurement semantics
+## 6. Measurement semantics
 
 | ID | Required interpretation |
 | --- | --- |
@@ -394,12 +413,12 @@ Logging/inspection limits can leave an incomplete trail. See the
 | COUNT-13 | Retain count/duration and supported base-minute extrema inputs for repeated aggregation. Preserve missing/partial populations; never average precomputed averages or sum reason extrema as overall extrema. |
 | COUNT-14 | Use UTC interval identities and the adopted precision/30-day policy. Deduplicate source revisions, merge supported generation contributions, and select disjoint grains; replay and source restarts must not extend expiry. |
 
-## 6. Review and acceptance checks
+## 7. Review and acceptance checks
 
 These checks define expected behavior for the real implementation as well as
 review targets for the prototype where applicable:
 
-1. Switch between the two views without stopping collection.
+1. Switch between the console views without stopping collection.
 2. Change periods, custom ranges, sites, comparison, and available chart series.
 3. Distinguish missing data from zero; expose available aggregation grain.
 4. Filter the event stream, inspect a record, and return without accidental

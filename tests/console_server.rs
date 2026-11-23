@@ -78,7 +78,8 @@ async fn start(
         .expect("valid console config")
         .console;
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let server = ConsoleServer::bind(&console, live, reader, shutdown_rx.clone())
+    let (_edr, edr_rx) = watch::channel(None);
+    let server = ConsoleServer::bind(&console, live, edr_rx, reader, shutdown_rx.clone())
         .await
         .expect("bind console");
     let address = server.local_addr().expect("address");
@@ -175,6 +176,44 @@ async fn seeded_collector(
     assert!(!report.timed_out);
     let minute_start = packet.buckets[0].start_ms;
     (reader, packet, health, minute_start)
+}
+
+#[tokio::test]
+async fn edr_api_serves_the_published_view_and_rejects_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (reader, _packet, _health, _) = seeded_collector(temp.path()).await;
+    let yaml = console_yaml(temp.path(), "  edr: { enabled: true }\n");
+    let console = kunato::config::parse(&yaml).expect("config").console;
+    let (_live, live_rx) = watch::channel(None);
+    let (edr_tx, edr_rx) = watch::channel(None);
+    edr_tx
+        .send(Some(Arc::new(kunato::console::edr::failed(
+            console.edr,
+            "test failure",
+        ))))
+        .expect("view");
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server = ConsoleServer::bind(&console, live_rx, edr_rx, reader, shutdown_rx.clone())
+        .await
+        .expect("bind");
+    let address = server.local_addr().expect("address");
+    let task = tokio::spawn(server.run(shutdown_rx));
+    let client = client();
+
+    let (status, body, _) = request(&client, address, Method::GET, "/api/v1/edr", &[], None).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["enabled"], true);
+    assert!(value["now_ms"].is_u64());
+    assert_eq!(value["view"]["state"], "failed");
+    assert_eq!(value["view"]["error"], "test failure");
+    assert_eq!(value["view"]["detectors"].as_array().map(Vec::len), Some(4));
+
+    let (status, _, _) = request(&client, address, Method::POST, "/api/v1/edr", &[], None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let _ = shutdown.send(true);
+    let _ = task.await;
 }
 
 #[tokio::test]
@@ -737,8 +776,11 @@ console:
 ",
         storage.display()
     );
-    let console = kunato::config::parse(&yaml).expect("config").console;
-    let runtime = ConsoleRuntime::start(console).await.expect("runtime");
+    let config = kunato::config::parse(&yaml).expect("config");
+    let geoip = config.geoip.clone();
+    let runtime = ConsoleRuntime::start(config.console, geoip)
+        .await
+        .expect("runtime");
     let address = runtime.address;
     let client = client();
 
@@ -756,6 +798,20 @@ console:
         }
     }
     assert!(connected, "console did not connect to the snapshot source");
+    let (status, body, _) = request(&client, address, Method::GET, "/api/v1/edr", &[], None).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_str(&body).expect("EDR view");
+    assert_eq!(value["enabled"], true);
+    assert!(value["view"].is_object(), "published EDR view: {body}");
+    assert_eq!(value["view"]["detectors"].as_array().map(Vec::len), Some(4));
+    assert!(
+        matches!(
+            value["view"]["state"].as_str(),
+            Some("starting" | "running")
+        ),
+        "state: {}",
+        value["view"]["state"]
+    );
     tokio::time::sleep(Duration::from_millis(500)).await;
     runtime.shutdown().await.expect("shutdown");
     source_task.abort();
@@ -808,8 +864,11 @@ console:
 ",
         temp.path().join("console").display()
     );
-    let console = kunato::config::parse(&yaml).expect("config").console;
-    let runtime = ConsoleRuntime::start(console).await.expect("runtime");
+    let config = kunato::config::parse(&yaml).expect("config");
+    let geoip = config.geoip.clone();
+    let runtime = ConsoleRuntime::start(config.console, geoip)
+        .await
+        .expect("runtime");
     let address = runtime.address;
     let client = client();
 

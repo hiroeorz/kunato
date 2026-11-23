@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -22,17 +23,27 @@ use crate::console::model::{MINUTE_MS, MetricBucket};
 use crate::error::Error;
 use crate::observations::StatisticsSnapshot;
 
-use super::{Baseline, BucketRecord, Report, Thresholds, Window, WindowData, format_utc};
+use super::{
+    Baseline, BucketRecord, Evidence, FindingKind, Report, Severity, Thresholds, Window,
+    WindowData, format_utc,
+};
 
 const MAX_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const MIN_RING: Duration = Duration::from_secs(10 * 60);
 const MAX_POLL: Duration = Duration::from_secs(60 * 60);
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
+const MIN_STATE_VERSION: u32 = 1;
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STATE_MINUTES: usize = 100_000;
 const MAX_STATE_HOURS: usize = 1_000;
 const MAX_STATE_GAPS: usize = 1_024;
 const MAX_RANKS: usize = 16;
+/// The console view shows at most this many findings per report. Detector
+/// counts stay exact through `StoredReport::counts`.
+const MAX_REPORT_FINDINGS: usize = 50;
+const MAX_REPORT_NOTES: usize = 20;
+const MAX_STATE_FINDINGS: usize = 256;
+const FINDING_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Configuration for the resident state machine.
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +185,36 @@ struct PersistedHour {
     hour: HourAuth,
 }
 
+/// One detected pattern retained across hourly reports. The record keeps the
+/// episode and recurrence counters so the console can show how long the
+/// finding has been present even after a console restart.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FindingRecord {
+    pub kind: FindingKind,
+    pub source: Option<IpAddr>,
+    pub severity: Severity,
+    pub title: String,
+    pub recommendation: String,
+    pub evidence: Evidence,
+    pub first_seen_ms: u64,
+    pub episode_started_ms: u64,
+    pub last_seen_ms: u64,
+    pub observed_windows: u64,
+    pub episodes: u64,
+}
+
+/// The last report stored for the console view. Its finding and note lists are
+/// capped; `counts` keeps the exact number of findings per kind.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredReport {
+    pub report: Report,
+    pub counts: BTreeMap<FindingKind, u64>,
+    /// Highest severity per kind from the full report, kept when the view list
+    /// is capped before a lower-severity kind appears.
+    #[serde(default)]
+    pub severities: BTreeMap<FindingKind, Severity>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedState {
     version: u32,
@@ -189,6 +230,12 @@ struct PersistedState {
     clock_discontinuity_at: u64,
     late_revisions: u64,
     snapshots: u64,
+    #[serde(default)]
+    last_report: Option<StoredReport>,
+    #[serde(default)]
+    finding_history: Vec<FindingRecord>,
+    #[serde(default)]
+    last_report_at_ms: u64,
 }
 
 /// Rolling authentication state. The state is bounded and can be saved to a
@@ -212,6 +259,9 @@ pub struct LiveEdr {
     clock_discontinuity_at: u64,
     late_revisions: u64,
     snapshots: u64,
+    last_report: Option<StoredReport>,
+    finding_history: Vec<FindingRecord>,
+    last_report_at_ms: u64,
 }
 
 impl LiveEdr {
@@ -231,6 +281,9 @@ impl LiveEdr {
             clock_discontinuity_at: 0,
             late_revisions: 0,
             snapshots: 0,
+            last_report: None,
+            finding_history: Vec::new(),
+            last_report_at_ms: 0,
         })
     }
 
@@ -383,6 +436,8 @@ impl LiveEdr {
                 auth_sources: ranking_entries(&value.sources),
                 auth_paths: ranking_entries(&value.paths),
                 auth_sketch: Some(value.distinct.clone()),
+                auth_successes: 0,
+                auth_success_sources: Vec::new(),
                 status_401: 0,
                 status_403: 0,
                 observed_ms: HOUR_MS,
@@ -437,6 +492,14 @@ impl LiveEdr {
         if let Some(finding) = data.reverse_finding(&baseline, &self.config.thresholds) {
             findings.push(finding);
         }
+        let (success_findings, flagged_sources) =
+            data.auth_success_findings(&self.config.thresholds);
+        findings.extend(success_findings);
+        if let Some(finding) =
+            data.campaign_success_finding(&flagged_sources, &self.config.thresholds)
+        {
+            findings.push(finding);
+        }
         findings.sort_by(|a, b| {
             b.severity
                 .cmp(&a.severity)
@@ -444,7 +507,8 @@ impl LiveEdr {
                 .then_with(|| a.source.cmp(&b.source))
         });
         let telemetry = data.telemetry_state();
-        let mut notes = data.notes(&baseline, telemetry);
+        let success_telemetry = data.success_telemetry_state();
+        let mut notes = data.notes(&baseline, telemetry, success_telemetry);
         notes.push(
             "Live in-memory source: the baseline is restored from the saved state when present; otherwise it begins at process start."
                 .to_owned(),
@@ -491,10 +555,96 @@ impl LiveEdr {
             site: None,
             window,
             telemetry,
+            success_telemetry,
             summary,
             findings,
             notes,
         })
+    }
+
+    /// Record one completed hourly report for the console view. The report is
+    /// capped before it is stored; the ring keeps the exact per-kind counts and
+    /// updates the observation/episode counters for each finding.
+    pub fn record_report(&mut self, report: Report, detected_at_ms: u64) {
+        let detected_at_ms = detected_at_ms.max(self.last_report_at_ms);
+        let previous_report_at = self.last_report_at_ms;
+        let mut counts = BTreeMap::new();
+        let mut severities = BTreeMap::new();
+        for finding in &report.findings {
+            *counts.entry(finding.kind).or_insert(0_u64) += 1;
+            severities
+                .entry(finding.kind)
+                .and_modify(|severity: &mut Severity| {
+                    if finding.severity > *severity {
+                        *severity = finding.severity;
+                    }
+                })
+                .or_insert(finding.severity);
+        }
+        for finding in report.findings.iter().take(MAX_REPORT_FINDINGS) {
+            let key = (finding.kind, finding.source);
+            if let Some(record) = self
+                .finding_history
+                .iter_mut()
+                .find(|record| (record.kind, record.source) == key)
+            {
+                if record.last_seen_ms < previous_report_at {
+                    record.episode_started_ms = detected_at_ms;
+                    record.episodes = record.episodes.saturating_add(1);
+                }
+                record.severity = finding.severity;
+                record.title.clone_from(&finding.title);
+                record.recommendation.clone_from(&finding.recommendation);
+                record.evidence = finding.evidence.clone();
+                record.last_seen_ms = detected_at_ms;
+                record.observed_windows = record.observed_windows.saturating_add(1);
+            } else {
+                self.finding_history.push(FindingRecord {
+                    kind: finding.kind,
+                    source: finding.source,
+                    severity: finding.severity,
+                    title: finding.title.clone(),
+                    recommendation: finding.recommendation.clone(),
+                    evidence: finding.evidence.clone(),
+                    first_seen_ms: detected_at_ms,
+                    episode_started_ms: detected_at_ms,
+                    last_seen_ms: detected_at_ms,
+                    observed_windows: 1,
+                    episodes: 1,
+                });
+            }
+        }
+        let cutoff = detected_at_ms.saturating_sub(FINDING_RETENTION_MS);
+        self.finding_history
+            .retain(|record| record.last_seen_ms >= cutoff);
+        self.finding_history.sort_by(|a, b| {
+            b.last_seen_ms
+                .cmp(&a.last_seen_ms)
+                .then_with(|| a.kind.cmp(&b.kind))
+                .then_with(|| a.source.cmp(&b.source))
+        });
+        self.finding_history.truncate(MAX_STATE_FINDINGS);
+        let mut report = report;
+        report.findings.truncate(MAX_REPORT_FINDINGS);
+        report.notes.truncate(MAX_REPORT_NOTES);
+        self.last_report = Some(StoredReport {
+            report,
+            counts,
+            severities,
+        });
+        self.last_report_at_ms = detected_at_ms;
+    }
+
+    pub fn last_report(&self) -> Option<&StoredReport> {
+        self.last_report.as_ref()
+    }
+
+    pub fn finding_history(&self) -> &[FindingRecord] {
+        &self.finding_history
+    }
+
+    pub fn last_report_at_ms(&self) -> u64 {
+        self.last_report_at_ms
     }
 
     /// Load a previously saved state. Returns `Ok(None)` when the file does
@@ -525,7 +675,7 @@ impl LiveEdr {
         })?;
         let state: PersistedState = serde_json::from_slice(&bytes)
             .map_err(|error| Error::Message(format!("invalid EDR state: {error}")))?;
-        if state.version != STATE_VERSION {
+        if !(MIN_STATE_VERSION..=STATE_VERSION).contains(&state.version) {
             return Err(Error::Message(format!(
                 "unsupported EDR state version {}",
                 state.version
@@ -534,8 +684,32 @@ impl LiveEdr {
         if state.minutes.len() > MAX_STATE_MINUTES
             || state.hours.len() > MAX_STATE_HOURS
             || state.gaps.len() > MAX_STATE_GAPS
+            || state.finding_history.len() > MAX_STATE_FINDINGS
         {
             return Err(Error::Message("EDR state exceeds its bounds".to_owned()));
+        }
+        if let Some(stored) = &state.last_report
+            && (stored.report.findings.len() > MAX_REPORT_FINDINGS
+                || stored.report.notes.len() > MAX_REPORT_NOTES
+                || stored.counts.values().any(|count| *count == 0))
+        {
+            return Err(Error::Message("invalid EDR stored report".to_owned()));
+        }
+        if state.last_report.is_some() != (state.last_report_at_ms != 0) {
+            return Err(Error::Message("invalid EDR report history".to_owned()));
+        }
+        for record in &state.finding_history {
+            if record.first_seen_ms == 0
+                || record.first_seen_ms > record.episode_started_ms
+                || record.episode_started_ms > record.last_seen_ms
+                || record.observed_windows == 0
+                || record.episodes == 0
+                || record.title.len() > 256
+                || record.recommendation.len() > 1024
+                || record.last_seen_ms > state.last_report_at_ms
+            {
+                return Err(Error::Message("invalid EDR finding record".to_owned()));
+            }
         }
         if state.last_observed_ms != 0 && state.first_observed_ms > state.last_observed_ms {
             return Err(Error::Message("invalid EDR state time range".to_owned()));
@@ -582,6 +756,9 @@ impl LiveEdr {
             clock_discontinuity_at: state.clock_discontinuity_at,
             late_revisions: state.late_revisions,
             snapshots: state.snapshots,
+            last_report: state.last_report,
+            finding_history: state.finding_history,
+            last_report_at_ms: state.last_report_at_ms,
         };
         live.trim(live.last_observed_ms);
         Ok(Some(live))
@@ -619,6 +796,9 @@ impl LiveEdr {
             clock_discontinuity_at: self.clock_discontinuity_at,
             late_revisions: self.late_revisions,
             snapshots: self.snapshots,
+            last_report: self.last_report.clone(),
+            finding_history: self.finding_history.clone(),
+            last_report_at_ms: self.last_report_at_ms,
         };
         let bytes = serde_json::to_vec(&state)
             .map_err(|error| Error::Message(format!("EDR state encoding failed: {error}")))?;
@@ -703,7 +883,12 @@ impl LiveEdr {
             .values()
             .map(|hour| 64 + hour.sources.entries.len() * 64 + hour.paths.entries.len() * 64 + 64)
             .sum();
-        minutes.saturating_add(hours)
+        let report = serde_json::to_vec(&self.last_report).map_or(0, |value| value.len());
+        let findings = serde_json::to_vec(&self.finding_history).map_or(0, |value| value.len());
+        minutes
+            .saturating_add(hours)
+            .saturating_add(report)
+            .saturating_add(findings)
     }
 
     /// True when the retained state has no usable baseline yet.
@@ -753,6 +938,282 @@ mod tests {
             outcomes: None,
             additional: Some(Box::new(additional)),
         }
+    }
+
+    fn complete_auth_bucket(
+        start: u64,
+        revision: u64,
+        failures: u64,
+        successes: u64,
+        source: &str,
+    ) -> MetricBucket {
+        let requests = failures + successes;
+        let mut additional = AdditionalMeasurements::measured();
+        additional.completed_requests = requests;
+        additional.auth_failures = failures;
+        additional.auth_successes = successes;
+        if failures > 0 {
+            additional.auth_sources.record(source, false, false);
+            additional.auth_paths.record("/login", false, false);
+            additional
+                .unique_auth_sources
+                .insert("auth-source-ip-v1", source.as_bytes());
+        }
+        if successes > 0 {
+            additional.auth_success_sources.record(source, false, false);
+        }
+        additional.validate().unwrap();
+        MetricBucket {
+            start_ms: start,
+            site: None,
+            revision,
+            counters: Counters {
+                requests: Some(requests),
+                ..Counters::default()
+            },
+            connections: None,
+            coverage: Coverage {
+                observed_ms: MINUTE_MS as u32,
+                incomplete: false,
+                omitted_events: None,
+            },
+            outcomes: None,
+            additional: Some(Box::new(additional)),
+        }
+    }
+
+    #[test]
+    fn live_report_detects_success_after_sustained_failures() {
+        let mut live = LiveEdr::new(LiveConfig {
+            window: Duration::from_secs(10 * 60),
+            baseline: Duration::ZERO,
+            poll_interval: Duration::from_secs(300),
+            ring: Duration::from_secs(10 * 60),
+            thresholds: Thresholds::default(),
+        })
+        .unwrap();
+        let observed = BASE + 9 * MINUTE_MS;
+        let mut buckets = Vec::new();
+        for minute in 0..9_u64 {
+            let failures = u64::from(minute <= 5);
+            let successes = u64::from(minute == 7);
+            buckets.push(complete_auth_bucket(
+                BASE + minute * MINUTE_MS,
+                minute + 1,
+                failures,
+                successes,
+                "203.0.113.7",
+            ));
+        }
+        live.ingest(&StatisticsSnapshot {
+            version: 3,
+            source: SourceIdentity {
+                instance: "live-test".into(),
+                generation: "g1".into(),
+            },
+            sequence: 9,
+            observed_at_ms: observed,
+            started_at_ms: BASE,
+            clock_discontinuity: false,
+            counters: Counters::default(),
+            active_connections: 0,
+            missed_updates: 0,
+            buckets,
+            events: Vec::new(),
+            events_omitted: 0,
+            event_sequence: 0,
+            additional_missed_updates: Some(0),
+        })
+        .unwrap();
+        let report = live.report(observed).unwrap();
+        assert_eq!(report.summary.auth_successes, 1);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.kind == super::super::FindingKind::AuthSuccessAfterFailures)
+            .expect("live success finding");
+        assert_eq!(finding.source, Some("203.0.113.7".parse().unwrap()));
+    }
+
+    use crate::edr::{
+        AuthSuccessEvidence, Evidence, Finding, FindingKind, PathCount, Report, Severity, Summary,
+        TelemetryState, Window,
+    };
+
+    const REPORT_BASE: u64 = 1_700_000_040_000;
+
+    fn report_at(until: u64, findings: Vec<Finding>) -> Report {
+        Report {
+            generated_at_ms: until,
+            database: "live-memory".into(),
+            site: None,
+            window: Window {
+                from_ms: until.saturating_sub(60 * MINUTE_MS),
+                until_ms: until,
+            },
+            telemetry: TelemetryState::Present,
+            success_telemetry: TelemetryState::Present,
+            summary: Summary {
+                buckets: 60,
+                minutes_covered: 60,
+                incomplete: false,
+                coarse: false,
+                requests: 10,
+                auth_failures: 1,
+                auth_successes: 0,
+                distinct_auth_sources: Some(1),
+                status_401: 1,
+                status_403: 0,
+                auth_paths: vec![PathCount {
+                    path: "/login".into(),
+                    count: 1,
+                }],
+                baseline_hours: 24,
+            },
+            findings,
+            notes: vec!["note".into()],
+        }
+    }
+
+    fn success_finding(source: &str) -> Finding {
+        Finding {
+            kind: FindingKind::AuthSuccessAfterFailures,
+            severity: Severity::High,
+            source: Some(source.parse().expect("IP")),
+            title: "success after failures".into(),
+            evidence: Evidence::AuthSuccessAfterFailures(AuthSuccessEvidence {
+                failures: 8,
+                active_buckets: 8,
+                first_failure_ms: 1_000,
+                last_failure_ms: 2_000,
+                success_ms: 3_000,
+                successes: 1,
+                total_failures: 8,
+            }),
+            recommendation: "review".into(),
+        }
+    }
+
+    fn live_config() -> LiveConfig {
+        LiveConfig {
+            window: Duration::from_secs(3600),
+            baseline: Duration::from_secs(3600),
+            poll_interval: Duration::from_secs(1),
+            ring: Duration::from_secs(720),
+            thresholds: Default::default(),
+        }
+    }
+
+    #[test]
+    fn finding_ring_tracks_age_observations_and_episodes() {
+        let mut live = LiveEdr::new(live_config()).expect("state");
+        live.record_report(
+            report_at(REPORT_BASE, vec![success_finding("203.0.113.7")]),
+            REPORT_BASE + 300_000,
+        );
+        let record = &live.finding_history()[0];
+        assert_eq!(record.first_seen_ms, REPORT_BASE + 300_000);
+        assert_eq!(record.episode_started_ms, REPORT_BASE + 300_000);
+        assert_eq!(record.observed_windows, 1);
+        assert_eq!(record.episodes, 1);
+
+        live.record_report(
+            report_at(REPORT_BASE + HOUR_MS, vec![success_finding("203.0.113.7")]),
+            REPORT_BASE + HOUR_MS + 300_000,
+        );
+        let record = &live.finding_history()[0];
+        assert_eq!(record.observed_windows, 2);
+        assert_eq!(record.episodes, 1);
+        assert_eq!(record.episode_started_ms, REPORT_BASE + 300_000);
+
+        live.record_report(
+            report_at(REPORT_BASE + 2 * HOUR_MS, Vec::new()),
+            REPORT_BASE + 2 * HOUR_MS + 300_000,
+        );
+        assert_eq!(live.finding_history().len(), 1);
+
+        live.record_report(
+            report_at(
+                REPORT_BASE + 3 * HOUR_MS,
+                vec![success_finding("203.0.113.7")],
+            ),
+            REPORT_BASE + 3 * HOUR_MS + 300_000,
+        );
+        let record = &live.finding_history()[0];
+        assert_eq!(record.first_seen_ms, REPORT_BASE + 300_000);
+        assert_eq!(
+            record.episode_started_ms,
+            REPORT_BASE + 3 * HOUR_MS + 300_000
+        );
+        assert_eq!(record.observed_windows, 3);
+        assert_eq!(record.episodes, 2);
+        assert_eq!(
+            live.last_report().expect("report").counts[&FindingKind::AuthSuccessAfterFailures],
+            1
+        );
+    }
+
+    #[test]
+    fn stored_report_caps_the_view_but_keeps_exact_counts() {
+        let mut live = LiveEdr::new(live_config()).expect("state");
+        let findings: Vec<Finding> = (0..60)
+            .map(|index| {
+                let mut finding = success_finding(&format!("198.51.100.{}", index + 1));
+                finding.kind = FindingKind::SlowAuthentication;
+                finding
+            })
+            .collect();
+        let mut report = report_at(REPORT_BASE, findings);
+        report.notes = (0..30).map(|index| format!("note {index}")).collect();
+        live.record_report(report, REPORT_BASE + 300_000);
+        let stored = live.last_report().expect("report");
+        assert_eq!(stored.report.findings.len(), MAX_REPORT_FINDINGS);
+        assert_eq!(stored.report.notes.len(), MAX_REPORT_NOTES);
+        assert_eq!(stored.counts[&FindingKind::SlowAuthentication], 60);
+        // The ring follows the capped view list; the counts stay exact.
+        assert_eq!(live.finding_history().len(), MAX_REPORT_FINDINGS);
+    }
+
+    #[test]
+    fn state_roundtrip_restores_the_last_report_and_ring() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("edr-state.json");
+        let mut live = LiveEdr::new(live_config()).expect("state");
+        live.record_report(
+            report_at(REPORT_BASE, vec![success_finding("203.0.113.7")]),
+            REPORT_BASE + 300_000,
+        );
+        live.save(&path).expect("save");
+        let loaded = LiveEdr::load(&path, live_config())
+            .expect("load")
+            .expect("state");
+        let stored = loaded.last_report().expect("report");
+        assert_eq!(stored.counts[&FindingKind::AuthSuccessAfterFailures], 1);
+        assert_eq!(loaded.finding_history().len(), 1);
+        assert_eq!(loaded.last_report_at_ms(), REPORT_BASE + 300_000);
+        assert!(loaded.retained_bytes() > 0);
+    }
+
+    #[test]
+    fn version_one_state_loads_without_view_history() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("edr-state.json");
+        let live = LiveEdr::new(live_config()).expect("state");
+        live.save(&path).expect("save");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        let object = value.as_object_mut().expect("object");
+        object.insert("version".to_owned(), 1.into());
+        object.remove("last_report");
+        object.remove("finding_history");
+        object.remove("last_report_at_ms");
+        std::fs::write(&path, serde_json::to_vec(&value).expect("encode")).expect("write");
+        let loaded = LiveEdr::load(&path, live_config())
+            .expect("load")
+            .expect("state");
+        assert!(loaded.last_report().is_none());
+        assert!(loaded.finding_history().is_empty());
+        assert_eq!(loaded.last_report_at_ms(), 0);
     }
 
     #[test]

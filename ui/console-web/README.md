@@ -6,17 +6,53 @@ is no build step, Node.js runtime, external font, or network request.
 
 | File | Purpose |
 | --- | --- |
-| `index.html` | Console shell with the Real-time monitor and Metrics views |
-| `app.js` | SSE state, history/correlation fetches, rendering, sign-out |
+| `index.html` | Console shell with the Real-time monitor, Metrics, and EDR views |
+| `app.js` | SSE state, history/correlation/EDR fetches, rendering, sign-out |
 | `login.html`, `login.js` | Token sign-in used when `console.auth.enabled` is set |
 | `world-map.js` | Pre-projected Natural Earth 1:50m country paths and small-country markers |
 | `styles.css` | Shared styles for both pages |
 | `favicon.svg` | Embedded icon |
 
 Data comes from the loopback `/console/snapshot` source through the console's
-own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, and
-`/api/v1/live` endpoints. All event values are rendered with `textContent`; the
-page makes no external requests.
+own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, `/api/v1/edr`,
+and `/api/v1/live` endpoints. All event values are rendered with `textContent`;
+the page makes no external requests.
+
+## EDR view
+
+The sidebar adds **EDR** under Observe. The page shows the console's live
+in-memory EDR (`console.edr`) over the latest complete hour; it does not run the
+offline `kunato edr` command.
+
+- **Detection lamps.** Four cards: slow authentication, reverse brute force,
+  success after failures, and campaign success. A finding in the latest
+  evaluated window gives a red pulsing lamp; a complete evaluation with no
+  finding gives a gray unlit lamp; a detector that cannot be evaluated gives an
+  amber dashed card with the reason. `unknown` is deliberately distinct from
+  `quiet`: the success detectors are unknown unless
+  `protection.behavior.auth.success` is configured, and the page never implies
+  that missing success telemetry means "no successful login."
+- **Status strip.** Task state, last evaluation and data window, next
+  evaluation, and the configured window/baseline. When the API marks the view
+  `stale` (last window older than expected, next evaluation overdue, or a
+  restored report past the window plus delay plus grace), every lamp becomes
+  `unknown` while the last findings remain visible with a note.
+- **Latest findings.** Severity, source IP and GeoIP country (for
+  single-source findings and the campaign-success source), first/last failure
+  times, occurrence and episode counts from the persisted ring, structured
+  evidence, and the analyzer recommendation. The list is capped at 50; the four
+  detector counts remain exact.
+- **Telemetry and health.** Failure/success telemetry states, the window
+  summary, task retention, and analyzer notes. Missing telemetry renders as
+  unavailable, never zero.
+- **Refresh.** The page fetches `/api/v1/edr` when it opens, when the tab
+  becomes visible, and every 60 seconds while visible. It uses the server clock
+  in `now_ms` for freshness and makes no external requests.
+
+Country codes come from the console's GeoIP database and are rendered with the
+browser's English region names. They are geolocation, not attribution; shared
+NAT, VPNs, and proxies can make them misleading. Findings are LOG-only and the
+page has no control that changes the WAF or the EDR configuration.
 
 ## Live edge shield topology
 
@@ -158,3 +194,8 @@ do not add inline scripts or styles, external fonts, or third-party assets.
 - Event-age backgrounds use the latest snapshot clock, so browser clock skew
   does not change the classification.
 - Unavailable values render as `Unavailable`, never as zero.
+- The EDR view shows the latest evaluated hourly window only. The ring keeps
+  age, observed-evaluation, and episode counters across restarts; browsing older
+  findings, filtering, acknowledging, and source drill-down remain future work.
+- The EDR view requires `console.edr.enabled: true`; success lamps additionally
+  require configured `protection.behavior.auth.success` endpoints.

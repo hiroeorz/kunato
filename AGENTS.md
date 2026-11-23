@@ -62,7 +62,7 @@ src/
   config/
     mod.rs         # YAML schema, loading, validation, compilation
     watcher.rs     # File watching and hot reload
-  console/         # Collector, UTC history/store, console runtime, HTTP/SSE server, auth, TLS
+  console/         # Collector, UTC history/store, EDR view, runtime, HTTP/SSE server, auth, TLS
   observations.rs  # WAF cumulative/minute measurements and bounded selected detail
   observations/    # Partitioned optional dimensions, rankings, sketches, and runtime state
   rules/           # Category/rule model, matcher, and evaluation engine
@@ -94,6 +94,7 @@ docs/
   behavioral-readiness.md # Deployment and authentication observation checklist
   edr-verification.md # Offline EDR method, evaluation, limits, and operation
   edr-live-verification.md # Live in-memory EDR source prototype evaluation
+  edr-detection-candidates.md # Proposed EDR detections, telemetry, and phases
   cve-coverage.md     # Daily CVE intake tracker (one row per reviewed candidate)
   engine-gaps.md      # Engine changes the daily CVE intake could not cover with a rule
   next-version-ai-defense.md # Next-version concept for defending home servers against AI-assisted attacks
@@ -106,6 +107,7 @@ docs/
   monitoring-console-phase4.md # Additional source measurements and compact decoy correlation
   monitoring-console-phase5.md # Console runtime, read-only HTTP/SSE delivery, and embedded UI
   monitoring-console-phase6.md # Remote access: source allowlist, authentication, and TLS
+  monitoring-console-edr.md # Read-only EDR view, view API, lamp states, finding ring
   monitoring-console-remaining.md # Remaining console and measurement work
   monitoring-console-cadence.md # Measured update costs and proposed one-second live publication
   development.md      # Development, deployment, and the full configuration reference
@@ -304,6 +306,11 @@ rule-set updates.
   default to `LOG` and accept `action: BLOCK`; the global signal is `LOG` only.
   Under `mode: detection`, `BLOCK` records the flag without banning or
   blocking authentication paths.
+  `behavior.auth.success` (opt-in) names per-endpoint success methods and
+  terminal statuses (200–399) for the EDR success-after-failures and
+  campaign-success findings; it never scores, flags, or bans, and requires
+  `auth.enabled` or `global_auth.enabled`. Unconfigured endpoints have no
+  success telemetry, and the analyzer reports that as a missing-telemetry note.
   `behavior.session` (opt-in) hashes configured cookies, confirms a country
   baseline from `Set-Cookie` or repeated same-country requests, and adds a
   low-weight `session-country-mismatch` evidence to the **current source IP's**
@@ -313,6 +320,14 @@ rule-set updates.
   `protection.enabled: false` and `--disable-protection`, and
   `protection.allowlist` (not an `ALLOW` rule) exempts a source. See
   `docs/behavioral-detection.md`.
+- `console.edr` (opt-in) runs the hourly EDR analysis in the console process
+  and feeds the read-only EDR view at `GET /api/v1/edr`. Detector lamps are
+  `detected`, `quiet`, or `unknown`; missing failure or success telemetry
+  (including an unconfigured `protection.behavior.auth.success`) is `unknown`,
+  never clear. The latest report and a 7-day/256-record finding ring live in
+  `edr-state.json` (state version 2, version 1 accepted). Country labels come
+  from the configured GeoIP database and are geolocation, not attribution.
+  Findings remain LOG-only and the view never changes the WAF.
 - `tls.acme` enables automatic certificates through ACME with TLS-ALPN-01
   challenges; it replaces `tls.cert_file`/`tls.key_file`, is validated at load
   time (no wildcards, no IPs), and is applied at startup like the rest of the

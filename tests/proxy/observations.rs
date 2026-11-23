@@ -328,12 +328,38 @@ async fn authentication_failures_are_attributed_to_the_source_minute() {
 
     let packet = running.metrics.observations.snapshot(0).unwrap();
     let values = additional(&packet);
-    assert_eq!(values.version, 2);
+    assert_eq!(values.version, 3);
     assert_eq!(values.auth_failures, 2);
     assert_eq!(values.auth_sources.entries[0].key, "127.0.0.1");
     assert_eq!(values.auth_sources.entries[0].estimate, 2);
     assert_eq!(values.auth_paths.entries[0].key, "/login");
     assert_eq!(values.auth_paths.entries[0].estimate, 2);
     assert!(values.unique_auth_sources.estimate().unwrap() >= 0.5);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn authentication_successes_need_the_configured_method_and_status() {
+    let upstream = spawn_upstream(StatusCode::OK, "ok").await;
+    let running = start_kunato(&format!(
+        "listen: 127.0.0.1:0\nupstream: http://{upstream}\nprotection:\n  behavior:\n    auth:\n      success:\n        - path: '^/login$'\n          methods: [POST]\n          statuses: [200]\n"
+    ))
+    .await;
+
+    for _ in 0..2 {
+        let (status, _) = send(running.addr, Method::POST, "/login", "").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = send(running.addr, Method::GET, "/login", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(running.addr, Method::POST, "/api/users", "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let packet = running.metrics.observations.snapshot(0).unwrap();
+    let values = additional(&packet);
+    assert_eq!(values.auth_successes, 2);
+    assert_eq!(values.auth_success_sources.entries[0].key, "127.0.0.1");
+    assert_eq!(values.auth_success_sources.entries[0].estimate, 2);
+    assert_eq!(values.auth_failures, 0);
     running.stop().await;
 }

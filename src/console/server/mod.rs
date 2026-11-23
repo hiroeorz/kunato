@@ -30,6 +30,7 @@ use tracing::{debug, info, warn};
 use crate::config::{Console, ConsoleTls};
 use crate::console::HistoryQuery;
 use crate::console::collector::HistoryReader;
+use crate::console::edr::EdrView;
 use crate::error::Error;
 use crate::proxy::server::drain_connections;
 use crate::proxy::{BodyExt, BoxError, ProxyBody, full_body};
@@ -63,6 +64,7 @@ pub struct ConsoleServer {
 struct Context {
     console: Console,
     live: watch::Receiver<Option<Arc<LiveState>>>,
+    edr: watch::Receiver<Option<Arc<EdrView>>>,
     reader: HistoryReader,
     auth: Option<Arc<Auth>>,
     tls: Option<TlsState>,
@@ -90,6 +92,7 @@ impl ConsoleServer {
     pub async fn bind(
         console: &Console,
         live: watch::Receiver<Option<Arc<LiveState>>>,
+        edr: watch::Receiver<Option<Arc<EdrView>>>,
         reader: HistoryReader,
         shutdown: watch::Receiver<bool>,
     ) -> Result<Self, Error> {
@@ -112,6 +115,7 @@ impl ConsoleServer {
             context: Arc::new(Context {
                 console: console.clone(),
                 live,
+                edr,
                 reader,
                 auth,
                 tls,
@@ -293,6 +297,7 @@ async fn route(request: Request<Incoming>, connection: Connection) -> Response<P
                 ("GET", "/api/v1/health") => health(&connection),
                 ("GET", "/api/v1/history") => history(request, &connection).await,
                 ("GET", "/api/v1/correlations") => correlations(request, &connection).await,
+                ("GET", "/api/v1/edr") => edr(&connection),
                 ("GET", "/api/v1/live") => live(request, &connection),
                 _ => text(StatusCode::NOT_FOUND, "not found\n"),
             }
@@ -304,9 +309,11 @@ fn allowed_methods(path: &str) -> Option<&'static str> {
     match path {
         "/" | "/app.js" | "/world-map.js" | "/login" | "/login.js" | "/styles.css"
         | "/favicon.svg" => Some("GET"),
-        "/api/v1/health" | "/api/v1/history" | "/api/v1/correlations" | "/api/v1/live" => {
-            Some("GET")
-        }
+        "/api/v1/health"
+        | "/api/v1/history"
+        | "/api/v1/correlations"
+        | "/api/v1/edr"
+        | "/api/v1/live" => Some("GET"),
         "/api/v1/session" => Some("GET, POST, DELETE"),
         _ => None,
     }
@@ -317,6 +324,21 @@ fn health(connection: &Connection) -> Response<ProxyBody> {
     match dto::health(&connection.context.console, state.as_deref(), now_ms()) {
         Ok(json) => json_response(json),
         Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "failed to encode health"),
+    }
+}
+
+fn edr(connection: &Connection) -> Response<ProxyBody> {
+    let view = connection.context.edr.borrow().clone();
+    match dto::edr(&connection.context.console, view.as_deref(), now_ms()) {
+        Ok(json) if json.len() <= dto::MAX_EDR_BYTES => json_response(json),
+        Ok(_) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EDR state exceeds the response budget",
+        ),
+        Err(_) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode EDR state",
+        ),
     }
 }
 

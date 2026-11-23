@@ -14,11 +14,14 @@
     connected: false,
     source: null,
     clockOffsetMs: 0,
+    edr: null,
+    edrRequest: 0,
   };
 
   var view = {
     live: document.getElementById("live-view"),
     metrics: document.getElementById("metrics-view"),
+    edr: document.getElementById("edr-view"),
   };
 
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -40,6 +43,32 @@
   var WORLD_MAP_COLORS = [
     "#fde8d8", "#f9c9a8", "#f2a47c", "#dd7048", "#b94b35", "#7f2a2a",
   ];
+
+  var EDR_DETECTOR_KINDS = [
+    "slow_authentication",
+    "reverse_brute_force",
+    "auth_success_after_failures",
+    "campaign_success",
+  ];
+
+  var EDR_DETECTOR_LABELS = {
+    slow_authentication: {
+      title: "Slow authentication",
+      detail: "One source failing authentication below the per-minute controls.",
+    },
+    reverse_brute_force: {
+      title: "Reverse brute force",
+      detail: "Many sources failing on the same authentication endpoint.",
+    },
+    auth_success_after_failures: {
+      title: "Success after failures",
+      detail: "A source authenticated after sustained failures.",
+    },
+    campaign_success: {
+      title: "Campaign success",
+      detail: "A distributed campaign produced a successful response.",
+    },
+  };
 
   var TOPO_LAYERS = [
     {
@@ -298,6 +327,47 @@
       return "unavailable";
     }
     return new Date(ms).toISOString().slice(11, 19) + " UTC";
+  }
+
+  function emptyNode(node) {
+    if (!node) {
+      return;
+    }
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+
+  function formatDurationMs(ms) {
+    if (ms === null || ms === undefined || ms <= 0) {
+      return "unavailable";
+    }
+    var minutes = Math.round(ms / 60000);
+    if (minutes >= 1440) {
+      return Math.round(minutes / 1440) + "d";
+    }
+    if (minutes >= 60) {
+      return Math.round(minutes / 60) + "h";
+    }
+    return minutes + "m";
+  }
+
+  function formatDecimal(value, digits) {
+    if (value === null || value === undefined || !isFinite(value)) {
+      return "n/a";
+    }
+    return Number(value).toFixed(digits);
+  }
+
+  function countryName(code) {
+    if (!code) {
+      return null;
+    }
+    try {
+      return COUNTRY_DISPLAY_NAMES ? COUNTRY_DISPLAY_NAMES.of(code) : code;
+    } catch (error) {
+      return code;
+    }
   }
 
   var GRAIN_MS = {
@@ -4251,6 +4321,648 @@
       });
   }
 
+  function loadEdr() {
+    var request = ++state.edrRequest;
+    fetch("/api/v1/edr", { credentials: "same-origin" })
+      .then(function (response) {
+        if (response.status === 401) {
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) {
+          throw new Error("HTTP " + response.status);
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        if (request !== state.edrRequest) {
+          return;
+        }
+        state.edr = data;
+        renderEdr();
+      })
+      .catch(function (error) {
+        if (request !== state.edrRequest) {
+          return;
+        }
+        if (error.message === "unauthorized") {
+          window.location.replace("/login");
+          return;
+        }
+        renderEdrError(error.message);
+      });
+  }
+
+  function renderEdr() {
+    var data = state.edr;
+    if (!data) {
+      return;
+    }
+    if (!data.enabled) {
+      renderEdrDisabled(data);
+      return;
+    }
+    if (!data.view) {
+      renderEdrStarting(data);
+      return;
+    }
+    var view = data.view;
+    var stale = edrIsStale(data);
+    renderEdrStatus(view, stale);
+    renderEdrLamps(view, stale);
+    renderEdrFindings(view);
+    renderEdrTelemetry(view);
+    var detected = (view.detectors || []).filter(function (detector) {
+      return detector.state === "detected";
+    }).length;
+    var unknown = (view.detectors || []).filter(function (detector) {
+      return detector.state === "unknown";
+    }).length;
+    if (stale || view.state === "stopped" || view.state === "failed") {
+      detected = 0;
+      unknown = (view.detectors || []).length;
+    }
+    text(
+      $("edr-live-summary"),
+      detected +
+        " detector" +
+        (detected === 1 ? "" : "s") +
+        " with findings; " +
+        unknown +
+        " could not be evaluated."
+    );
+  }
+
+  function edrIsStale(data) {
+    return data.stale === true;
+  }
+
+  function edrTaskLabel(value) {
+    if (value === "running") {
+      return "EDR running";
+    }
+    if (value === "starting") {
+      return "EDR starting";
+    }
+    if (value === "failed") {
+      return "EDR failed";
+    }
+    if (value === "stopped") {
+      return "EDR stopped";
+    }
+    return "EDR state unknown";
+  }
+
+  function renderEdrStatus(view, stale) {
+    text($("edr-task-chip"), edrTaskLabel(view.state));
+    var schedule = view.schedule || {};
+    var last = schedule.last_evaluated_at_ms;
+    if (last) {
+      var evaluated = "Evaluated " + utcMinute(last) + " UTC";
+      if (schedule.last_window) {
+        evaluated +=
+          " · window " +
+          utcMinute(schedule.last_window.from_ms) +
+          "–" +
+          utcMinute(schedule.last_window.until_ms) +
+          " UTC";
+      }
+      text($("edr-last-evaluated"), evaluated);
+    } else {
+      text($("edr-last-evaluated"), "No evaluation yet");
+    }
+    text(
+      $("edr-next-evaluation"),
+      schedule.next_evaluation_at_ms
+        ? "Next " + utcMinute(schedule.next_evaluation_at_ms) + " UTC"
+        : "Next evaluation unavailable"
+    );
+    text(
+      $("edr-schedule"),
+      "Window " +
+        formatDurationMs(schedule.window_ms) +
+        " · baseline " +
+        formatDurationMs(schedule.baseline_ms)
+    );
+    var note;
+    if (view.error) {
+      note = "EDR task error: " + view.error;
+    } else if (stale) {
+      note =
+        "The last evaluation is older than the expected hourly window, or the next evaluation is overdue. The lamps show the last completed report; check the console EDR task and the WAF snapshot source.";
+    } else if (view.state === "starting") {
+      note = "Waiting for the first hourly evaluation. The analysis covers the last complete UTC hour.";
+    } else if (!last) {
+      note = "No hourly evaluation has completed yet.";
+    } else {
+      note =
+        "The lamps describe the last completed hourly window. A red lamp is a finding in that window, not a live alarm.";
+    }
+    text($("edr-status-note"), note);
+  }
+
+  function renderEdrLamps(view, stale) {
+    var grid = $("edr-lamp-grid");
+    emptyNode(grid);
+    var detectors = view.detectors || [];
+    if (!detectors.length) {
+      renderEdrUnavailableLamps("No detector state is available.");
+      return;
+    }
+    detectors.forEach(function (detector) {
+      var state = detector.state;
+      var reason = detector.reason;
+      if (stale) {
+        state = "unknown";
+        reason = "The next evaluation is overdue.";
+      } else if (view.state === "stopped") {
+        state = "unknown";
+        reason = "The EDR task is stopped.";
+      } else if (view.state === "failed") {
+        state = "unknown";
+        reason = "The EDR task failed.";
+      }
+      grid.appendChild(edrLampCard(detector, state, reason));
+    });
+  }
+
+  function renderEdrUnavailableLamps(reason) {
+    var grid = $("edr-lamp-grid");
+    emptyNode(grid);
+    EDR_DETECTOR_KINDS.forEach(function (kind) {
+      grid.appendChild(
+        edrLampCard(
+          {
+            kind: kind,
+            count: 0,
+            severity: null,
+            last_detected_at_ms: null,
+          },
+          "unknown",
+          reason
+        )
+      );
+    });
+  }
+
+  function edrLampCard(detector, state, reason) {
+    var meta = EDR_DETECTOR_LABELS[detector.kind] || {
+      title: String(detector.kind || "unknown").replace(/_/g, " "),
+      detail: "",
+    };
+    var card = document.createElement("article");
+    card.className = "edr-lamp is-" + state;
+    var dot = document.createElement("span");
+    dot.className = "edr-lamp-dot";
+    dot.setAttribute("aria-hidden", "true");
+    var body = document.createElement("div");
+    body.className = "edr-lamp-body";
+    var stateLine = document.createElement("p");
+    stateLine.className = "edr-lamp-state";
+    stateLine.textContent =
+      state === "detected" ? "DETECTED" : state === "quiet" ? "QUIET" : "UNKNOWN";
+    var title = document.createElement("p");
+    title.className = "edr-lamp-title";
+    title.textContent = meta.title;
+    var metaLine = document.createElement("p");
+    metaLine.className = "edr-lamp-meta";
+    if (state === "detected") {
+      var parts = [plural(detector.count || 0, "finding", "findings")];
+      if (detector.severity) {
+        parts.push(String(detector.severity).toUpperCase());
+      }
+      if (detector.last_detected_at_ms) {
+        parts.push("last " + utcMinute(detector.last_detected_at_ms) + " UTC");
+      }
+      metaLine.textContent = parts.join(" · ");
+    } else if (state === "quiet") {
+      metaLine.textContent = "No finding in the last evaluated window.";
+    } else {
+      metaLine.textContent = "Not evaluated.";
+    }
+    var detail = document.createElement("p");
+    detail.className = "edr-lamp-detail";
+    detail.textContent = meta.detail;
+    body.appendChild(stateLine);
+    body.appendChild(title);
+    body.appendChild(metaLine);
+    body.appendChild(detail);
+    if (state === "unknown" && reason) {
+      var why = document.createElement("p");
+      why.className = "edr-lamp-reason";
+      why.textContent = reason;
+      body.appendChild(why);
+    }
+    card.appendChild(dot);
+    card.appendChild(body);
+    return card;
+  }
+
+  function renderEdrFindings(view) {
+    var list = $("edr-findings-list");
+    var note = $("edr-findings-note");
+    emptyNode(list);
+    var findings = view.findings || [];
+    var total = (view.detectors || []).reduce(function (sum, detector) {
+      return sum + (detector.count || 0);
+    }, 0);
+    if (!findings.length) {
+      var unknown = (view.detectors || []).some(function (detector) {
+        return detector.state === "unknown";
+      });
+      list.appendChild(
+        edrEmpty(
+          unknown
+            ? "No finding in the last evaluated window, but at least one detector could not be evaluated. Treat the amber lamps as unknown, not clear."
+            : "No finding in the last evaluated window."
+        )
+      );
+      text(
+        note,
+        "The latest hourly window only; the finding ring keeps age and recurrence across console restarts."
+      );
+      return;
+    }
+    if (total > findings.length) {
+      text(
+        note,
+        "Showing " +
+          findings.length +
+          " of " +
+          number(total) +
+          " findings; the detector counts are exact."
+      );
+    } else {
+      text(
+        note,
+        "The latest hourly window only; the finding ring keeps age and recurrence across console restarts."
+      );
+    }
+    findings.forEach(function (finding) {
+      list.appendChild(edrFindingCard(finding));
+    });
+  }
+
+  function edrFindingCard(finding) {
+    var card = document.createElement("article");
+    card.className = "edr-finding severity-" + finding.severity;
+    var head = document.createElement("div");
+    head.className = "edr-finding-head";
+    var severity = document.createElement("span");
+    severity.className = "chip";
+    severity.textContent = String(finding.severity || "unknown").toUpperCase();
+    var kind = document.createElement("span");
+    kind.className = "edr-finding-kind";
+    kind.textContent =
+      (EDR_DETECTOR_LABELS[finding.kind] || {}).title ||
+      String(finding.kind || "").replace(/_/g, " ");
+    head.appendChild(severity);
+    head.appendChild(kind);
+    var source = edrFindingSource(finding);
+    if (source) {
+      var sourceNode = document.createElement("span");
+      sourceNode.className = "edr-finding-source";
+      sourceNode.textContent = source;
+      head.appendChild(sourceNode);
+    }
+    card.appendChild(head);
+    var history = document.createElement("p");
+    history.className = "edr-finding-history";
+    var parts = [];
+    if (finding.first_seen_ms) {
+      parts.push("first detected " + utcMinute(finding.first_seen_ms) + " UTC");
+    }
+    if (finding.episode_started_ms && finding.episode_started_ms !== finding.first_seen_ms) {
+      parts.push("episode started " + utcMinute(finding.episode_started_ms) + " UTC");
+    }
+    if (finding.last_seen_ms) {
+      parts.push("last seen " + utcMinute(finding.last_seen_ms) + " UTC");
+    }
+    parts.push("seen in " + plural(finding.observed_windows || 0, "evaluation", "evaluations"));
+    if ((finding.episodes || 0) > 1) {
+      parts.push(plural(finding.episodes, "episode", "episodes"));
+    }
+    history.textContent = parts.join(" · ");
+    card.appendChild(history);
+    var evidence = document.createElement("ul");
+    evidence.className = "edr-finding-evidence";
+    edrEvidenceLines(finding).forEach(function (line) {
+      var item = document.createElement("li");
+      item.textContent = line;
+      evidence.appendChild(item);
+    });
+    card.appendChild(evidence);
+    var recommendation = document.createElement("p");
+    recommendation.className = "edr-finding-rec";
+    recommendation.textContent = finding.recommendation || "";
+    card.appendChild(recommendation);
+    return card;
+  }
+
+  function edrFindingSource(finding) {
+    if (finding.source) {
+      var country = countryName(finding.country);
+      return finding.source + (country ? " · " + country : "");
+    }
+    if (finding.success_source) {
+      var successCountry = countryName(finding.success_country);
+      return "success source " + finding.success_source + (successCountry ? " · " + successCountry : "");
+    }
+    return "distributed sources";
+  }
+
+  function edrEvidenceLines(finding) {
+    var evidence = finding.evidence || {};
+    var lines = [];
+    if (finding.kind === "slow_authentication") {
+      lines.push(
+        "Failures: " +
+          number(evidence.failures) +
+          " over " +
+          plural(evidence.active_buckets || 0, "active minute", "active minutes") +
+          "; span " +
+          number(evidence.span_minutes) +
+          " minutes."
+      );
+      if (evidence.first_failure_ms) {
+        lines.push(
+          "Failure range: " +
+            utcMinute(evidence.first_failure_ms) +
+            "–" +
+            (evidence.last_failure_ms ? utcMinute(evidence.last_failure_ms) : "unknown") +
+            " UTC."
+        );
+      }
+      lines.push(
+        "Maximum " +
+          number(evidence.max_failures_per_minute) +
+          " failure(s) per minute; baseline " +
+          formatDecimal(evidence.baseline_failures_per_hour, 1) +
+          " failures/hour (z " +
+          formatDecimal(evidence.baseline_z, 1) +
+          ")."
+      );
+    } else if (finding.kind === "reverse_brute_force") {
+      lines.push(
+        "Failures: " +
+          number(evidence.failures) +
+          " from an estimated " +
+          number(Math.round(evidence.distinct_sources || 0)) +
+          " distinct sources; mean " +
+          formatDecimal(evidence.mean_failures_per_source, 2) +
+          " per source."
+      );
+      if (evidence.first_failure_ms) {
+        lines.push(
+          "Failure range: " +
+            utcMinute(evidence.first_failure_ms) +
+            "–" +
+            (evidence.last_failure_ms ? utcMinute(evidence.last_failure_ms) : "unknown") +
+            " UTC."
+        );
+      }
+      if (evidence.top_path) {
+        lines.push(
+          "Top failure path: " +
+            evidence.top_path +
+            " (" +
+            formatDecimal((Number(evidence.top_path_share) || 0) * 100, 1) +
+            "% of failures)."
+        );
+      }
+      lines.push(
+        "Baseline " +
+          formatDecimal(evidence.baseline_failures_per_hour, 1) +
+          " failures/hour (z " +
+          formatDecimal(evidence.baseline_z, 1) +
+          ")."
+      );
+    } else if (finding.kind === "auth_success_after_failures") {
+      lines.push(
+        "Failures before the success: " +
+          number(evidence.failures) +
+          " over " +
+          plural(evidence.active_buckets || 0, "active minute", "active minutes") +
+          "; success at " +
+          (evidence.success_ms ? utcMinute(evidence.success_ms) + " UTC" : "unknown") +
+          "."
+      );
+      if (evidence.first_failure_ms) {
+        lines.push(
+          "Failure range: " +
+            utcMinute(evidence.first_failure_ms) +
+            "–" +
+            (evidence.last_failure_ms ? utcMinute(evidence.last_failure_ms) : "unknown") +
+            " UTC."
+        );
+      }
+      lines.push(
+        "Successful responses in the window: " +
+          number(evidence.successes) +
+          "; total source failures: " +
+          number(evidence.total_failures) +
+          "."
+      );
+    } else if (finding.kind === "campaign_success") {
+      lines.push(
+        "Failures: " +
+          number(evidence.failures) +
+          " from an estimated " +
+          number(Math.round(evidence.distinct_sources || 0)) +
+          " distinct sources; mean " +
+          formatDecimal(evidence.mean_failures_per_source, 2) +
+          " per source."
+      );
+      if (evidence.first_failure_ms) {
+        lines.push(
+          "Failure range: " +
+            utcMinute(evidence.first_failure_ms) +
+            "–" +
+            (evidence.last_failure_ms ? utcMinute(evidence.last_failure_ms) : "unknown") +
+            " UTC."
+        );
+      }
+      if (evidence.success_source) {
+        lines.push(
+          "Success source: " +
+            evidence.success_source +
+            " at " +
+            (evidence.success_ms ? utcMinute(evidence.success_ms) + " UTC" : "unknown") +
+            "; its last failure " +
+            (evidence.source_last_failure_ms
+              ? utcMinute(evidence.source_last_failure_ms) + " UTC"
+              : "unknown") +
+            "."
+        );
+      }
+    }
+    if (!lines.length) {
+      lines.push("No structured evidence is available for this finding.");
+    }
+    return lines;
+  }
+
+  function edrEmpty(message) {
+    var node = document.createElement("p");
+    node.className = "edr-empty";
+    node.textContent = message;
+    return node;
+  }
+
+  function renderEdrTelemetry(view) {
+    var telemetry = view.telemetry || {};
+    setEdrTelemetry("edr-failure-telemetry", telemetry.failure, false);
+    setEdrTelemetry("edr-success-telemetry", telemetry.success, true);
+    var summary = telemetry.summary;
+    if (!summary) {
+      text($("edr-summary"), "Unavailable");
+    } else {
+      var parts = [
+        "Requests " + number(summary.requests),
+        "auth failures " + number(summary.auth_failures),
+        "auth successes " + number(summary.auth_successes),
+        "distinct failing sources " +
+          (summary.distinct_auth_sources === null || summary.distinct_auth_sources === undefined
+            ? "unknown"
+            : number(summary.distinct_auth_sources)),
+        "baseline " + number(summary.baseline_hours) + " hours",
+      ];
+      if (summary.auth_paths && summary.auth_paths.length) {
+        parts.push(
+          "top failure paths " +
+            summary.auth_paths
+              .map(function (value) {
+                return value.path + " (" + number(value.count) + ")";
+              })
+              .join(", ")
+        );
+      }
+      text($("edr-summary"), parts.join(" · "));
+    }
+    var task = view.task || {};
+    var taskParts = [
+      "Snapshots " + number(task.snapshots),
+      "retained " + number(task.retained_minutes) + " minutes / " + number(task.retained_hours) + " hours",
+    ];
+    if (task.baseline_warming_up) {
+      taskParts.push("baseline warming up");
+    }
+    text($("edr-task-detail"), taskParts.join(" · "));
+    var notes = $("edr-notes");
+    emptyNode(notes);
+    var values = (view.notes || []).slice();
+    if (view.error) {
+      values.unshift("EDR task error: " + view.error);
+    }
+    if (!values.length) {
+      var item = document.createElement("li");
+      item.textContent = "No notes for the last evaluation.";
+      notes.appendChild(item);
+    } else {
+      values.forEach(function (value) {
+        var entry = document.createElement("li");
+        entry.textContent = value;
+        notes.appendChild(entry);
+      });
+    }
+  }
+
+  function setEdrTelemetry(id, value, success) {
+    var node = $(id);
+    var label;
+    if (value === "present") {
+      label = "Present";
+    } else if (value === "partial") {
+      label = "Incomplete (lower bound)";
+    } else {
+      label = success ? "Missing or not configured" : "Missing";
+    }
+    text(node, label);
+    node.classList.toggle("is-unavailable", value !== "present");
+  }
+
+  function renderEdrDisabled(data) {
+    var config = data.config || {};
+    text($("edr-task-chip"), "EDR disabled");
+    text($("edr-last-evaluated"), "No evaluation");
+    text($("edr-next-evaluation"), "Next evaluation unavailable");
+    text(
+      $("edr-schedule"),
+      "Window " + formatDurationMs(config.window_ms) + " · baseline " + formatDurationMs(config.baseline_ms)
+    );
+    text(
+      $("edr-status-note"),
+      "EDR is disabled. Enable console.edr in the Kunato configuration and restart the console service. No lamp can be evaluated."
+    );
+    text($("edr-live-summary"), "EDR is disabled; no detector was evaluated.");
+    renderEdrUnavailableLamps("EDR is disabled by console.edr.enabled: false.");
+    var list = $("edr-findings-list");
+    emptyNode(list);
+    list.appendChild(edrEmpty("EDR is disabled; no findings are evaluated."));
+    text($("edr-findings-note"), "Enable console.edr to run the hourly analysis.");
+    text($("edr-failure-telemetry"), "Not collected");
+    text($("edr-success-telemetry"), "Not collected");
+    $("edr-failure-telemetry").classList.add("is-unavailable");
+    $("edr-success-telemetry").classList.add("is-unavailable");
+    text($("edr-summary"), "Unavailable");
+    text($("edr-task-detail"), "EDR task is not running.");
+    var notes = $("edr-notes");
+    emptyNode(notes);
+    var item = document.createElement("li");
+    item.textContent = "Set console.edr.enabled: true to evaluate the four detectors.";
+    notes.appendChild(item);
+  }
+
+  function renderEdrStarting(data) {
+    var config = data.config || {};
+    text($("edr-task-chip"), "EDR starting");
+    text($("edr-last-evaluated"), "No evaluation yet");
+    text($("edr-next-evaluation"), "Next evaluation unavailable");
+    text(
+      $("edr-schedule"),
+      "Window " + formatDurationMs(config.window_ms) + " · baseline " + formatDurationMs(config.baseline_ms)
+    );
+    text($("edr-status-note"), "Waiting for the EDR task to publish its first state.");
+    text($("edr-live-summary"), "Waiting for the EDR task to publish its first state.");
+    renderEdrUnavailableLamps("No EDR state has been published yet.");
+    var list = $("edr-findings-list");
+    emptyNode(list);
+    list.appendChild(edrEmpty("Waiting for the first hourly evaluation."));
+    text($("edr-findings-note"), "The latest hourly window only.");
+    text($("edr-failure-telemetry"), "Unavailable");
+    text($("edr-success-telemetry"), "Unavailable");
+    text($("edr-summary"), "Unavailable");
+    text($("edr-task-detail"), "EDR task is starting.");
+    var notes = $("edr-notes");
+    emptyNode(notes);
+    var item = document.createElement("li");
+    item.textContent = "Waiting for the console EDR task.";
+    notes.appendChild(item);
+  }
+
+  function renderEdrError(message) {
+    if (state.edr && state.edr.view) {
+      text(
+        $("edr-status-note"),
+        "The console could not refresh the EDR state: " +
+          message +
+          ". Showing the last received state."
+      );
+      return;
+    }
+    text($("edr-task-chip"), "EDR unavailable");
+    text($("edr-status-note"), "The console could not read the EDR state: " + message);
+    text($("edr-live-summary"), "The EDR state is unavailable.");
+    renderEdrUnavailableLamps("The EDR state is unavailable.");
+    var list = $("edr-findings-list");
+    emptyNode(list);
+    list.appendChild(edrEmpty("The EDR state is unavailable."));
+    var notes = $("edr-notes");
+    emptyNode(notes);
+    var item = document.createElement("li");
+    item.textContent = message;
+    notes.appendChild(item);
+  }
+
   function showView(name) {
     state.view = name;
     Object.keys(view).forEach(function (key) {
@@ -4259,15 +4971,23 @@
     document.querySelectorAll(".nav-item").forEach(function (item) {
       item.classList.toggle("is-active", item.dataset.view === name);
     });
-    text($("page-title"), name === "live" ? "Real-time monitor" : "Metrics");
-    text(
-      $("page-subtitle"),
-      name === "live"
-        ? "Latest state from the WAF; UTC timestamps. Read-only."
-        : "Retained UTC history; chart display grain, storage grain, and coverage are shown with the data."
-    );
+    var titles = {
+      live: "Real-time monitor",
+      metrics: "Metrics",
+      edr: "EDR",
+    };
+    var subtitles = {
+      live: "Latest state from the WAF; UTC timestamps. Read-only.",
+      metrics:
+        "Retained UTC history; chart display grain, storage grain, and coverage are shown with the data.",
+      edr: "Hourly authentication-abuse analysis over the latest evaluated window. Read-only.",
+    };
+    text($("page-title"), titles[name] || "EDR");
+    text($("page-subtitle"), subtitles[name] || "");
     if (name === "metrics") {
       loadMetrics();
+    } else if (name === "edr") {
+      loadEdr();
     } else {
       updateEventAges();
       updateTopology();
@@ -4318,9 +5038,17 @@
   });
 
   setInterval(updateEventAges, 10000);
+  setInterval(function () {
+    if (state.view === "edr" && !document.hidden) {
+      loadEdr();
+    }
+  }, 60000);
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) {
       updateEventAges();
+      if (state.view === "edr") {
+        loadEdr();
+      }
     }
   });
 

@@ -779,6 +779,17 @@ pub fn auth_failure() {
     });
 }
 
+/// Attribute the current request's configured authentication success to its
+/// source-minute. The proxy calls this only after an upstream response matches
+/// `protection.behavior.auth.success`.
+pub fn auth_success() {
+    let _ = CURRENT.try_with(|cell| {
+        if let Ok(mut value) = cell.try_borrow_mut() {
+            value.auth_success = true;
+        }
+    });
+}
+
 fn counters(load: impl Fn(usize) -> u64) -> Counters {
     Counters {
         rejection_classes: Some(rejection_classes(
@@ -900,6 +911,7 @@ struct RequestMeasurement {
     logged: bool,
     response_logged: bool,
     auth_failure: bool,
+    auth_success: bool,
     finished: bool,
     in_flight_counted: bool,
     client: Option<std::net::IpAddr>,
@@ -942,6 +954,7 @@ impl RequestMeasurement {
             logged: false,
             response_logged: false,
             auth_failure: false,
+            auth_success: false,
             finished: false,
             in_flight_counted,
             client: None,
@@ -1003,6 +1016,7 @@ impl RequestMeasurement {
                 rejected: self.reason,
                 logged: self.logged,
                 auth_failure: self.auth_failure,
+                auth_success: self.auth_success,
                 micros,
                 upstream_failure: self.upstream_failure,
                 upstream_timeout: self.upstream_timeout,

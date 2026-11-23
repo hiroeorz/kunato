@@ -423,8 +423,10 @@ impl InitArgs {
             "\n# Optional read-only monitoring console served by `kunato console` (the\n\
              # packaged kunato-console.service). Uncomment to enable it, then run\n\
              # `systemctl enable --now kunato-console`. History is stored under\n\
-             # /var/lib/kunato/console.\n\
-             # console:\n  # enabled: true\n",
+             # /var/lib/kunato/console. The optional EDR task reports slow\n\
+             # authentication, distributed campaigns, and (when\n\
+             # protection.behavior.auth.success is set) logins after failures.\n\
+             # console:\n  # enabled: true\n  # edr: { enabled: true }\n",
         );
 
         let allowed_hosts = self.render_allowed_hosts()?;
@@ -518,6 +520,9 @@ impl InitArgs {
             "    enabled: true\n",
             "    enumeration: { action: BLOCK }\n",
             "    auth: { action: BLOCK }\n",
+            "    # Add `success: [...]` inside the auth block after confirming the\n",
+            "    # endpoint's terminal statuses for the EDR, for example\n",
+            "    # [{ path: '(?i)^/login$', methods: [POST], statuses: [302] }].\n",
             "    global_auth: { action: BLOCK }\n",
             "    scraping: { enabled: true, action: BLOCK }\n",
             "    sequence: { action: BLOCK }\n",

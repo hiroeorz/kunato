@@ -2376,6 +2376,18 @@ protection:
       enabled: true
       action: BLOCK
       min_failures: 20
+      # Opt-in authentication-success outcomes for the EDR. A 200 error page and
+      # a 302 MFA challenge look like a successful login without application
+      # knowledge, so name only the terminal success statuses per endpoint.
+      # Uncomment and adapt after completing the authentication-endpoint
+      # inventory in docs/behavioral-readiness.md.
+      # success:
+      #   - path: '(?i)^/login$'
+      #     methods: [POST]
+      #     statuses: [302]
+      #   - path: '(?i)^/api/(v[0-9]+/)?auth/token$'
+      #     methods: [POST]
+      #     statuses: [200]
     global_auth:
       enabled: true
       window: 60s
@@ -2443,7 +2455,9 @@ admin:
 # console:
 #   enabled: true
 #   # Optional in-memory EDR analysis fed by the console's accepted snapshots.
-#   # Findings are journald warnings; no SQLite table or WAF ban is created.
+#   # The hourly report feeds the read-only EDR view (lamps, latest findings,
+#   # telemetry states), journald warnings, and a bounded finding ring in the
+#   # console state file. No SQLite table or WAF ban is created.
 #   edr:
 #     enabled: false
 #     window: 1h

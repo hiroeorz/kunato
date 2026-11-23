@@ -18,11 +18,15 @@ const SLOW_SOURCE: &str = "203.0.113.7";
 struct Minute {
     requests: u64,
     failures: Vec<(String, String)>,
+    successes: Vec<String>,
 }
 
 impl Minute {
     fn failure(&mut self, source: &str, path: &str) {
         self.failures.push((source.to_owned(), path.to_owned()));
+    }
+    fn success(&mut self, source: &str) {
+        self.successes.push(source.to_owned());
     }
 }
 
@@ -34,16 +38,20 @@ fn source() -> SourceIdentity {
 }
 
 fn bucket(start_ms: u64, minute: &Minute, revision: u64) -> MetricBucket {
-    let requests = minute.requests + minute.failures.len() as u64;
+    let requests = minute.requests + minute.failures.len() as u64 + minute.successes.len() as u64;
     let mut additional = AdditionalMeasurements::measured();
     additional.completed_requests = requests;
     additional.auth_failures = minute.failures.len() as u64;
+    additional.auth_successes = minute.successes.len() as u64;
     for (source, path) in &minute.failures {
         additional.auth_sources.record(source, false, false);
         additional.auth_paths.record(path, false, false);
         additional
             .unique_auth_sources
             .insert("auth-source-ip-v1", source.as_bytes());
+    }
+    for source in &minute.successes {
+        additional.auth_success_sources.record(source, false, false);
     }
     additional.validate().unwrap();
     MetricBucket {
@@ -236,6 +244,17 @@ fn hourly_analysis_finds_both_patterns_with_one_known_false_positive() {
                     evidence.top_path_share,
                     evidence.baseline_z
                 ),
+                Evidence::AuthSuccessAfterFailures(evidence) => println!(
+                    "       success failures={} active={} success_at={} successes={}",
+                    evidence.failures,
+                    evidence.active_buckets,
+                    evidence.success_ms,
+                    evidence.successes
+                ),
+                Evidence::CampaignSuccess(evidence) => println!(
+                    "       campaign success failures={} sources={:.0} mean={:.2}",
+                    evidence.failures, evidence.distinct_sources, evidence.mean_failures_per_source
+                ),
             }
         }
     }
@@ -251,6 +270,185 @@ fn hourly_analysis_finds_both_patterns_with_one_known_false_positive() {
     assert!(
         slow_false <= 1,
         "expected at most the shared-egress probe as a false positive, got {slow_false}"
+    );
+}
+
+const SCENARIO_BASE: u64 = NOW - HOUR_MS;
+
+fn write_scenario(temp: &tempfile::TempDir, minutes: &[Minute]) -> std::path::PathBuf {
+    write_scenario_version(temp, minutes, 3)
+}
+
+fn write_scenario_version(
+    temp: &tempfile::TempDir,
+    minutes: &[Minute],
+    version: u32,
+) -> std::path::PathBuf {
+    let mut config = StorageConfig::new(temp.path().join("history"));
+    config.clock = || NOW;
+    let mut store = Store::open(config).unwrap();
+    for (hour, chunk) in minutes.chunks(60).enumerate() {
+        let sequence = (hour + 1) as u64;
+        let metrics = chunk
+            .iter()
+            .enumerate()
+            .map(|(minute, values)| {
+                let mut bucket = bucket(
+                    SCENARIO_BASE + hour as u64 * HOUR_MS + minute as u64 * MINUTE_MS,
+                    values,
+                    sequence,
+                );
+                if version < 3 {
+                    let additional = bucket.additional.as_mut().expect("additional");
+                    additional.version = version;
+                    additional.auth_successes = 0;
+                    additional.auth_success_sources = Default::default();
+                }
+                bucket
+            })
+            .collect();
+        store
+            .write_batch(&WriteBatch {
+                checkpoint: Checkpoint {
+                    source: source(),
+                    sequence,
+                    cursor: None,
+                    snapshot: None,
+                },
+                events: Vec::<EventRecord>::new(),
+                metrics,
+            })
+            .unwrap();
+    }
+    temp.path().join("history").join("history.sqlite3")
+}
+
+fn scenario_report(database: std::path::PathBuf) -> edr::Report {
+    edr::analyze(&Options {
+        database,
+        window: Window {
+            from_ms: SCENARIO_BASE,
+            until_ms: NOW,
+        },
+        baseline: std::time::Duration::ZERO,
+        thresholds: edr::Thresholds::default(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_success_after_sustained_failures_is_reported_end_to_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut minutes = vec![Minute::default(); 60];
+    for minute in &mut minutes {
+        minute.requests = 1;
+    }
+    for offset in [0, 5, 10, 15, 20, 25] {
+        minutes[offset].failure("203.0.113.7", "/login");
+    }
+    minutes[31].success("203.0.113.7");
+    let report = scenario_report(write_scenario(&temp, &minutes));
+    assert_eq!(report.success_telemetry, edr::TelemetryState::Present);
+    assert_eq!(report.summary.auth_successes, 1);
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.kind == FindingKind::AuthSuccessAfterFailures)
+        .expect("success after failures finding");
+    assert_eq!(finding.source, Some("203.0.113.7".parse().unwrap()));
+    match &finding.evidence {
+        Evidence::AuthSuccessAfterFailures(evidence) => {
+            assert_eq!(evidence.failures, 6);
+            assert_eq!(evidence.successes, 1);
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    }
+}
+
+#[test]
+fn a_benign_retry_success_is_not_reported() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut minutes = vec![Minute::default(); 60];
+    for minute in &mut minutes {
+        minute.requests = 1;
+    }
+    minutes[0].failure("203.0.113.8", "/login");
+    minutes[1].failure("203.0.113.8", "/login");
+    minutes[3].success("203.0.113.8");
+    let report = scenario_report(write_scenario(&temp, &minutes));
+    assert_eq!(report.success_telemetry, edr::TelemetryState::Present);
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::AuthSuccessAfterFailures)
+    );
+}
+
+#[test]
+fn a_distributed_campaign_with_one_success_is_reported() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut minutes = vec![Minute::default(); 60];
+    for minute in &mut minutes {
+        minute.requests = 1;
+    }
+    for index in 0..39_u64 {
+        minutes[index as usize].failure(&format!("192.0.2.{}", index + 1), "/login");
+    }
+    minutes[35].failure("198.51.100.50", "/login");
+    minutes[40].success("198.51.100.50");
+    let report = scenario_report(write_scenario(&temp, &minutes));
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.kind == FindingKind::CampaignSuccess)
+        .expect("campaign success finding");
+    match &finding.evidence {
+        Evidence::CampaignSuccess(evidence) => {
+            assert!(evidence.failures >= 40);
+            // The 64-register sketch is an estimate; the rule only needs the
+            // campaign floor of ten distinct sources.
+            assert!(
+                evidence.distinct_sources >= 20.0,
+                "distinct estimate: {}",
+                evidence.distinct_sources
+            );
+            assert_eq!(
+                evidence.success_source,
+                Some("198.51.100.50".parse().unwrap())
+            );
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    }
+}
+
+#[test]
+fn version_two_records_report_missing_success_telemetry() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut minutes = vec![Minute::default(); 60];
+    for minute in &mut minutes {
+        minute.requests = 1;
+    }
+    for offset in [0, 5, 10, 15, 20, 25] {
+        minutes[offset].failure("203.0.113.7", "/login");
+    }
+    minutes[31].success("203.0.113.7");
+    let report = scenario_report(write_scenario_version(&temp, &minutes, 2));
+    assert_eq!(report.success_telemetry, edr::TelemetryState::Missing);
+    assert_eq!(report.summary.auth_successes, 0);
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == FindingKind::AuthSuccessAfterFailures)
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("No authentication-success telemetry")),
+        "{:?}",
+        report.notes
     );
 }
 

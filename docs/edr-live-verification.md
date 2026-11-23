@@ -4,8 +4,12 @@ Date: 2026-11-23
 
 Status: Implemented as an opt-in console task (`console.edr`). A standalone
 daemon is not implemented. The SQLite-backed `kunato edr` command remains the
-supported offline analyzer. This document covers the evaluation that led to
-the console integration.
+supported offline analyzer. The live report runs the same detection rules as
+the offline analyzer, including the version-3 success-after-failures rules when
+`protection.behavior.auth.success` is configured. The hourly report and a
+bounded finding ring feed the read-only EDR view through `GET /api/v1/edr`; see
+[the EDR view](monitoring-console-edr.md). This document covers the evaluation
+that led to the console integration.
 
 ## 1. Proposed change
 
@@ -13,7 +17,7 @@ Replace the EDR's SQLite source with a resident process that, like the console,
 polls the WAF's bounded `/console/snapshot` endpoint. A five-minute poll was
 proposed. The process would:
 
-1. receive only the bounded authentication-failure measurements;
+1. receive only the bounded authentication-outcome measurements;
 2. keep a rolling window in memory;
 3. maintain hourly evidence for the baseline;
 4. run the existing detection rules once per hour.
@@ -35,7 +39,9 @@ to a standalone poller.
 | Is five-minute polling safe? | In steady state, yes. But the WAF snapshot ring holds ten minutes and a five-minute cadence gives each minute only one completion opportunity. One skipped five-minute poll loses the boundary minute; the prototype reports the gap and marks the window incomplete. |
 | What is the safe cadence? | Four minutes tolerates one skipped poll. One minute (the console cadence) gives more margin but increases snapshot traffic. The console polls every second and is unaffected. |
 | What happens on an EDR restart? | The window and baseline are lost. The first report after a restart contains only the minutes from the latest snapshot (four complete minutes in the test), no slow finding, and a warm-up note. |
-| Should it block automatically? | Not from this prototype. The earlier caveats about hourly latency, shared NAT, and the control-plane surface still apply. |
+| Does it see authentication successes? | Yes. `minutes` keeps the whole version-3 bucket, so the success counters and top-16 success sources reach the same `WindowData` aggregation. Version-2 buckets are treated as missing success telemetry and produce a note, not a finding. |
+| Should it block automatically? | Not from this prototype. The earlier caveats about hourly latency, shared NAT, and the control-plane surface still apply. Success findings are HIGH severity and LOG only. |
+| How are findings shown? | The console publishes a bounded view over the same hourly report: four detector lamps, latest findings, telemetry states, and ring age/recurrence. A detector that cannot be evaluated is `unknown`, never gray. See [the EDR view](monitoring-console-edr.md). |
 
 ## 3. State model
 
@@ -43,12 +49,15 @@ to a standalone poller.
 
 | State | Contents | Bound in the test |
 | --- | --- | --- |
-| `minutes` | Per WAF generation and UTC minute: the bounded `MetricBucket` with `AdditionalMeasurements` authentication fields | Detection window plus the 12-minute rolling margin. A one-hour window retained 73 buckets. |
-| `hours` | Per UTC hour: total authentication failures, top-16 sources, top-16 paths, and the distinct-source sketch | Baseline duration, seven days. The test retained 169 hourly aggregates. |
+| `minutes` | Per WAF generation and UTC minute: the bounded `MetricBucket` with `AdditionalMeasurements` authentication fields, including version-3 success counters and the top-16 success sources | Detection window plus the 12-minute rolling margin. A one-hour window retained 73 buckets. |
+| `hours` | Per UTC hour: total authentication failures, top-16 sources, top-16 paths, and the distinct-source sketch (the baseline does not need the success side) | Baseline duration, seven days. The test retained 169 hourly aggregates. |
 
 Additional state: a set of minutes already folded into the hourly baseline, a
 bounded list of collection gaps, the last observed snapshot time, the last
-generation and missed-update counter, and a clock-discontinuity flag.
+generation and missed-update counter, and a clock-discontinuity flag. The state
+file also keeps the latest hourly report (capped at 50 findings and 20 notes)
+and a finding ring (7 days, 256 records, displayed findings only) for the UI.
+State version 2 accepts version-1 files with an empty view history.
 
 The hot path is SQLite-free:
 
@@ -59,6 +68,8 @@ GET /console/snapshot (bounded JSON)
   -> keep the last window + ring minutes
   -> fold minutes older than the ring into one HourAuth
   -> every hour, build WindowData + Baseline and run the existing rules
+  -> record the report and update the finding ring
+  -> publish the EDR view for GET /api/v1/edr
 ```
 
 Only the bounded authentication measurements are retained. The state does not
@@ -244,6 +255,13 @@ alone is not sufficient for one-missed-poll tolerance.
 - The application must still return `401`/`403` on failed authentication.
 - The default authentication path list must cover the application's login
   endpoint, or `protection.behavior.auth.paths` must be extended.
+- Success findings additionally require `protection.behavior.auth.success` with
+  the endpoint's POST/GET method and terminal status. An unconfigured endpoint
+  leaves the live report with no success telemetry and a note.
+- The success rule looks back one hour from the success minute. Because the live
+  state keeps a window plus the rolling ring, a success near the start of a
+  short window may lack the preceding failure minutes; the offline analyzer has
+  the same property for a one-hour `--window`.
 - The WAF snapshot is global; per-site attribution is not available.
 - Top-16 per minute and the 64-register distinct sketch bound accuracy.
 - The console task has a compact durable state, not full history. A standalone
@@ -254,17 +272,35 @@ alone is not sufficient for one-missed-poll tolerance.
   minutes for a one-hour window). A report delayed beyond that loses its
   earliest minutes and is marked incomplete.
 - The console task is not a standalone daemon; it runs only while the console
-  is enabled. Findings are journald-only, and enforcement is out of scope.
+  is enabled. Findings reach the read-only EDR view and journald; enforcement is
+  out of scope. The view is hourly and shows the latest evaluated window, not a
+  streaming alarm.
+- The view's finding list is capped at 50 and the ring follows that list;
+  detector counts remain exact. Older-finding browsing, filters, acknowledge,
+  and source drill-down remain future work.
 - The state file survives a console restart, but minutes lost while the console
   was down remain gaps.
 
-## 10. Reproduction
+## 10. Future candidates
+
+The next detection classes beyond slow authentication, distributed
+authentication failures, and success-after-failure — slow enumeration,
+sensitive-action abuse, and multi-day campaign correlation — are tracked in
+[EDR detection candidates](edr-detection-candidates.md). The EDR view's
+remaining presentation work (history browsing, filters, acknowledge, source
+drill-down) is tracked in
+[the console remaining work](monitoring-console-remaining.md).
+
+## 11. Reproduction
 
 ```sh
 cargo test --test edr_live -- --nocapture
 cargo test --lib edr::live
+cargo test --lib console::edr
 cargo test --test console_server runtime_runs_the_console_edr_task_and_saves_its_state
+cargo test --test console_server edr_api_serves_the_published_view_and_rejects_writes
 cargo test --test edr --test edr_evaluation
+node --check ui/console-web/app.js
 ```
 
 The first command prints the retained state sizes and the per-window findings.
@@ -274,4 +310,6 @@ The tests cover:
 - one missed five-minute poll producing a gap;
 - four-minute cadence surviving one missed poll;
 - restart warm-up;
-- seven-day retention size.
+- seven-day retention size;
+- success after sustained failures through the live state, and the missing
+  success telemetry path for version-2 buckets.

@@ -2,6 +2,7 @@
 
 pub mod collector;
 pub mod correlations;
+pub mod edr;
 pub mod history;
 mod history_store;
 pub mod measurements;

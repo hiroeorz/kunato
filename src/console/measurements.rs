@@ -395,6 +395,13 @@ pub struct AdditionalMeasurements {
     /// Estimated distinct failing sources, merged across minutes.
     #[serde(default)]
     pub unique_auth_sources: DistinctSketch,
+    /// Authentication-success outcomes observed for this source-minute.
+    #[serde(default)]
+    pub auth_successes: u64,
+    /// Top sources with successful authentication responses; bounded like the
+    /// failure ranking so the success side costs one fixed-size list.
+    #[serde(default)]
+    pub auth_success_sources: Ranking,
     pub upstream_statuses: BTreeMap<u16, u64>,
     pub reason_latency: BTreeMap<RejectionReason, LatencyMeasurements>,
     pub sources: Ranking,
@@ -412,7 +419,7 @@ pub struct AdditionalMeasurements {
 impl AdditionalMeasurements {
     pub fn measured() -> Self {
         Self {
-            version: 2,
+            version: 3,
             missed_updates: Some(0),
             ..Self::default()
         }
@@ -501,6 +508,9 @@ impl AdditionalMeasurements {
         self.auth_sources.merge(&other.auth_sources)?;
         self.auth_paths.merge(&other.auth_paths)?;
         self.unique_auth_sources.merge(&other.unique_auth_sources)?;
+        self.auth_successes = add(self.auth_successes, other.auth_successes)?;
+        self.auth_success_sources
+            .merge(&other.auth_success_sources)?;
         for (status, count) in &other.upstream_statuses {
             *self.upstream_statuses.entry(*status).or_default() = add(
                 self.upstream_statuses.get(status).copied().unwrap_or(0),
@@ -573,6 +583,11 @@ impl AdditionalMeasurements {
         } else if let Some(entry) = self.auth_sources.entries.pop() {
             self.auth_sources.omitted_upper_bound =
                 self.auth_sources.omitted_upper_bound.max(entry.estimate);
+        } else if let Some(entry) = self.auth_success_sources.entries.pop() {
+            self.auth_success_sources.omitted_upper_bound = self
+                .auth_success_sources
+                .omitted_upper_bound
+                .max(entry.estimate);
         } else {
             return false;
         }
@@ -581,7 +596,7 @@ impl AdditionalMeasurements {
         true
     }
     pub fn validate(&self) -> Result<(), Error> {
-        if !(1..=2).contains(&self.version)
+        if !(1..=3).contains(&self.version)
             || self.dimensions.len() > MAX_DIMENSIONS
             || self.countries.len() > MAX_COUNTRIES
             || self.countries.iter().any(|(code, counts)| {
@@ -619,9 +634,17 @@ impl AdditionalMeasurements {
                 "invalid authentication-failure measurements",
             ));
         }
+        if self.auth_successes > self.completed_requests
+            || !ranking_fits(&self.auth_success_sources, self.auth_successes)
+        {
+            return Err(Error::Invalid(
+                "invalid authentication-success measurements",
+            ));
+        }
         self.auth_sources.validate()?;
         self.auth_paths.validate()?;
         self.unique_auth_sources.validate()?;
+        self.auth_success_sources.validate()?;
         self.sources.validate()?;
         self.paths.validate()?;
         self.unique_sources.validate()?;
@@ -842,7 +865,7 @@ mod tests {
 
         first.merge(&second).unwrap();
         first.validate().unwrap();
-        assert_eq!(first.version, 2);
+        assert_eq!(first.version, 3);
         assert_eq!(first.auth_failures, 3);
         assert_eq!(first.auth_sources.entries.len(), 2);
         assert_eq!(first.auth_paths.entries.len(), 2);
@@ -929,5 +952,80 @@ mod tests {
                 .iter()
                 .any(|value| value.kind == DimensionKind::Site)
         );
+    }
+
+    #[test]
+    fn authentication_success_measurements_merge_validate_and_shrink() {
+        let mut first = AdditionalMeasurements::measured();
+        first.completed_requests = 3;
+        first.auth_successes = 3;
+        first
+            .auth_success_sources
+            .record("203.0.113.7", false, false);
+        first
+            .auth_success_sources
+            .record("203.0.113.7", false, false);
+        first
+            .auth_success_sources
+            .record("198.51.100.9", false, false);
+        first.validate().unwrap();
+        assert_eq!(first.version, 3);
+
+        let mut second = AdditionalMeasurements::measured();
+        second.completed_requests = 2;
+        second.auth_successes = 1;
+        second
+            .auth_success_sources
+            .record("203.0.113.7", false, false);
+        second.validate().unwrap();
+
+        first.merge(&second).unwrap();
+        first.validate().unwrap();
+        assert_eq!(first.auth_successes, 4);
+        let entry = first
+            .auth_success_sources
+            .entries
+            .iter()
+            .find(|entry| entry.key == "203.0.113.7")
+            .expect("merged success source");
+        assert_eq!(entry.estimate, 3);
+
+        while first.shrink() {}
+        first.validate().unwrap();
+        assert!(first.auth_success_sources.entries.is_empty());
+        assert!(first.auth_success_sources.omitted_upper_bound > 0);
+    }
+
+    #[test]
+    fn authentication_success_counts_are_bounded_by_completed_requests() {
+        let mut values = AdditionalMeasurements::measured();
+        values.completed_requests = 1;
+        values.auth_successes = 2;
+        assert!(values.validate().is_err());
+
+        let mut values = AdditionalMeasurements::measured();
+        values.completed_requests = 1;
+        values.auth_successes = 1;
+        values
+            .auth_success_sources
+            .record("203.0.113.7", false, false);
+        values
+            .auth_success_sources
+            .record("198.51.100.9", false, false);
+        assert!(values.validate().is_err());
+    }
+
+    #[test]
+    fn version_two_measurements_still_parse_without_success_fields() {
+        let mut value = serde_json::to_value(AdditionalMeasurements::measured()).expect("encode");
+        let object = value.as_object_mut().expect("object");
+        object.insert("version".to_owned(), 2.into());
+        object.remove("auth_successes");
+        object.remove("auth_success_sources");
+        let parsed: AdditionalMeasurements = serde_json::from_value(value).expect("decode");
+        parsed.validate().expect("valid version 2");
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.auth_successes, 0);
+        assert!(parsed.auth_success_sources.entries.is_empty());
     }
 }

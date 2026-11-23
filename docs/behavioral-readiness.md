@@ -62,25 +62,37 @@ different virtual hosts sharing the same Kunato listener.
 | --- | --- | --- | --- | --- |
 | Pending | Pending | Pending | Pending | Pending |
 
-The current predicate is: the normalized/decoded path matches `auth.paths`
-AND the upstream status is 401 or 403. There are no host, method, body,
+The current failure predicate is: the normalized/decoded path matches
+`auth.paths` AND the upstream status is 401 or 403. There are no host, body,
 account, or cookie conditions. Kunato-generated blocks/errors do not count.
 `auth.paths` replaces the built-in path list and is shared by the per-source
 and global authentication signals; an explicit empty list matches nothing.
 
+The optional success predicate adds `auth.success`: the normalized/decoded path
+matches one endpoint's `path`, the request method is listed, and the upstream
+status is one of that endpoint's terminal `statuses` (200–399 only). Success is
+recorded for the EDR and never counts as a failure, never feeds sequence scores,
+and never bans. The success row in the inventory is the configuration source
+for this block.
+
 | Application behavior | Assessment |
 | --- | --- |
 | Wrong password returns 401 on a dedicated login path | Supported; include the path |
-| Successful login returns 200 or 302 | Does not count as a failure |
+| Successful login returns 200 or 302 | Does not count as a failure; add the terminal status to `auth.success` to observe it for the EDR |
 | Failed login also returns 200 or 302 | Unsupported; record the coverage gap |
 | Normal MFA challenge returns 401 on the same path as invalid credentials | Ambiguous; exclude that path or disable authentication signals pending a separate classifier |
+| A successful login and an MFA challenge share a status | Ambiguous; leave the endpoint out of `auth.success` or split it by path before relying on success findings |
 | An unrelated resource returns 403 for insufficient permissions | Keep the resource outside `auth.paths` |
 | Hosts/methods on the same path require different interpretation | Unsupported distinction; use separate Kunato configurations or document the gap |
 
 Do not count every 200/302 as a failure to make an unsupported endpoint visible.
 If classification is ambiguous, keep enumeration available and disable both
 authentication signals (`auth.enabled: false`, `global_auth.enabled: false`),
-or configure an explicit list containing only unambiguous paths.
+or configure an explicit list containing only unambiguous paths. The same rule
+applies to success: do not list a status that can also be an error or an
+intermediate step, because a false success becomes a false HIGH-severity
+compromise finding. The EDR is LOG-only, so a misconfiguration costs operator
+attention rather than availability.
 
 ## Acceptance checks
 
@@ -97,6 +109,8 @@ production proxy or application configuration.
 | A controlled client reaches a behavior BLOCK threshold | Only its identity is banned; another client through the proxy still works; expiry follows the configured ban duration |
 | Genuine authentication failure on an included path | Failure count increases once, with source/global flags at the configured thresholds |
 | Success, excluded-path failure, or local Kunato rejection | Authentication failure count does not increase |
+| Configured success method and terminal status | Success count increases once; the failure count does not |
+| Unlisted method, status, or path | Success count does not increase |
 | Trust settings are validly reloaded / invalidly reloaded | New policy applies / last known good policy remains |
 
 Record timestamps, transport peer, resolved client IP, request path, upstream

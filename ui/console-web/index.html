@@ -38,6 +38,15 @@
             </span>
             Metrics
           </button>
+          <button id="nav-edr" class="nav-item" type="button" data-view="edr">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2.8 20 6v5.2c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10V6l8-3.2Z" />
+                <path d="M7 12.2h2.4l1.5-3.2 2.2 6.2 1.5-3h2.4" />
+              </svg>
+            </span>
+            EDR
+          </button>
         </nav>
         <div class="sidebar-footer">
           <div class="status-line">
@@ -437,6 +446,89 @@
             </section>
           </div>
 
+        </section>
+
+        <section id="edr-view" aria-label="EDR analysis" hidden>
+          <section class="edr-status" aria-labelledby="edr-status-title">
+            <div class="edr-status-row">
+              <h2 id="edr-status-title" class="sr-only">EDR evaluation status</h2>
+              <span id="edr-task-chip" class="chip">EDR state unavailable</span>
+              <span id="edr-last-evaluated" class="chip">No evaluation yet</span>
+              <span id="edr-next-evaluation" class="chip">Next evaluation unavailable</span>
+              <span id="edr-schedule" class="chip">Window unavailable</span>
+            </div>
+            <p id="edr-status-note" class="edr-status-note muted" role="status" aria-live="polite">
+              Waiting for the EDR state.
+            </p>
+            <p id="edr-live-summary" class="sr-only" role="status" aria-live="polite"></p>
+          </section>
+
+          <section class="edr-lamps" aria-labelledby="edr-lamps-title">
+            <div class="edr-section-head">
+              <h2 id="edr-lamps-title">Detection lamps</h2>
+              <p class="edr-section-note">
+                Red: a finding is present in the latest evaluated window. Gray:
+                the window was evaluated with no finding. Amber: the detector
+                could not be evaluated; gray is not a clean result.
+              </p>
+            </div>
+            <div id="edr-lamp-grid" class="edr-lamp-grid">
+              <p class="edr-empty">Waiting for the first hourly evaluation.</p>
+            </div>
+          </section>
+
+          <section class="edr-findings" aria-labelledby="edr-findings-title">
+            <div class="edr-section-head">
+              <h2 id="edr-findings-title">Latest findings</h2>
+              <p id="edr-findings-note" class="edr-section-note">
+                The latest hourly window only; the finding ring keeps age and
+                recurrence across console restarts.
+              </p>
+            </div>
+            <div id="edr-findings-list" class="edr-findings-list">
+              <p class="edr-empty">Waiting for the first hourly evaluation.</p>
+            </div>
+          </section>
+
+          <section class="edr-telemetry" aria-labelledby="edr-telemetry-title">
+            <div class="edr-section-head">
+              <h2 id="edr-telemetry-title">Telemetry and evaluation health</h2>
+              <p class="edr-section-note">
+                Missing telemetry is shown as unavailable, never as zero.
+              </p>
+            </div>
+            <div class="edr-telemetry-grid">
+              <article class="edr-telemetry-card">
+                <h3>Failure telemetry</h3>
+                <p id="edr-failure-telemetry" class="edr-telemetry-value is-unavailable">Unavailable</p>
+                <p class="detail">Upstream 401/403 on configured authentication paths.</p>
+              </article>
+              <article class="edr-telemetry-card">
+                <h3>Success telemetry</h3>
+                <p id="edr-success-telemetry" class="edr-telemetry-value is-unavailable">Unavailable</p>
+                <p class="detail">Configured success outcomes; opt-in per endpoint.</p>
+              </article>
+              <article class="edr-telemetry-card">
+                <h3>Window summary</h3>
+                <p id="edr-summary" class="detail">Unavailable</p>
+              </article>
+              <article class="edr-telemetry-card">
+                <h3>Task state</h3>
+                <p id="edr-task-detail" class="detail">Unavailable</p>
+              </article>
+            </div>
+            <ul id="edr-notes" class="edr-notes">
+              <li>Waiting for the EDR state.</li>
+            </ul>
+          </section>
+
+          <p class="edr-footnote muted">
+            Read-only EDR analysis over the console's accepted snapshots. The
+            analysis covers the last complete UTC hour and runs five minutes
+            after the hour. Findings are LOG-only and never ban a source.
+            Country labels come from DB-IP Lite and describe geolocation, not
+            attribution; a shared NAT or VPN can make them misleading.
+          </p>
         </section>
       </main>
     </div>
