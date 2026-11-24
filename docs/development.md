@@ -2034,14 +2034,15 @@ rendering zero, shows the returned grain and effective bounds, and does not
 replay live arrival effects for backlog. The history payload also carries
 bounded per-minute country request/rejection counts; the Metrics view renders
 them as a country-coloured traffic chart, a world map of WAF-rejected requests,
-and a top-10 country table, using the same embedded DB-IP lookup as request
-matching. The map geometry is embedded Natural Earth 1:50m data (public
-domain). Rejection detail uses the category-based
-attack classes shared with `kunato log`, plus built-in guard causes. A cause
-whose stable class name collides with an attack class (for example `jwt`,
-`protocol`, or `malicious-upload`) is summed under that class. Older intervals without class detail remain unavailable or unrecorded. Historical event
-drill-down, CSV export, comparison periods, and complete journal ingestion remain
-future work;
+a top-10 country table, and a pie chart of each country's share of requests,
+using the same embedded DB-IP lookup as request matching. The map geometry is
+embedded Natural Earth 1:50m data (public domain). Rejection detail uses the
+category-based attack classes shared with `kunato log`, plus built-in guard
+causes. A cause whose stable class name collides with an attack class (for
+example `jwt`, `protocol`, or `malicious-upload`) is summed under that class.
+Older intervals without class detail remain unavailable or unrecorded.
+Historical event drill-down, CSV export, comparison periods, and complete
+journal ingestion remain future work;
 see [remaining work](monitoring-console-remaining.md).
 
 #### First run and storage

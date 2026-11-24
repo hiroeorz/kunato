@@ -38,6 +38,7 @@
     "#b36d9b", "#82904b",
   ];
   var COUNTRY_OTHER_COLOR = "#9aa6b2";
+  var COUNTRY_RANKING_LIMIT = 10;
   var WORLD_MAP_NO_DATA = "#e7ecf1";
   var WORLD_MAP_ZERO = "#f7f9fb";
   var WORLD_MAP_COLORS = [
@@ -2768,7 +2769,9 @@
     renderReasonClasses(buckets, rejected.total || 0);
     renderReasons(buckets);
     renderCorrelations();
-    renderCountryRanking(buckets);
+    var ranking = countryRanking(buckets);
+    renderCountryRanking(ranking);
+    renderCountryShare(ranking);
   }
 
   function renderChart(buckets, displayWidth, rangeStart, rangeEnd) {
@@ -4112,9 +4115,7 @@
     });
   }
 
-  function renderCountryRanking(buckets) {
-    var body = $("country-ranking");
-    body.innerHTML = "";
+  function countryRanking(buckets) {
     var totals = {};
     var known = false;
     var incomplete = false;
@@ -4134,9 +4135,18 @@
         incomplete = true;
       }
     });
-    var entries = countryOrder(totals).map(function (code) {
-      return { code: code, counts: totals[code] };
-    });
+    return {
+      entries: countryOrder(totals).map(function (code) {
+        return { code: code, counts: totals[code] };
+      }),
+      known: known,
+      incomplete: incomplete,
+    };
+  }
+
+  function renderCountryRanking(ranking) {
+    var body = $("country-ranking");
+    body.innerHTML = "";
     function message(value) {
       var row = document.createElement("tr");
       var cell = document.createElement("td");
@@ -4146,15 +4156,15 @@
       row.appendChild(cell);
       body.appendChild(row);
     }
-    if (!known) {
+    if (!ranking.known) {
       message("Country detail is unavailable for these stored intervals.");
       return;
     }
-    if (!entries.length) {
+    if (!ranking.entries.length) {
       message("No country statistics in this range.");
       return;
     }
-    entries.slice(0, 10).forEach(function (entry, index) {
+    ranking.entries.slice(0, COUNTRY_RANKING_LIMIT).forEach(function (entry, index) {
       var row = document.createElement("tr");
       var rank = document.createElement("td");
       rank.className = "country-rank";
@@ -4181,8 +4191,133 @@
       row.appendChild(rate);
       body.appendChild(row);
     });
-    if (incomplete) {
+    if (ranking.incomplete) {
       message("Country detail is incomplete for some intervals in this range.");
+    }
+  }
+
+  function countryShareSlices(entries) {
+    var slices = entries.slice(0, COUNTRY_RANKING_LIMIT).map(function (entry, index) {
+      return {
+        label: countryLabel(entry.code) || entry.code,
+        requests: entry.counts.requests,
+        color: countryColor(index),
+      };
+    });
+    var other = entries.slice(COUNTRY_RANKING_LIMIT).reduce(function (sum, entry) {
+      return sum + entry.counts.requests;
+    }, 0);
+    if (other > 0) {
+      slices.push({ label: "OTHER", requests: other, color: COUNTRY_OTHER_COLOR });
+    }
+    return slices.filter(function (slice) {
+      return slice.requests > 0;
+    });
+  }
+
+  function countryShareArc(startFraction, endFraction) {
+    var radius = 98;
+    var start = startFraction * Math.PI * 2 - Math.PI / 2;
+    var end = endFraction * Math.PI * 2 - Math.PI / 2;
+    var x1 = (100 + radius * Math.cos(start)).toFixed(2);
+    var y1 = (100 + radius * Math.sin(start)).toFixed(2);
+    var x2 = (100 + radius * Math.cos(end)).toFixed(2);
+    var y2 = (100 + radius * Math.sin(end)).toFixed(2);
+    var largeArc = endFraction - startFraction > 0.5 ? 1 : 0;
+    return (
+      "M 100 100 L " + x1 + " " + y1 +
+      " A " + radius + " " + radius + " 0 " + largeArc + " 1 " + x2 + " " + y2 +
+      " Z"
+    );
+  }
+
+  function countryShareTitle(slice, total) {
+    var title = document.createElementNS(SVG_NS, "title");
+    title.textContent =
+      slice.label + ": " + percent(slice.requests, total) + " (" + number(slice.requests) + " requests)";
+    return title;
+  }
+
+  function renderCountryShare(ranking) {
+    var host = $("country-share");
+    host.innerHTML = "";
+    host.className = "country-share";
+    function message(value) {
+      host.className = "country-share country-share-muted";
+      host.textContent = value;
+    }
+    if (!ranking.known) {
+      message("Country detail is unavailable for these stored intervals.");
+      return;
+    }
+    var slices = countryShareSlices(ranking.entries);
+    var total = slices.reduce(function (sum, slice) {
+      return sum + slice.requests;
+    }, 0);
+    if (!total) {
+      message("No requests with country detail in this range.");
+      return;
+    }
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "country-share-svg");
+    svg.setAttribute("viewBox", "0 0 200 200");
+    svg.setAttribute("role", "img");
+    svg.setAttribute(
+      "aria-label",
+      "Request share by source country: " +
+        slices
+          .map(function (slice) {
+            return slice.label + " " + percent(slice.requests, total);
+          })
+          .join(", ")
+    );
+    var offset = 0;
+    slices.forEach(function (slice, index) {
+      var fraction = slice.requests / total;
+      var end = index === slices.length - 1 ? 1 : offset + fraction;
+      var shape;
+      if (slices.length === 1) {
+        shape = document.createElementNS(SVG_NS, "circle");
+        shape.setAttribute("cx", "100");
+        shape.setAttribute("cy", "100");
+        shape.setAttribute("r", "98");
+      } else {
+        shape = document.createElementNS(SVG_NS, "path");
+        shape.setAttribute("d", countryShareArc(offset, end));
+      }
+      shape.setAttribute("fill", slice.color);
+      shape.setAttribute("class", "country-share-slice");
+      shape.appendChild(countryShareTitle(slice, total));
+      svg.appendChild(shape);
+      offset = end;
+    });
+    host.appendChild(svg);
+    var legend = document.createElement("div");
+    legend.className = "country-share-legend";
+    slices.forEach(function (slice) {
+      var entry = document.createElement("span");
+      entry.className = "country-share-entry";
+      var swatch = document.createElement("span");
+      swatch.className = "country-share-swatch";
+      swatch.style.setProperty("--share-swatch", slice.color);
+      entry.appendChild(swatch);
+      var label = document.createElement("span");
+      label.className = "country-share-label";
+      label.textContent = slice.label;
+      label.title = slice.label;
+      entry.appendChild(label);
+      var value = document.createElement("span");
+      value.className = "country-share-value";
+      value.textContent = percent(slice.requests, total);
+      entry.appendChild(value);
+      legend.appendChild(entry);
+    });
+    host.appendChild(legend);
+    if (ranking.incomplete) {
+      var note = document.createElement("p");
+      note.className = "country-share-note";
+      note.textContent = "Country detail is incomplete for some intervals in this range.";
+      host.appendChild(note);
     }
   }
 

@@ -554,6 +554,11 @@ main {
   align-items: start;
 }
 
+.panel-grid-ranking {
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  align-items: stretch;
+}
+
 .panel {
   min-width: 0;
   margin-bottom: 20px;
@@ -918,6 +923,86 @@ th.num {
   color: #a0a8b3;
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+.country-share {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  margin: 0;
+  padding: 12px 22px 18px;
+}
+
+.country-share.country-share-muted {
+  min-height: 180px;
+  place-items: center;
+  color: #9aa1ab;
+  font-size: 12px;
+  text-align: center;
+}
+
+.country-share-svg {
+  display: block;
+  width: 100%;
+  max-width: 200px;
+  height: auto;
+}
+
+.country-share-slice {
+  stroke: #ffffff;
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+  transition: opacity 120ms ease;
+}
+
+.country-share-slice:hover {
+  opacity: 0.82;
+}
+
+.country-share-legend {
+  display: grid;
+  gap: 3px 10px;
+  width: 100%;
+  max-width: 320px;
+  font-size: 11px;
+}
+
+.country-share-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.country-share-swatch {
+  flex: none;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 2px;
+  background: var(--share-swatch, #9aa6b2);
+}
+
+.country-share-label {
+  min-width: 0;
+  overflow: hidden;
+  color: #55606f;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.country-share-value {
+  flex: none;
+  margin-left: auto;
+  color: #8a909b;
+  font-variant-numeric: tabular-nums;
+}
+
+.country-share-note {
+  width: 100%;
+  margin: 0;
+  color: #8a909b;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .country-map {
