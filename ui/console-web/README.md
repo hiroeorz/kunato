@@ -15,8 +15,9 @@ is no build step, Node.js runtime, external font, or network request.
 
 Data comes from the loopback `/console/snapshot` source through the console's
 own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, `/api/v1/edr`,
-and `/api/v1/live` endpoints. All event values are rendered with `textContent`;
-the page makes no external requests.
+`/api/v1/ip-info`, and `/api/v1/live` endpoints. All event values are rendered
+with `textContent`; the page makes no external requests. The ASN lookup is
+served entirely from the embedded or configured local DB-IP database.
 
 ## EDR view
 
@@ -95,6 +96,35 @@ event table. It reads from the same snapshot and makes no additional requests:
 Node counters describe the retained browser event window, not lifetime totals.
 The mapping is illustrative: it shows where the recorded event was handled and
 does not prove malicious intent or a successful compromise.
+
+## Source detail drawer
+
+The Client column in Recent detections and service events is a button. Opening
+it shows a read-only **Source detail** drawer from the right at roughly one
+third of the viewport; the table remains visible and interactive behind it.
+The drawer is non-modal, moves focus to its close button, closes with Escape or
+the close button, and returns focus to the source button that opened it.
+Refresh re-reads the retained event window and the ASN result. The drawer
+freezes its activity snapshot until Refresh; the header shows the `as of` time.
+
+The **Network operator (BGP)** section is populated by
+`GET /api/v1/ip-info?ip=...` from the DB-IP ASN Lite database embedded in the
+binary. It shows the ASN, organization, database build date, and the source
+(`embedded` or `external`). The database has no registrant, allocation range,
+registration date, or abuse contact; RDAP lookup is not implemented. An address
+can have no record, and a record does not identify the attacker: the operator
+may be an upstream, anycasting CDN, reseller, or an ISP whose customer is the
+source. Private, loopback, CGNAT, documentation, and other non-global addresses
+are reported as not applicable rather than looked up. The section carries the
+DB-IP attribution and a warning when the database is more than 45 days old.
+`console.ip_info.asn_database` can point at a newer local `.mmdb` or `.mmdb.gz`;
+the console loads it at startup and falls back to the embedded copy when the
+file is unreadable.
+
+The drawer also summarizes the retained records for that address: country,
+first and last recorded time, disposition counts, and the eight most recent
+events. When the table shows the transport peer because no resolved client was
+recorded, the drawer treats the address as the transport peer and says so.
 
 ## Rejection detail
 

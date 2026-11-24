@@ -290,6 +290,7 @@ References: [Let's Encrypt challenges](https://letsencrypt.org/docs/challenge-ty
 | Status distributions and header-decision latency | Client/upstream statuses, reason latency, and exact observed extrema implemented | Header decisions; full-body duration remains unavailable |
 | Restart identity and observation completeness | Process generation, source revisions, missed attribution, and gap metadata implemented | Bounded recovery; no promise of lossless history |
 | EDR findings and ring | `console.edr` hourly report plus a 7-day/256-record ring in `edr-state.json` | Latest-window view; limited to the four implemented detectors and the capped view findings. Country is GeoIP geolocation, not attribution |
+| Source BGP operator | Embedded DB-IP ASN Lite plus an optional external MMDB | ASN and organization only; no registrant, range, registration date, or abuse contact. A lead, not attribution; Lite data is monthly and can lag the current BGP holder |
 
 Current logs do not record ALLOW rule matches, request query strings, headers,
 or bodies. Classification is category-based. Do not imply that the console can

@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{Console, ConsoleTls};
 use crate::console::HistoryQuery;
+use crate::console::asn::AsnDb;
 use crate::console::collector::HistoryReader;
 use crate::console::edr::EdrView;
 use crate::error::Error;
@@ -66,6 +67,7 @@ struct Context {
     live: watch::Receiver<Option<Arc<LiveState>>>,
     edr: watch::Receiver<Option<Arc<EdrView>>>,
     reader: HistoryReader,
+    asn: Arc<AsnDb>,
     auth: Option<Arc<Auth>>,
     tls: Option<TlsState>,
     live_slots: Arc<Semaphore>,
@@ -110,6 +112,7 @@ impl ConsoleServer {
             Some(tls) => Some(TlsState::load(tls).await?),
             None => None,
         };
+        let asn = Arc::new(AsnDb::load(console.ip_info.asn_database.as_deref()));
         Ok(Self {
             listener,
             context: Arc::new(Context {
@@ -117,6 +120,7 @@ impl ConsoleServer {
                 live,
                 edr,
                 reader,
+                asn,
                 auth,
                 tls,
                 live_slots: Arc::new(Semaphore::new(MAX_LIVE_STREAMS)),
@@ -298,6 +302,7 @@ async fn route(request: Request<Incoming>, connection: Connection) -> Response<P
                 ("GET", "/api/v1/history") => history(request, &connection).await,
                 ("GET", "/api/v1/correlations") => correlations(request, &connection).await,
                 ("GET", "/api/v1/edr") => edr(&connection),
+                ("GET", "/api/v1/ip-info") => ip_info(request, &connection),
                 ("GET", "/api/v1/live") => live(request, &connection),
                 _ => text(StatusCode::NOT_FOUND, "not found\n"),
             }
@@ -313,6 +318,7 @@ fn allowed_methods(path: &str) -> Option<&'static str> {
         | "/api/v1/history"
         | "/api/v1/correlations"
         | "/api/v1/edr"
+        | "/api/v1/ip-info"
         | "/api/v1/live" => Some("GET"),
         "/api/v1/session" => Some("GET, POST, DELETE"),
         _ => None,
@@ -338,6 +344,32 @@ fn edr(connection: &Connection) -> Response<ProxyBody> {
         Err(_) => error_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to encode EDR state",
+        ),
+    }
+}
+
+fn ip_info(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBody> {
+    let params = match query_params(request.uri().query(), &["ip"]) {
+        Ok(params) => params,
+        Err(message) => return bad_request(message),
+    };
+    let Some(raw) = params.get("ip") else {
+        return bad_request("missing query parameter `ip`");
+    };
+    let address: IpAddr = match raw.parse() {
+        Ok(address) => address,
+        Err(_) => return bad_request("`ip` must be an IPv4 or IPv6 address"),
+    };
+    let lookup = connection.context.asn.lookup(address);
+    match dto::ip_info(address, &lookup, now_ms()) {
+        Ok(json) if json.len() <= dto::MAX_IP_INFO_BYTES => json_response(json),
+        Ok(_) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IP information exceeds the response budget",
+        ),
+        Err(_) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode IP information",
         ),
     }
 }

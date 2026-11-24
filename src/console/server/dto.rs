@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use crate::config::Console;
 use crate::console::HistoryPage;
+use crate::console::asn::AsnLookup;
 use crate::console::correlations::CorrelationPage;
 use crate::console::edr::{EdrView, REPORT_DELAY_MS};
 use crate::console::writer::WriterState;
@@ -17,6 +18,9 @@ pub const MAX_CORRELATION_BYTES: usize = 1024 * 1024;
 /// Bound for the EDR view. The view itself caps findings and notes; this is the
 /// outer response guard.
 pub const MAX_EDR_BYTES: usize = 1024 * 1024;
+/// Bound for the IP-information response. It carries only the ASN record.
+pub const MAX_IP_INFO_BYTES: usize = 4 * 1024;
+const ASN_STALE_MS: u64 = 45 * 24 * 60 * 60 * 1000;
 
 pub fn health(
     console: &Console,
@@ -98,6 +102,30 @@ pub fn edr(
 
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const STALE_GRACE_MS: u64 = 15 * 60 * 1000;
+
+/// Encode the ASN record for one source address. The embedded or external
+/// database never leaves the process; only the bounded result is returned.
+pub fn ip_info(
+    address: std::net::IpAddr,
+    lookup: &AsnLookup,
+    now_ms: u64,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let stale = lookup
+        .built_at_ms
+        .is_some_and(|built| now_ms.saturating_sub(built) > ASN_STALE_MS);
+    serde_json::to_vec(&json!({
+        "version": 1,
+        "now_ms": now_ms,
+        "ip": address.to_string(),
+        "state": lookup.state,
+        "asn": lookup.asn,
+        "organization": lookup.organization,
+        "database": lookup.database,
+        "source": lookup.source,
+        "built_at_ms": lookup.built_at_ms,
+        "stale": stale,
+    }))
+}
 
 /// The window end that should have been reported at `now_ms`. Reports run five
 /// minutes after each UTC hour, so before :05 the expected end is the previous
@@ -256,6 +284,28 @@ pub fn correlations(page: &CorrelationPage) -> Result<Vec<u8>, serde_json::Error
 mod tests {
     use super::*;
     use crate::console::history::{Grain, HistoryBucket};
+
+    #[test]
+    fn ip_info_marks_stale_asn_data() {
+        let lookup = crate::console::asn::AsnLookup {
+            state: crate::console::asn::AsnState::Ok,
+            asn: Some(15169),
+            organization: Some("Google LLC".to_owned()),
+            database: Some("DB-IP ASN Lite".to_owned()),
+            source: Some("embedded"),
+            built_at_ms: Some(1_000),
+        };
+        let json = ip_info(
+            "8.8.8.8".parse().expect("ip"),
+            &lookup,
+            1_000 + ASN_STALE_MS + 1,
+        )
+        .expect("encode");
+        let value: Value = serde_json::from_slice(&json).expect("json");
+        assert_eq!(value["stale"], true);
+        assert_eq!(value["asn"], 15169);
+        assert_eq!(value["state"], "ok");
+    }
 
     #[test]
     fn expected_report_window_end_follows_the_five_minute_delay() {

@@ -57,7 +57,7 @@ Traditional WAF setups often require either paid cloud services or a complex sta
 ### Operations & Reliability
 - **YAML rules with hot reload** — Rules are written in YAML. Changes to the rule file are detected at runtime and reloaded on the fly without restarting the process or dropping connections.
 - **High fault tolerance** — Keeps serving with the last known good configuration, isolates failures, and avoids disrupting traffic during reloads.
-- **Optional monitoring console** — `kunato console` runs as a separate read-only service with a browser UI, live SSE updates, and 30-day UTC history in embedded SQLite. It is disabled by default and cannot change rules, maintenance, or access state.
+- **Optional monitoring console** — `kunato console` runs as a separate read-only service with a browser UI, live SSE updates, and 30-day UTC history in embedded SQLite. It is disabled by default and cannot change rules, maintenance, or access state. Source details include the recorded BGP operator from an embedded DB-IP ASN Lite database; it is a lead, not a WHOIS registrant or abuse contact.
 - **Guided install** — One `curl | sudo sh` command installs the static binary, the systemd units, the configuration, and the initial rule set on a Linux server.
 - **Simple deployment** — One binary and one YAML configuration file. No database, no external services, no complex setup.
 - **Rust implementation** — Memory safety and predictable performance in a single static binary with no runtime dependencies.
@@ -468,10 +468,10 @@ contributing notes live in the
 
 ## Data attribution
 
-Official Kunato builds embed the DB-IP Lite country database. The data is
-licensed under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/)
-and is attributed as "IP Geolocation by [DB-IP](https://db-ip.com/)". The
-embedded database is a separate work from Kunato's source code.
+Official Kunato builds embed the DB-IP Lite country and ASN databases. The data
+is licensed under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/)
+and is attributed as "IP data by [DB-IP](https://db-ip.com/)". The embedded
+databases are separate works from Kunato's source code.
 
 The monitoring console's world map uses Natural Earth 1:50m country geometry.
 Natural Earth is in the public domain and is attributed as "Map geometry:

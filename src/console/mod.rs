@@ -1,5 +1,6 @@
 //! Console collection and persistence foundations, independent of WAF forwarding.
 
+pub mod asn;
 pub mod collector;
 pub mod correlations;
 pub mod edr;
@@ -14,6 +15,7 @@ pub mod writer;
 
 use std::time::Duration;
 
+pub use asn::{AsnDb, AsnLookup, AsnSource, AsnState};
 pub use collector::HistoryReader;
 pub use history::{HistoryBucket, HistoryPage, HistoryQuery, MaintenanceReport};
 pub use storage::{ReadWindow, StorageConfig, Store, WriteReport};

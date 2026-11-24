@@ -889,3 +889,81 @@ console:
     runtime.shutdown().await.expect("shutdown");
     source_task.abort();
 }
+
+#[tokio::test]
+async fn ip_info_serves_embedded_asn_and_rejects_invalid_addresses() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (reader, _packet, _health, _) = seeded_collector(temp.path()).await;
+    let (_live_tx, live_rx) = watch::channel(None);
+    let running = start(&console_yaml(temp.path(), ""), live_rx, reader).await;
+    let client = client();
+
+    let (status, body, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/ip-info?ip=8.8.8.8",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["ip"], "8.8.8.8");
+    assert_eq!(value["state"], "ok");
+    assert_eq!(value["asn"], 15169);
+    assert_eq!(value["source"], "embedded");
+    assert_eq!(value["database"], "DB-IP ASN Lite");
+    assert!(value["built_at_ms"].is_u64());
+    assert_eq!(value["stale"], false);
+
+    let (status, body, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/ip-info?ip=203.0.113.1",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(value["state"], "not_global");
+    assert!(value["asn"].is_null());
+
+    let (status, _, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/ip-info?ip=not-an-ip",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/ip-info",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) = request(
+        &client,
+        running.address,
+        Method::POST,
+        "/api/v1/ip-info?ip=8.8.8.8",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    running.stop().await;
+}

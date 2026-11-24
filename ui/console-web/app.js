@@ -16,6 +16,20 @@
     clockOffsetMs: 0,
     edr: null,
     edrRequest: 0,
+    sourceDetail: {
+      open: false,
+      ip: null,
+      role: "client",
+      eventKey: null,
+      peer: null,
+      openedAt: null,
+      events: [],
+      info: null,
+      loading: false,
+      error: null,
+      request: 0,
+      returnFocus: null,
+    },
   };
 
   var view = {
@@ -328,6 +342,13 @@
       return "unavailable";
     }
     return new Date(ms).toISOString().slice(11, 19) + " UTC";
+  }
+
+  function utcDate(ms) {
+    if (ms === null || ms === undefined) {
+      return "unavailable";
+    }
+    return new Date(ms).toISOString().slice(0, 10);
   }
 
   function emptyNode(node) {
@@ -2564,6 +2585,45 @@
         }
         row.appendChild(cell);
       }
+      function addSource(address, role) {
+        if (!address) {
+          add(null);
+          return;
+        }
+        var cell = document.createElement("td");
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "source-link";
+        button.textContent = String(address);
+        button.title = "Open source details";
+        button.setAttribute("data-source-ip", String(address));
+        button.setAttribute("data-source-role", role);
+        button.setAttribute("aria-haspopup", "dialog");
+        button.setAttribute("aria-controls", "source-drawer");
+        button.setAttribute(
+          "aria-expanded",
+          state.sourceDetail.open &&
+            state.sourceDetail.ip === String(address) &&
+            state.sourceDetail.role === role
+            ? "true"
+            : "false"
+        );
+        button.addEventListener("click", function (clickEvent) {
+          clickEvent.stopPropagation();
+          openSourceDetail(role, String(address), key);
+        });
+        button.addEventListener("keydown", function (keyboardEvent) {
+          if (
+            keyboardEvent.key === "Enter" ||
+            keyboardEvent.key === " " ||
+            keyboardEvent.key === "Spacebar"
+          ) {
+            keyboardEvent.stopPropagation();
+          }
+        });
+        cell.appendChild(button);
+        row.appendChild(cell);
+      }
       add(utc(event.occurred_at_ms));
       add(String(event.kind).replace(/_/g, " "));
       add(String(event.disposition).toUpperCase());
@@ -2573,7 +2633,7 @@
       add(event.method);
       add(event.path);
       add(event.site);
-      add(event.client || event.peer);
+      addSource(event.client, event.client ? "client" : "peer");
       add(event.country);
       row.addEventListener("click", function () {
         selectEvent(event);
@@ -2587,6 +2647,422 @@
       body.appendChild(row);
     });
     syncSelectedRows();
+    syncSourceLinks();
+  }
+
+  function sourceEvents(role, ip) {
+    var events = [];
+    state.events.forEach(function (event) {
+      if (role === "client" ? event.client === ip : !event.client && event.peer === ip) {
+        events.push(event);
+      }
+    });
+    events.sort(function (a, b) {
+      return b.occurred_at_ms - a.occurred_at_ms;
+    });
+    return events;
+  }
+
+  function sourceNode(tag, className, value) {
+    var node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
+    if (value !== undefined && value !== null && value !== "") {
+      node.textContent = String(value);
+    }
+    return node;
+  }
+
+  function sourceSection(title) {
+    var section = sourceNode("section", "source-section");
+    section.appendChild(sourceNode("h3", null, title));
+    return section;
+  }
+
+  function sourceRow(list, term, value, mono) {
+    list.appendChild(sourceNode("dt", null, term));
+    var display = value === null || value === undefined || value === "" ? "unrecorded" : value;
+    list.appendChild(sourceNode("dd", mono ? "source-mono" : null, display));
+  }
+
+  function sourceDatabaseLine(info) {
+    var parts = [];
+    if (info.database) {
+      parts.push(info.database);
+    }
+    if (info.built_at_ms) {
+      parts.push(utcDate(info.built_at_ms));
+    }
+    if (info.source) {
+      parts.push(info.source);
+    }
+    return parts.join(" · ");
+  }
+
+  function renderSourceAsn(container, info) {
+    if (info.state === "not_global") {
+      container.appendChild(
+        sourceNode(
+          "p",
+          "source-state",
+          "Private, loopback, or reserved address. ASN lookup is not applicable."
+        )
+      );
+      return;
+    }
+    if (info.state === "unavailable") {
+      container.appendChild(
+        sourceNode("p", "source-state", "The ASN database is unavailable.")
+      );
+      return;
+    }
+    var databaseLine = sourceDatabaseLine(info);
+    if (info.state === "no_data") {
+      container.appendChild(
+        sourceNode(
+          "p",
+          "source-state",
+          "No ASN record in " + (info.database || "the ASN database") + " for this address."
+        )
+      );
+      if (databaseLine) {
+        container.appendChild(sourceNode("p", "source-source", databaseLine));
+      }
+      return;
+    }
+    if (info.state !== "ok" || info.asn === null || info.asn === undefined) {
+      container.appendChild(sourceNode("p", "source-state", "ASN lookup unavailable."));
+      return;
+    }
+    var row = sourceNode("div", "source-asn");
+    row.appendChild(sourceNode("span", "source-asn-number", "AS" + info.asn));
+    if (info.organization) {
+      row.appendChild(sourceNode("span", "source-asn-org", info.organization));
+    }
+    container.appendChild(row);
+    if (databaseLine) {
+      container.appendChild(sourceNode("p", "source-source", "Source: " + databaseLine));
+    }
+    if (info.stale) {
+      container.appendChild(
+        sourceNode(
+          "p",
+          "source-alert",
+          "This ASN database is more than 45 days old; the recorded operator may have changed."
+        )
+      );
+    }
+  }
+
+  function renderSourceDetail() {
+    var detail = state.sourceDetail;
+    if (!detail.open || !detail.ip) {
+      return;
+    }
+    var body = $("source-drawer-body");
+    emptyNode(body);
+    var events = detail.events || [];
+    var latest = events.length ? events[0] : null;
+    var earliest = events.length ? events[events.length - 1] : null;
+    var countryCode = null;
+    for (var countryIndex = 0; countryIndex < events.length; countryIndex += 1) {
+      if (events[countryIndex].country) {
+        countryCode = String(events[countryIndex].country);
+        break;
+      }
+    }
+    var country = countryName(countryCode);
+
+    text($("source-drawer-title"), detail.ip);
+    var meta = [detail.role === "peer" ? "Transport peer" : "Resolved client"];
+    if (country) {
+      meta.push(country + " (" + countryCode + ")");
+    }
+    if (detail.openedAt) {
+      meta.push("as of " + utc(detail.openedAt));
+    }
+    text($("source-drawer-meta"), meta.join(" · "));
+
+    var network = sourceSection("Network operator (BGP)");
+    if (detail.loading) {
+      network.appendChild(sourceNode("p", "source-state", "Looking up the ASN database…"));
+    } else if (detail.error) {
+      network.appendChild(
+        sourceNode("p", "source-alert", "ASN lookup unavailable: " + detail.error)
+      );
+    } else if (detail.info) {
+      renderSourceAsn(network, detail.info);
+    } else {
+      network.appendChild(sourceNode("p", "source-state", "ASN lookup has not completed."));
+    }
+    network.appendChild(
+      sourceNode(
+        "p",
+        "source-note",
+        "BGP operator recorded by DB-IP; not the IP holder, end user, or attacker. It may be an upstream, anycast network, or reseller, and organization names can lag."
+      )
+    );
+    if (detail.role === "peer") {
+      network.appendChild(
+        sourceNode(
+          "p",
+          "source-note",
+          "This is the transport peer. The WAF did not record a resolved client address for these events."
+        )
+      );
+    }
+    body.appendChild(network);
+
+    var activity = sourceSection("Recorded activity");
+    var list = sourceNode("dl", "source-kv");
+    sourceRow(list, "Address", detail.ip, true);
+    sourceRow(
+      list,
+      "Role",
+      detail.role === "peer" ? "Transport peer" : "Resolved client"
+    );
+    if (detail.role === "client" && detail.peer && detail.peer !== detail.ip) {
+      sourceRow(list, "Transport peer", detail.peer, true);
+    }
+    sourceRow(list, "Country", country ? country + " (" + countryCode + ")" : null);
+    sourceRow(list, "First recorded", earliest ? utc(earliest.occurred_at_ms) : null);
+    sourceRow(list, "Last recorded", latest ? utc(latest.occurred_at_ms) : null);
+    sourceRow(list, "Recorded events", events.length ? number(events.length) : null);
+    activity.appendChild(list);
+    if (events.length) {
+      var counts = {};
+      events.forEach(function (event) {
+        var key = String(event.disposition || "unknown").toUpperCase();
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      var dispositions = sourceNode("div", "source-dispositions");
+      Object.keys(counts)
+        .sort()
+        .forEach(function (key) {
+          dispositions.appendChild(
+            sourceNode("span", "source-chip", key + " " + number(counts[key]))
+          );
+        });
+      activity.appendChild(dispositions);
+    } else {
+      activity.appendChild(
+        sourceNode("p", "source-note", "No retained events for this address.")
+      );
+    }
+    body.appendChild(activity);
+
+    var recent = sourceSection("Recent recorded events");
+    if (!events.length) {
+      recent.appendChild(
+        sourceNode("p", "source-state", "No retained events for this address.")
+      );
+    } else {
+      var eventList = sourceNode("ul", "source-events");
+      events.slice(0, 8).forEach(function (event) {
+        var item = sourceNode("li", "source-event");
+        var head = sourceNode("div", "source-event-head");
+        head.appendChild(sourceNode("span", "source-event-time", utcClock(event.occurred_at_ms)));
+        head.appendChild(
+          sourceNode(
+            "span",
+            "source-event-kind",
+            String(event.kind || "service").replace(/_/g, " ")
+          )
+        );
+        head.appendChild(
+          sourceNode(
+            "span",
+            "source-chip",
+            String(event.disposition || "unknown").toUpperCase()
+          )
+        );
+        item.appendChild(head);
+        var details = [];
+        if (event.attack_class) {
+          details.push(rejectClassLabel(event.attack_class));
+        }
+        if (event.category) {
+          details.push(event.category + (event.rule ? "/" + event.rule : ""));
+        } else if (event.rule) {
+          details.push(event.rule);
+        }
+        if (event.reason) {
+          details.push(event.reason);
+        }
+        if (event.method || event.path) {
+          details.push([event.method, event.path].filter(Boolean).join(" "));
+        }
+        if (event.site) {
+          details.push(event.site);
+        }
+        if (event.status !== null && event.status !== undefined) {
+          details.push("status " + event.status);
+        }
+        if (details.length) {
+          item.appendChild(sourceNode("div", "source-event-detail", details.join(" · ")));
+        }
+        eventList.appendChild(item);
+      });
+      recent.appendChild(eventList);
+      if (events.length > 8) {
+        recent.appendChild(
+          sourceNode(
+            "p",
+            "source-note",
+            "Showing the 8 most recent of " + number(events.length) + " retained events."
+          )
+        );
+      }
+    }
+    body.appendChild(recent);
+
+    body.appendChild(
+      sourceNode(
+        "p",
+        "source-drawer-footer",
+        "Recorded events are selected samples from the live snapshot, not a complete request log. Counts describe retained records only."
+      )
+    );
+  }
+
+  function syncSourceLinks() {
+    var detail = state.sourceDetail;
+    var buttons = document.querySelectorAll(".source-link");
+    for (var index = 0; index < buttons.length; index += 1) {
+      var button = buttons[index];
+      var expanded =
+        detail.open &&
+        button.getAttribute("data-source-ip") === detail.ip &&
+        button.getAttribute("data-source-role") === detail.role;
+      button.setAttribute("aria-expanded", expanded ? "true" : "false");
+    }
+  }
+
+  function loadSourceInfo(ip, request) {
+    fetch("/api/v1/ip-info?ip=" + encodeURIComponent(ip), {
+      credentials: "same-origin",
+    })
+      .then(function (response) {
+        if (response.status === 401) {
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) {
+          throw new Error("HTTP " + response.status);
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        var detail = state.sourceDetail;
+        if (!detail.open || request !== detail.request) {
+          return;
+        }
+        detail.info = data;
+        detail.loading = false;
+        detail.error = null;
+        renderSourceDetail();
+      })
+      .catch(function (error) {
+        var detail = state.sourceDetail;
+        if (!detail.open || request !== detail.request) {
+          return;
+        }
+        if (error.message === "unauthorized") {
+          window.location.replace("/login");
+          return;
+        }
+        detail.loading = false;
+        detail.error = error.message;
+        renderSourceDetail();
+      });
+  }
+
+  function openSourceDetail(role, ip, eventKey) {
+    var detail = state.sourceDetail;
+    detail.returnFocus = document.activeElement;
+    var wasOpen = detail.open;
+    detail.open = true;
+    detail.ip = ip;
+    detail.role = role;
+    detail.eventKey = eventKey || null;
+    var anchorEvent = eventKey ? state.events.get(eventKey) : null;
+    detail.peer = anchorEvent && anchorEvent.peer ? String(anchorEvent.peer) : null;
+    detail.openedAt = now();
+    detail.events = sourceEvents(role, ip);
+    detail.info = null;
+    detail.error = null;
+    detail.loading = true;
+    detail.request += 1;
+    var request = detail.request;
+    $("source-drawer").hidden = false;
+    renderSourceDetail();
+    syncSourceLinks();
+    if (!wasOpen) {
+      $("source-drawer-close").focus();
+    }
+    loadSourceInfo(ip, request);
+  }
+
+  function refreshSourceDetail() {
+    var detail = state.sourceDetail;
+    if (!detail.open || !detail.ip) {
+      return;
+    }
+    detail.openedAt = now();
+    detail.events = sourceEvents(detail.role, detail.ip);
+    detail.info = null;
+    detail.error = null;
+    detail.loading = true;
+    detail.request += 1;
+    var request = detail.request;
+    renderSourceDetail();
+    loadSourceInfo(detail.ip, request);
+  }
+
+  function closeSourceDetail(suppressFocus) {
+    var detail = state.sourceDetail;
+    if (!detail.open) {
+      return;
+    }
+    var returnFocus = detail.returnFocus;
+    var previousIp = detail.ip;
+    var previousRole = detail.role;
+    detail.open = false;
+    detail.request += 1;
+    detail.ip = null;
+    detail.role = "client";
+    detail.eventKey = null;
+    detail.peer = null;
+    detail.openedAt = null;
+    detail.events = [];
+    detail.info = null;
+    detail.loading = false;
+    detail.error = null;
+    detail.returnFocus = null;
+    $("source-drawer").hidden = true;
+    syncSourceLinks();
+    if (suppressFocus) {
+      return;
+    }
+    if (returnFocus && returnFocus.isConnected) {
+      returnFocus.focus();
+      return;
+    }
+    var buttons = document.querySelectorAll(".source-link");
+    for (var index = 0; index < buttons.length; index += 1) {
+      var button = buttons[index];
+      if (
+        button.getAttribute("data-source-ip") === previousIp &&
+        button.getAttribute("data-source-role") === previousRole
+      ) {
+        button.focus();
+        return;
+      }
+    }
+    var main = $("main");
+    if (main) {
+      main.focus({ preventScroll: true });
+    }
   }
 
   function applyState(data) {
@@ -2604,6 +3080,7 @@
         state.events.clear();
         state.previous = null;
         resetTopology();
+        closeSourceDetail();
       }
       var incoming = snapshot.events || [];
       var maximumSequence = topo.lastSequence || 0;
@@ -5099,6 +5576,9 @@
   }
 
   function showView(name) {
+    if (name !== "live" && state.sourceDetail.open) {
+      closeSourceDetail(true);
+    }
     state.view = name;
     Object.keys(view).forEach(function (key) {
       view[key].hidden = key !== name;
@@ -5160,6 +5640,17 @@
 
   $("topo-new").addEventListener("click", function () {
     setTopologyMode("realtime");
+  });
+
+  $("source-drawer-close").addEventListener("click", function () {
+    closeSourceDetail();
+  });
+  $("source-drawer-refresh").addEventListener("click", refreshSourceDetail);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && state.sourceDetail.open) {
+      event.preventDefault();
+      closeSourceDetail();
+    }
   });
 
   buildTopology();

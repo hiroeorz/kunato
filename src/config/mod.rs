@@ -830,6 +830,7 @@ pub struct ConsoleSpec {
     pub auth: ConsoleAuthSpec,
     pub tls: Option<ConsoleTlsSpec>,
     pub edr: ConsoleEdrSpec,
+    pub ip_info: ConsoleIpInfoSpec,
 }
 
 impl Default for ConsoleSpec {
@@ -847,8 +848,18 @@ impl Default for ConsoleSpec {
             auth: ConsoleAuthSpec::default(),
             tls: None,
             edr: ConsoleEdrSpec::default(),
+            ip_info: ConsoleIpInfoSpec::default(),
         }
     }
+}
+
+/// Optional source-address enrichment for the console.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsoleIpInfoSpec {
+    /// External DB-IP ASN Lite MMDB (raw or gzip). The embedded copy is used
+    /// when this is absent or cannot be loaded.
+    pub asn_database: Option<PathBuf>,
 }
 
 /// Optional in-memory EDR analysis fed by the console's accepted snapshots.
@@ -2032,6 +2043,7 @@ pub struct Console {
     pub auth: Option<ConsoleAuth>,
     pub tls: Option<ConsoleTls>,
     pub edr: ConsoleEdr,
+    pub ip_info: ConsoleIpInfo,
 }
 
 impl Console {
@@ -2047,6 +2059,11 @@ impl Console {
     pub fn tls_enabled(&self) -> bool {
         self.tls.is_some()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleIpInfo {
+    pub asn_database: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2555,6 +2572,9 @@ fn load_candidate(path: &Path, candidate: Option<&str>) -> Result<CompiledConfig
     if let Some(database) = spec.geoip.database.as_mut() {
         *database = resolve_path(base, database);
     }
+    if let Some(database) = spec.console.ip_info.asn_database.as_mut() {
+        *database = resolve_path(base, database);
+    }
     let rules_file = spec
         .rules_file
         .as_deref()
@@ -2584,6 +2604,9 @@ pub fn load_settings(path: &Path) -> Result<CompiledConfig, Error> {
     let mut spec = read_spec(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     if let Some(database) = spec.geoip.database.as_mut() {
+        *database = resolve_path(base, database);
+    }
+    if let Some(database) = spec.console.ip_info.asn_database.as_mut() {
         *database = resolve_path(base, database);
     }
     let sources = RulesSources {
@@ -4050,6 +4073,14 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
     {
         issues.push("console.event_retention must be between 1 ms and 30 days".to_owned());
     }
+    if spec
+        .ip_info
+        .asn_database
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        issues.push("console.ip_info.asn_database must not be empty".to_owned());
+    }
     if spec.edr.enabled && !spec.enabled {
         issues.push("console.edr.enabled requires console.enabled".to_owned());
     }
@@ -4155,6 +4186,9 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
             enabled: spec.edr.enabled,
             window: spec.edr.window,
             baseline: spec.edr.baseline,
+        },
+        ip_info: ConsoleIpInfo {
+            asn_database: spec.ip_info.asn_database.clone(),
         },
     }
 }
@@ -8537,6 +8571,54 @@ categories:
         assert!(!config.console.edr.enabled);
         assert_eq!(config.console.edr.window, Duration::from_secs(3600));
         assert_eq!(config.console.edr.baseline, Duration::from_secs(168 * 3600));
+        assert!(config.console.ip_info.asn_database.is_none());
+    }
+
+    #[test]
+    fn console_ip_info_accepts_an_external_asn_database() {
+        let config = parse_with(
+            BASE,
+            "console: { enabled: true, ip_info: { asn_database: /var/lib/kunato/asn.mmdb } }
+",
+        )
+        .expect("valid external ASN database");
+        assert_eq!(
+            config.console.ip_info.asn_database,
+            Some(std::path::PathBuf::from("/var/lib/kunato/asn.mmdb"))
+        );
+
+        let error = parse_with(
+            BASE,
+            "console: { enabled: true, ip_info: { asn_database: '' } }
+",
+        )
+        .expect_err("empty ASN database path");
+        assert!(
+            error.to_string().contains("console.ip_info.asn_database"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn console_ip_info_resolves_a_relative_database_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kunato.yaml");
+        std::fs::write(
+            &path,
+            "listen: 127.0.0.1:8080
+upstream: http://127.0.0.1:3000
+console:
+  enabled: false
+  ip_info:
+    asn_database: asn.mmdb
+",
+        )
+        .expect("write config");
+        let config = load_settings(&path).expect("load config");
+        assert_eq!(
+            config.console.ip_info.asn_database,
+            Some(dir.path().join("asn.mmdb"))
+        );
     }
 
     #[test]

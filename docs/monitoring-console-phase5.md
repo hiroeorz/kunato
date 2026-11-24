@@ -144,6 +144,7 @@ bounded connection count.
 | GET | `/api/v1/health` | yes | Collection, source, writer, and storage health |
 | GET | `/api/v1/history` | yes | Bounded UTC history page |
 | GET | `/api/v1/correlations` | yes | Compact decoy evidence page |
+| GET | `/api/v1/ip-info` | yes | Bounded BGP operator lookup for one source address |
 | GET | `/api/v1/live` | yes | SSE stream of latest state |
 | GET | `/api/v1/session` | no | Session status |
 | POST | `/api/v1/session` | no | Login with the configured token |
@@ -233,7 +234,41 @@ Returns `{"version":1,"records":[],"expiry_ms":0,"evicted_records":0,
 and 128 records. Records are selected evidence, not complete traffic counts, and
 addresses are not proof of identity.
 
-### 5.4 Live SSE
+### 5.4 Source ASN query
+
+`GET /api/v1/ip-info?ip=<IPv4-or-IPv6-literal>`
+
+Returns at most 4 KiB:
+
+```json
+{
+  "version": 1,
+  "now_ms": 1795500000000,
+  "ip": "8.8.8.8",
+  "state": "ok",
+  "asn": 15169,
+  "organization": "Google LLC",
+  "database": "DB-IP ASN Lite",
+  "source": "embedded",
+  "built_at_ms": 1793501563000,
+  "stale": false
+}
+```
+
+`state` is `ok`, `no_data`, `not_global`, or `unavailable`. The database is
+read-only, local, and bounded; an external `console.ip_info.asn_database`
+overrides the embedded copy and is loaded at console start. The endpoint does
+not make a network request and does not expose a path. `not_global` covers
+private, loopback, CGNAT, documentation, and reserved ranges. `no_data` means
+the database is healthy but has no record; it is not an error. A missing or
+malformed `ip` is `400`.
+
+The record identifies the BGP operator, not the IP block registrant, end user,
+or attacker. The database is a monthly DB-IP Lite subset; the organization name
+can lag the current BGP holder and the response marks data older than 45 days
+with `"stale": true`.
+
+### 5.5 Live SSE
 
 `GET /api/v1/live` returns `text/event-stream` and requires the same access
 controls as the APIs.

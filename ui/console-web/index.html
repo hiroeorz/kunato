@@ -55,7 +55,7 @@
           </div>
           <button id="sign-out" class="link-button" type="button" hidden>Sign out</button>
           <p class="attribution">
-            IP Geolocation by <a href="https://db-ip.com/" target="_blank" rel="noopener noreferrer">DB-IP</a>
+            IP data by <a href="https://db-ip.com/" target="_blank" rel="noopener noreferrer">DB-IP</a>
             · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>
             <br>
             Map geometry: <a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener noreferrer">Natural Earth</a>
@@ -544,6 +544,38 @@
         </section>
       </main>
     </div>
+
+    <aside
+      id="source-drawer"
+      class="source-drawer"
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby="source-drawer-title"
+      hidden
+    >
+      <div class="source-drawer-head">
+        <div class="source-drawer-heading">
+          <p class="source-drawer-eyebrow">Source detail</p>
+          <h2 id="source-drawer-title">Source</h2>
+          <p id="source-drawer-meta" class="source-drawer-meta"></p>
+        </div>
+        <div class="source-drawer-actions">
+          <button id="source-drawer-refresh" class="link-button source-drawer-refresh" type="button">
+            Refresh
+          </button>
+          <button
+            id="source-drawer-close"
+            class="source-drawer-close"
+            type="button"
+            aria-label="Close source details"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+      <div id="source-drawer-body" class="source-drawer-body"></div>
+    </aside>
+
     <script src="/world-map.js"></script>
     <script src="/app.js"></script>
   </body>

@@ -1382,7 +1382,7 @@ effective `ALLOW` action; the loader rejects that configuration. Use
 compatibility gate applies.
 
 The embedded DB-IP Lite data is licensed under CC BY 4.0 and attributed as
-"IP Geolocation by DB-IP" in the console footer and README files. See
+"IP data by DB-IP" in the console footer and README files. See
 [`data/README.md`](../data/README.md) for the pinned release and checksum. An
 external database is the operator's choice and remains subject to its own
 license; it is not covered by the embedded data's attribution.
@@ -1863,12 +1863,53 @@ console:
 | `edr.enabled` | `false` | Run the in-memory hourly EDR analysis in the console process |
 | `edr.window` | `1h` | EDR detection window, 1 minute..24 hours |
 | `edr.baseline` | `168h` | Hourly baseline retained before the window, at most 30 days; `0s` disables it |
+| `ip_info.asn_database` | embedded | Optional raw or gzip DB-IP ASN Lite MMDB; an invalid or missing external file falls back to the embedded copy |
 
 The console reads its statistics from the admin listener. Enabling it while
 `admin.enabled` is false is accepted with a startup warning: `kunato console`
 logs the reason and exits successfully, so the packaged service stays inactive
 instead of failed. The console's `allowed_clients` and `allowed_hosts` are
 separate from the WAF request policies.
+
+#### Source address lookup
+
+The Real-time monitor's Client column is a link to a read-only source drawer.
+The drawer shows the recorded events for that address and, when the embedded
+DB-IP ASN Lite database has a record, the BGP operator:
+
+- the autonomous system number and organization name;
+- the ASN database name and build date;
+- a warning when the data is more than 45 days old.
+
+This is not WHOIS. The ASN record has no registrant, allocation range,
+registration date, or abuse contact; RDAP is not implemented. Treat the
+organization as a lead, not an attribution: it may be an upstream network, an
+anycasting CDN, a reseller, or an ISP whose customer is the actual source. The
+ASN database is a monthly Lite subset, so an address can have no record and the
+organization name can lag the current BGP holder. Private, loopback, CGNAT,
+documentation, and other non-global addresses are not looked up.
+
+The embedded database adds about 5 MiB to the binary. To update it without a
+new build, point `console.ip_info.asn_database` at a newer `.mmdb` or
+`.mmdb.gz`; relative paths resolve against the configuration file's directory.
+
+```yaml
+console:
+  ip_info:
+    asn_database: /var/lib/kunato/dbip-asn-lite-2026-11.mmdb.gz
+```
+
+The external file is read when `kunato console` starts, so restart the console
+after replacing it. An unreadable external file logs a warning and uses the
+embedded copy. The same path is available to `load_settings` validation, but
+the WAF request path never opens the ASN database.
+
+The HTTP API exposes the bounded result at `GET /api/v1/ip-info?ip=...`. The
+address must be an IPv4 or IPv6 literal; the response contains only the state,
+ASN, organization, database name, source, build date, and stale flag. The
+console never makes an external network request for this lookup. DB-IP Lite is
+CC BY 4.0; keep the DB-IP attribution in the console footer and
+`data/README.md` when updating the data.
 
 
 #### In-memory EDR in the console

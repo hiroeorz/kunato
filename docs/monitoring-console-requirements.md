@@ -242,6 +242,10 @@ Show recorded detections and service events, including:
 
 - Event time and type.
 - Resolved source IP and, in details, transport peer when recorded.
+- Recorded BGP operator (ASN and organization) for a selected source when an
+  offline ASN database is available. Label it as a lead, not a WHOIS
+  registrant, abuse contact, or attribution; absent data and non-global
+  addresses remain explicit.
 - Target site/host, HTTP method, redacted path, and status when recorded.
 - Category/rule or built-in mechanism/reason.
 - Actual disposition, such as BLOCK, LOG, rejection, or service error.
