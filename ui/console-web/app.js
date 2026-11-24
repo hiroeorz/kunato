@@ -27,6 +27,9 @@
       info: null,
       loading: false,
       error: null,
+      rdap: null,
+      rdapLoading: false,
+      rdapError: null,
       request: 0,
       returnFocus: null,
     },
@@ -2755,6 +2758,163 @@
     }
   }
 
+  function sourceDate(value) {
+    if (!value) {
+      return null;
+    }
+    var parsed = Date.parse(value);
+    return isNaN(parsed) ? String(value) : new Date(parsed).toISOString().slice(0, 10);
+  }
+
+  function sourceContactLabel(contact) {
+    if (!contact) {
+      return null;
+    }
+    return contact.organization || contact.name || contact.email || null;
+  }
+
+  function sourceRegistrySection() {
+    var detail = state.sourceDetail;
+    var section = sourceSection("Registry record (RDAP)");
+    if (detail.rdapLoading) {
+      section.appendChild(sourceNode("p", "source-state", "Looking up the registry…"));
+      return section;
+    }
+    if (detail.rdapError) {
+      section.appendChild(
+        sourceNode("p", "source-alert", "Registry lookup unavailable: " + detail.rdapError)
+      );
+      return section;
+    }
+    var data = detail.rdap;
+    if (!data) {
+      section.appendChild(sourceNode("p", "source-state", "Registry lookup has not completed."));
+      return section;
+    }
+    if (data.state === "disabled") {
+      section.appendChild(
+        sourceNode(
+          "p",
+          "source-state",
+          "RDAP lookup is disabled. Enable console.ip_info.rdap.enabled to show the registry owner and abuse contact."
+        )
+      );
+      return section;
+    }
+    if (data.state === "not_global") {
+      section.appendChild(
+        sourceNode("p", "source-state", "Not applicable to private or reserved addresses.")
+      );
+      return section;
+    }
+    if (data.state === "no_bootstrap") {
+      section.appendChild(
+        sourceNode("p", "source-state", "No RDAP service is mapped for this address.")
+      );
+      return section;
+    }
+    if (data.state === "not_found") {
+      section.appendChild(
+        sourceNode("p", "source-state", "No registry record was found for this address.")
+      );
+      return section;
+    }
+    if (data.state === "rate_limited") {
+      var retry = data.retry_after_ms ? Math.ceil(data.retry_after_ms / 1000) + "s" : "later";
+      section.appendChild(
+        sourceNode("p", "source-alert", "Registry lookup is rate limited; retry after " + retry + ".")
+      );
+      return section;
+    }
+    if (data.state === "timeout") {
+      section.appendChild(sourceNode("p", "source-alert", "Registry lookup timed out."));
+      return section;
+    }
+    if (data.state === "invalid") {
+      section.appendChild(
+        sourceNode("p", "source-alert", "The registry returned an unreadable record.")
+      );
+      return section;
+    }
+    if (data.state === "unavailable") {
+      section.appendChild(
+        sourceNode("p", "source-alert", "Registry lookup is unavailable.")
+      );
+      return section;
+    }
+    var record = data.record;
+    if (data.state !== "ok" || !record) {
+      section.appendChild(sourceNode("p", "source-state", "Registry lookup is unavailable."));
+      return section;
+    }
+    var registrants = (record.registrant || []).map(sourceContactLabel).filter(Boolean);
+    var abuseEmails = (record.abuse || []).map(function (contact) {
+      return contact.email;
+    }).filter(Boolean);
+    if (!abuseEmails.length) {
+      abuseEmails = (record.abuse || []).map(sourceContactLabel).filter(Boolean);
+    }
+    var network = [record.name, record.handle].filter(Boolean).join(" · ");
+    var range = record.cidrs && record.cidrs.length
+      ? record.cidrs.join(", ")
+      : [record.start_address, record.end_address].filter(Boolean).join(" – ");
+    var list = sourceNode("dl", "source-kv");
+    sourceRow(
+      list,
+      "Registrant",
+      registrants.length ? registrants.slice(0, 2).join(" · ") : "Not published or redacted"
+    );
+    sourceRow(
+      list,
+      "Abuse contact",
+      abuseEmails.length ? abuseEmails.slice(0, 2).join(" · ") : "Not published"
+    );
+    sourceRow(list, "Registry", data.registry);
+    sourceRow(list, "Network", network);
+    sourceRow(list, "Range", range);
+    sourceRow(list, "Network type", record.network_type);
+    sourceRow(list, "Registration country", record.country);
+    sourceRow(list, "Registered", sourceDate(record.registered_at));
+    sourceRow(list, "Last changed", sourceDate(record.last_changed_at));
+    if (record.status && record.status.length) {
+      sourceRow(list, "Status", record.status.join(", "));
+    }
+    section.appendChild(list);
+    var sourceLine = "RDAP " + (data.registry || "registry");
+    if (data.cached && data.fetched_at_ms) {
+      var cacheAge = now() - data.fetched_at_ms;
+      sourceLine += " · cached " + (cacheAge >= 60000 ? formatDurationMs(cacheAge) : "just now");
+    } else {
+      sourceLine += " · fetched now";
+    }
+    section.appendChild(sourceNode("p", "source-source", sourceLine));
+    if (record.remarks && record.remarks.length) {
+      record.remarks.forEach(function (remark) {
+        section.appendChild(sourceNode("p", "source-note", remark));
+      });
+    }
+    if (record.record_url && /^https:\/\//i.test(record.record_url)) {
+      var link = sourceNode("a", "source-record-link", "Open registry record");
+      link.href = record.record_url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      section.appendChild(link);
+    }
+    if (record.redacted) {
+      section.appendChild(
+        sourceNode("p", "source-note", "Some registrant fields are redacted by the registry.")
+      );
+    }
+    section.appendChild(
+      sourceNode(
+        "p",
+        "source-note",
+        "The registrant is often an ISP, hosting provider, VPN, or reseller and may be a victim or stepping stone; it is not proof of the attacker."
+      )
+    );
+    return section;
+  }
+
   function renderSourceDetail() {
     var detail = state.sourceDetail;
     if (!detail.open || !detail.ip) {
@@ -2813,6 +2973,7 @@
       );
     }
     body.appendChild(network);
+    body.appendChild(sourceRegistrySection());
 
     var activity = sourceSection("Recorded activity");
     var list = sourceNode("dl", "source-kv");
@@ -2977,6 +3138,44 @@
       });
   }
 
+  function loadSourceRdap(ip, request) {
+    fetch("/api/v1/rdap?ip=" + encodeURIComponent(ip), {
+      credentials: "same-origin",
+    })
+      .then(function (response) {
+        if (response.status === 401) {
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) {
+          throw new Error("HTTP " + response.status);
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        var detail = state.sourceDetail;
+        if (!detail.open || request !== detail.request) {
+          return;
+        }
+        detail.rdap = data;
+        detail.rdapLoading = false;
+        detail.rdapError = null;
+        renderSourceDetail();
+      })
+      .catch(function (error) {
+        var detail = state.sourceDetail;
+        if (!detail.open || request !== detail.request) {
+          return;
+        }
+        if (error.message === "unauthorized") {
+          window.location.replace("/login");
+          return;
+        }
+        detail.rdapLoading = false;
+        detail.rdapError = error.message;
+        renderSourceDetail();
+      });
+  }
+
   function openSourceDetail(role, ip, eventKey) {
     var detail = state.sourceDetail;
     detail.returnFocus = document.activeElement;
@@ -2992,6 +3191,9 @@
     detail.info = null;
     detail.error = null;
     detail.loading = true;
+    detail.rdap = null;
+    detail.rdapError = null;
+    detail.rdapLoading = true;
     detail.request += 1;
     var request = detail.request;
     $("source-drawer").hidden = false;
@@ -3001,6 +3203,7 @@
       $("source-drawer-close").focus();
     }
     loadSourceInfo(ip, request);
+    loadSourceRdap(ip, request);
   }
 
   function refreshSourceDetail() {
@@ -3013,10 +3216,14 @@
     detail.info = null;
     detail.error = null;
     detail.loading = true;
+    detail.rdap = null;
+    detail.rdapError = null;
+    detail.rdapLoading = true;
     detail.request += 1;
     var request = detail.request;
     renderSourceDetail();
     loadSourceInfo(detail.ip, request);
+    loadSourceRdap(detail.ip, request);
   }
 
   function closeSourceDetail(suppressFocus) {
@@ -3038,6 +3245,9 @@
     detail.info = null;
     detail.loading = false;
     detail.error = null;
+    detail.rdap = null;
+    detail.rdapLoading = false;
+    detail.rdapError = null;
     detail.returnFocus = null;
     $("source-drawer").hidden = true;
     syncSourceLinks();

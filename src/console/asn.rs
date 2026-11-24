@@ -362,14 +362,14 @@ fn clean_organization(value: &str) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-fn canonical(address: IpAddr) -> IpAddr {
+pub(crate) fn canonical(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V6(value) => value.to_ipv4_mapped().map_or(address, IpAddr::V4),
         IpAddr::V4(_) => address,
     }
 }
 
-fn is_global(address: IpAddr) -> bool {
+pub(crate) fn is_global(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(value) => is_global_v4(value),
         IpAddr::V6(value) => is_global_v6(value),

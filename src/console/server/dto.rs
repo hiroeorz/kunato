@@ -7,6 +7,7 @@ use crate::console::HistoryPage;
 use crate::console::asn::AsnLookup;
 use crate::console::correlations::CorrelationPage;
 use crate::console::edr::{EdrView, REPORT_DELAY_MS};
+use crate::console::rdap::RdapLookup;
 use crate::console::writer::WriterState;
 
 use super::super::runtime::LiveState;
@@ -20,6 +21,8 @@ pub const MAX_CORRELATION_BYTES: usize = 1024 * 1024;
 pub const MAX_EDR_BYTES: usize = 1024 * 1024;
 /// Bound for the IP-information response. It carries only the ASN record.
 pub const MAX_IP_INFO_BYTES: usize = 4 * 1024;
+/// Bound for the optional RDAP response.
+pub const MAX_RDAP_BYTES: usize = 16 * 1024;
 const ASN_STALE_MS: u64 = 45 * 24 * 60 * 60 * 1000;
 
 pub fn health(
@@ -124,6 +127,27 @@ pub fn ip_info(
         "source": lookup.source,
         "built_at_ms": lookup.built_at_ms,
         "stale": stale,
+    }))
+}
+
+/// Encode the optional registry record for one source address.
+pub fn rdap(
+    address: std::net::IpAddr,
+    lookup: &RdapLookup,
+    now_ms: u64,
+) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&json!({
+        "version": 1,
+        "now_ms": now_ms,
+        "ip": address.to_string(),
+        "enabled": lookup.enabled,
+        "state": lookup.state,
+        "cached": lookup.cached,
+        "fetched_at_ms": lookup.fetched_at_ms,
+        "expires_at_ms": lookup.expires_at_ms,
+        "retry_after_ms": lookup.retry_after_ms,
+        "registry": lookup.registry,
+        "record": lookup.record,
     }))
 }
 

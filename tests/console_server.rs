@@ -967,3 +967,79 @@ async fn ip_info_serves_embedded_asn_and_rejects_invalid_addresses() {
 
     running.stop().await;
 }
+
+#[tokio::test]
+async fn rdap_api_is_disabled_by_default_and_rejects_invalid_addresses() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (reader, _packet, _health, _) = seeded_collector(temp.path()).await;
+    let (_live_tx, live_rx) = watch::channel(None);
+    let running = start(&console_yaml(temp.path(), ""), live_rx, reader).await;
+    let client = client();
+
+    let (status, body, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/rdap?ip=8.8.8.8",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["enabled"], false);
+    assert_eq!(value["state"], "disabled");
+    assert!(value["record"].is_null());
+
+    let (status, _, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/rdap?ip=not-an-ip",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) = request(
+        &client,
+        running.address,
+        Method::POST,
+        "/api/v1/rdap?ip=8.8.8.8",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn rdap_api_reports_non_global_addresses_without_a_network_query() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (reader, _packet, _health, _) = seeded_collector(temp.path()).await;
+    let (_live_tx, live_rx) = watch::channel(None);
+    let yaml = console_yaml(temp.path(), "  ip_info: { rdap: { enabled: true } }\n");
+    let running = start(&yaml, live_rx, reader).await;
+    let client = client();
+
+    let (status, body, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/rdap?ip=203.0.113.1",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(value["enabled"], true);
+    assert_eq!(value["state"], "not_global");
+    assert!(value["record"].is_null());
+
+    running.stop().await;
+}

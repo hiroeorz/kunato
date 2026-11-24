@@ -860,6 +860,31 @@ pub struct ConsoleIpInfoSpec {
     /// External DB-IP ASN Lite MMDB (raw or gzip). The embedded copy is used
     /// when this is absent or cannot be loaded.
     pub asn_database: Option<PathBuf>,
+    /// Optional registry lookup for a source address. It sends the address to
+    /// the authoritative RIR and is disabled unless explicitly enabled.
+    pub rdap: ConsoleRdapSpec,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsoleRdapSpec {
+    pub enabled: bool,
+    #[serde(deserialize_with = "de_duration")]
+    pub timeout: Duration,
+    #[serde(deserialize_with = "de_duration")]
+    pub cache_ttl: Duration,
+    pub cache_entries: usize,
+}
+
+impl Default for ConsoleRdapSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout: Duration::from_secs(4),
+            cache_ttl: Duration::from_secs(24 * 60 * 60),
+            cache_entries: 256,
+        }
+    }
 }
 
 /// Optional in-memory EDR analysis fed by the console's accepted snapshots.
@@ -2064,6 +2089,15 @@ impl Console {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleIpInfo {
     pub asn_database: Option<PathBuf>,
+    pub rdap: ConsoleRdap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleRdap {
+    pub enabled: bool,
+    pub timeout: Duration,
+    pub cache_ttl: Duration,
+    pub cache_entries: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4081,6 +4115,25 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
     {
         issues.push("console.ip_info.asn_database must not be empty".to_owned());
     }
+    if spec.ip_info.rdap.enabled && !spec.enabled {
+        issues.push("console.ip_info.rdap.enabled requires console.enabled".to_owned());
+    }
+    if spec.ip_info.rdap.timeout < Duration::from_secs(1)
+        || spec.ip_info.rdap.timeout > Duration::from_secs(15)
+    {
+        issues.push(
+            "console.ip_info.rdap.timeout must be between 1 second and 15 seconds".to_owned(),
+        );
+    }
+    if spec.ip_info.rdap.cache_ttl < Duration::from_secs(60)
+        || spec.ip_info.rdap.cache_ttl > Duration::from_secs(30 * 24 * 60 * 60)
+    {
+        issues
+            .push("console.ip_info.rdap.cache_ttl must be between 1 minute and 30 days".to_owned());
+    }
+    if !(16..=1024).contains(&spec.ip_info.rdap.cache_entries) {
+        issues.push("console.ip_info.rdap.cache_entries must be between 16 and 1024".to_owned());
+    }
     if spec.edr.enabled && !spec.enabled {
         issues.push("console.edr.enabled requires console.enabled".to_owned());
     }
@@ -4189,6 +4242,12 @@ fn compile_console(spec: &ConsoleSpec, admin: &AdminSpec, issues: &mut Vec<Strin
         },
         ip_info: ConsoleIpInfo {
             asn_database: spec.ip_info.asn_database.clone(),
+            rdap: ConsoleRdap {
+                enabled: spec.ip_info.rdap.enabled,
+                timeout: spec.ip_info.rdap.timeout,
+                cache_ttl: spec.ip_info.rdap.cache_ttl,
+                cache_entries: spec.ip_info.rdap.cache_entries,
+            },
         },
     }
 }
@@ -8572,6 +8631,57 @@ categories:
         assert_eq!(config.console.edr.window, Duration::from_secs(3600));
         assert_eq!(config.console.edr.baseline, Duration::from_secs(168 * 3600));
         assert!(config.console.ip_info.asn_database.is_none());
+        assert!(!config.console.ip_info.rdap.enabled);
+        assert_eq!(config.console.ip_info.rdap.timeout, Duration::from_secs(4));
+        assert_eq!(
+            config.console.ip_info.rdap.cache_ttl,
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert_eq!(config.console.ip_info.rdap.cache_entries, 256);
+    }
+
+    #[test]
+    fn console_rdap_parses_and_validates_its_bounds() {
+        let config = parse_with(
+            BASE,
+            "console: { enabled: true, ip_info: { rdap: { enabled: true, timeout: 5s, cache_ttl: 48h, cache_entries: 512 } } }
+",
+        )
+        .expect("valid RDAP config");
+        assert!(config.console.ip_info.rdap.enabled);
+        assert_eq!(config.console.ip_info.rdap.timeout, Duration::from_secs(5));
+        assert_eq!(
+            config.console.ip_info.rdap.cache_ttl,
+            Duration::from_secs(48 * 60 * 60)
+        );
+        assert_eq!(config.console.ip_info.rdap.cache_entries, 512);
+
+        let error = parse_with(
+            BASE,
+            "console: { ip_info: { rdap: { enabled: true } } }
+",
+        )
+        .expect_err("RDAP requires the console");
+        assert!(
+            error.to_string().contains("console.ip_info.rdap.enabled"),
+            "{error}"
+        );
+
+        for (body, expected) in [
+            ("enabled: true, timeout: 0s", "rdap.timeout"),
+            ("enabled: true, timeout: 16s", "rdap.timeout"),
+            ("enabled: true, cache_ttl: 30s", "rdap.cache_ttl"),
+            ("enabled: true, cache_ttl: 745h", "rdap.cache_ttl"),
+            ("enabled: true, cache_entries: 8", "rdap.cache_entries"),
+            ("enabled: true, cache_entries: 2048", "rdap.cache_entries"),
+        ] {
+            let error = parse_with(
+                BASE,
+                &format!("console: {{ enabled: true, ip_info: {{ rdap: {{ {body} }} }} }}\n"),
+            )
+            .expect_err("invalid RDAP setting");
+            assert!(error.to_string().contains(expected), "{body}: {error}");
+        }
     }
 
     #[test]

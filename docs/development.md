@@ -1864,6 +1864,10 @@ console:
 | `edr.window` | `1h` | EDR detection window, 1 minute..24 hours |
 | `edr.baseline` | `168h` | Hourly baseline retained before the window, at most 30 days; `0s` disables it |
 | `ip_info.asn_database` | embedded | Optional raw or gzip DB-IP ASN Lite MMDB; an invalid or missing external file falls back to the embedded copy |
+| `ip_info.rdap.enabled` | `false` | Query the authoritative RIR for a selected source; opt-in external HTTPS |
+| `ip_info.rdap.timeout` | `4s` | RDAP request timeout, 1..15 seconds |
+| `ip_info.rdap.cache_ttl` | `24h` | RDAP network-record cache lifetime, 1 minute..30 days |
+| `ip_info.rdap.cache_entries` | `256` | Bounded in-memory RDAP cache, 16..1024 records |
 
 The console reads its statistics from the admin listener. Enabling it while
 `admin.enabled` is false is accepted with a startup warning: `kunato console`
@@ -1881,16 +1885,54 @@ DB-IP ASN Lite database has a record, the BGP operator:
 - the ASN database name and build date;
 - a warning when the data is more than 45 days old.
 
-This is not WHOIS. The ASN record has no registrant, allocation range,
-registration date, or abuse contact; RDAP is not implemented. Treat the
-organization as a lead, not an attribution: it may be an upstream network, an
-anycasting CDN, a reseller, or an ISP whose customer is the actual source. The
-ASN database is a monthly Lite subset, so an address can have no record and the
-organization name can lag the current BGP holder. Private, loopback, CGNAT,
-documentation, and other non-global addresses are not looked up.
+The ASN record has no registrant, allocation range, registration date, or
+abuse contact. Treat the organization as a lead, not an attribution: it may be
+an upstream network, an anycasting CDN, a reseller, or an ISP whose customer is
+the actual source. The ASN database is a monthly Lite subset, so an address can
+have no record and the organization name can lag the current BGP holder.
+Private, loopback, CGNAT, documentation, and other non-global addresses are not
+looked up.
 
-The embedded database adds about 5 MiB to the binary. To update it without a
-new build, point `console.ip_info.asn_database` at a newer `.mmdb` or
+`console.ip_info.rdap` adds the registry record. It is disabled by default and
+sends the selected address to the authoritative regional internet registry:
+
+```yaml
+console:
+  ip_info:
+    rdap:
+      enabled: true
+      timeout: 4s
+      cache_ttl: 24h
+      cache_entries: 256
+```
+
+- The console selects the registry from the embedded IANA RDAP bootstrap
+  (`data/rdap-ipv4.json` and `rdap-ipv6.json`) and requests
+  `ip/<address>` over HTTPS. It follows at most two HTTPS redirects, bounds the
+  response to 256 KiB, and never accepts a browser-supplied URL.
+- A bounded in-memory cache stores records by their returned network range, so
+  opening different addresses in the same block does not repeat the query.
+  Positive records use `cache_ttl`; negative `404` results are cached for one
+  hour. A `429` response blocks that registry for the returned `Retry-After`
+  (capped at one hour); the API reports `rate_limited`.
+- The drawer shows the network name and range, registration country, registration
+  and last-changed dates, status, registrant, abuse contact, remarks, and a
+  link to the registry record. Missing registrant fields are shown as not
+  published or redacted, never guessed.
+- The registrant is usually the ISP, hosting provider, VPN, or reseller that
+  holds the block, not the end user; it can be a victim or stepping stone.
+  RDAP describes the current registration, not the owner at attack time. Treat
+  it as a lead, not attribution, and do not use it for automatic ASN or country
+  bans.
+- Enabling RDAP creates external HTTPS egress from the console process; the WAF
+  request path remains untouched. The console must have DNS and CA roots. The
+  registry sees the console's egress address and the queried address. Records
+  are kept only in memory.
+- IANA's RDAP bootstrap and the RIR responses remain subject to IANA and
+  registry terms; keep the data attribution in `data/README.md`.
+
+The embedded ASN database adds about 5 MiB to the binary. To update it without
+a new build, point `console.ip_info.asn_database` at a newer `.mmdb` or
 `.mmdb.gz`; relative paths resolve against the configuration file's directory.
 
 ```yaml
@@ -1904,12 +1946,14 @@ after replacing it. An unreadable external file logs a warning and uses the
 embedded copy. The same path is available to `load_settings` validation, but
 the WAF request path never opens the ASN database.
 
-The HTTP API exposes the bounded result at `GET /api/v1/ip-info?ip=...`. The
-address must be an IPv4 or IPv6 literal; the response contains only the state,
-ASN, organization, database name, source, build date, and stale flag. The
-console never makes an external network request for this lookup. DB-IP Lite is
-CC BY 4.0; keep the DB-IP attribution in the console footer and
-`data/README.md` when updating the data.
+The ASN HTTP API exposes the bounded result at `GET /api/v1/ip-info?ip=...`.
+The address must be an IPv4 or IPv6 literal; the response contains only the
+state, ASN, organization, database name, source, build date, and stale flag.
+`GET /api/v1/rdap?ip=...` adds the optional registry record and uses the same
+address validation. Both endpoints are read-only and require the console
+session. Disabled RDAP returns `"state":"disabled"` without any network
+request. DB-IP Lite is CC BY 4.0; keep the DB-IP attribution in the console
+footer and `data/README.md` when updating the data.
 
 
 #### In-memory EDR in the console

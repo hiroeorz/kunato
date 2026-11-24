@@ -246,6 +246,12 @@ Show recorded detections and service events, including:
   offline ASN database is available. Label it as a lead, not a WHOIS
   registrant, abuse contact, or attribution; absent data and non-global
   addresses remain explicit.
+- Optional RDAP registry details for a selected source: network name and range,
+  registration country, registration and last-changed dates, status,
+  registrant, abuse contact, and registry record link. Mark missing or redacted
+  fields as not published; distinguish timeout, rate-limited, disabled,
+  no-bootstrap, and not-found states. Registrant data is a lead, not proof of
+  the attacker.
 - Target site/host, HTTP method, redacted path, and status when recorded.
 - Category/rule or built-in mechanism/reason.
 - Actual disposition, such as BLOCK, LOG, rejection, or service error.

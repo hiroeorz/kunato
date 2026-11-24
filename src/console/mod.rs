@@ -8,6 +8,7 @@ pub mod history;
 mod history_store;
 pub mod measurements;
 pub mod model;
+pub mod rdap;
 pub mod runtime;
 pub mod server;
 pub mod storage;
@@ -18,6 +19,7 @@ use std::time::Duration;
 pub use asn::{AsnDb, AsnLookup, AsnSource, AsnState};
 pub use collector::HistoryReader;
 pub use history::{HistoryBucket, HistoryPage, HistoryQuery, MaintenanceReport};
+pub use rdap::{RdapLookup, RdapRecord, RdapService, RdapState};
 pub use storage::{ReadWindow, StorageConfig, Store, WriteReport};
 pub use writer::{Health, Receipt, ShutdownReport, SubmitError, Writer, WriterConfig, WriterState};
 

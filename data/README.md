@@ -1,8 +1,8 @@
-# Embedded IP databases
+# Embedded IP data
 
-Two DB-IP Lite databases are embedded into release binaries. They are separate
-works from Kunato's source code and are not covered by the MIT or Apache-2.0
-licenses.
+Two DB-IP Lite databases and the IANA RDAP bootstrap registries are embedded
+into release binaries. They are separate works from Kunato's source code and
+are not covered by the MIT or Apache-2.0 licenses.
 
 ## Country database
 
@@ -40,14 +40,35 @@ name can lag the current BGP holder.
 Do not remove the DB-IP attribution from the monitoring console or the README
 files when updating either database.
 
+## RDAP bootstrap
+
+`rdap-ipv4.json` and `rdap-ipv6.json` are snapshots of the IANA RDAP bootstrap
+registries. The console uses them to select the authoritative HTTPS registry
+for an address when `console.ip_info.rdap.enabled` is set. The files are
+embedded in the binary; they are not request data.
+
+- Source IPv4: <https://data.iana.org/rdap/ipv4.json>
+- Source IPv6: <https://data.iana.org/rdap/ipv6.json>
+- Publication dates: IPv4 `2019-06-07T19:00:02Z`, IPv6 `2024-11-01T22:00:01Z`
+- SHA-256 IPv4: `f6ad30d1ebbd16fed6121e1eb54ae7db86edbf5e425345a040aa7893b0447d78`
+- SHA-256 IPv6: `3292eb71787b903f7a6798ff31f7f2239fb61ce346be142a3719ffa26deaf080`
+- Format: IANA RDAP bootstrap JSON
+- Attribution: IANA RDAP bootstrap registry
+
+RDAP responses are fetched on demand from the selected registry and cached in
+memory only. The registries' terms and the redaction of registrant fields
+apply; Kunato does not redistribute registry records.
+
 ## Updating
 
 1. Download the required monthly release from DB-IP.
 2. Verify the gzip stream and record its SHA-256.
 3. Replace the file and update this file's release, source URL, and checksum.
+   Replace the RDAP bootstrap JSON when IANA publishes a newer registry.
 4. Rebuild and run the tests. Embedded databases are validated for MaxMind DB
    version, database type, IP version, node count, record size, build time, and
-   IPv4/IPv6 sample lookups.
+   IPv4/IPv6 sample lookups. Bootstrap files are parsed at console startup;
+   their services must use HTTPS.
 
 An external ASN database is loaded when the console starts. Replace the file
 and restart `kunato console` to apply the update; there is no in-process file

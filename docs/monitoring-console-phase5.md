@@ -145,6 +145,7 @@ bounded connection count.
 | GET | `/api/v1/history` | yes | Bounded UTC history page |
 | GET | `/api/v1/correlations` | yes | Compact decoy evidence page |
 | GET | `/api/v1/ip-info` | yes | Bounded BGP operator lookup for one source address |
+| GET | `/api/v1/rdap` | yes | Optional authoritative RIR registry record |
 | GET | `/api/v1/live` | yes | SSE stream of latest state |
 | GET | `/api/v1/session` | no | Session status |
 | POST | `/api/v1/session` | no | Login with the configured token |
@@ -268,7 +269,64 @@ or attacker. The database is a monthly DB-IP Lite subset; the organization name
 can lag the current BGP holder and the response marks data older than 45 days
 with `"stale": true`.
 
-### 5.5 Live SSE
+### 5.5 RDAP query
+
+`GET /api/v1/rdap?ip=<IPv4-or-IPv6-literal>`
+
+Returns at most 16 KiB. RDAP is disabled by default; a disabled lookup returns
+`{"version":1,"ip":"8.8.8.8","enabled":false,"state":"disabled",...}` without a
+network request. When `console.ip_info.rdap.enabled` is true, the console
+selects the authoritative HTTPS registry from the embedded IANA bootstrap and
+queries `ip/<address>`. The response is normalized and cached in memory by the
+returned network range; the browser receives no raw registry payload.
+
+```json
+{
+  "version": 1,
+  "now_ms": 1795500000000,
+  "ip": "8.8.8.8",
+  "enabled": true,
+  "state": "ok",
+  "cached": false,
+  "fetched_at_ms": 1795500000000,
+  "expires_at_ms": 1795586400000,
+  "retry_after_ms": null,
+  "registry": "ARIN",
+  "record": {
+    "handle": "8.8.8.0 - 8.8.8.255",
+    "name": "GOOGLE",
+    "network_type": "DIRECT ALLOCATION",
+    "start_address": "8.8.8.0",
+    "end_address": "8.8.8.255",
+    "cidrs": ["8.8.8.0/24"],
+    "country": "US",
+    "status": ["active"],
+    "registered_at": "2014-03-18T00:00:00Z",
+    "last_changed_at": "2024-01-01T00:00:00Z",
+    "registrant": [
+      {"name": "Google LLC", "organization": "Google LLC", "email": null, "phone": null}
+    ],
+    "abuse": [
+      {"name": "Abuse", "organization": null, "email": "network-abuse@example.net", "phone": null}
+    ],
+    "remarks": [],
+    "record_url": "https://rdap.example.net/registry/ip/8.8.8.0/24",
+    "redacted": false
+  }
+}
+```
+
+`state` is `ok`, `disabled`, `not_global`, `no_bootstrap`, `not_found`,
+`rate_limited`, `timeout`, `unavailable`, or `invalid`. Responses are bounded:
+256 KiB per registry response, 16 KiB encoded API output, three contacts per
+role, eight CIDRs, eight statuses, two remarks, and 160-character text fields.
+The cache is in memory only; positive records use `cache_ttl`, negative results
+last one hour, and `429` responses block that registry for the returned
+`Retry-After` up to one hour. Registrant fields may be redacted; missing fields
+must be shown as not published, never guessed. A missing or malformed `ip` is
+`400`.
+
+### 5.6 Live SSE
 
 `GET /api/v1/live` returns `text/event-stream` and requires the same access
 controls as the APIs.
@@ -303,7 +361,7 @@ data: {"version":1,"replayed":true,"snapshot":{...},"collection":{...},"writer":
 - A generation change is visible in the payload; the client must not add counts
   across generations.
 
-### 5.5 Embedded UI
+### 5.7 Embedded UI
 
 The UI is served from the binary and has no build step, external fonts, or
 network requests. It shows:

@@ -32,6 +32,7 @@ use crate::console::HistoryQuery;
 use crate::console::asn::AsnDb;
 use crate::console::collector::HistoryReader;
 use crate::console::edr::EdrView;
+use crate::console::rdap::RdapService;
 use crate::error::Error;
 use crate::proxy::server::drain_connections;
 use crate::proxy::{BodyExt, BoxError, ProxyBody, full_body};
@@ -68,6 +69,7 @@ struct Context {
     edr: watch::Receiver<Option<Arc<EdrView>>>,
     reader: HistoryReader,
     asn: Arc<AsnDb>,
+    rdap: Arc<RdapService>,
     auth: Option<Arc<Auth>>,
     tls: Option<TlsState>,
     live_slots: Arc<Semaphore>,
@@ -113,6 +115,7 @@ impl ConsoleServer {
             None => None,
         };
         let asn = Arc::new(AsnDb::load(console.ip_info.asn_database.as_deref()));
+        let rdap = Arc::new(RdapService::new(console.ip_info.rdap));
         Ok(Self {
             listener,
             context: Arc::new(Context {
@@ -121,6 +124,7 @@ impl ConsoleServer {
                 edr,
                 reader,
                 asn,
+                rdap,
                 auth,
                 tls,
                 live_slots: Arc::new(Semaphore::new(MAX_LIVE_STREAMS)),
@@ -303,6 +307,7 @@ async fn route(request: Request<Incoming>, connection: Connection) -> Response<P
                 ("GET", "/api/v1/correlations") => correlations(request, &connection).await,
                 ("GET", "/api/v1/edr") => edr(&connection),
                 ("GET", "/api/v1/ip-info") => ip_info(request, &connection),
+                ("GET", "/api/v1/rdap") => rdap(request, &connection).await,
                 ("GET", "/api/v1/live") => live(request, &connection),
                 _ => text(StatusCode::NOT_FOUND, "not found\n"),
             }
@@ -319,6 +324,7 @@ fn allowed_methods(path: &str) -> Option<&'static str> {
         | "/api/v1/correlations"
         | "/api/v1/edr"
         | "/api/v1/ip-info"
+        | "/api/v1/rdap"
         | "/api/v1/live" => Some("GET"),
         "/api/v1/session" => Some("GET, POST, DELETE"),
         _ => None,
@@ -348,17 +354,19 @@ fn edr(connection: &Connection) -> Response<ProxyBody> {
     }
 }
 
-fn ip_info(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBody> {
-    let params = match query_params(request.uri().query(), &["ip"]) {
-        Ok(params) => params,
-        Err(message) => return bad_request(message),
-    };
+fn request_ip(request: &Request<Incoming>) -> Result<IpAddr, String> {
+    let params = query_params(request.uri().query(), &["ip"])?;
     let Some(raw) = params.get("ip") else {
-        return bad_request("missing query parameter `ip`");
+        return Err("missing query parameter `ip`".to_owned());
     };
-    let address: IpAddr = match raw.parse() {
+    raw.parse()
+        .map_err(|_| "`ip` must be an IPv4 or IPv6 address".to_owned())
+}
+
+fn ip_info(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBody> {
+    let address = match request_ip(&request) {
         Ok(address) => address,
-        Err(_) => return bad_request("`ip` must be an IPv4 or IPv6 address"),
+        Err(message) => return bad_request(message),
     };
     let lookup = connection.context.asn.lookup(address);
     match dto::ip_info(address, &lookup, now_ms()) {
@@ -370,6 +378,25 @@ fn ip_info(request: Request<Incoming>, connection: &Connection) -> Response<Prox
         Err(_) => error_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to encode IP information",
+        ),
+    }
+}
+
+async fn rdap(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBody> {
+    let address = match request_ip(&request) {
+        Ok(address) => address,
+        Err(message) => return bad_request(message),
+    };
+    let lookup = connection.context.rdap.lookup(address).await;
+    match dto::rdap(address, &lookup, now_ms()) {
+        Ok(json) if json.len() <= dto::MAX_RDAP_BYTES => json_response(json),
+        Ok(_) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RDAP information exceeds the response budget",
+        ),
+        Err(_) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode RDAP information",
         ),
     }
 }

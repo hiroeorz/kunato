@@ -2813,3 +2813,12 @@ th.num {
     padding: 18px 18px 28px;
   }
 }
+
+.source-record-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--orange-dark);
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

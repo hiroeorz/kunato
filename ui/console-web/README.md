@@ -15,7 +15,7 @@ is no build step, Node.js runtime, external font, or network request.
 
 Data comes from the loopback `/console/snapshot` source through the console's
 own `/api/v1/health`, `/api/v1/history`, `/api/v1/correlations`, `/api/v1/edr`,
-`/api/v1/ip-info`, and `/api/v1/live` endpoints. All event values are rendered
+`/api/v1/ip-info`, `/api/v1/rdap`, and `/api/v1/live` endpoints. All event values are rendered
 with `textContent`; the page makes no external requests. The ASN lookup is
 served entirely from the embedded or configured local DB-IP database.
 
@@ -104,22 +104,33 @@ it shows a read-only **Source detail** drawer from the right at roughly one
 third of the viewport; the table remains visible and interactive behind it.
 The drawer is non-modal, moves focus to its close button, closes with Escape or
 the close button, and returns focus to the source button that opened it.
-Refresh re-reads the retained event window and the ASN result. The drawer
-freezes its activity snapshot until Refresh; the header shows the `as of` time.
+Refresh re-reads the retained event window, the ASN result, and the optional
+registry record. The drawer freezes its activity snapshot until Refresh; the
+header shows the `as of` time.
 
 The **Network operator (BGP)** section is populated by
 `GET /api/v1/ip-info?ip=...` from the DB-IP ASN Lite database embedded in the
 binary. It shows the ASN, organization, database build date, and the source
-(`embedded` or `external`). The database has no registrant, allocation range,
-registration date, or abuse contact; RDAP lookup is not implemented. An address
-can have no record, and a record does not identify the attacker: the operator
-may be an upstream, anycasting CDN, reseller, or an ISP whose customer is the
-source. Private, loopback, CGNAT, documentation, and other non-global addresses
-are reported as not applicable rather than looked up. The section carries the
-DB-IP attribution and a warning when the database is more than 45 days old.
-`console.ip_info.asn_database` can point at a newer local `.mmdb` or `.mmdb.gz`;
-the console loads it at startup and falls back to the embedded copy when the
-file is unreadable.
+(`embedded` or `external`). An address can have no record, and a record does not
+identify the attacker: the operator may be an upstream, anycasting CDN,
+reseller, or an ISP whose customer is the source. Private, loopback, CGNAT,
+documentation, and other non-global addresses are reported as not applicable
+rather than looked up. The section carries the DB-IP attribution and a warning
+when the database is more than 45 days old. `console.ip_info.asn_database` can
+point at a newer local `.mmdb` or `.mmdb.gz`; the console loads it at startup
+and falls back to the embedded copy when the file is unreadable.
+
+The **Registry record (RDAP)** section is populated by
+`GET /api/v1/rdap?ip=...` only when `console.ip_info.rdap.enabled` is set. It
+shows the network name/handle, CIDR or address range, registry, registration
+country, registration and last-changed dates, status, registrant, abuse
+contact, remarks, and a link to the registry record. A disabled lookup says so
+without a network request; loading, timeout, rate-limited, invalid, and
+unavailable states are explicit. Registrant fields are often redacted or point
+to an ISP, hosting provider, VPN, or reseller rather than the end user; the
+drawer labels missing fields as not published and never guesses. RDAP describes
+the current registration, not the owner at attack time. The console caches
+records by network range in memory and makes no browser-side external request.
 
 The drawer also summarizes the retained records for that address: country,
 first and last recorded time, disposition counts, and the eight most recent
