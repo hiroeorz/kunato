@@ -385,7 +385,7 @@ GET /api/logs?from=2026-01-01&limit=100
 # --- Multipart near-misses: Content-Length uploads, multiple boundaries with
 #     benign content, and chunked non-form bodies must keep passing ---
 POST /api/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
-POST /api/upload header="Content-Type: multipart/form-data; boundary=safe; boundary=malicious" body_file=payloads/multipart-boundary-benign.txt
+POST /api/upload header="Content-Type: multipart/form-data; boundary=X; charset=utf-8" body_file=payloads/multipart-benign.txt
 POST /api/search header="Content-Type: application/json" chunked=1 body="{\"query\":\"rust\"}"
 # A file part whose compressed bytes contain a request signature: the payload is
 # content, inspected by the upload checks, not a body-matched parameter.
@@ -961,3 +961,112 @@ POST /saml/callback header="Content-Type: application/json" body="{\"RelayState\
 GET /index.php header="Referer: http://127.0.0.1:8080/index.php"
 GET /index.php header="Origin: http://127.0.0.1:8080"
 GET /dvwa/css/main.css header="Referer: http://127.0.0.1:8080/index.php"
+
+# --- 2026-11-04..25 delta intake near-misses: the same features with ordinary
+#     values. Every request must reach the upstream with a 200. ---
+
+# PHP upload progress itself is not an attack; only serialized bytes are.
+POST /upload_progress.php header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php-session-upload-progress-benign.bin
+POST /upload_progress.php header="Content-Type: application/x-www-form-urlencoded" body="PHP_SESSION_UPLOAD_PROGRESS=upload_key_9421&submit=1"
+
+# Wavelog QSL image names and callsigns with ordinary values.
+POST /qsl/addQsoToQsl header="Content-Type: application/x-www-form-urlencoded" body="qso_id=42&filename=qsl-2026-11-25.jpg"
+POST /qsl/addQsoToQsl header="Content-Type: application/x-www-form-urlencoded" body="qso_id=42&filename=JA1ABC-20m-CW.png"
+POST /oqrs/search_log header="Content-Type: application/x-www-form-urlencoded" body="callsign=JA1ABC&mode=search"
+GET /oqrs/search_log?callsign=JA1ABC
+
+# Ordinary OAuth callback address.
+GET /enduser/auth_callback.php?code=abc&email=user%40example.com
+
+# The dashed spelling is what Kunato forwards and what the application reads.
+GET /admin.php header="X-Authenticated-User: administrator"
+GET /admin.php header="X-Real-IP: 203.0.113.10"
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="user=alice&pass=s3cret"
+
+# AVideo's browser API and media routes stay reachable.
+GET /plugin/API/
+POST /plugin/API/upload.json.php header="Content-Type: application/x-www-form-urlencoded" body="title=clip&duration=42"
+GET /api/v1/videos
+
+# A production Silverstripe dev task is run from the CLI; a plain GET has no
+# writer argument.
+GET /dev/tasks/
+GET /dev/tasks/i18nTextCollectorTask
+
+# Ordinary Livewire round trips.
+POST /livewire/update header="Content-Type: application/json" body="{\"components\":[{\"snapshot\":\"{}\",\"updates\":{},\"calls\":[{\"path\":\"\",\"method\":\"save\",\"params\":[]}]}],\"_token\":\"x\"}"
+POST /livewire/update header="Content-Type: application/json" body="{\"_token\":\"x\",\"components\":[{\"calls\":[{\"method\":\"refresh\",\"params\":[]}]}]}"
+
+# Ordinary CMS media metadata and comments.
+POST /media/upload header="Content-Type: application/x-www-form-urlencoded" body="title=Autumn%20walk&alt=A%20path%20through%20the%20wood&class=thumb"
+POST /media/upload header="Content-Type: application/x-www-form-urlencoded" body="title=Sunset&alt=Golden%20hour&id=media-42"
+POST /blog/comment header="Content-Type: application/x-www-form-urlencoded" body="name=alice&comment=Great%20post%2C%20thanks%21"
+
+# baserCMS theme file browsing stays reachable for the shipped theme.
+GET /admin/bc-theme-file/theme_file?type=core&name=main.php
+POST /admin/bc-theme-file/theme_file header="Content-Type: application/x-www-form-urlencoded" body="type=core&name=main.php&action=read"
+
+# Ordinary image uploads.
+POST /media/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-png-valid.bin
+POST /media/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-jpeg-valid.bin
+
+# A SOAP call and a fault without an exception class.
+POST /axis/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Body><ns:getVersion xmlns:ns=\"http://axis.apache.org/axis2/java/core/\"/></soapenv:Body></soapenv:Envelope>"
+POST /axis/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Body><soapenv:Fault><faultcode>soapenv:Server</faultcode><faultstring>unknown service</faultstring></soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+
+# Ordinary Spring Data Elasticsearch arguments.
+GET /api/search?name=widget
+GET /api/search?name=Widget%20Pro&size=20
+POST /api/search header="Content-Type: application/json" body="{\"name\":\"widget\",\"page\":0}"
+
+# Ordinary OFBiz CMS edits and XWiki REST queries.
+POST /cms/control/EditAddContent header="Content-Type: application/x-www-form-urlencoded" body="caContentIdTo=10000&contentId=1&contentName=home"
+POST /cms/control/EditAddContent header="Content-Type: application/x-www-form-urlencoded" body="caContentIdTo=10004&contentId=1"
+GET /rest/wikis/xwiki/query?q=where%20doc.fullName%3D%27Main.WebHome%27
+GET /rest/wikis/xwiki/query?type=hql&q=where%20doc.space%3D%27Sandbox%27
+
+# Ordinary SeaDoc conversion jobs.
+POST /api/v1/confluence-to-wiki/ header="Content-Type: application/json" body="{\"download_url\":\"https://docs.example/x.zip\",\"filename\":\"team-handbook.md\"}"
+POST /api/v1/confluence-to-wiki/ header="Content-Type: application/json" body="{\"download_url\":\"https://docs.example/y.zip\"}"
+
+# Ordinary TeamCity and Jira paths.
+POST /app/rest/buildQueue header="Content-Type: application/json" body="{\"buildType\":{\"id\":\"Project_Build\"}}"
+GET /secure/attachment/12345/report.txt
+GET /rest/api/2/issue/PROJ-1
+
+# A genuine AntiCsrf token serializes one GUID, far shorter than a gadget chain.
+POST /Default.aspx header="Cookie: __CSRFCOOKIE=9f8d2c6e-1b4a-4c77-9d20-2b6f0a1c3d55" header="Content-Type: application/x-www-form-urlencoded" body="__CSRFTOKEN=AAEAAAD/////AQAAAAAAAAAMAgAAAClTeXN0ZW0uR3VpZCwgU3lzdGVtLlJ1bnRpbWUsIFZlcnNpb249NC4wLjAuMAo=&__EVENTTARGET=&__VIEWSTATE="
+POST /Default.aspx header="Cookie: __CSRFCOOKIE=1" header="Content-Type: application/x-www-form-urlencoded" body="__CSRFTOKEN=9f8d2c6e-1b4a-4c77-9d20-2b6f0a1c3d55&user=a"
+
+# Ordinary SharePoint downloads.
+GET /sites/team/_layouts/15/download.aspx?SourceUrl=%2Fsites%2Fteam%2FShared%20Documents%2Freport.xlsx
+GET /_layouts/15/WopiFrame.aspx?sourcedoc=%2Fsites%2Fteam%2FDocuments%2Fplan.docx
+GET /sites/team/_api/web/GetFileByServerRelativeUrl('/sites/team/Shared%20Documents/report.xlsx')
+
+# Ordinary Telerik data-source filters.
+GET /api/orders?filter=Status~eq~'open'
+GET /api/orders?filter=((Status~eq~'open'))
+GET /api/grid?$filter=Status~eq~'open'%20and%20Total~gt~100
+
+# Ordinary file downloads.
+GET /common/DownloadFile?path=reports%2F2026-11.txt
+GET /common/DownloadFile?path=exports%2Fusers.csv
+
+# Ordinary Rails Active Storage uploads.
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/activestorage-mp4-benign.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/activestorage-jpeg-benign.bin
+
+# A small multipart form is a normal upload.
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/multipart-benign.txt
+
+# Ordinary URL-encoded forms with a handful of fields.
+POST /login header="Content-Type: application/x-www-form-urlencoded" body="user=alice&pass=s3cret&remember=1"
+POST /profile header="Content-Type: application/x-www-form-urlencoded" body="name=Alice&email=alice%40example.com&bio=hello"
+
+# A normal framed POST and chunked upload.
+POST /upload header="Content-Type: text/plain" body="hello"
+POST /upload header="Content-Type: text/plain" chunked=1 body="hello"
+
+# A properly shaped single-assertion SAML response.
+POST /saml/acs header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIHhtbG5zOmRzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwLzA5L3htbGRzaWcjIiBJRD0iX3IxIiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAyNi0xMS0yNVQwMDowMDowMFoiPjxzYW1sOklzc3Vlcj5odHRwczovL2lkcC5leGFtcGxlPC9zYW1sOklzc3Vlcj48c2FtbDpBc3NlcnRpb24gSUQ9Il9hMSIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMjYtMTEtMjVUMDA6MDA6MDBaIj48c2FtbDpJc3N1ZXI%2BaHR0cHM6Ly9pZHAuZXhhbXBsZTwvc2FtbDpJc3N1ZXI%2BPGRzOlNpZ25hdHVyZT48ZHM6U2lnbmVkSW5mbz48ZHM6UmVmZXJlbmNlIFVSST0iI19hMSIvPjwvZHM6U2lnbmVkSW5mbz48L2RzOlNpZ25hdHVyZT48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5hbGljZUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ%2BPC9zYW1sOlN1YmplY3Q%2BPC9zYW1sOkFzc2VydGlvbj48L3NhbWxwOlJlc3BvbnNlPg%3D%3D"
+POST /saml/acs header="Content-Type: application/json" body="{\"SAMLResponse\":\"PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIHhtbG5zOmRzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwLzA5L3htbGRzaWcjIiBJRD0iX3IxIiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAyNi0xMS0yNVQwMDowMDowMFoiPjxzYW1sOklzc3Vlcj5odHRwczovL2lkcC5leGFtcGxlPC9zYW1sOklzc3Vlcj48c2FtbDpBc3NlcnRpb24gSUQ9Il9hMSIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMjYtMTEtMjVUMDA6MDA6MDBaIj48c2FtbDpJc3N1ZXI+aHR0cHM6Ly9pZHAuZXhhbXBsZTwvc2FtbDpJc3N1ZXI+PGRzOlNpZ25hdHVyZT48ZHM6U2lnbmVkSW5mbz48ZHM6UmVmZXJlbmNlIFVSST0iI19hMSIvPjwvZHM6U2lnbmVkSW5mbz48L2RzOlNpZ25hdHVyZT48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5hbGljZUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ+PC9zYW1sOlN1YmplY3Q+PC9zYW1sOkFzc2VydGlvbj48L3NhbWxwOlJlc3BvbnNlPg==\",\"RelayState\":\"state\"}"

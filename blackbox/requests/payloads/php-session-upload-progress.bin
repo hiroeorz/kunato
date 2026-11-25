@@ -1,0 +1,10 @@
+--X
+Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
+
+key|O:8:"stdClass":1:{s:1:"a";s:3:"cmd";}
+--X
+Content-Disposition: form-data; name="file"; filename="note.txt"
+Content-Type: text/plain
+
+hello
+--X--

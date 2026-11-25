@@ -1719,6 +1719,20 @@ pub(crate) fn request_head_error(
         return Some(err);
     }
 
+    // PHP rewrites `.` to `_` when it maps a request header into `$_SERVER`, so
+    // `X.Authenticated.User` and `X-Authenticated-User` reach the application as
+    // the same `HTTP_X_AUTHENTICATED_USER` key. Forwarding one spelling while
+    // stripping or inspecting the other lets the origin read a value that
+    // neither the rule engine nor the proxy rewrite saw; that aliasing is the
+    // FrankenPHP authentication bypass (CVE-2026-128023). Dotted header names
+    // are otherwise vanishingly rare, so refuse the request instead of guessing
+    // which spelling the origin means.
+    if parts.headers.keys().any(|name| name.as_str().contains('.')) {
+        return Some(HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "ambiguous request header name",
+        ));
+    }
     if parts.headers.get_all(HOST).iter().count() > 1 {
         return Some(HttpError::new(
             StatusCode::BAD_REQUEST,
@@ -3649,6 +3663,35 @@ categories: []
             .header(HOST, "example.test")
             .header("connection", "keep-alive, Upgrade")
             .header("upgrade", "websocket")
+            .body(())
+            .expect("request");
+        let (parts, ()) = request.into_parts();
+        assert!(request_head_error(&config, &parts).is_none());
+    }
+
+    #[test]
+    fn dotted_header_names_are_rejected() {
+        let config =
+            crate::config::parse("listen: 127.0.0.1:8080\nupstream: http://127.0.0.1:3000\n")
+                .expect("valid config");
+        for name in ["x.authenticated.user", "x.forwarded.for", "x.real.ip"] {
+            let request = Request::builder()
+                .uri("/")
+                .header(HOST, "example.test")
+                .header(name, "administrator")
+                .body(())
+                .expect("request");
+            let (parts, ()) = request.into_parts();
+            let error = request_head_error(&config, &parts)
+                .unwrap_or_else(|| panic!("{name} must be rejected"));
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.message, "ambiguous request header name");
+        }
+
+        let request = Request::builder()
+            .uri("/")
+            .header(HOST, "example.test")
+            .header("x-authenticated-user", "administrator")
             .body(())
             .expect("request");
         let (parts, ()) = request.into_parts();

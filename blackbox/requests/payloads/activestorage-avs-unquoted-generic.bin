@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name="file"; filename=clip.avs
+Content-Type: application/octet-stream
+
+[AVISource("C:\\media\\intro.avi")]
+--X--

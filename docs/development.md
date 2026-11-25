@@ -1248,6 +1248,18 @@ logs a warning at startup or reload when a configured ACME domain is missing
 from the list. Leaving `allowed_hosts` out (or using `--cert-file` without
 `--allowed-host`) keeps the previous behavior: any Host is accepted.
 
+### Ambiguous request header names
+
+A request whose header name contains a dot is rejected with `400` before rule
+evaluation. PHP rewrites `.` to `_` when it maps a request header into
+`$_SERVER`, so `X.Authenticated.User` and `X-Authenticated-User` reach the
+application as the same `HTTP_X_AUTHENTICATED_USER` key. Forwarding one spelling
+while the proxy strips or inspects the other would let the origin read a value
+that no rule and no proxy rewrite saw (FrankenPHP CVE-2026-128023). Dotted header
+names are otherwise vanishingly rare; the rejection applies to HTTP/1.1, HTTP/2,
+and HTTP/3 alike, and every rejection is logged at warning level with the reason
+string.
+
 ### Client identity behind trusted proxies
 
 By default, request rules, rate limits, bans, and behavioral detection use the

