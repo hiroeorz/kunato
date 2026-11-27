@@ -1927,6 +1927,11 @@ console:
   Positive records use `cache_ttl`; negative `404` results are cached for one
   hour. A `429` response blocks that registry for the returned `Retry-After`
   (capped at one hour); the API reports `rate_limited`.
+- When a registry answers `429` over IPv6, the lookup retries once over IPv4 and
+  keeps that choice for the registry host. Registries rate limit by source
+  address, and a hosting or cloud IPv6 prefix can be throttled while the
+  console's IPv4 address is accepted; the fallback is logged once per registry.
+  A `429` over IPv4 still blocks the registry as above.
 - The drawer shows the network name and range, registration country, registration
   and last-changed dates, status, registrant, abuse contact, remarks, and a
   link to the registry record. Missing registrant fields are shown as not

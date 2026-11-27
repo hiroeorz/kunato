@@ -4,11 +4,13 @@
 //! authoritative regional internet registry selected by the embedded IANA
 //! bootstrap. It is opt-in because it sends the queried address to an external
 //! registry. Results are cached by network range in memory; the WAF request
-//! path never calls this module.
+//! path never calls this module. A registry that rejects the console's IPv6
+//! address with HTTP 429 is retried once over IPv4, and that choice is
+//! remembered for the registry host.
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,7 +21,7 @@ use http::header::{ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, LOCATION, RETRY_AF
 use http::{HeaderMap, Method, Request, StatusCode, Uri};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::{HttpConnector, HttpInfo};
 use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
 use serde_json::Value;
@@ -131,11 +133,14 @@ impl RdapLookup {
     }
 }
 
+type RdapClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+
 /// Shared, bounded RDAP client and cache.
 pub struct RdapService {
     enabled: bool,
     ready: bool,
-    client: Option<Client<HttpsConnector<HttpConnector>, Full<Bytes>>>,
+    client: Option<RdapClient>,
+    client_v4: Option<RdapClient>,
     bootstrap: Option<Bootstrap>,
     timeout: Duration,
     cache_ttl: Duration,
@@ -151,6 +156,7 @@ impl std::fmt::Debug for RdapService {
             .field("enabled", &self.enabled)
             .field("ready", &self.ready)
             .field("has_bootstrap", &self.bootstrap.is_some())
+            .field("has_ipv4_fallback", &self.client_v4.is_some())
             .finish()
     }
 }
@@ -167,10 +173,17 @@ impl RdapService {
                 None
             }
         };
-        let client = match build_client() {
+        let client = match build_client(false) {
             Ok(client) => Some(client),
             Err(error) => {
                 warn!(error = %error, "cannot initialize the RDAP HTTPS client");
+                None
+            }
+        };
+        let client_v4 = match build_client(true) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                warn!(error = %error, "cannot initialize the RDAP IPv4 fallback client");
                 None
             }
         };
@@ -179,6 +192,7 @@ impl RdapService {
             info!(
                 cache_entries = config.cache_entries,
                 timeout_ms = config.timeout.as_millis(),
+                ipv4_fallback = client_v4.is_some(),
                 "RDAP registry lookup enabled"
             );
         }
@@ -186,6 +200,7 @@ impl RdapService {
             enabled: true,
             ready,
             client,
+            client_v4,
             bootstrap,
             timeout: config.timeout,
             cache_ttl: config.cache_ttl,
@@ -200,6 +215,7 @@ impl RdapService {
             enabled: false,
             ready: false,
             client: None,
+            client_v4: None,
             bootstrap: None,
             timeout: Duration::from_secs(4),
             cache_ttl: Duration::from_secs(24 * 60 * 60),
@@ -261,19 +277,33 @@ impl RdapService {
         if let Some(cached) = cache_lock(&self.cache).lookup(address, now_ms()) {
             return Ok(Some(RdapLookup::cached(&cached)));
         }
-        self.wait_for_host(&entry.host).await?;
-        let Some(client) = self.client.as_ref() else {
-            return Err(QueryError::Unavailable);
-        };
+        let mut prefer_ipv4 = self.wait_for_host(&entry.host).await?;
         let mut current = format!("{}ip/{}", entry.base, address);
         for redirect in 0..=MAX_REDIRECTS {
-            let response = match fetch_with_retry(client, &current).await {
+            let Some(client) = self.client_for(prefer_ipv4) else {
+                return Err(QueryError::Unavailable);
+            };
+            let mut response = match fetch_with_retry(client, &current).await {
                 Ok(response) => response,
                 Err(error) => {
                     debug!(error = %error, host = %entry.host, "RDAP request failed");
                     return Err(QueryError::Unavailable);
                 }
             };
+            if ipv4_fallback_applies(&response, prefer_ipv4, self.client_v4.is_some())
+                && let Some(fallback) = self.client_v4.as_ref()
+                && let Ok(retry) = fetch_with_retry(fallback, &current).await
+                && retry.status != StatusCode::TOO_MANY_REQUESTS
+            {
+                info!(
+                    host = %entry.host,
+                    registry = %entry.registry,
+                    "RDAP registry rejected the console's IPv6 address; using IPv4"
+                );
+                prefer_ipv4 = true;
+                self.set_prefer_ipv4(&entry.host);
+                response = retry;
+            }
             if response.status.is_redirection() {
                 if redirect == MAX_REDIRECTS {
                     return Err(QueryError::Unavailable);
@@ -295,6 +325,12 @@ impl RdapService {
             }
             if response.status == StatusCode::TOO_MANY_REQUESTS {
                 let retry = retry_after(&response.headers);
+                debug!(
+                    host = %entry.host,
+                    registry = %entry.registry,
+                    retry_after_ms = retry.as_millis(),
+                    "RDAP registry rate limited the console"
+                );
                 self.block_host(&entry.host, retry);
                 return Err(QueryError::RateLimited(
                     retry.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -342,8 +378,10 @@ impl RdapService {
         Err(QueryError::Unavailable)
     }
 
-    async fn wait_for_host(&self, host: &str) -> Result<(), QueryError> {
-        let sleep_for = {
+    /// Wait for the per-host interval and report whether this host already
+    /// required the IPv4 fallback.
+    async fn wait_for_host(&self, host: &str) -> Result<bool, QueryError> {
+        let (sleep_for, prefer_ipv4) = {
             let mut hosts = lock(&self.hosts);
             let now = Instant::now();
             let state = hosts.entry(host.to_owned()).or_default();
@@ -358,17 +396,31 @@ impl RdapService {
                 }
                 state.blocked_until = None;
             }
-            if state.next_allowed > now {
+            let sleep_for = if state.next_allowed > now {
                 state.next_allowed.saturating_duration_since(now)
             } else {
                 state.next_allowed = now + MIN_HOST_INTERVAL;
                 Duration::ZERO
-            }
+            };
+            (sleep_for, state.prefer_ipv4)
         };
         if !sleep_for.is_zero() {
             tokio::time::sleep(sleep_for).await;
         }
-        Ok(())
+        Ok(prefer_ipv4)
+    }
+
+    fn client_for(&self, prefer_ipv4: bool) -> Option<&RdapClient> {
+        if prefer_ipv4 {
+            self.client_v4.as_ref().or(self.client.as_ref())
+        } else {
+            self.client.as_ref()
+        }
+    }
+
+    fn set_prefer_ipv4(&self, host: &str) {
+        let mut hosts = lock(&self.hosts);
+        hosts.entry(host.to_owned()).or_default().prefer_ipv4 = true;
     }
 
     fn block_host(&self, host: &str, retry: Duration) {
@@ -378,13 +430,23 @@ impl RdapService {
     }
 }
 
-fn build_client() -> Result<Client<HttpsConnector<HttpConnector>, Full<Bytes>>, String> {
+fn build_client(ipv4_only: bool) -> Result<RdapClient, String> {
+    let mut http = HttpConnector::new();
+    // `HttpsConnectorBuilder::build` does this for the default connector; a
+    // wrapped connector must still allow the `https` scheme through.
+    http.enforce_http(false);
+    if ipv4_only {
+        // Binding the local side to an unspecified IPv4 address also makes the
+        // connector discard resolved IPv6 addresses, so the fallback client
+        // cannot reach a registry that rate limits the console's IPv6 address.
+        http.set_local_address(Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+    }
     let connector = HttpsConnectorBuilder::new()
         .with_native_roots()
         .map_err(|error| format!("failed to load native TLS roots: {error}"))?
         .https_only()
         .enable_http1()
-        .build();
+        .wrap_connector(http);
     Ok(Client::builder(TokioExecutor::new()).build(connector))
 }
 
@@ -492,6 +554,7 @@ fn registry_label(host: &str) -> String {
 struct HostState {
     next_allowed: Instant,
     blocked_until: Option<Instant>,
+    prefer_ipv4: bool,
 }
 
 impl Default for HostState {
@@ -499,6 +562,7 @@ impl Default for HostState {
         Self {
             next_allowed: Instant::now(),
             blocked_until: None,
+            prefer_ipv4: false,
         }
     }
 }
@@ -648,12 +712,10 @@ struct HttpResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Vec<u8>,
+    remote: Option<SocketAddr>,
 }
 
-async fn fetch(
-    client: &Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
-    url: &str,
-) -> Result<HttpResponse, String> {
+async fn fetch(client: &RdapClient, url: &str) -> Result<HttpResponse, String> {
     let uri: Uri = url
         .parse()
         .map_err(|error| format!("invalid RDAP URL: {error}"))?;
@@ -674,6 +736,10 @@ async fn fetch(
         .map_err(|error| format!("RDAP request failed: {error}"))?;
     let status = response.status();
     let headers = response.headers().clone();
+    let remote = response
+        .extensions()
+        .get::<HttpInfo>()
+        .map(HttpInfo::remote_addr);
     let mut body = response.into_body();
     let mut bytes = Vec::new();
     while let Some(frame) = body.frame().await {
@@ -689,13 +755,11 @@ async fn fetch(
         status,
         headers,
         body: bytes,
+        remote,
     })
 }
 
-async fn fetch_with_retry(
-    client: &Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
-    url: &str,
-) -> Result<HttpResponse, String> {
+async fn fetch_with_retry(client: &RdapClient, url: &str) -> Result<HttpResponse, String> {
     match fetch(client, url).await {
         Ok(response) if response.status.is_server_error() => {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -755,6 +819,21 @@ fn retry_after(headers: &HeaderMap) -> Duration {
         .map_or(DEFAULT_RETRY_AFTER, |seconds| {
             Duration::from_secs(seconds.clamp(1, MAX_RETRY_AFTER.as_secs()))
         })
+}
+
+/// Whether a rate-limited answer should be retried over IPv4. Shared hosting
+/// IPv6 prefixes are commonly throttled by registries even when the console's
+/// IPv4 address is accepted, so only a 429 over IPv6 (or an unknown transport)
+/// triggers the fallback.
+fn ipv4_fallback_applies(
+    response: &HttpResponse,
+    prefer_ipv4: bool,
+    has_ipv4_client: bool,
+) -> bool {
+    response.status == StatusCode::TOO_MANY_REQUESTS
+        && !prefer_ipv4
+        && has_ipv4_client
+        && response.remote.is_none_or(|address| address.is_ipv6())
 }
 
 fn record_range(record: &RdapRecord, fallback: IpAddr) -> (IpAddr, IpAddr) {
@@ -1220,6 +1299,49 @@ mod tests {
         assert_eq!(retry_after(&headers), MAX_RETRY_AFTER);
         headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-number"));
         assert_eq!(retry_after(&headers), DEFAULT_RETRY_AFTER);
+    }
+
+    #[test]
+    fn ipv4_fallback_only_applies_to_ipv6_rate_limits() {
+        let response = |status, remote| HttpResponse {
+            status,
+            headers: HeaderMap::new(),
+            body: Vec::new(),
+            remote,
+        };
+        let v4: SocketAddr = "192.0.2.1:443".parse().expect("IPv4");
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().expect("IPv6");
+
+        assert!(ipv4_fallback_applies(
+            &response(StatusCode::TOO_MANY_REQUESTS, Some(v6)),
+            false,
+            true
+        ));
+        assert!(ipv4_fallback_applies(
+            &response(StatusCode::TOO_MANY_REQUESTS, None),
+            false,
+            true
+        ));
+        assert!(!ipv4_fallback_applies(
+            &response(StatusCode::TOO_MANY_REQUESTS, Some(v4)),
+            false,
+            true
+        ));
+        assert!(!ipv4_fallback_applies(
+            &response(StatusCode::TOO_MANY_REQUESTS, Some(v6)),
+            true,
+            true
+        ));
+        assert!(!ipv4_fallback_applies(
+            &response(StatusCode::TOO_MANY_REQUESTS, Some(v6)),
+            false,
+            false
+        ));
+        assert!(!ipv4_fallback_applies(
+            &response(StatusCode::OK, Some(v6)),
+            false,
+            true
+        ));
     }
 
     #[test]
