@@ -383,7 +383,7 @@
                 country. The ten largest countries keep the colours of the ranking
                 table and the rest are grouped as OTHER.
               </p>
-              <div id="country-share" class="country-share country-share-muted">No history loaded.</div>
+              <div id="country-share" class="share-pie share-pie-muted">No history loaded.</div>
             </section>
           </div>
 
@@ -432,31 +432,52 @@
               </div>
             </section>
 
-            <section class="panel" aria-labelledby="correlations-title">
-              <h2 id="correlations-title">Decoy correlation</h2>
+            <section class="panel" aria-labelledby="rejection-share-title">
+              <h2 id="rejection-share-title">Rejection share</h2>
               <p class="muted small">
-                Hashed identifiers from admitted evidence. Different addresses do
-                not prove the same person.
+                Pie charts of the same measured rejections as the tables on the
+                left. Each rejected request contributes once per chart. The eight
+                largest entries keep their own slice and the rest are grouped as
+                OTHER; rejections without recorded detail are shown as unrecorded,
+                never as zero.
               </p>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">Credential</th>
-                      <th scope="col">Site</th>
-                      <th scope="col">First seen</th>
-                      <th scope="col">Last evidence</th>
-                      <th scope="col">Uses</th>
-                      <th scope="col">Occurrences</th>
-                    </tr>
-                  </thead>
-                  <tbody id="correlations">
-                    <tr><td colspan="6" class="muted">No evidence retained.</td></tr>
-                  </tbody>
-                </table>
+              <div class="share-pie-grid">
+                <section class="share-pie-block" aria-labelledby="rejection-class-share-title">
+                  <h3 id="rejection-class-share-title">Attack type and cause</h3>
+                  <div id="rejection-class-share" class="share-pie share-pie-muted">No history loaded.</div>
+                </section>
+                <section class="share-pie-block" aria-labelledby="rejection-reason-share-title">
+                  <h3 id="rejection-reason-share-title">Terminal mechanism</h3>
+                  <div id="rejection-reason-share" class="share-pie share-pie-muted">No history loaded.</div>
+                </section>
               </div>
             </section>
           </div>
+
+          <section class="panel" aria-labelledby="correlations-title">
+            <h2 id="correlations-title">Decoy correlation</h2>
+            <p class="muted small">
+              Hashed identifiers from admitted evidence. Different addresses do
+              not prove the same person.
+            </p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Credential</th>
+                    <th scope="col">Site</th>
+                    <th scope="col">First seen</th>
+                    <th scope="col">Last evidence</th>
+                    <th scope="col">Uses</th>
+                    <th scope="col">Occurrences</th>
+                  </tr>
+                </thead>
+                <tbody id="correlations">
+                  <tr><td colspan="6" class="muted">No evidence retained.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
 
         </section>
 

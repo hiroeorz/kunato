@@ -549,7 +549,7 @@ main {
 
 .panel-grid {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(0, 2fr);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
   gap: 20px;
   align-items: start;
 }
@@ -925,15 +925,39 @@ th.num {
   text-align: right;
 }
 
-.country-share {
+.panel > .share-pie-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  padding: 12px 22px 18px;
+}
+
+.share-pie-block {
+  min-width: 0;
+}
+
+.share-pie-block > h3 {
+  margin: 0;
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.share-pie {
   display: grid;
   gap: 12px;
   justify-items: center;
   margin: 0;
+  padding: 12px 0 0;
+}
+
+.panel > .share-pie {
   padding: 12px 22px 18px;
 }
 
-.country-share.country-share-muted {
+.share-pie.share-pie-muted {
   min-height: 180px;
   place-items: center;
   color: #9aa1ab;
@@ -941,25 +965,25 @@ th.num {
   text-align: center;
 }
 
-.country-share-svg {
+.share-pie-svg {
   display: block;
   width: 100%;
   max-width: 200px;
   height: auto;
 }
 
-.country-share-slice {
+.share-pie-slice {
   stroke: #ffffff;
   stroke-width: 0.6;
   stroke-linejoin: round;
   transition: opacity 120ms ease;
 }
 
-.country-share-slice:hover {
+.share-pie-slice:hover {
   opacity: 0.82;
 }
 
-.country-share-legend {
+.share-pie-legend {
   display: grid;
   gap: 3px 10px;
   width: 100%;
@@ -967,14 +991,14 @@ th.num {
   font-size: 11px;
 }
 
-.country-share-entry {
+.share-pie-entry {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.country-share-swatch {
+.share-pie-swatch {
   flex: none;
   width: 0.65rem;
   height: 0.65rem;
@@ -982,7 +1006,7 @@ th.num {
   background: var(--share-swatch, #9aa6b2);
 }
 
-.country-share-label {
+.share-pie-label {
   min-width: 0;
   overflow: hidden;
   color: #55606f;
@@ -990,19 +1014,25 @@ th.num {
   white-space: nowrap;
 }
 
-.country-share-value {
+.share-pie-value {
   flex: none;
   margin-left: auto;
   color: #8a909b;
   font-variant-numeric: tabular-nums;
 }
 
-.country-share-note {
+.share-pie-note {
   width: 100%;
   margin: 0;
   color: #8a909b;
   font-size: 11px;
   line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .panel > .share-pie-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .country-map {

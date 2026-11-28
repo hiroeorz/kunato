@@ -56,6 +56,13 @@
   ];
   var COUNTRY_OTHER_COLOR = "#9aa6b2";
   var COUNTRY_RANKING_LIMIT = 10;
+  var REJECTION_SHARE_COLORS = [
+    "#46618f", "#b7623f", "#5d8259", "#8e639f", "#a98c39",
+    "#4c8b95", "#a85c70", "#6f7ab0",
+  ];
+  var REJECTION_OTHER_COLOR = "#9aa6b2";
+  var REJECTION_UNRECORDED_COLOR = "#c9d1da";
+  var REJECTION_SHARE_LIMIT = 8;
   var WORLD_MAP_NO_DATA = "#e7ecf1";
   var WORLD_MAP_ZERO = "#f7f9fb";
   var WORLD_MAP_COLORS = [
@@ -3453,8 +3460,13 @@
     renderChart(grouped, displayWidth, data.from_ms, data.until_ms);
     renderCountryChart(grouped, displayWidth, data.from_ms, data.until_ms);
     renderCountryMap(buckets);
-    renderReasonClasses(buckets, rejected.total || 0);
-    renderReasons(buckets);
+    var classTotals = rejectionClassTotals(buckets);
+    var reasonTotals = rejectionReasonTotals(buckets);
+    var rejectedTotal = rejected.total || 0;
+    renderReasonClasses(classTotals, rejectedTotal);
+    renderRejectionClassShare(classTotals, rejectedTotal);
+    renderReasons(reasonTotals, rejectedTotal);
+    renderRejectionReasonShare(reasonTotals, rejectedTotal);
     renderCorrelations();
     var ranking = countryRanking(buckets);
     renderCountryRanking(ranking);
@@ -4648,12 +4660,7 @@
     return REJECT_CLASS_LABELS[key] || humanToken(key.replace(/-/g, " "));
   }
 
-  function renderReasonClasses(buckets, rejected) {
-    var body = $("rejection-classes");
-    if (!body) {
-      return;
-    }
-    body.innerHTML = "";
+  function rejectionClassTotals(buckets) {
     var totals = {};
     var known = false;
     buckets.forEach(function (bucket) {
@@ -4668,14 +4675,36 @@
       });
     });
     var entries = Object.keys(totals).map(function (key) {
-      return { key: key, count: totals[key] };
+      return { key: key, label: rejectClassLabel(key), value: totals[key] };
     });
     entries.sort(function (a, b) {
-      return b.count - a.count || a.key.localeCompare(b.key);
+      return b.value - a.value || a.key.localeCompare(b.key);
     });
     var measured = entries.reduce(function (sum, entry) {
-      return sum + entry.count;
+      return sum + entry.value;
     }, 0);
+    return { entries: entries, measured: measured, known: known };
+  }
+
+  function rejectionClassEntries(summary, rejected) {
+    var entries = summary.entries.slice();
+    if (rejected > summary.measured) {
+      entries.push({
+        key: "unrecorded",
+        label: "Unrecorded cause",
+        value: rejected - summary.measured,
+        unrecorded: true,
+      });
+    }
+    return entries;
+  }
+
+  function renderReasonClasses(summary, rejected) {
+    var body = $("rejection-classes");
+    if (!body) {
+      return;
+    }
+    body.innerHTML = "";
     function message(value) {
       var row = document.createElement("tr");
       var cell = document.createElement("td");
@@ -4685,7 +4714,7 @@
       row.appendChild(cell);
       body.appendChild(row);
     }
-    if (!known) {
+    if (!summary.known) {
       message(
         rejected
           ? "Attack-type detail is unavailable for these stored intervals."
@@ -4693,9 +4722,7 @@
       );
       return;
     }
-    if (rejected > measured) {
-      entries.push({ key: "unrecorded", count: rejected - measured, unrecorded: true });
-    }
+    var entries = rejectionClassEntries(summary, rejected);
     if (!entries.length) {
       message("No measured rejections in this range.");
       return;
@@ -4703,13 +4730,13 @@
     entries.forEach(function (entry) {
       var row = document.createElement("tr");
       var name = document.createElement("td");
-      name.textContent = entry.unrecorded ? "Unrecorded cause" : rejectClassLabel(entry.key);
+      name.textContent = entry.label;
       var count = document.createElement("td");
       count.className = "num";
-      count.textContent = number(entry.count);
+      count.textContent = number(entry.value);
       var share = document.createElement("td");
       share.className = "num";
-      share.textContent = rejected ? ((100 * entry.count) / rejected).toFixed(1) + "%" : "Unavailable";
+      share.textContent = percent(entry.value, rejected);
       row.appendChild(name);
       row.appendChild(count);
       row.appendChild(share);
@@ -4717,11 +4744,38 @@
     });
   }
 
-  function renderReasons(buckets) {
-    var body = $("reasons");
-    body.innerHTML = "";
+  function renderRejectionClassShare(summary, rejected) {
+    var host = $("rejection-class-share");
+    if (!host) {
+      return;
+    }
+    if (!summary.known) {
+      renderSharePie(host, [], {
+        empty: rejected
+          ? "Attack-type detail is unavailable for these stored intervals."
+          : "No measured rejections in this range.",
+      });
+      return;
+    }
+    renderSharePie(
+      host,
+      shareSlices(rejectionClassEntries(summary, rejected), {
+        colors: REJECTION_SHARE_COLORS,
+        limit: REJECTION_SHARE_LIMIT,
+        otherLabel: "OTHER",
+        otherColor: REJECTION_OTHER_COLOR,
+        unrecordedColor: REJECTION_UNRECORDED_COLOR,
+      }),
+      {
+        label: "Attack type and cause share of rejections",
+        empty: "No measured rejections in this range.",
+        unit: "rejections",
+      }
+    );
+  }
+
+  function rejectionReasonTotals(buckets) {
     var totals = {};
-    var rejected = 0;
     REASONS.forEach(function (reason) {
       totals[reason] = 0;
     });
@@ -4732,10 +4786,34 @@
           totals[reason] += reasons[reason].sum;
         }
       });
-      if (bucket.counters && bucket.counters.rejected_requests) {
-        rejected += bucket.counters.rejected_requests.sum;
-      }
     });
+    return totals;
+  }
+
+  function rejectionReasonEntries(totals, rejected) {
+    var entries = [];
+    var measured = 0;
+    REASONS.forEach(function (reason) {
+      if (!totals[reason]) {
+        return;
+      }
+      entries.push({ key: reason, label: reason.replace(/_/g, " "), value: totals[reason] });
+      measured += totals[reason];
+    });
+    if (rejected > measured) {
+      entries.push({
+        key: "unrecorded",
+        label: "Unrecorded mechanism",
+        value: rejected - measured,
+        unrecorded: true,
+      });
+    }
+    return entries;
+  }
+
+  function renderReasons(totals, rejected) {
+    var body = $("reasons");
+    body.innerHTML = "";
     var any = false;
     REASONS.forEach(function (reason) {
       if (!totals[reason]) {
@@ -4750,7 +4828,7 @@
       count.textContent = number(totals[reason]);
       var share = document.createElement("td");
       share.className = "num";
-      share.textContent = rejected ? ((100 * totals[reason]) / rejected).toFixed(1) + "%" : "Unavailable";
+      share.textContent = percent(totals[reason], rejected);
       row.appendChild(name);
       row.appendChild(count);
       row.appendChild(share);
@@ -4765,6 +4843,28 @@
       row.appendChild(cell);
       body.appendChild(row);
     }
+  }
+
+  function renderRejectionReasonShare(totals, rejected) {
+    var host = $("rejection-reason-share");
+    if (!host) {
+      return;
+    }
+    renderSharePie(
+      host,
+      shareSlices(rejectionReasonEntries(totals, rejected), {
+        colors: REJECTION_SHARE_COLORS,
+        limit: REJECTION_SHARE_LIMIT,
+        otherLabel: "OTHER",
+        otherColor: REJECTION_OTHER_COLOR,
+        unrecordedColor: REJECTION_UNRECORDED_COLOR,
+      }),
+      {
+        label: "Terminal mechanism share of rejections",
+        empty: "No measured rejections in this range.",
+        unit: "rejections",
+      }
+    );
   }
 
   function renderCorrelations() {
@@ -4883,26 +4983,7 @@
     }
   }
 
-  function countryShareSlices(entries) {
-    var slices = entries.slice(0, COUNTRY_RANKING_LIMIT).map(function (entry, index) {
-      return {
-        label: countryLabel(entry.code) || entry.code,
-        requests: entry.counts.requests,
-        color: countryColor(index),
-      };
-    });
-    var other = entries.slice(COUNTRY_RANKING_LIMIT).reduce(function (sum, entry) {
-      return sum + entry.counts.requests;
-    }, 0);
-    if (other > 0) {
-      slices.push({ label: "OTHER", requests: other, color: COUNTRY_OTHER_COLOR });
-    }
-    return slices.filter(function (slice) {
-      return slice.requests > 0;
-    });
-  }
-
-  function countryShareArc(startFraction, endFraction) {
+  function shareArc(startFraction, endFraction) {
     var radius = 98;
     var start = startFraction * Math.PI * 2 - Math.PI / 2;
     var end = endFraction * Math.PI * 2 - Math.PI / 2;
@@ -4918,49 +4999,78 @@
     );
   }
 
-  function countryShareTitle(slice, total) {
+  function shareSlices(entries, options) {
+    var regular = entries
+      .filter(function (entry) {
+        return entry.value > 0 && !entry.unrecorded;
+      })
+      .sort(function (a, b) {
+        return b.value - a.value || a.label.localeCompare(b.label);
+      });
+    var pinned = entries.filter(function (entry) {
+      return entry.value > 0 && entry.unrecorded;
+    });
+    var slices = regular.slice(0, options.limit).map(function (entry, index) {
+      return {
+        label: entry.label,
+        value: entry.value,
+        color: options.colors[index % options.colors.length],
+      };
+    });
+    var other = regular.slice(options.limit).reduce(function (sum, entry) {
+      return sum + entry.value;
+    }, 0);
+    if (other > 0) {
+      slices.push({ label: options.otherLabel, value: other, color: options.otherColor });
+    }
+    pinned.forEach(function (entry) {
+      slices.push({
+        label: entry.label,
+        value: entry.value,
+        color: options.unrecordedColor,
+      });
+    });
+    return slices;
+  }
+
+  function shareSliceTitle(slice, total, unit) {
     var title = document.createElementNS(SVG_NS, "title");
     title.textContent =
-      slice.label + ": " + percent(slice.requests, total) + " (" + number(slice.requests) + " requests)";
+      slice.label + ": " + percent(slice.value, total) + " (" + number(slice.value) + " " + unit + ")";
     return title;
   }
 
-  function renderCountryShare(ranking) {
-    var host = $("country-share");
-    host.innerHTML = "";
-    host.className = "country-share";
-    function message(value) {
-      host.className = "country-share country-share-muted";
-      host.textContent = value;
-    }
-    if (!ranking.known) {
-      message("Country detail is unavailable for these stored intervals.");
-      return;
-    }
-    var slices = countryShareSlices(ranking.entries);
-    var total = slices.reduce(function (sum, slice) {
-      return sum + slice.requests;
+  function shareTotal(slices) {
+    return slices.reduce(function (sum, slice) {
+      return sum + slice.value;
     }, 0);
-    if (!total) {
-      message("No requests with country detail in this range.");
+  }
+
+  function renderSharePie(host, slices, options) {
+    host.innerHTML = "";
+    host.className = "share-pie";
+    var total = shareTotal(slices);
+    if (!slices.length || !total) {
+      host.className = "share-pie share-pie-muted";
+      host.textContent = options.empty;
       return;
     }
     var svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("class", "country-share-svg");
+    svg.setAttribute("class", "share-pie-svg");
     svg.setAttribute("viewBox", "0 0 200 200");
     svg.setAttribute("role", "img");
     svg.setAttribute(
       "aria-label",
-      "Request share by source country: " +
+      options.label + ": " +
         slices
           .map(function (slice) {
-            return slice.label + " " + percent(slice.requests, total);
+            return slice.label + " " + percent(slice.value, total);
           })
           .join(", ")
     );
     var offset = 0;
     slices.forEach(function (slice, index) {
-      var fraction = slice.requests / total;
+      var fraction = slice.value / total;
       var end = index === slices.length - 1 ? 1 : offset + fraction;
       var shape;
       if (slices.length === 1) {
@@ -4970,42 +5080,77 @@
         shape.setAttribute("r", "98");
       } else {
         shape = document.createElementNS(SVG_NS, "path");
-        shape.setAttribute("d", countryShareArc(offset, end));
+        shape.setAttribute("d", shareArc(offset, end));
       }
       shape.setAttribute("fill", slice.color);
-      shape.setAttribute("class", "country-share-slice");
-      shape.appendChild(countryShareTitle(slice, total));
+      shape.setAttribute("class", "share-pie-slice");
+      shape.appendChild(shareSliceTitle(slice, total, options.unit));
       svg.appendChild(shape);
       offset = end;
     });
     host.appendChild(svg);
     var legend = document.createElement("div");
-    legend.className = "country-share-legend";
+    legend.className = "share-pie-legend";
     slices.forEach(function (slice) {
       var entry = document.createElement("span");
-      entry.className = "country-share-entry";
+      entry.className = "share-pie-entry";
       var swatch = document.createElement("span");
-      swatch.className = "country-share-swatch";
+      swatch.className = "share-pie-swatch";
       swatch.style.setProperty("--share-swatch", slice.color);
       entry.appendChild(swatch);
       var label = document.createElement("span");
-      label.className = "country-share-label";
+      label.className = "share-pie-label";
       label.textContent = slice.label;
       label.title = slice.label;
       entry.appendChild(label);
       var value = document.createElement("span");
-      value.className = "country-share-value";
-      value.textContent = percent(slice.requests, total);
+      value.className = "share-pie-value";
+      value.textContent = percent(slice.value, total);
       entry.appendChild(value);
       legend.appendChild(entry);
     });
     host.appendChild(legend);
-    if (ranking.incomplete) {
+    if (options.note) {
       var note = document.createElement("p");
-      note.className = "country-share-note";
-      note.textContent = "Country detail is incomplete for some intervals in this range.";
+      note.className = "share-pie-note";
+      note.textContent = options.note;
       host.appendChild(note);
     }
+  }
+
+  function countryShareSlices(entries) {
+    return shareSlices(
+      entries.map(function (entry) {
+        return {
+          label: countryLabel(entry.code) || entry.code,
+          value: entry.counts.requests,
+        };
+      }),
+      {
+        colors: COUNTRY_COLORS,
+        limit: COUNTRY_RANKING_LIMIT,
+        otherLabel: "OTHER",
+        otherColor: COUNTRY_OTHER_COLOR,
+      }
+    );
+  }
+
+  function renderCountryShare(ranking) {
+    var host = $("country-share");
+    if (!ranking.known) {
+      renderSharePie(host, [], {
+        empty: "Country detail is unavailable for these stored intervals.",
+      });
+      return;
+    }
+    renderSharePie(host, countryShareSlices(ranking.entries), {
+      label: "Request share by source country",
+      empty: "No requests with country detail in this range.",
+      unit: "requests",
+      note: ranking.incomplete
+        ? "Country detail is incomplete for some intervals in this range."
+        : null,
+    });
   }
 
   var MAX_HISTORY_PAGES = 64;

@@ -165,7 +165,12 @@ operator clicks them.
 The Metrics view keeps the terminal-mechanism table and adds an **Attack type
 and cause** table from the retained per-minute class counters. Older intervals
 that predate the class counters remain unavailable or unrecorded, never
-zero. The live snapshot reports the cumulative map as
+zero. Beside those tables, a **Rejection share** panel renders the same counts
+as two pie charts, one for attack type and cause and one for terminal
+mechanism. Each chart keeps the eight largest entries as their own slice,
+groups the rest as OTHER, and shows rejections without recorded detail as
+unrecorded rather than zero. The decoy correlation table sits below the
+rejection panels. The live snapshot reports the cumulative map as
 `counters.rejection_classes`; history intervals report per-class count
 statistics as `rejection_classes`.
 
