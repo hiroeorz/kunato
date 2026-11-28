@@ -189,9 +189,9 @@ views, and the display interval follows the selected period: 1 minute, 1 hour,
 about 56 bars. Bars show requests and rejections per minute, averaged over
 complete minutes in each display interval, so retained 1-minute and 1-hour
 storage intervals are comparable; the tooltip also shows interval totals,
-storage grain, and coverage. Request bars are green and rejected bars are
-crimson (`#dc143c`), matching the legend. Bars are capped at a fixed maximum
-width and centered in their display interval, so every range uses the same bar
+storage grain, and coverage. Request bars use the page green and rejected bars
+the page red, matching the legend. Bars are capped at a fixed maximum width
+and centered in their display interval, so every range uses the same bar
 thickness. The time axis always spans the selected range; bars are drawn only
 for intervals that history has retained, so the 28-day view keeps a 28-day
 axis even when fewer days are available. The 28-day period leaves two days

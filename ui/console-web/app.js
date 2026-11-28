@@ -419,8 +419,8 @@
   var SIX_HOURS_MS = 6 * GRAIN_MS.hour;
   var TWELVE_HOURS_MS = 12 * GRAIN_MS.hour;
   var MAX_BAR_WIDTH = 12;
-  var REQUESTS_BAR_COLOR = "#008000";
-  var REJECTED_BAR_COLOR = "#dc143c";
+  var REQUESTS_BAR_COLOR = "#3c8b70";
+  var REJECTED_BAR_COLOR = "#c66361";
   var COUNTRY_BADGE_VISIBLE_MS = 20000;
 
   function displayGrainMs(rangeMs, buckets) {

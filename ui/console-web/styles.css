@@ -942,11 +942,11 @@ th.num {
 }
 
 .legend .legend-requests {
-  --bar: #008000;
+  --bar: var(--green);
 }
 
 .legend .legend-rejected {
-  --bar: #dc143c;
+  --bar: var(--red);
 }
 
 .legend .legend-note::before {
