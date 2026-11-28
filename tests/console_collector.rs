@@ -68,6 +68,7 @@ async fn bounded_history_reader_serves_committed_reasons_without_taking_a_write_
             site: None,
             from_ms: packet.buckets[0].start_ms,
             until_ms: packet.observed_at_ms + 60_000,
+            range_ms: None,
             limit: 128,
             revision: None,
         })

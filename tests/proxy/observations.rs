@@ -287,6 +287,7 @@ async fn loopback_export_collects_live_then_persists_and_reopens_real_waf_counts
             site: None,
             from_ms: packet.buckets[0].start_ms,
             until_ms: packet.observed_at_ms + 60_000,
+            range_ms: None,
             limit: 128,
             revision: None,
         })

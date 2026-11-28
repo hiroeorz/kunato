@@ -240,6 +240,14 @@ async fn serves_history_live_state_and_assets() {
     assert!(!body.contains(r#"id="range""#), "{body}");
     assert!(body.contains("/world-map.js"), "{body}");
 
+    let (status, body, _) =
+        request(&client, running.address, Method::GET, "/app.js", &[], None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("?range_ms="),
+        "metrics history must be anchored by the server, not a client clock"
+    );
+
     let (status, body, _) = request(
         &client,
         running.address,
@@ -287,6 +295,38 @@ async fn serves_history_live_state_and_assets() {
             .is_some_and(|sum| sum >= 4),
         "{body}"
     );
+
+    let (status, body, _) = request(
+        &client,
+        running.address,
+        Method::GET,
+        "/api/v1/history?range_ms=3600000&limit=10",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("history json");
+    let until = page["until_ms"].as_u64().expect("until_ms");
+    let from = page["from_ms"].as_u64().expect("from_ms");
+    assert_eq!(from, until - 3_600_000, "{body}");
+    assert!(
+        page["buckets"]
+            .as_array()
+            .is_some_and(|buckets| !buckets.is_empty()),
+        "{body}"
+    );
+
+    for path in [
+        "/api/v1/history?range_ms=3600000&from_ms=0",
+        "/api/v1/history?range_ms=3600000&until_ms=180000",
+        "/api/v1/history?range_ms=0",
+        "/api/v1/history?range_ms=3000000000",
+    ] {
+        let (status, body, _) =
+            request(&client, running.address, Method::GET, path, &[], None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
 
     let path = format!(
         "/api/v1/history?from_ms={minute_start}&until_ms={}&site=default",

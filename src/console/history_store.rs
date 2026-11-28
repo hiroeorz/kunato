@@ -158,9 +158,21 @@ impl Store {
             let revision: i64 = store.connection.query_row("SELECT revision FROM history_state WHERE singleton=1", [], |row| row.get(0))?;
             if query.revision.is_some_and(|expected|expected!=revision as u64) { return Err(Error::HistoryChanged); }
             let site = query.site.as_deref().unwrap_or("");
+            // A range query is anchored to the newest retained interval, never to
+            // a caller clock: stored labels can predate a WAF wall-clock change,
+            // so a caller-chosen range could miss the retained history entirely.
+            let (from_ms, until_ms) = match query.range_ms {
+                Some(range) => {
+                    let until = newest_retained_end(&store.connection,&query.instance,site,expiry)?
+                        .unwrap_or_else(|| (store.config.clock)());
+                    (until.saturating_sub(range),until)
+                }
+                None => (query.from_ms,query.until_ms),
+            };
+            if from_ms >= until_ms { return Err(Error::Invalid("empty history range")); }
             let raw: Vec<(u64,u64,String)> = {
                 let mut statement = store.connection.prepare("SELECT start_ms,grain_ms,payload FROM history_buckets WHERE source=?1 AND site=?2 AND start_ms>=?3 AND start_ms+grain_ms<=?4 ORDER BY start_ms LIMIT ?5")?;
-                statement.query_map(params![query.instance,site,query.from_ms.max(expiry) as i64,query.until_ms as i64,(query.limit+1) as i64], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get(2)?)))?.collect::<Result<_,_>>()?
+                statement.query_map(params![query.instance,site,from_ms.max(expiry) as i64,until_ms as i64,(query.limit+1) as i64], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get(2)?)))?.collect::<Result<_,_>>()?
             };
             let mut buckets = Vec::with_capacity(query.limit.min(raw.len()));
             let next_start_ms = raw.get(query.limit).map(|row|row.0);
@@ -173,9 +185,26 @@ impl Store {
             let after: i64 = store.connection.query_row("SELECT revision FROM history_state WHERE singleton=1",[],|row|row.get(0))?;
             if revision != after { return Err(Error::Busy); }
             super::storage::check_deadline(&store.cancel,deadline)?;
-            Ok(HistoryPage { buckets,expiry_ms:expiry,oldest_available_ms,next_start_ms,pending_minutes,revision:revision as u64 })
+            Ok(HistoryPage { buckets,from_ms,until_ms,expiry_ms:expiry,oldest_available_ms,next_start_ms,pending_minutes,revision:revision as u64 })
         })
     }
+}
+
+/// End of the newest retained interval, used to anchor a server-selected range.
+fn newest_retained_end(
+    connection: &Connection,
+    source: &str,
+    site: &str,
+    expiry: u64,
+) -> Result<Option<u64>, Error> {
+    let newest = connection
+        .query_row(
+            "SELECT start_ms,grain_ms FROM history_buckets WHERE source=?1 AND site=?2 AND start_ms>=?3 ORDER BY start_ms DESC LIMIT 1",
+            params![source, site, expiry as i64],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+        )
+        .optional()?;
+    Ok(newest.map(|(start, grain)| start.saturating_add(grain)))
 }
 
 fn materialize(connection: &Connection, expiry: u64) -> Result<bool, Error> {

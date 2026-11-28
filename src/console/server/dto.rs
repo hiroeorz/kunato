@@ -240,12 +240,11 @@ fn writer_json(health: &crate::console::Health) -> Value {
 }
 
 /// Encode a history page, dropping whole trailing buckets when the page would
-/// exceed the response budget. The response reports the cut and the next start.
+/// exceed the response budget. The response reports the cut, the next start,
+/// and the effective range the server selected.
 pub fn history(
     page: &HistoryPage,
     instance: &str,
-    from_ms: u64,
-    until_ms: u64,
 ) -> Result<(Vec<u8>, usize, bool), serde_json::Error> {
     let mut encoded = Vec::new();
     let mut total = 0usize;
@@ -266,8 +265,8 @@ pub fn history(
     let head = json!({
         "version": 1,
         "instance": instance,
-        "from_ms": from_ms,
-        "until_ms": until_ms,
+        "from_ms": page.from_ms,
+        "until_ms": page.until_ms,
         "expiry_ms": page.expiry_ms,
         "oldest_available_ms": page.oldest_available_ms,
         "pending_minutes": page.pending_minutes,
@@ -413,17 +412,21 @@ mod tests {
         let bucket = HistoryBucket::empty(0, Grain::Minute);
         let page = HistoryPage {
             buckets: vec![bucket.clone(), bucket.clone(), bucket],
+            from_ms: 0,
+            until_ms: 180_000,
             expiry_ms: 1000,
             oldest_available_ms: Some(0),
             next_start_ms: Some(180_000),
             pending_minutes: 1,
             revision: 7,
         };
-        let (json, returned, truncated) = history(&page, "local-waf", 0, 180_000).expect("encode");
+        let (json, returned, truncated) = history(&page, "local-waf").expect("encode");
         assert_eq!(returned, 3);
         assert!(!truncated);
         let value: Value = serde_json::from_slice(&json).expect("json");
         assert_eq!(value["revision"], 7);
+        assert_eq!(value["from_ms"], 0);
+        assert_eq!(value["until_ms"], 180_000);
         assert_eq!(value["buckets"].as_array().map(Vec::len), Some(3));
         assert_eq!(value["next_start_ms"], 180_000);
     }

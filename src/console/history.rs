@@ -618,6 +618,11 @@ pub struct HistoryQuery {
     pub site: Option<String>,
     pub from_ms: u64,
     pub until_ms: u64,
+    /// Select the range server-side from the newest retained interval. The
+    /// stored history owns the clock labels, so a caller clock cannot select
+    /// an empty range after a WAF wall-clock change or before the first live
+    /// sample reaches a browser.
+    pub range_ms: Option<u64>,
     pub limit: usize,
     /// Reuse the first page's revision when continuing a paginated read.
     pub revision: Option<u64>,
@@ -629,9 +634,21 @@ impl HistoryQuery {
         if let Some(site) = &self.site {
             super::model::identifier(site, 64)?;
         }
-        super::model::timestamp(self.from_ms)?;
-        super::model::timestamp(self.until_ms)?;
-        if self.from_ms >= self.until_ms || self.limit == 0 || self.limit > MAX_HISTORY_PAGE {
+        match self.range_ms {
+            Some(range) => {
+                if range == 0 || range > RETENTION_MS {
+                    return Err(Error::Invalid("invalid history range"));
+                }
+            }
+            None => {
+                super::model::timestamp(self.from_ms)?;
+                super::model::timestamp(self.until_ms)?;
+                if self.from_ms >= self.until_ms {
+                    return Err(Error::Invalid("invalid history query"));
+                }
+            }
+        }
+        if self.limit == 0 || self.limit > MAX_HISTORY_PAGE {
             return Err(Error::Invalid("invalid history query"));
         }
         Ok(())
@@ -641,6 +658,9 @@ impl HistoryQuery {
 #[derive(Clone, Debug)]
 pub struct HistoryPage {
     pub buckets: Vec<HistoryBucket>,
+    /// Effective inclusive start and exclusive end after server-side anchoring.
+    pub from_ms: u64,
+    pub until_ms: u64,
     pub expiry_ms: u64,
     pub oldest_available_ms: Option<u64>,
     pub next_start_ms: Option<u64>,

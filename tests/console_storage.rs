@@ -514,6 +514,7 @@ fn version_one_history_migrates_without_inventing_new_measurements() {
             site: None,
             from_ms: 60_000,
             until_ms: 120_000,
+            range_ms: None,
             limit: 128,
             revision: None,
         })

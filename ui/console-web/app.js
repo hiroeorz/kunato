@@ -5161,18 +5161,27 @@
   var HISTORY_PAGE_LIMIT = 128;
   var metricsRequest = 0;
 
-  async function fetchHistory(from, until, attempt) {
+  async function fetchHistory(rangeMs, attempt) {
     attempt = attempt || 0;
     var buckets = [];
     var seen = {};
     var firstPage = null;
     var pageCount = 0;
-    var pageFrom = from;
+    var from = 0;
+    var until = 0;
+    var pageFrom = 0;
     var revision = null;
     var nextStart = null;
     var truncated = false;
     for (var page = 0; page < MAX_HISTORY_PAGES; page += 1) {
-      var query = "?from_ms=" + pageFrom + "&until_ms=" + until + "&limit=" + HISTORY_PAGE_LIMIT;
+      // The first page names the reporting period instead of absolute bounds:
+      // stored history owns its clock labels, so the server anchors the range
+      // to the newest retained interval. Client and live-snapshot clocks can
+      // differ from those labels after a WAF wall-clock change.
+      var query =
+        page === 0
+          ? "?range_ms=" + rangeMs + "&limit=" + HISTORY_PAGE_LIMIT
+          : "?from_ms=" + pageFrom + "&until_ms=" + until + "&limit=" + HISTORY_PAGE_LIMIT;
       if (revision !== null) {
         query += "&revision=" + revision;
       }
@@ -5185,7 +5194,7 @@
         if (attempt >= 2) {
           throw new Error("history changed; retry");
         }
-        return fetchHistory(from, until, attempt + 1);
+        return fetchHistory(rangeMs, attempt + 1);
       }
       if (response.status === 503) {
         if (attempt >= 2) {
@@ -5194,7 +5203,7 @@
         await new Promise(function (resolve) {
           setTimeout(resolve, 1000);
         });
-        return fetchHistory(from, until, attempt + 1);
+        return fetchHistory(rangeMs, attempt + 1);
       }
       if (!response.ok) {
         throw new Error("history request failed with " + response.status);
@@ -5203,6 +5212,9 @@
       if (!firstPage) {
         firstPage = data;
         revision = data.revision;
+        from = data.from_ms;
+        until = data.until_ms;
+        pageFrom = from;
       }
       pageCount += 1;
       var pageBuckets = data.buckets || [];
@@ -5270,19 +5282,15 @@
 
   function loadMetrics() {
     var request = ++metricsRequest;
-    // Anchor the range to the snapshot clock, not the browser clock: a client
-    // clock skew would otherwise select a window with no retained intervals and
-    // render every measurement as Unavailable.
-    var until = now();
-    var from = until - state.rangeMs;
-    fetchCorrelations(from, until, request);
-    fetchHistory(from, until)
+    state.correlations = null;
+    fetchHistory(state.rangeMs)
       .then(function (data) {
         if (request !== metricsRequest) {
           return;
         }
         state.metrics = data;
         renderMetrics();
+        fetchCorrelations(data.from_ms, data.until_ms, request);
       })
       .catch(function (error) {
         if (request !== metricsRequest) {

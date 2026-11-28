@@ -183,12 +183,14 @@ stream is idle.
 
 The Metrics view opens with the last seven days selected. A **7 days**,
 **14 days**, or **28 days** switch at the right end of the toolbar sets the
-reporting period for the whole view. The traffic chart follows the switch with
-a 3-hour, 6-hour, or 12-hour display interval, so each range renders about 56
-bars. Bars show requests and rejections per minute, averaged over complete
-minutes in each display interval, so retained 1-minute and 1-hour storage
-intervals are comparable; the tooltip also shows interval totals, storage
-grain, and coverage. Request bars use the page green and rejected bars the page
+reporting period for the whole view. The page sends that period as a duration;
+the server anchors it to the newest retained interval, so the window always
+stays on the clock labels stored history uses. The traffic chart follows the
+switch with a 3-hour, 6-hour, or 12-hour display interval, so each range
+renders about 56 bars. Bars show requests and rejections per minute, averaged
+over complete minutes in each display interval, so retained 1-minute and
+1-hour storage intervals are comparable; the tooltip also shows interval
+totals, storage grain, and coverage. Request bars use the page green and rejected bars the page
 red, matching the legend. The status line below the toolbar has a fixed height,
 so switching periods does not move the panels while history loads. Bars are
 capped at a fixed maximum width and centered in their display interval, so
@@ -244,9 +246,10 @@ do not add inline scripts or styles, external fonts, or third-party assets.
   `next_start_ms` is reported as an incomplete range instead of being hidden.
 - Rates are derived from two consecutive live samples and labeled as such; a
   source generation change resets them.
-- Event-age backgrounds and the Metrics history window use the latest snapshot
-  clock, so browser clock skew does not change the classification or select an
-  empty window.
+- Event-age backgrounds use the latest snapshot clock, so browser clock skew
+  does not change the classification. The Metrics history window never uses a
+  browser or live snapshot clock: it requests a duration and the server anchors
+  it to the newest retained interval.
 - Unavailable values render as `Unavailable`, never as zero.
 - The EDR view shows the latest evaluated hourly window only. The ring keeps
   age, observed-evaluation, and episode counters across restarts; browsing older

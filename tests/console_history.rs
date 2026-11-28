@@ -111,6 +111,7 @@ fn query(from: u64, until: u64) -> HistoryQuery {
         site: None,
         from_ms: from,
         until_ms: until,
+        range_ms: None,
         limit: 128,
         revision: None,
     }
@@ -1112,4 +1113,70 @@ async fn writer_materializes_reason_history_and_flushes_it_on_shutdown() {
         Some(0.1)
     );
     assert_eq!(bucket.reason_share(RejectionReason::Decoy), Some(1.0));
+}
+
+#[test]
+fn a_server_selected_range_anchors_to_retained_history_across_a_clock_step() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = config(&temp, early);
+    let mut store = Store::open(config.clone()).unwrap();
+    store
+        .write_batch(&batch(
+            "a",
+            1,
+            vec![
+                minute(BASE, 4, RejectionReason::Rule, 1),
+                minute(BASE + MINUTE_MS, 6, RejectionReason::Rule, 2),
+            ],
+        ))
+        .unwrap();
+    drain(&mut store, early());
+    drop(store);
+    let mut store = Store::open(config).unwrap();
+
+    // A caller clock that moved forward, as after a WAF wall-clock change,
+    // selects a window that contains no retained interval.
+    let live = early() + 8 * 24 * HOUR_MS;
+    let caller_window = query(live - 7 * 24 * HOUR_MS, live);
+    assert!(store.history(&caller_window).unwrap().buckets.is_empty());
+
+    // A range query is anchored to the newest retained interval instead.
+    let page = store
+        .history(&HistoryQuery {
+            instance: "waf".into(),
+            site: None,
+            from_ms: 0,
+            until_ms: 0,
+            range_ms: Some(7 * 24 * HOUR_MS),
+            limit: 128,
+            revision: None,
+        })
+        .unwrap();
+    assert_eq!(page.until_ms, BASE + 5 * MINUTE_MS);
+    assert_eq!(page.from_ms, page.until_ms - 7 * 24 * HOUR_MS);
+    assert_eq!(page.buckets.len(), 1);
+    assert_eq!(
+        page.buckets[0].counters[&CountMetric::Requests].total(),
+        Some(10)
+    );
+}
+
+#[test]
+fn a_server_selected_range_rejects_an_invalid_span_before_reading() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(config(&temp, early)).unwrap();
+    for range in [0, RETENTION_MS + 1] {
+        let error = store
+            .history(&HistoryQuery {
+                instance: "waf".into(),
+                site: None,
+                from_ms: 0,
+                until_ms: 0,
+                range_ms: Some(range),
+                limit: 128,
+                revision: None,
+            })
+            .unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error}");
+    }
 }

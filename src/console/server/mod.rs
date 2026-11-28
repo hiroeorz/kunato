@@ -404,18 +404,35 @@ async fn rdap(request: Request<Incoming>, connection: &Connection) -> Response<P
 async fn history(request: Request<Incoming>, connection: &Connection) -> Response<ProxyBody> {
     let params = match query_params(
         request.uri().query(),
-        &["from_ms", "until_ms", "limit", "site", "revision"],
+        &[
+            "from_ms", "until_ms", "range_ms", "limit", "site", "revision",
+        ],
     ) {
         Ok(params) => params,
         Err(message) => return bad_request(message),
     };
-    let from_ms = match required_u64(&params, "from_ms") {
+    let range_ms = match optional_u64(&params, "range_ms") {
         Ok(value) => value,
         Err(message) => return bad_request(message),
     };
-    let until_ms = match required_u64(&params, "until_ms") {
-        Ok(value) => value,
-        Err(message) => return bad_request(message),
+    let (from_ms, until_ms) = match range_ms {
+        Some(_) => {
+            if params.contains_key("from_ms") || params.contains_key("until_ms") {
+                return bad_request("`range_ms` cannot be combined with `from_ms` or `until_ms`");
+            }
+            (0, 0)
+        }
+        None => {
+            let from_ms = match required_u64(&params, "from_ms") {
+                Ok(value) => value,
+                Err(message) => return bad_request(message),
+            };
+            let until_ms = match required_u64(&params, "until_ms") {
+                Ok(value) => value,
+                Err(message) => return bad_request(message),
+            };
+            (from_ms, until_ms)
+        }
     };
     let limit = match optional_usize(&params, "limit", 24) {
         Ok(value) if (1..=MAX_HISTORY_LIMIT).contains(&value) => value,
@@ -437,16 +454,12 @@ async fn history(request: Request<Incoming>, connection: &Connection) -> Respons
         site: None,
         from_ms,
         until_ms,
+        range_ms,
         limit,
         revision,
     };
     match connection.context.reader.history(query).await {
-        Ok(page) => match dto::history(
-            &page,
-            &connection.context.console.instance,
-            from_ms,
-            until_ms,
-        ) {
+        Ok(page) => match dto::history(&page, &connection.context.console.instance) {
             Ok((json, _, _)) => json_response(json),
             Err(_) => error_json(
                 StatusCode::INTERNAL_SERVER_ERROR,

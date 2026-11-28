@@ -194,9 +194,20 @@ Unavailable values are `null`; the UI must not render them as zero.
 
 ### 5.2 History query
 
+`GET /api/v1/history?range_ms=<u64>[&limit=24][&revision=<u64>]`
+
 `GET /api/v1/history?from_ms=<u64>&until_ms=<u64>[&limit=24][&revision=<u64>]`
 
+- `range_ms` selects the last N milliseconds server-side, ending at the newest
+  retained interval end (or the console clock when history is empty). It cannot
+  be combined with `from_ms` or `until_ms`. Stored history keeps the clock
+  labels it was written with, so a range selected from a browser or live
+  snapshot clock can miss the retained intervals after a WAF wall-clock change;
+  the server-selected range is always anchored to the data itself. `range_ms`
+  is at most the 30-day statistics retention.
 - `from_ms` is inclusive, `until_ms` exclusive, both UTC Unix milliseconds.
+  This absolute form remains available for callers that already own the
+  history clock.
 - `limit` is 1..128, default 24. The response is additionally bounded by 4 MiB
   of encoded buckets; a cut response reports `truncated: true` and the next
   available start.
@@ -221,7 +232,7 @@ Response:
 Buckets use the Phase 3 `HistoryBucket` encoding: grain, counters, reason
 statistics, coverage, connections, outcomes, and optional additional
 measurements. A range cutting a coarse bucket excludes it; the response exposes
-the effective bounds and never prorates.
+the effective bounds (`from_ms`, `until_ms`) and never prorates.
 
 Errors: `400` for an invalid query, `409` for `HistoryChanged`, `503` for a busy
 or timed-out reader with `Retry-After: 1`.

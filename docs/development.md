@@ -2116,7 +2116,7 @@ copy; the console does not widen the ACME cache permissions.
 | GET | `/` | Console UI |
 | GET | `/login`, `/login.js`, `/styles.css`, `/favicon.svg` | Public login and static assets |
 | GET | `/api/v1/health` | Collection, writer, and storage health |
-| GET | `/api/v1/history?from_ms=&until_ms=[&limit=][&revision=]` | Bounded UTC history page (no per-site primary history yet) |
+| GET | `/api/v1/history?range_ms=[&limit=][&revision=]` or `/api/v1/history?from_ms=&until_ms=[&limit=][&revision=]` | Bounded UTC history page; `range_ms` anchors to the newest retained interval (no per-site primary history yet) |
 | GET | `/api/v1/correlations?from_ms=&until_ms=[&limit=][&credential_id=]` | Compact decoy evidence |
 | GET | `/api/v1/edr` | Bounded latest EDR report, detector lamps, telemetry, and finding ring metadata |
 | GET | `/api/v1/live` | SSE stream of the latest state |
