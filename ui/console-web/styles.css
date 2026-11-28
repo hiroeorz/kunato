@@ -582,6 +582,54 @@ main {
   text-transform: uppercase;
 }
 
+.panel-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 22px 0;
+}
+
+.panel-heading > h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.chart-units {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #e1e5ea;
+  border-radius: 7px;
+  background: #f4f6f9;
+}
+
+.chart-unit {
+  min-height: 26px;
+  padding: 0.2rem 0.65rem;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.chart-unit:hover {
+  border-color: transparent;
+  background: #e9edf3;
+}
+
+.chart-unit[aria-pressed="true"] {
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(32, 44, 61, 0.08);
+  color: var(--subtle);
+  font-weight: 600;
+}
+
 .panel > p.small {
   padding: 5px 22px 0;
 }
@@ -894,11 +942,11 @@ th.num {
 }
 
 .legend .legend-requests {
-  --bar: #829ab3;
+  --bar: #008000;
 }
 
 .legend .legend-rejected {
-  --bar: #dc9b6c;
+  --bar: #dc143c;
 }
 
 .legend .legend-note::before {

@@ -416,7 +416,11 @@
 
   var DAY_MS = 86400000;
   var THREE_HOURS_MS = 3 * GRAIN_MS.hour;
+  var SIX_HOURS_MS = 6 * GRAIN_MS.hour;
+  var TWELVE_HOURS_MS = 12 * GRAIN_MS.hour;
   var MAX_BAR_WIDTH = 12;
+  var REQUESTS_BAR_COLOR = "#008000";
+  var REJECTED_BAR_COLOR = "#dc143c";
   var COUNTRY_BADGE_VISIBLE_MS = 20000;
 
   function displayGrainMs(rangeMs, buckets) {
@@ -430,8 +434,10 @@
         width = GRAIN_MS.hour;
       } else if (rangeMs <= 8 * DAY_MS) {
         width = THREE_HOURS_MS;
+      } else if (rangeMs <= 16 * DAY_MS) {
+        width = SIX_HOURS_MS;
       } else {
-        width = DAY_MS;
+        width = TWELVE_HOURS_MS;
       }
     }
     return Math.max(width, maxGrain);
@@ -447,6 +453,12 @@
     }
     var minutes = Math.round(widthMs / GRAIN_MS.minute);
     return minutes === 1 ? "1 minute" : minutes + " minutes";
+  }
+
+  function syncChartRangeButtons() {
+    document.querySelectorAll("[data-chart-range]").forEach(function (button) {
+      button.setAttribute("aria-pressed", String(Number(button.dataset.chartRange) === state.rangeMs));
+    });
   }
 
   function grainLabel(grain) {
@@ -3596,14 +3608,14 @@
       requestsBar.setAttribute("y", top + innerHeight - requestHeight);
       requestsBar.setAttribute("width", barWidth);
       requestsBar.setAttribute("height", Math.max(0, requestHeight));
-      requestsBar.setAttribute("fill", "#829ab3");
+      requestsBar.setAttribute("fill", REQUESTS_BAR_COLOR);
       svg.appendChild(requestsBar);
       var rejectedBar = document.createElementNS(ns, "rect");
       rejectedBar.setAttribute("x", barX);
       rejectedBar.setAttribute("y", top + innerHeight - rejectHeight);
       rejectedBar.setAttribute("width", barWidth);
       rejectedBar.setAttribute("height", Math.max(0, rejectHeight));
-      rejectedBar.setAttribute("fill", "#dc9b6c");
+      rejectedBar.setAttribute("fill", REJECTED_BAR_COLOR);
       svg.appendChild(rejectedBar);
     });
 
@@ -5973,8 +5985,23 @@
 
   $("range").addEventListener("change", function (event) {
     state.rangeMs = Number(event.target.value);
+    syncChartRangeButtons();
     loadMetrics();
   });
+
+  document.querySelectorAll("[data-chart-range]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var rangeMs = Number(button.dataset.chartRange);
+      if (!rangeMs || state.rangeMs === rangeMs) {
+        return;
+      }
+      state.rangeMs = rangeMs;
+      $("range").value = String(rangeMs);
+      syncChartRangeButtons();
+      loadMetrics();
+    });
+  });
+
   $("refresh").addEventListener("click", loadMetrics);
 
   $("sign-out").addEventListener("click", function () {
@@ -6007,6 +6034,8 @@
       closeSourceDetail();
     }
   });
+
+  syncChartRangeButtons();
 
   buildTopology();
   updateTopologyScrollHint();
