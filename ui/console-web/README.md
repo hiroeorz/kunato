@@ -244,8 +244,9 @@ do not add inline scripts or styles, external fonts, or third-party assets.
   `next_start_ms` is reported as an incomplete range instead of being hidden.
 - Rates are derived from two consecutive live samples and labeled as such; a
   source generation change resets them.
-- Event-age backgrounds use the latest snapshot clock, so browser clock skew
-  does not change the classification.
+- Event-age backgrounds and the Metrics history window use the latest snapshot
+  clock, so browser clock skew does not change the classification or select an
+  empty window.
 - Unavailable values render as `Unavailable`, never as zero.
 - The EDR view shows the latest evaluated hourly window only. The ring keeps
   age, observed-evaluation, and episode counters across restarts; browsing older

@@ -5270,7 +5270,10 @@
 
   function loadMetrics() {
     var request = ++metricsRequest;
-    var until = Date.now();
+    // Anchor the range to the snapshot clock, not the browser clock: a client
+    // clock skew would otherwise select a window with no retained intervals and
+    // render every measurement as Unavailable.
+    var until = now();
     var from = until - state.rangeMs;
     fetchCorrelations(from, until, request);
     fetchHistory(from, until)
