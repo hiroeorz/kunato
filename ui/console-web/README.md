@@ -181,36 +181,37 @@ first five minutes) with a labeled legend above the table. Ages are computed
 against the snapshot clock and refreshed at most every ten seconds while the
 stream is idle.
 
-The Metrics view opens with the last seven days selected. The reporting period
-offers 1 hour, 24 hours, 7 days, 14 days, and 28 days. The traffic chart
-carries **7 days**, **14 days**, and **28 days** buttons for the long-range
-views, and the display interval follows the selected period: 1 minute, 1 hour,
-3 hours, 6 hours, or 12 hours. The three long ranges therefore each render
-about 56 bars. Bars show requests and rejections per minute, averaged over
-complete minutes in each display interval, so retained 1-minute and 1-hour
-storage intervals are comparable; the tooltip also shows interval totals,
-storage grain, and coverage. Request bars use the page green and rejected bars
-the page red, matching the legend. Bars are capped at a fixed maximum width
-and centered in their display interval, so every range uses the same bar
-thickness. The time axis always spans the selected range; bars are drawn only
-for intervals that history has retained, so the 28-day view keeps a 28-day
-axis even when fewer days are available. The 28-day period leaves two days
-inside the 30-day statistics retention. The chart is focusable: the left and
-right arrow keys move between intervals, Home and End jump to the edges, and
-Escape hides the tooltip. A second chart below it uses the same UTC intervals
-and per-minute rates, with each interval's requests and rejections stacked by
-country; the top eight countries keep stable colours and the rest are grouped
-as OTHER. A world map below it colours countries by all WAF-rejected requests
-in the selected range on a logarithmic scale, separates no data from zero, and
-uses point markers for small countries. When no country detail exists, the map
-still renders with every country in the no-data colour. Small islands,
-territories, and other countries without map geometry remain in the top-10
-table. A top-10 country table immediately below the map shows request,
-rejection, and rejection-rate totals for the fetched range; it takes two
-thirds of the row, and a pie chart beside it shows each country's share of
-requests in the same ten colours, with the remaining countries grouped as
-OTHER. Country detail comes from bounded per-minute supplementary
-measurements, so older intervals without it remain explicitly unavailable.
+The Metrics view opens with the last seven days selected. A **7 days**,
+**14 days**, or **28 days** switch at the right end of the toolbar sets the
+reporting period for the whole view. The traffic chart follows the switch with
+a 3-hour, 6-hour, or 12-hour display interval, so each range renders about 56
+bars. Bars show requests and rejections per minute, averaged over complete
+minutes in each display interval, so retained 1-minute and 1-hour storage
+intervals are comparable; the tooltip also shows interval totals, storage
+grain, and coverage. Request bars use the page green and rejected bars the page
+red, matching the legend. The status line below the toolbar has a fixed height,
+so switching periods does not move the panels while history loads. Bars are
+capped at a fixed maximum width and centered in their display interval, so
+every range uses the same bar thickness. The time axis always spans the
+selected range; bars are drawn only for intervals that history has retained,
+so the 28-day view keeps a 28-day axis even when fewer days are available. The
+28-day period leaves two days inside the 30-day statistics retention. The
+chart is focusable: the left and right arrow keys move between intervals, Home
+and End jump to the edges, and Escape hides the tooltip. A second chart below
+it uses the same UTC intervals and per-minute rates, with each interval's
+requests and rejections stacked by country; the top eight countries keep
+stable colours and the rest are grouped as OTHER. A world map below it colours
+countries by all WAF-rejected requests in the selected range on a logarithmic
+scale, separates no data from zero, and uses point markers for small
+countries. When no country detail exists, the map still renders with every
+country in the no-data colour. Small islands, territories, and other countries
+without map geometry remain in the top-10 table. A top-10 country table
+immediately below the map shows request, rejection, and rejection-rate totals
+for the fetched range; it takes two thirds of the row, and a pie chart beside
+it shows each country's share of requests in the same ten colours, with the
+remaining countries grouped as OTHER. Country detail comes from bounded
+per-minute supplementary measurements, so older intervals without it remain
+explicitly unavailable.
 
 The UI is intentionally smaller than the fictional interaction prototype in
 `../console-prototype/`. Table-row arrival flares, pause/resume, scroll

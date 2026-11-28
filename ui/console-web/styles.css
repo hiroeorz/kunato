@@ -582,21 +582,7 @@ main {
   text-transform: uppercase;
 }
 
-.panel-heading {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 16px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 20px 22px 0;
-}
-
-.panel-heading > h2 {
-  margin: 0;
-  font-size: 15px;
-}
-
-.chart-units {
+.period-switch {
   display: inline-flex;
   flex: none;
   gap: 2px;
@@ -606,7 +592,7 @@ main {
   background: #f4f6f9;
 }
 
-.chart-unit {
+.period-option {
   min-height: 26px;
   padding: 0.2rem 0.65rem;
   border: 0;
@@ -618,12 +604,12 @@ main {
   line-height: 1.4;
 }
 
-.chart-unit:hover {
+.period-option:hover {
   border-color: transparent;
   background: #e9edf3;
 }
 
-.chart-unit[aria-pressed="true"] {
+.period-option[aria-pressed="true"] {
   background: var(--panel);
   box-shadow: 0 1px 2px rgba(32, 44, 61, 0.08);
   color: var(--subtle);
@@ -683,13 +669,16 @@ main {
   margin-bottom: 16px;
 }
 
-.toolbar label {
-  color: #7d8694;
-  font-size: 12px;
+.toolbar .period-switch {
+  margin-left: auto;
 }
 
-#range {
-  font-size: 12px;
+#metrics-meta {
+  flex-basis: 100%;
+  height: 4.8em;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  line-height: 1.5;
 }
 
 .panel > .event-age-legend {

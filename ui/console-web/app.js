@@ -428,17 +428,9 @@
     buckets.forEach(function (bucket) {
       maxGrain = Math.max(maxGrain, GRAIN_MS[bucket.grain] || 0);
     });
-    var width = GRAIN_MS.minute;
-    if (rangeMs > 2 * GRAIN_MS.hour) {
-      if (rangeMs <= 2 * DAY_MS) {
-        width = GRAIN_MS.hour;
-      } else if (rangeMs <= 8 * DAY_MS) {
-        width = THREE_HOURS_MS;
-      } else if (rangeMs <= 16 * DAY_MS) {
-        width = SIX_HOURS_MS;
-      } else {
-        width = TWELVE_HOURS_MS;
-      }
+    var width = THREE_HOURS_MS;
+    if (rangeMs > 8 * DAY_MS) {
+      width = rangeMs <= 16 * DAY_MS ? SIX_HOURS_MS : TWELVE_HOURS_MS;
     }
     return Math.max(width, maxGrain);
   }
@@ -455,9 +447,9 @@
     return minutes === 1 ? "1 minute" : minutes + " minutes";
   }
 
-  function syncChartRangeButtons() {
-    document.querySelectorAll("[data-chart-range]").forEach(function (button) {
-      button.setAttribute("aria-pressed", String(Number(button.dataset.chartRange) === state.rangeMs));
+  function syncPeriodButtons() {
+    document.querySelectorAll("[data-period-ms]").forEach(function (button) {
+      button.setAttribute("aria-pressed", String(Number(button.dataset.periodMs) === state.rangeMs));
     });
   }
 
@@ -5280,7 +5272,6 @@
     var request = ++metricsRequest;
     var until = Date.now();
     var from = until - state.rangeMs;
-    text($("metrics-meta"), "Loading history...");
     fetchCorrelations(from, until, request);
     fetchHistory(from, until)
       .then(function (data) {
@@ -5983,21 +5974,14 @@
     });
   });
 
-  $("range").addEventListener("change", function (event) {
-    state.rangeMs = Number(event.target.value);
-    syncChartRangeButtons();
-    loadMetrics();
-  });
-
-  document.querySelectorAll("[data-chart-range]").forEach(function (button) {
+  document.querySelectorAll("[data-period-ms]").forEach(function (button) {
     button.addEventListener("click", function () {
-      var rangeMs = Number(button.dataset.chartRange);
+      var rangeMs = Number(button.dataset.periodMs);
       if (!rangeMs || state.rangeMs === rangeMs) {
         return;
       }
       state.rangeMs = rangeMs;
-      $("range").value = String(rangeMs);
-      syncChartRangeButtons();
+      syncPeriodButtons();
       loadMetrics();
     });
   });
@@ -6035,7 +6019,7 @@
     }
   });
 
-  syncChartRangeButtons();
+  syncPeriodButtons();
 
   buildTopology();
   updateTopologyScrollHint();

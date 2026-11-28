@@ -267,15 +267,18 @@
 
         <section id="metrics-view" aria-label="Historical metrics" hidden>
           <div class="toolbar">
-            <label for="range">Reporting period</label>
-            <select id="range">
-              <option value="3600000">Last 1 hour</option>
-              <option value="86400000">Last 24 hours</option>
-              <option value="604800000" selected>Last 7 days</option>
-              <option value="1209600000">Last 14 days</option>
-              <option value="2419200000">Last 28 days</option>
-            </select>
             <button id="refresh" type="button">Refresh</button>
+            <div class="period-switch" role="group" aria-label="Reporting period">
+              <button type="button" class="period-option" data-period-ms="604800000" aria-pressed="true" title="Last 7 days, 3-hour intervals">
+                7 days
+              </button>
+              <button type="button" class="period-option" data-period-ms="1209600000" aria-pressed="false" title="Last 14 days, 6-hour intervals">
+                14 days
+              </button>
+              <button type="button" class="period-option" data-period-ms="2419200000" aria-pressed="false" title="Last 28 days, 12-hour intervals">
+                28 days
+              </button>
+            </div>
             <span id="metrics-meta" class="muted small" role="status"></span>
           </div>
 
@@ -313,28 +316,15 @@
           </div>
 
           <section class="panel" aria-labelledby="chart-title">
-            <div class="panel-heading">
-              <h2 id="chart-title">Traffic and rejections per minute</h2>
-              <div class="chart-units" role="group" aria-label="Reporting range">
-                <button type="button" class="chart-unit" data-chart-range="604800000" aria-pressed="true" title="Last 7 days, 3-hour intervals">
-                  7 days
-                </button>
-                <button type="button" class="chart-unit" data-chart-range="1209600000" aria-pressed="false" title="Last 14 days, 6-hour intervals">
-                  14 days
-                </button>
-                <button type="button" class="chart-unit" data-chart-range="2419200000" aria-pressed="false" title="Last 28 days, 12-hour intervals">
-                  28 days
-                </button>
-              </div>
-            </div>
+            <h2 id="chart-title">Traffic and rejections per minute</h2>
             <p class="muted small">
               UTC interval starts. Bar height is the per-minute rate over complete
               minutes, so retained 1-minute and 1-hour intervals are comparable. The
-              display interval follows the reporting period: 1 minute, 1 hour, 3
-              hours, 6 hours, or 12 hours. The 7-day, 14-day, and 28-day buttons
-              select the long-range views. The time axis always spans the selected
-              range, so bars appear only where history is retained. Hover or use the
-              arrow keys for totals, storage grain, and coverage.
+              reporting-period switch above selects the 7-day, 14-day, or 28-day
+              view; the display interval is 3, 6, or 12 hours. The time axis always
+              spans the selected range, so bars appear only where history is
+              retained. Hover or use the arrow keys for totals, storage grain, and
+              coverage.
             </p>
             <div id="chart" class="chart"></div>
           </section>

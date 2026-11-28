@@ -232,9 +232,12 @@ async fn serves_history_live_state_and_assets() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Kunato console"), "{body}");
     assert!(
-        body.contains(r#"<option value="604800000" selected>Last 7 days</option>"#),
+        body.contains(
+            r#"<button type="button" class="period-option" data-period-ms="604800000" aria-pressed="true""#
+        ),
         "{body}"
     );
+    assert!(!body.contains(r#"id="range""#), "{body}");
     assert!(body.contains("/world-map.js"), "{body}");
 
     let (status, body, _) = request(
